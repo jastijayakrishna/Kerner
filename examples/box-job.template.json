@@ -4,5 +4,6 @@
   "tools": ["C:/Users/you/AppData/Local/nvm/<version>"],
   "denied": [],
   "network": false,
+  "timeout_seconds": 900,
   "command": ["C:/Users/you/AppData/Local/nvm/<version>/node.exe", "--preserve-symlinks-main", "agent.js"]
 }

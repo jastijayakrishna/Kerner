@@ -16,6 +16,7 @@ pub struct BoxSpec<'a> {
     pub net: bool,
     pub cwd: &'a Path,
     pub env: &'a [(String, String)],
+    pub timeout_ms: u32,
 }
 
 #[cfg(windows)]
@@ -37,22 +38,24 @@ fn abs_existing(s: &str, label: &str) -> R<PathBuf> {
     Ok(strip_verbatim(&c))
 }
 
-pub struct BoxJob { pub workspace: PathBuf, pub tools: Vec<PathBuf>, pub denied: Vec<PathBuf>, pub network: bool, pub command: Vec<String> }
+pub struct BoxJob { pub workspace: PathBuf, pub tools: Vec<PathBuf>, pub denied: Vec<PathBuf>, pub network: bool, pub command: Vec<String>, pub timeout_seconds: u64 }
 pub fn box_job(v: &Value) -> R<BoxJob> {
     ensure!(v["version"] == 1, "Box job v1 required");
-    exact(v, &["version", "workspace", "tools", "denied", "network", "command"], "box job")?;
+    exact(v, &["version", "workspace", "tools", "denied", "network", "command", "timeout_seconds"], "box job")?;
     let workspace = abs_existing(text(v, "workspace")?, "workspace")?;
     ensure!(workspace.is_dir(), "workspace must be an existing directory");
     let tools = strings(v, "tools", 32)?.iter().map(|t| abs_existing(t, "tool")).collect::<R<Vec<_>>>()?;
     ensure!(tools.iter().all(|t| t.is_dir()), "each tool must be an existing directory");
     let denied = strings(v, "denied", 64)?.iter().map(|d| abs_existing(d, "denied path")).collect::<R<Vec<_>>>()?;
     ensure!(v["network"].is_boolean(), "network must be a boolean");
+    let timeout_seconds = int(v, "timeout_seconds", 1, 3600)?;
     let mut command = argv_native(&v["command"])?;
     let exe = abs_existing(&command[0], "command executable")?;
     ensure!(exe.is_file(), "command executable must be an existing file: {}", command[0]);
     command[0] = exe.display().to_string();
-    Ok(BoxJob { workspace, tools, denied, network: v["network"] == true, command })
+    Ok(BoxJob { workspace, tools, denied, network: v["network"] == true, command, timeout_seconds })
 }
+fn timeout_ms(seconds: u64) -> u32 { (seconds * 1000).min(u32::MAX as u64) as u32 }
 fn argv_native(v: &Value) -> R<Vec<String>> {
     let Some(a) = v.as_array() else { deny!("command must be an array") };
     ensure!(!a.is_empty() && a.len() <= 256, "command must have 1..256 arguments");
@@ -88,7 +91,7 @@ pub fn grants_for(job: &BoxJob) -> Vec<(PathBuf, Access)> {
 pub fn run_box_job(job: &BoxJob) -> R<Value> {
     let grants = grants_for(job);
     let env = box_env(&job.workspace, &job.tools);
-    let code = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &job.workspace, env: &env })?;
+    let code = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &job.workspace, env: &env, timeout_ms: timeout_ms(job.timeout_seconds) })?;
     Ok(json!({
         "status": if code == 0 { "OK" } else { "EXITED" }, "stage": "box", "exit_code": code,
         "workspace": job.workspace.display().to_string(), "network": job.network,
@@ -175,7 +178,7 @@ pub fn local_run(job: &RunJob) -> R<Value> {
     let mut grants = vec![(ws.clone(), Access::ReadWrite), (tmp.clone(), Access::ReadWrite)];
     grants.extend(job.tools.iter().map(|t| (t.clone(), Access::ReadExec)));
     let env = run_env(&ws, &tmp, &job.tools);
-    let exit = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &ws, env: &env })?;
+    let exit = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &ws, env: &env, timeout_ms: timeout_ms(job.contract.limits.timeout_seconds) })?;
 
     let mut checks = vec![json!({ "id": "agent-exit", "status": if exit == 0 { "PASS" } else { "BLOCKED" }, "detail": exit })];
     let candidate = read_workspace(&ws, l.file_bytes, l.total_bytes)?;

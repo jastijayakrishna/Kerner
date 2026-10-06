@@ -484,7 +484,7 @@ fn windows_box_blocks_escape_reads_writes_and_local_network() {
         .replace("SEC", &win(&secret))
         .replace("PORT", &port.to_string());
     let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    let job = json!({ "version": 1, "workspace": win(&ws), "tools": [], "denied": [], "network": false,
+    let job = json!({ "version": 1, "workspace": win(&ws), "tools": [], "denied": [], "network": false, "timeout_seconds": 60,
         "command": [ps, "-NoProfile", "-NonInteractive", "-Command", script] });
     let parsed = kern::local::box_job(&job).unwrap();
     let result = kern::local::run_box_job(&parsed).unwrap();
@@ -539,4 +539,20 @@ fn windows_run_flow_boxes_agent_gates_output_and_promotes_create_only() {
     assert!(r2["promotion"].is_null(), "an out-of-contract change must not be promoted");
     let kern_branches = sh(&repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/kern/"]);
     assert_eq!(kern_branches.lines().count(), 1, "only the green run may create a branch: {kern_branches}");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_box_terminates_a_runaway_agent_on_timeout() {
+    let t = Temp::new();
+    let ws = t.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+    let job = json!({ "version": 1, "workspace": win(&ws), "tools": [], "denied": [], "network": false, "timeout_seconds": 2,
+        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"] });
+    let parsed = kern::local::box_job(&job).unwrap();
+    let start = std::time::Instant::now();
+    let r = kern::local::run_box_job(&parsed);
+    assert!(start.elapsed() < std::time::Duration::from_secs(20), "the box must give up well before the 30s command would finish");
+    match r { Ok(v) => panic!("expected a timeout denial, got {v}"), Err(e) => assert!(e.0.contains("timed out"), "{}", e.0) }
 }

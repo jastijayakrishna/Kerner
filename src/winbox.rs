@@ -1,6 +1,6 @@
 use crate::local::{Access, BoxSpec};
 use crate::util::*;
-use crate::ensure;
+use crate::{deny, ensure};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
@@ -174,7 +174,11 @@ unsafe fn launch(spec: &BoxSpec, sc: &mut SECURITY_CAPABILITIES) -> R<u32> {
         let thread = Owned(pi.hThread);
         ensure!(AssignProcessToJobObject(job.0, process.0) != 0, "Box job assignment failed ({})", GetLastError());
         ResumeThread(thread.0);
-        WaitForSingleObject(process.0, INFINITE);
+        if WaitForSingleObject(process.0, spec.timeout_ms) == WAIT_TIMEOUT {
+            TerminateJobObject(job.0, 1);
+            WaitForSingleObject(process.0, 5000);
+            deny!("The box timed out after {} seconds and every process in it was terminated", spec.timeout_ms / 1000);
+        }
         let mut code = 0u32;
         ensure!(GetExitCodeProcess(process.0, &mut code) != 0, "Box exit code unavailable ({})", GetLastError());
         Ok(code)
