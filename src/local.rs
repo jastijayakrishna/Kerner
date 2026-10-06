@@ -189,12 +189,20 @@ pub fn local_run(job: &RunJob) -> R<Value> {
         "network": job.network, "workspace": ws.display().to_string(), "checks": checks,
         "changes": changed.clone().unwrap_or(Value::Null), "capabilities": caps.unwrap_or(Value::Null),
     });
+    let files_changed = changed.as_ref().and_then(|c| c["files"].as_array().map(Vec::len)).unwrap_or(0);
+    let task = &job.contract.task;
     if green && job.promote {
         let run_id = uuid4()?;
         let branch = format!("kern/{}/{run_id}", job.contract.task);
         let commit = git::write_commit(&job.repo, &candidate, Some(&job.base), &job.contract.task)?;
         git::git(&job.repo, &["update-ref", &format!("refs/heads/{branch}"), &commit, &"0".repeat(40)], None)?;
+        result["summary"] = json!(format!("OK  {task}: {files_changed} file(s) changed, no new module capabilities. Promoted to {branch} (reversible)."));
         result["promotion"] = json!({ "branch": branch, "commit": commit, "review": format!("git -C {} diff {}..{branch}", job.repo.display(), job.base), "undo": format!("git -C {} branch -D {branch}", job.repo.display()) });
+    } else if green {
+        result["summary"] = json!(format!("OK  {task}: {files_changed} file(s) changed, verified. Promotion disabled; review {}.", ws.display()));
+    } else {
+        let reason = checks.iter().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str().map(str::to_string)).unwrap_or_else(|| "agent did not exit cleanly".into());
+        result["summary"] = json!(format!("BLOCKED  {task}: {reason}. Nothing was promoted; the real repository is untouched."));
     }
     write_json(root.join("result.json"), &result)?;
     Ok(result)

@@ -14,7 +14,23 @@ agent (any sandbox) ──commit──▶ kern ingest ──bundle──▶ kern
                                                                                                      └▶ kern-verified required check
 ```
 
-Kern is one static Rust binary (3.7 MB). The same binary is the CLI, the verifier and the in-sandbox runner.
+Kern is one static Rust binary. The same binary is the CLI, the verifier and the in-sandbox runner.
+
+## Developer box (Windows, no Docker, no admin)
+
+The box is the developer-local on-ramp: it runs an agent inside a native Windows AppContainer, then gates the result with the same contract and capability checks the server uses — with no Docker, no VM and no administrator rights.
+
+```sh
+# Run one command inside the box (read-write on one workspace, tools granted, no network)
+kern box box-job.json
+
+# Box an agent, gate its output, and promote a green result to a reversible branch
+kern run run-job.json
+```
+
+`kern run` materializes the base commit into a throwaway workspace, runs the agent inside the box, then checks the result against the contract (paths, change budget, protected files) and the capability diff. A clean result becomes a create-only `kern/<task>/<run_id>` branch; the real working tree and `HEAD` never move, and a blocked result promotes nothing. The box grants read-write to one workspace only, read-execute to the tool directories it is given, and no network unless the job asks for it. Isolation is enforced by OS ACLs and AppContainer network restrictions.
+
+Proven on Windows 11 (`tests/kern.rs`, and reproducibly by hand): inside the box, writing or deleting outside the workspace, reading a secret file, connecting to a local service, and reaching the internet are all denied, while the same actions succeed in an identical run outside the box. Granting the network restores internet access without restoring local-service or filesystem access.
 
 ## Build
 

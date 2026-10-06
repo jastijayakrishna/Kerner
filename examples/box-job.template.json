@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "workspace": "C:/path/to/throwaway-workspace",
+  "tools": ["C:/Users/you/AppData/Local/nvm/<version>"],
+  "denied": [],
+  "network": false,
+  "command": ["C:/Users/you/AppData/Local/nvm/<version>/node.exe", "--preserve-symlinks-main", "agent.js"]
+}
