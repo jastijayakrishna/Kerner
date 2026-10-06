@@ -26,6 +26,8 @@ Promoter:
   promote-github <run-dir> <attestation> <contract> <operator> <expected> <public.pem> <token-file> <base-branch> <ledger-dir> <git-pin.json>
 GitHub required check:
   check-pr <event.json> <checkout-dir> [config-path=.github/kern]
+Factory lock (deploy-time enforcement):
+  gate-artifact <checkout-dir> <commit> <attestation.json> <trusted-config-dir>
 Utilities:
   contract <contract> [narrower-contract] | pin-check <id> <file>";
 
@@ -97,6 +99,7 @@ fn cli() -> R<(Option<Value>, i32)> {
             let token = std::fs::read_to_string(&a[6])?;
             (Some(promote::promote_github(&store, &d, &c, &envelope, &key, GitHub { token: token.trim(), base_branch: &a[7], ledger: Path::new(&a[8]), git: git_pin })?), 0)
         }
+        "gate-artifact" => { count(a, 4)?; (Some(promote::gate_artifact(Path::new(&a[0]), &a[1], &read_json(&a[2])?, Path::new(&a[3]), now)?), 0) }
         "check-pr" => {
             ensure!(a.len() == 2 || a.len() == 3, "Expected event JSON, checkout and optional config path");
             let result = promote::check_pr(&read_json(&a[0])?, Path::new(&a[1]), a.get(2).map_or(".github/kern", String::as_str), now);

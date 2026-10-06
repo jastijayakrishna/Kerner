@@ -556,3 +556,25 @@ fn windows_box_terminates_a_runaway_agent_on_timeout() {
     assert!(start.elapsed() < std::time::Duration::from_secs(20), "the box must give up well before the 30s command would finish");
     match r { Ok(v) => panic!("expected a timeout denial, got {v}"), Err(e) => assert!(e.0.contains("timed out"), "{}", e.0) }
 }
+
+#[test]
+fn factory_lock_gate_allows_a_proven_commit_and_refuses_everything_else() {
+    let f = fixture();
+    let cfg = f.t.join("config");
+    std::fs::create_dir_all(cfg.join("tasks")).unwrap();
+    std::fs::write(cfg.join("operator.json"), operator_value(&["external"]).to_string()).unwrap();
+    std::fs::write(cfg.join("verifier.pub"), &f.public).unwrap();
+    std::fs::write(cfg.join("tasks/fix-addition.json"), policy_value().to_string()).unwrap();
+
+    let ok = promote::gate_artifact(&f.store, &f.commit, &f.envelope, &cfg, now_ms()).unwrap();
+    assert_eq!(ok["status"], "ALLOW");
+    assert_eq!(ok["commit"], f.commit);
+
+    denied(promote::gate_artifact(&f.store, &f.base, &f.envelope, &cfg, now_ms()), "");
+    let mut tampered = f.envelope.clone();
+    tampered["payload"] = json!(b64(b"{}"));
+    assert!(promote::gate_artifact(&f.store, &f.commit, &tampered, &cfg, now_ms()).is_err());
+    let other = attest::public_pem(&SigningKey::from_bytes(&random_bytes::<32>().unwrap()).verifying_key()).unwrap();
+    std::fs::write(cfg.join("verifier.pub"), &other).unwrap();
+    denied(promote::gate_artifact(&f.store, &f.commit, &f.envelope, &cfg, now_ms()), "Untrusted");
+}

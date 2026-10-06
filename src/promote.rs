@@ -133,3 +133,23 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     let capabilities = capability::check(&original, &candidate, &changed, &op.permissions)?;
     Ok(json!({ "status": "PASS", "head": head, "base": base, "task": task, "run_id": run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities }))
 }
+
+pub fn gate_artifact(checkout: &Path, commit: &str, envelope: &Value, config: &Path, now: u64) -> R<Value> {
+    git::oid(commit)?;
+    let read = |name: &str| -> R<Vec<u8>> { std::fs::read(config.join(name)).map_err(|_| Denied(format!("Trusted deploy config lacks {name}"))) };
+    let payload = unb64(text(envelope, "payload")?)?;
+    let stmt: Value = serde_json::from_slice(&payload)?;
+    let k = &stmt["predicate"][attest::EXTENSION];
+    let (task, run_id, base) = (text(k, "task")?.to_string(), text(k, "run_id")?.to_string(), text(k, "base")?.to_string());
+    git::oid(&base)?;
+    let op = operator(&serde_json::from_slice(&read("operator.json")?)?)?;
+    let key_pem = String::from_utf8(read("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))?;
+    let policy = contract(&serde_json::from_slice(&read(&format!("tasks/{task}.json"))?)?)?;
+    ensure!(policy.task == task, "Trusted contract task does not match the attestation");
+    let k = verify_against(checkout, envelope, &attest::public_key(&key_pem)?, &policy, &op, Claim { run_id: &run_id, base: &base, commit, now, enforce_expiry: false })?;
+    let l = &policy.limits;
+    let (original, candidate) = (git::read_commit(checkout, &base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, commit, l.file_bytes, l.total_bytes)?);
+    let changed = git::changes(&original, &candidate, &policy)?;
+    let capabilities = capability::check(&original, &candidate, &changed, &op.permissions)?;
+    Ok(json!({ "status": "ALLOW", "commit": commit, "base": base, "task": task, "repository": op.repository, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities }))
+}
