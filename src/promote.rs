@@ -1,0 +1,135 @@
+use crate::attest::{self, Expect};
+use crate::capability;
+use crate::flow::required_checks;
+use crate::git;
+use crate::policy::{Contract, Operator, Pin, configure_git, contract, contract_digest, operator, pinned, verifier_digest};
+use crate::util::*;
+use crate::{deny, ensure};
+use ed25519_dalek::VerifyingKey;
+use serde_json::{Value, json};
+use std::path::Path;
+use std::time::Duration;
+
+pub struct Decision { pub repository: String, pub branch: String, pub base: String, pub commit: String, pub run_id: String, pub attestation: Value }
+
+pub struct Claim<'a> { pub run_id: &'a str, pub base: &'a str, pub commit: &'a str, pub now: u64, pub enforce_expiry: bool }
+fn verify_against(store: &Path, envelope: &Value, key: &VerifyingKey, policy: &Contract, op: &Operator, claim: Claim) -> R<Value> {
+    let Claim { run_id, base, commit, now, enforce_expiry } = claim;
+    let l = &policy.limits;
+    let manifest = digest(&git::manifest(store, commit, l.file_bytes, l.total_bytes)?)?;
+    let (contract_sha, verifier_sha, deployment) = (contract_digest(policy)?, verifier_digest(op)?, text(&op.value, "deployment")?.to_string());
+    let expect = Expect {
+        run_id, task: &policy.task, repository: &op.repository, base, commit, manifest_sha256: &manifest, contract_sha256: &contract_sha, verifier_sha256: &verifier_sha,
+        verifier_builder: &op.verifier_builder, deployment: &deployment, image: &op.image, executors: &op.executors, executor_builder: op.executor_builder.as_deref(), checks: required_checks(policy),
+    };
+    let k = attest::verify(envelope, key, &expect, now, enforce_expiry)?;
+    ensure!(git::parents(store, commit)? == vec![base.to_string()], "Promotion parent mismatch");
+    Ok(k)
+}
+pub fn authorize(store: &Path, envelope: &Value, key_pem: &str, policy: &Contract, op: &Operator, expected: &Value, now: u64) -> R<Decision> {
+    exact(expected, &["run_id", "base", "commit", "branch"], "promotion expectation")?;
+    let (run_id, base, commit, branch) = (text(expected, "run_id")?, text(expected, "base")?, text(expected, "commit")?, text(expected, "branch")?);
+    git::oid(base)?;
+    git::oid(commit)?;
+    ensure!(is_uuid(run_id) && branch == format!("kern/{}/{run_id}", policy.task), "Only run-specific kern/<task>/<run_id> branches are permitted");
+    let attestation = verify_against(store, envelope, &attest::public_key(key_pem)?, policy, op, Claim { run_id, base, commit, now, enforce_expiry: true })?;
+    Ok(Decision { repository: op.repository.clone(), branch: branch.into(), base: base.into(), commit: commit.into(), run_id: run_id.into(), attestation })
+}
+pub fn consume(directory: &Path, d: &Decision, key_pem: &str) -> R<Value> {
+    ensure!(directory.is_absolute(), "Explicit absolute promoter ledger directory required");
+    std::fs::create_dir_all(directory)?;
+    ensure!(std::fs::symlink_metadata(directory)?.is_dir(), "Ledger must be a real directory, not a symlink");
+    let record = json!({ "version": 1, "state": "CONSUMED", "run_id": d.run_id, "key_id": attest::key_id(&attest::public_key(key_pem)?)?, "repository": d.repository, "base": d.base, "commit": d.commit, "branch": d.branch });
+    let file = directory.join(format!("{}.json", d.run_id));
+    if let Err(e) = create_new(&file, format!("{}\n", canonical(&record)?).as_bytes(), 0o600) {
+        if file.exists() { deny!("Authorization already consumed; reconcile manually, never retry publication"); }
+        return Err(e);
+    }
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(record)
+}
+pub fn promote_local(store: &Path, d: &Decision, key_pem: &str, target: &Path, ledger: Option<&Path>) -> R<Value> {
+    ensure!(git::trimmed(git::git(target, &["cat-file", "-t", &d.base], None)?) == "commit", "Target lacks the approved base");
+    let metadata = std::path::PathBuf::from(git::trimmed(git::git(target, &["rev-parse", "--absolute-git-dir"], None)?));
+    consume(&ledger.map(Path::to_path_buf).unwrap_or_else(|| metadata.join("kern-consumed")), d, key_pem)?;
+    let pack = git::git(store, &["pack-objects", "--stdout", "--revs", "-q"], Some(format!("{}\n^{}\n", d.commit, d.base).as_bytes()))?;
+    git::git(target, &["index-pack", "--stdin", "--fsck-objects"], Some(&pack))?;
+    git::git(target, &["update-ref", &format!("refs/heads/{}", d.branch), &d.commit, &"0".repeat(40)], None)?;
+    Ok(json!({ "branch": d.branch, "commit": d.commit, "published": "local-feature-ref" }))
+}
+
+pub const MARKER: &str = "<!-- kern-attestation:v1\n";
+pub fn pr_body(task: &str, d: &Decision, envelope: &Value) -> R<String> {
+    Ok(format!("Kern-verified agent change for task `{task}`.\n\nCommit: `{}`\nAttestation SHA-256: `{}`\n\nReview before merging. The `kern-verified` check re-verifies this attestation against the PR head.\n\n{MARKER}{}\n-->\n", d.commit, digest(envelope)?, b64(canonical(envelope)?.as_bytes())))
+}
+pub fn extract_attestation(body: &str) -> R<Value> {
+    ensure!(body.len() <= 65536 && body.matches(MARKER).count() == 1, "Pull request must carry exactly one Kern attestation block");
+    let rest = &body[body.find(MARKER).unwrap_or(0) + MARKER.len()..];
+    let end = rest.find("\n-->").ok_or_else(|| Denied("Unterminated Kern attestation block".into()))?;
+    Ok(serde_json::from_slice(&unb64(rest[..end].trim())?)?)
+}
+pub struct GitHub<'a> { pub token: &'a str, pub base_branch: &'a str, pub ledger: &'a Path, pub git: Pin }
+pub fn promote_github(store: &Path, d: &Decision, policy: &Contract, envelope: &Value, key_pem: &str, gh: GitHub) -> R<Value> {
+    ensure!(!gh.token.is_empty() && !gh.token.contains(['\r', '\n']), "An explicit publishing token is required");
+    let b = gh.base_branch;
+    ensure!(!b.is_empty() && b.len() <= 128 && !b.contains("..") && !b.contains("//") && !b.ends_with('/') && b.bytes().all(|c| c.is_ascii_alphanumeric() || b"._/-".contains(&c)), "Invalid PR base branch");
+    let git_exe = pinned(&gh.git)?;
+    let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(Duration::from_secs(20))).build().into();
+    let root = format!("https://api.github.com/repos/{}", d.repository);
+    let api = |method: &str, suffix: &str, body: Option<Value>| -> R<Value> {
+        let url = format!("{root}{suffix}");
+        let auth = format!("Bearer {}", gh.token);
+        let response = match body {
+            Some(b) => agent.post(&url).header("Authorization", &auth).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28").header("Content-Type", "application/json").send(b.to_string()),
+            None => agent.get(&url).header("Authorization", &auth).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28").call(),
+        };
+        let mut r = response.map_err(|e| Denied(format!("GitHub request failed: {method} {suffix}: {e}")))?;
+        ensure!(r.status().is_success(), "GitHub request failed: {method} {suffix} ({})", r.status().as_u16());
+        Ok(serde_json::from_str(&r.body_mut().read_to_string().map_err(|e| Denied(e.to_string()))?)?)
+    };
+    let refpath = |branch: &str| format!("/git/ref/heads/{}", branch.split('/').map(|s| s.replace('%', "%25")).collect::<Vec<_>>().join("/"));
+    ensure!(api("GET", &refpath(b), None)?["object"]["sha"] == d.base.as_str(), "PR base moved; re-run against the new base");
+    consume(gh.ledger, d, key_pem)?;
+    let header = format!("http.https://github.com/.extraHeader=Authorization: Basic {}", b64(format!("x-access-token:{}", gh.token).as_bytes()));
+    let mut env: Vec<(String, String)> = safe_env(store).into_iter().filter(|(k, _)| k != "PATH").collect();
+    env.extend([("PATH".into(), String::new()), ("GIT_CONFIG_COUNT".into(), "1".into()), ("GIT_CONFIG_KEY_0".into(), header.split_once('=').map(|h| h.0.to_string()).unwrap_or_default()), ("GIT_CONFIG_VALUE_0".into(), header.split_once('=').map(|h| h.1.to_string()).unwrap_or_default())]);
+    let reference = format!("refs/heads/{}", d.branch);
+    let args: Vec<String> = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.followRedirects=false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-C"].iter().map(|s| s.to_string())
+        .chain([store.display().to_string(), "push".into(), "--no-verify".into(), "--porcelain".into(), format!("--force-with-lease={reference}:"), format!("https://github.com/{}.git", d.repository), format!("{}:{reference}", d.commit)]).collect();
+    run(&git_exe, &args, Run { cwd: Some(store), env, input: None, timeout: Duration::from_secs(120), max_output: 1048576 }).map_err(|_| Denied("Exact create-only push failed; no existing branch was overwritten".into()))?;
+    ensure!(api("GET", &refpath(&d.branch), None)?["object"]["sha"] == d.commit.as_str(), "Remote branch does not match the verified artifact");
+    ensure!(api("GET", &refpath(b), None)?["object"]["sha"] == d.base.as_str(), "PR base moved after push; reconcile the created branch manually");
+    let pr = api("POST", "/pulls", Some(json!({ "title": format!("Kern: {}", policy.task), "head": d.branch, "base": b, "draft": true, "body": pr_body(&policy.task, d, envelope)? })))?;
+    ensure!(pr["head"]["sha"] == d.commit.as_str() && pr["base"]["sha"] == d.base.as_str() && pr["draft"] == true, "Created PR does not match the verified head/base or is not a draft; reconcile manually");
+    Ok(json!({ "url": pr["html_url"], "number": pr["number"], "commit": d.commit, "branch": d.branch, "draft": true }))
+}
+pub fn git_pin(file: &Path) -> R<Pin> {
+    let p = crate::policy::pin(&read_json(file)?, "Git pin")?;
+    configure_git(p.clone())?;
+    Ok(p)
+}
+
+pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Value> {
+    let pr = &event["pull_request"];
+    ensure!(pr.is_object(), "Not a pull_request event");
+    let (head, base, head_ref) = (text(&pr["head"], "sha")?, text(&pr["base"], "sha")?, text(&pr["head"], "ref")?);
+    let repository = text(&pr["base"]["repo"], "full_name")?;
+    let Some(rest) = head_ref.strip_prefix("kern/") else { return Ok(json!({ "status": "SKIPPED", "reason": "Not a Kern agent branch; ordinary review rules apply", "head": head })) };
+    let (task, run_id) = rest.split_once('/').ok_or_else(|| Denied("Kern branches must be kern/<task>/<run_id>".into()))?;
+    ensure!(is_uuid(run_id) && !config.contains("..") && !config.starts_with('/'), "Invalid Kern branch or configuration path");
+    git::oid(head)?;
+    git::oid(base)?;
+    let trusted = |name: &str| -> R<Vec<u8>> { git::git(checkout, &["cat-file", "blob", &format!("{base}:{config}/{name}")], None).map_err(|_| Denied(format!("Trusted base commit lacks {config}/{name}"))) };
+    let policy = contract(&serde_json::from_slice(&trusted(&format!("tasks/{task}.json"))?)?)?;
+    let op = operator(&serde_json::from_slice(&trusted("operator.json")?)?)?;
+    let key_pem = String::from_utf8(trusted("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))?;
+    ensure!(policy.task == task && op.repository == repository, "Trusted configuration does not match this repository and task");
+    let envelope = extract_attestation(pr["body"].as_str().unwrap_or(""))?;
+    let k = verify_against(checkout, &envelope, &attest::public_key(&key_pem)?, &policy, &op, Claim { run_id, base, commit: head, now, enforce_expiry: false })?;
+    let l = &policy.limits;
+    let (original, candidate) = (git::read_commit(checkout, base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, head, l.file_bytes, l.total_bytes)?);
+    let changed = git::changes(&original, &candidate, &policy)?;
+    let capabilities = capability::check(&original, &candidate, &changed, &op.permissions)?;
+    Ok(json!({ "status": "PASS", "head": head, "base": base, "task": task, "run_id": run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities }))
+}

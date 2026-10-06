@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "repo": "/operator/source.git",
+  "base": "<reviewed-full-40-hex-base-commit>",
+  "contract": "./task.json",
+  "operator": "./operator.json",
+  "command": "./agent-command.json",
+  "verification_key": "/operator/keys/public.pem",
+  "output": "/work/tasks"
+}

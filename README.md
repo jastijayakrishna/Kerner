@@ -1,0 +1,90 @@
+# Kern
+
+**Admission control for AI-written code.** Any coding agent (OpenShell, Claude Code, Codex, Copilot, Devin) proposes a change. Kern decides whether that exact commit may be merged, and proves it with a signed in-toto attestation that a GitHub required check re-verifies.
+
+Sandboxes such as OpenShell control what an agent can *do while it runs*. Kern controls what the agent's *output may become*:
+
+- **Task contract.** The agent may change only the granted directories, within a change budget. Lockfiles, `.github/`, `.env*` and other dependency or CI files are always protected.
+- **Capability diff.** JS/TS/JSX are parsed with `oxc`. A patch is refused if it gives a module new authority, such as `child_process`, `fetch`, `process.env`, `eval`, dynamic `require`, or a new package. Unchanged authority never blocks an edit.
+- **Independent verification.** A separate verifier runs the project's real test suite and operator-owned cases on the exact commit, each in a fresh gVisor sandbox with no network. Dependencies come only from the committed lockfile.
+- **Signed proof at merge time.** The verifier emits an in-toto Statement with a SLSA verification-summary predicate. The `kern-verified` check re-verifies it against the PR head, so any later push invalidates it.
+
+```text
+agent (any sandbox) ──commit──▶ kern ingest ──bundle──▶ kern verify (gVisor) ──in-toto──▶ kern promote ──▶ draft PR
+                                                                                                     └▶ kern-verified required check
+```
+
+Kern is one static Rust binary (3.7 MB). The same binary is the CLI, the verifier and the in-sandbox runner.
+
+## Build
+
+```sh
+cargo build --release --locked
+cargo test
+```
+
+Production commands need native Linux, Docker with genuine gVisor registered as `runsc`, and memory/swap/PID/CPU limits. There is no fallback runtime.
+
+## Set up one Linux VM (default)
+
+1. Install gVisor (`gvisor.tar.zstd` from gvisor.dev, verify its SHA-512) and register it in `/etc/docker/daemon.json` as `"runsc": {"path": "/usr/local/bin/runsc"}`.
+2. Write two control files from [examples/control.template.json](examples/control.template.json), one with `"role": "executor"` and one with `"role": "verifier"`. Each pins the Docker, git and runsc binaries and a host policy by SHA-256.
+3. Run `kern --control verifier.json doctor` and the executor equivalent, then copy both `builder.sha256` values into [the operator policy](examples/operator.template.json). The identity covers the pinned binaries and versions, machine ID, Kern's own hash and the policy. It changes on upgrades, not on reboots.
+4. Run `kern --control verifier.json keygen /operator/keys`, or use a KMS/HSM through an external signer ([template](examples/signer.template.json)). The signer receives DSSE PAE bytes on stdin and returns a base64 Ed25519 signature, which Kern verifies before writing anything.
+5. Pin each check file with `kern pin-check <id> <file>`. A check is a list of `{command, stdout}` cases; `"stdout": null` means exit 0 is enough. For example, `{"command": ["/usr/local/bin/npm", "test"], "stdout": null}` runs the project's own suite.
+
+Set `"deployment": "multi-machine"` to require that executor and verifier report different machines.
+
+## Run
+
+```sh
+# A) the agent runs inside Kern's gVisor executor (offline command)
+kern --control executor.json plan job.json
+kern --control executor.json task job.json
+
+# B) the agent ran anywhere else and produced a commit
+kern ingest job.json /path/to/agent-repo <agent-commit>
+
+# Verifier: transfer only the handoff/ directory (git bundle + run.json)
+kern --control verifier.json import <bundle>/handoff run
+kern --control verifier.json verify-external run task.json operator.json out signer.json
+
+# Promoter: independent expectations, create-only branch, consumed exactly once
+kern authorize run out/attestation.json task.json operator.json expected.json public.pem
+kern promote-local run out/attestation.json task.json operator.json expected.json public.pem target.git
+kern promote-github run out/attestation.json task.json operator.json expected.json public.pem token-file main /promoter/ledger git-pin.json
+```
+
+`expected.json` is `{run_id, base, commit, branch: "kern/<task>/<run_id>"}`, written by the reviewer. Nothing in an attestation grants publication on its own.
+
+## Enforce at merge
+
+1. Commit `.github/kern/operator.json`, `.github/kern/verifier.pub` and `.github/kern/tasks/<task>.json` to the default branch.
+2. Add [examples/kern-verified.yml](examples/kern-verified.yml) and require the `kern-verified` status in branch protection.
+
+The workflow uses `pull_request_target`, so its definition comes from the protected base branch and a PR cannot alter the check. Kern only reads git objects from the PR; it never executes PR code there. For `kern/*` branches the check requires exactly one valid attestation for the exact head and base, and recomputes the contract and capability diff. Other branches are reported as `SKIPPED`.
+
+## Evidence (2026-10-04)
+
+All measurements were run on this implementation. The live runs used gVisor release-20260928.0 on a single Linux VM.
+
+| What | Result |
+|---|---|
+| Unit and integration tests (real git, real Ed25519, git as the oracle) | 14/14, zero `clippy` warnings |
+| Escape probes inside the gVisor executor | Credentials EACCES; Docker socket, `.git`, host root and signing key absent; every write outside grants denied; env exactly `HOME LANG PATH`; IPv4, IPv6 and DNS unreachable; detached writer stopped before capture |
+| Hostile captures (symlink, hardlink, timeout) | All refused |
+| Live verification of upstream sprintf.js issue #181 | 433 locked packages installed in gVisor, 32 behavioural cases and the real `npm test` (ESLint + Mocha) in about 50 s; signed by an external signer |
+| Hostile candidates (incomplete fix, `child_process` added, bug, failing own test) | All denied: behaviour, capability and test-suite gates each triggered |
+| Promotion and required check | Create-only branch; replay refused after branch deletion; PASS on exact head; a later push and a missing attestation are refused |
+| Capability check on 3,443 real files from 34 repos | 99.9% parsed; 100% of harmless edits accepted; 99.2% of 40,479 injected attacks blocked, and every miss was authority the file already held |
+| Repository acceptance (50 popular JS/TS repos) | 34/50. The rest exceed 16 MiB or 1 MiB per file, or contain symlinks or submodules |
+| Reading 2,468 files (nestjs/nest) | 0.19 s |
+
+## Limits
+
+- Changed code must be JS/TS/JSX or text/JSON/CSS/HTML/Markdown. Repositories must be SHA-1 git, at most 10,000 files and 16 MiB, with no symlinks or submodules.
+- Dependency setup supports npm `package-lock.json` v2/v3 from one registry, with install scripts disabled. Legacy SHA-1-only lock pins are accepted and counted in the record.
+- The capability check is syntactic: it stops new authority from being granted, not misuse of authority a module already has. Tests and review still matter.
+- The GitHub promoter and Action are exercised locally against GitHub-shaped events; no live GitHub publication has been run yet.
+
+See [SECURITY.md](SECURITY.md) for the trust model.

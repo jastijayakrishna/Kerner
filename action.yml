@@ -1,0 +1,20 @@
+name: kern-verified
+description: Admission control for AI-written code. Re-verifies the Kern attestation of a kern/* pull request against its exact head.
+branding:
+  icon: shield
+  color: gray-dark
+inputs:
+  config-path:
+    description: Directory on the base branch containing operator.json, verifier.pub and tasks/<task>.json
+    default: .github/kern
+runs:
+  using: composite
+  steps:
+    - name: Build Kern
+      shell: bash
+      run: cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    - name: Verify the agent change
+      shell: bash
+      env:
+        KERN_CONFIG: ${{ inputs.config-path }}
+      run: '"$GITHUB_ACTION_PATH/target/release/kern" check-pr "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE" "$KERN_CONFIG"'
