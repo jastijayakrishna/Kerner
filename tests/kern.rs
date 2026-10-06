@@ -499,3 +499,44 @@ fn windows_box_blocks_escape_reads_writes_and_local_network() {
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep", "box must not have modified the outside victim file");
     assert!(control_reached, "independent control: the test process itself must reach the loopback listener the box was denied");
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_run_flow_boxes_agent_gates_output_and_promotes_create_only() {
+    let t = Temp::new();
+    let repo = t.join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    sh(&t.0, &["init", "-q", "repo"]);
+    sh(&repo, &["config", "core.autocrlf", "false"]);
+    std::fs::write(repo.join("src/add.mjs"), "export const add = (a, b) => a - b;\n").unwrap();
+    std::fs::write(repo.join("README.md"), "# fixture\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "base"]);
+    let base = sh(&repo, &["rev-parse", "HEAD"]);
+
+    let contract = json!({ "version": 2, "task": "fix-addition", "filesystem": { "read": ["README.md", "src/", "test/"], "write": ["src/", "test/"] },
+        "network": [], "secrets": [], "publish": false, "dependencies": null,
+        "limits": { "files_changed": 8, "lines_changed": 200, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 30, "memory_mb": 256, "pids": 64 }, "required_checks": ["build"] });
+    std::fs::write(t.join("task.json"), contract.to_string()).unwrap();
+    let cmd = r"C:\Windows\System32\cmd.exe";
+    let runs = win(&t.join("runs"));
+
+    let green = json!({ "version": 1, "repo": win(&repo), "base": base, "contract": "./task.json", "tools": [],
+        "command": [cmd, "/c", ">src\\note.txt echo hello"], "network": false, "output": runs, "promote": true });
+    std::fs::write(t.join("run-green.json"), green.to_string()).unwrap();
+    let r = kern::local::local_run(&kern::local::run_job(&t.join("run-green.json")).unwrap()).unwrap();
+    assert_eq!(r["status"], "GREEN", "{r}");
+    let branch = r["promotion"]["branch"].as_str().unwrap().to_string();
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), base, "the real HEAD must not move");
+    assert_eq!(std::fs::read_to_string(repo.join("src/add.mjs")).unwrap(), "export const add = (a, b) => a - b;\n", "the real working tree must be untouched");
+    assert_eq!(sh(&repo, &["cat-file", "-t", &format!("{branch}:src/note.txt")]), "blob", "the promoted branch must carry the agent's change");
+
+    let blocked = json!({ "version": 1, "repo": win(&repo), "base": base, "contract": "./task.json", "tools": [],
+        "command": [cmd, "/c", ">README.md echo x"], "network": false, "output": runs, "promote": true });
+    std::fs::write(t.join("run-blocked.json"), blocked.to_string()).unwrap();
+    let r2 = kern::local::local_run(&kern::local::run_job(&t.join("run-blocked.json")).unwrap()).unwrap();
+    assert_eq!(r2["status"], "BLOCKED", "{r2}");
+    assert!(r2["promotion"].is_null(), "an out-of-contract change must not be promoted");
+    let kern_branches = sh(&repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/kern/"]);
+    assert_eq!(kern_branches.lines().count(), 1, "only the green run may create a branch: {kern_branches}");
+}

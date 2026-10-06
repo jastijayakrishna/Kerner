@@ -1,6 +1,10 @@
+use crate::capability;
+use crate::git::{self, Entry, Files};
+use crate::policy::{Contract, contract};
 use crate::util::*;
 use crate::{deny, ensure};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,4 +94,108 @@ pub fn run_box_job(job: &BoxJob) -> R<Value> {
         "workspace": job.workspace.display().to_string(), "network": job.network,
         "granted": { "read_write": [job.workspace.display().to_string()], "read_execute": job.tools.iter().map(|t| t.display().to_string()).collect::<Vec<_>>(), "denied": job.denied.iter().map(|d| d.display().to_string()).collect::<Vec<_>>() },
     }))
+}
+
+fn run_env(ws: &Path, tmp: &Path, tools: &[PathBuf]) -> Vec<(String, String)> {
+    let mut env = box_env(ws, tools);
+    let tmp = tmp.display().to_string();
+    for (k, v) in env.iter_mut() {
+        if k == "TEMP" || k == "TMP" { *v = tmp.clone(); }
+    }
+    env
+}
+
+pub fn read_workspace(root: &Path, file_bytes: u64, total_bytes: u64) -> R<Files> {
+    let mut files = Files::new();
+    let mut total = 0u64;
+    read_into(root, "", &mut files, &mut total, file_bytes, total_bytes)?;
+    Ok(files)
+}
+fn read_into(dir: &Path, prefix: &str, files: &mut Files, total: &mut u64, file_bytes: u64, total_bytes: u64) -> R<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for e in entries {
+        let name = e.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let meta = std::fs::symlink_metadata(e.path())?;
+        if meta.file_type().is_symlink() { deny!("Symlink in workspace is unsupported: {rel}"); }
+        if meta.is_dir() {
+            let lower = name.to_ascii_lowercase();
+            if lower == ".git" || lower == "node_modules" { continue; }
+            read_into(&e.path(), &rel, files, total, file_bytes, total_bytes)?;
+        } else if meta.is_file() {
+            file_path(&rel)?;
+            *total += meta.len();
+            ensure!(meta.len() <= file_bytes && *total <= total_bytes, "Workspace output exceeds byte limits at {rel}");
+            files.insert(rel, Entry { mode: "100644".into(), bytes: std::fs::read(e.path())? });
+        } else {
+            deny!("Special file in workspace is unsupported: {rel}");
+        }
+    }
+    Ok(())
+}
+
+pub struct RunJob { pub repo: PathBuf, pub base: String, pub contract: Contract, pub tools: Vec<PathBuf>, pub command: Vec<String>, pub network: bool, pub output: PathBuf, pub promote: bool }
+pub fn run_job(path: &Path) -> R<RunJob> {
+    let file = std::path::absolute(path)?;
+    let dir = file.parent().unwrap_or(Path::new("/")).to_path_buf();
+    let raw = read_json(&file)?;
+    ensure!(raw["version"] == 1, "Run job v1 required");
+    exact(&raw, &["version", "repo", "base", "contract", "tools", "command", "network", "output", "promote"], "run job")?;
+    let repo = strip_verbatim(&std::fs::canonicalize(dir.join(text(&raw, "repo")?)).map_err(|e| Denied(format!("repo: {e}")))?);
+    ensure!(repo.is_dir(), "repo must be an existing directory");
+    let base = text(&raw, "base")?.to_string();
+    ensure!(is_oid(&base), "base must be a full 40-hex commit id");
+    let contract = contract(&read_json(dir.join(text(&raw, "contract")?))?)?;
+    let tools = strings(&raw, "tools", 32)?.iter().map(|t| abs_existing(t, "tool")).collect::<R<Vec<_>>>()?;
+    ensure!(tools.iter().all(|t| t.is_dir()), "each tool must be an existing directory");
+    ensure!(raw["network"].is_boolean() && raw["promote"].is_boolean(), "network and promote must be booleans");
+    let mut command = argv_native(&raw["command"])?;
+    let exe = abs_existing(&command[0], "command executable")?;
+    ensure!(exe.is_file(), "command executable must exist: {}", command[0]);
+    command[0] = exe.display().to_string();
+    Ok(RunJob { repo, base, contract, tools, command, network: raw["network"] == true, output: std::path::absolute(dir.join(text(&raw, "output")?))?, promote: raw["promote"] == true })
+}
+
+fn gate(label: &str, f: impl FnOnce() -> R<Value>, checks: &mut Vec<Value>) -> Option<Value> {
+    match f() {
+        Ok(v) => { checks.push(json!({ "id": label, "status": "PASS" })); Some(v) }
+        Err(e) => { checks.push(json!({ "id": label, "status": "BLOCKED", "detail": e.0 })); None }
+    }
+}
+pub fn local_run(job: &RunJob) -> R<Value> {
+    let l = &job.contract.limits;
+    let base_files = git::read_commit(&job.repo, &job.base, l.file_bytes, l.total_bytes)?;
+    std::fs::create_dir_all(&job.output)?;
+    let root = fresh_dir(job.output.join(format!("{}-{}", job.contract.task, uuid4()?)))?;
+    let ws = root.join("ws");
+    let tmp = root.join("tmp");
+    std::fs::create_dir_all(&tmp)?;
+    git::materialize(&base_files, &ws, None)?;
+    let mut grants = vec![(ws.clone(), Access::ReadWrite), (tmp.clone(), Access::ReadWrite)];
+    grants.extend(job.tools.iter().map(|t| (t.clone(), Access::ReadExec)));
+    let env = run_env(&ws, &tmp, &job.tools);
+    let exit = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &ws, env: &env })?;
+
+    let mut checks = vec![json!({ "id": "agent-exit", "status": if exit == 0 { "PASS" } else { "BLOCKED" }, "detail": exit })];
+    let candidate = read_workspace(&ws, l.file_bytes, l.total_bytes)?;
+    let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let changed = gate("contract", || git::changes(&base_files, &candidate, &job.contract), &mut checks);
+    let caps = changed.as_ref().and_then(|ch| gate("capabilities", || capability::check(&base_files, &candidate, ch, &empty), &mut checks));
+    let green = exit == 0 && checks.iter().all(|c| c["status"] == "PASS");
+
+    let mut result = json!({
+        "status": if green { "GREEN" } else { "BLOCKED" }, "stage": "run", "task": job.contract.task, "base": job.base,
+        "network": job.network, "workspace": ws.display().to_string(), "checks": checks,
+        "changes": changed.clone().unwrap_or(Value::Null), "capabilities": caps.unwrap_or(Value::Null),
+    });
+    if green && job.promote {
+        let run_id = uuid4()?;
+        let branch = format!("kern/{}/{run_id}", job.contract.task);
+        let commit = git::write_commit(&job.repo, &candidate, Some(&job.base), &job.contract.task)?;
+        git::git(&job.repo, &["update-ref", &format!("refs/heads/{branch}"), &commit, &"0".repeat(40)], None)?;
+        result["promotion"] = json!({ "branch": branch, "commit": commit, "review": format!("git -C {} diff {}..{branch}", job.repo.display(), job.base), "undo": format!("git -C {} branch -D {branch}", job.repo.display()) });
+    }
+    write_json(root.join("result.json"), &result)?;
+    Ok(result)
 }

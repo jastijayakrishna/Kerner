@@ -10,7 +10,8 @@ use std::path::Path;
 const HELP: &str = "kern 0.3 - admission control for AI-written code
 
 Native box (developer-local, no Docker):
-  box <box-job.json>
+  box <box-job.json>              run one command inside the box
+  run <run-job.json>              box an agent, gate its output, create a reversible branch
 Executor (--control executor.json):
   doctor | plan <job> | task <job>
 Any agent sandbox (OpenShell, Claude Code, Codex, ...):
@@ -54,6 +55,7 @@ fn cli() -> R<(Option<Value>, i32)> {
         "help" | "--help" | "-h" => { println!("{HELP}"); (None, 0) }
         "--version" => (Some(json!({ "kern": env!("CARGO_PKG_VERSION"), "implementation_sha256": policy::implementation_digest()? })), 0),
         "box" => { count(a, 1)?; let r = kern::local::run_box_job(&kern::local::box_job(&read_json(&a[0])?)?)?; let code = r["exit_code"].as_i64().unwrap_or(1) as i32; (Some(r), code) }
+        "run" => { count(a, 1)?; let r = kern::local::local_run(&kern::local::run_job(Path::new(&a[0]))?)?; let code = i32::from(r["status"] != "GREEN"); (Some(r), code) }
         "doctor" => { count(a, 0)?; let d = sandbox::doctor(); let code = if d.ready { 0 } else { 2 }; (Some(d.report), code) }
         "plan" => { count(a, 1)?; let r = flow::preflight(&policy::job(Path::new(&a[0]))?, true); let code = i32::from(r["status"] != "READY"); (Some(r), code) }
         "task" => { count(a, 1)?; let r = flow::task(&policy::job(Path::new(&a[0]))?, Source::Agent)?; let code = i32::from(r["status"] != "CANDIDATE"); (Some(r), code) }
