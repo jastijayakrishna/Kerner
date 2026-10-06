@@ -28,7 +28,7 @@ fn sh(dir: &Path, args: &[&str]) -> String {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
-fn file(text: &str) -> Entry { Entry { mode: "100644".into(), bytes: text.as_bytes().to_vec() } }
+fn file(text: &str) -> Entry { let b = text.as_bytes().to_vec(); Entry { mode: "100644".into(), oid: git::object_id("blob", &b), size: b.len() as u64, bytes: Some(b) } }
 fn files(items: &[(&str, &str)]) -> Files { items.iter().map(|(p, t)| (p.to_string(), file(t))).collect() }
 fn policy_value() -> Value {
     json!({ "version": 2, "task": "fix-addition", "filesystem": { "read": ["README.md", "src/", "test/"], "write": ["src/", "test/"] }, "network": [], "secrets": [], "publish": false, "dependencies": null,
@@ -86,7 +86,7 @@ fn commits_are_byte_identical_to_git_and_reads_are_exact() {
     let head = sh(&repo, &["rev-parse", "HEAD"]);
     let read = git::read_commit(&repo, &head, 1048576, 16777216).unwrap();
     assert_eq!(read.len(), 7);
-    assert_eq!(read["docs/Über uns.md"].bytes, "ü\n".as_bytes());
+    assert_eq!(read["docs/Über uns.md"].bytes.as_deref().unwrap(), "ü\n".as_bytes());
     let mine = git::write_commit(&repo, &read, None, "oracle").unwrap();
     assert_eq!(sh(&repo, &["rev-parse", &format!("{mine}^{{tree}}")]), sh(&repo, &["rev-parse", "HEAD^{tree}"]));
     assert_eq!(git::write_commit(&repo, &read, None, "oracle").unwrap(), mine);
@@ -163,7 +163,7 @@ fn change_gate_enforces_grants_protected_paths_budgets_and_text() {
         denied(git::changes(&f.original, &c, &f.policy), needle);
     }
     let mut c = f.candidate.clone();
-    c.insert("src/bin.dat".into(), Entry { mode: "100644".into(), bytes: vec![0, 1] });
+    c.insert("src/bin.dat".into(), { let b = vec![0u8, 1]; Entry { mode: "100644".into(), oid: git::object_id("blob", &b), size: 2, bytes: Some(b) } });
     denied(git::changes(&f.original, &c, &f.policy), "Binary");
     let mut tight = policy_value();
     tight["limits"]["lines_changed"] = json!(1);
@@ -328,7 +328,7 @@ fn github_required_check_reverifies_the_exact_pr_head() {
     let repo = f.t.join("gh");
     sh(&f.t.0, &["init", "-q", "gh"]);
     sh(&repo, &["config", "core.autocrlf", "false"]);
-    for (p, c) in &f.original { std::fs::create_dir_all(repo.join(p).parent().unwrap()).unwrap(); std::fs::write(repo.join(p), &c.bytes).unwrap(); }
+    for (p, c) in &f.original { std::fs::create_dir_all(repo.join(p).parent().unwrap()).unwrap(); std::fs::write(repo.join(p), c.bytes.as_deref().unwrap()).unwrap(); }
     std::fs::create_dir_all(repo.join(".github/kern/tasks")).unwrap();
     let mut op = operator_value(&["external"]);
     op["checks"][0]["file"] = json!(std::path::absolute("checks.json").unwrap());
@@ -593,4 +593,65 @@ fn dev_side_confirm_accepts_only_the_trusted_signed_proof_for_the_exact_commit()
     assert!(kern::local::confirm_attestation(&tampered, &f.public, &f.commit).is_err());
     // a proof that binds a different commit is refused (exact-hash binding)
     denied(kern::local::confirm_attestation(&f.envelope, &f.public, &f.base), "exact approved commit");
+}
+
+#[test]
+fn file_level_write_grants_enable_root_source_repos() {
+    let c = json!({ "version": 2, "task": "root-src", "filesystem": { "read": ["index.js", "lib/"], "write": ["index.js", "lib/"] },
+        "network": [], "secrets": [], "publish": false, "dependencies": null,
+        "limits": { "files_changed": 8, "lines_changed": 200, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 30, "memory_mb": 256, "pids": 64 }, "required_checks": ["build"] });
+    let policy = contract(&c).unwrap();
+    assert_eq!(policy.write, vec!["index.js".to_string(), "lib/".to_string()]);
+    let base = files(&[("index.js", "module.exports = require('./lib/a');\n"), ("lib/a.js", "module.exports = 1;\n"), ("README.md", "hi\n")]);
+    let mut good = base.clone();
+    good.insert("index.js".into(), file("module.exports = require('./lib/a');\n// kern edit\n"));
+    git::changes(&base, &good, &policy).unwrap();
+    let mut good2 = base.clone();
+    good2.insert("lib/a.js".into(), file("module.exports = 2;\n"));
+    git::changes(&base, &good2, &policy).unwrap();
+    let mut bad = base.clone();
+    bad.insert("README.md".into(), file("hacked\n"));
+    denied(git::changes(&base, &bad, &policy), "outside contract");
+    let mut overlap = c.clone();
+    overlap["filesystem"]["read"] = json!(["lib/", "lib/a.js"]);
+    overlap["filesystem"]["write"] = json!(["lib/", "lib/a.js"]);
+    denied(contract(&overlap), "Overlapping");
+}
+
+#[test]
+fn large_assets_stream_without_loading_and_changed_assets_fail_closed() {
+    let t = Temp::new();
+    let repo = t.join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    sh(&t.0, &["init", "-q", "repo"]);
+    sh(&repo, &["config", "core.autocrlf", "false"]);
+    std::fs::write(repo.join("logo.bin"), vec![7u8; 2 * 1048576]).unwrap(); // 2 MiB asset, > file_bytes
+    std::fs::write(repo.join("src/a.js"), "module.exports = 1;\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "base"]);
+    let base = sh(&repo, &["rev-parse", "HEAD"]);
+
+    // the 2 MiB asset is recorded opaquely (oid+size, no bytes), not rejected; small source is loaded
+    let files = git::read_commit(&repo, &base, 65536, 1048576).unwrap();
+    assert_eq!(files.len(), 2);
+    assert!(files["logo.bin"].bytes.is_none() && files["logo.bin"].size == 2 * 1048576);
+    assert!(files["src/a.js"].bytes.is_some());
+    // streamed manifest sha256 is deterministic
+    assert_eq!(digest(&git::manifest(&repo, &base, 65536, 1048576).unwrap()).unwrap(), digest(&git::manifest(&repo, &base, 65536, 1048576).unwrap()).unwrap());
+    // write_commit round-trips the tree, referencing the opaque asset by oid
+    let rewritten = git::write_commit(&repo, &files, None, "t").unwrap();
+    assert_eq!(sh(&repo, &["rev-parse", &format!("{rewritten}^{{tree}}")]), sh(&repo, &["rev-parse", "HEAD^{tree}"]));
+
+    let policy = contract(&json!({ "version": 2, "task": "asset", "filesystem": { "read": ["src/", "logo.bin"], "write": ["src/", "logo.bin"] },
+        "network": [], "secrets": [], "publish": false, "dependencies": null,
+        "limits": { "files_changed": 8, "lines_changed": 200, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 30, "memory_mb": 256, "pids": 64 }, "required_checks": ["build"] })).unwrap();
+    // an in-contract source edit passes; the unchanged 2 MiB asset is skipped, not diffed
+    let mut good = files.clone();
+    good.insert("src/a.js".into(), file("module.exports = 2;\n"));
+    let changed = git::changes(&files, &good, &policy).unwrap();
+    assert_eq!(changed["files"].as_array().unwrap().len(), 1);
+    // a CHANGED large asset (opaque on both sides, different oid) fails closed
+    let mut bad = files.clone();
+    bad.insert("logo.bin".into(), git::Entry { mode: "100644".into(), oid: "a".repeat(40), size: 2 * 1048576, bytes: None });
+    denied(git::changes(&files, &bad, &policy), "Binary or oversized change unsupported");
 }

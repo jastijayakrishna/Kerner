@@ -161,7 +161,7 @@ pub fn footprint(name: &str, source: &str) -> R<BTreeSet<String>> {
     deny!("Changed code cannot be parsed for capability analysis: {name}")
 }
 fn inspectable(files: &Files, name: &str) -> Option<BTreeSet<String>> {
-    std::str::from_utf8(&files.get(name)?.bytes).ok().and_then(|s| footprint(name, s).ok())
+    std::str::from_utf8(files.get(name)?.bytes.as_deref()?).ok().and_then(|s| footprint(name, s).ok())
 }
 pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTreeMap<String, Vec<String>>) -> R<Value> {
     let (mut report, mut siblings) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
@@ -171,7 +171,7 @@ pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTre
         if op == "delete" { continue; }
         ensure!(is_code(name) || is_data(name), "Unsupported changed file type: {name}");
         if !is_code(name) { continue; }
-        let source = std::str::from_utf8(&candidate.get(name).ok_or_else(|| Denied(format!("Missing changed file {name}")))?.bytes).map_err(|_| Denied(format!("Invalid UTF-8: {name}")))?;
+        let source = std::str::from_utf8(candidate.get(name).ok_or_else(|| Denied(format!("Missing changed file {name}")))?.bytes.as_deref().ok_or_else(|| Denied(format!("Changed code file too large to inspect: {name}")))?).map_err(|_| Denied(format!("Invalid UTF-8: {name}")))?;
         let after = footprint(name, source)?;
         let before = if base.contains_key(name) { inspectable(base, name).unwrap_or_default() } else {
             let dir = name.rsplit_once('/').map_or("", |(d, _)| d).to_string();

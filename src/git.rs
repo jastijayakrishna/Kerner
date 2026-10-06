@@ -8,11 +8,35 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
-pub struct Entry { pub mode: String, pub bytes: Vec<u8> }
+pub struct Entry { pub mode: String, pub oid: String, pub size: u64, pub bytes: Option<Vec<u8>> }
 pub type Files = BTreeMap<String, Entry>;
 pub const MAX_FILE: u64 = 1048576;
 pub const MAX_TOTAL: u64 = 16777216;
+pub const MAX_BLOB: u64 = 64 * 1048576;
+pub const MAX_TREE: u64 = 1024 * 1048576;
 const BUNDLE_BYTES: usize = 64 * 1048576;
+
+pub fn blob_sha256(repo: &Path, oid: &str, size: u64) -> R<String> {
+    use sha2::{Digest, Sha256};
+    let full: Vec<String> = ["--no-replace-objects", "-C"].iter().map(|s| s.to_string()).chain([repo.display().to_string(), "cat-file".into(), "blob".into(), oid.into()]).collect();
+    let mut cmd = std::process::Command::new(git_exe()?);
+    cmd.args(&full).env_clear().envs(safe_env(repo)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    let mut child = cmd.spawn().map_err(|e| Denied(format!("git cat-file could not start: {e}")))?;
+    let mut out = child.stdout.take().expect("piped stdout");
+    let (mut hasher, mut buf, mut total) = (Sha256::new(), [0u8; 65536], 0u64);
+    loop {
+        let n = std::io::Read::read(&mut out, &mut buf).map_err(|e| Denied(e.to_string()))?;
+        if n == 0 { break; }
+        total += n as u64;
+        ensure!(total <= size, "Object {oid} larger than its tree entry");
+        hasher.update(&buf[..n]);
+    }
+    let status = child.wait().map_err(|e| Denied(e.to_string()))?;
+    ensure!(status.success() && total == size, "Could not stream object {oid}");
+    Ok(hex::encode(hasher.finalize()))
+}
 
 pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: usize) -> R<Vec<u8>> {
     let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"].map(String::from).to_vec();
@@ -45,7 +69,7 @@ pub fn read_commit(repo: &Path, commit: &str, file_bytes: u64, total_bytes: u64)
     let listing = git(repo, &["ls-tree", "-rlz", "--full-tree", commit], None)?;
     let rows: Vec<&[u8]> = listing.split(|b| *b == 0).filter(|r| !r.is_empty()).collect();
     ensure!(rows.len() <= 10000, "Too many repository files");
-    let (mut entries, mut seen, mut total) = (Vec::new(), std::collections::HashSet::new(), 0u64);
+    let (mut entries, mut seen, mut loaded_total, mut tree_total) = (Vec::new(), std::collections::HashSet::new(), 0u64, 0u64);
     for row in rows {
         let tab = row.iter().position(|b| *b == b'\t').ok_or_else(|| Denied("Malformed tree listing".into()))?;
         let header = std::str::from_utf8(&row[..tab]).map_err(|_| Denied("Malformed tree listing".into()))?;
@@ -55,20 +79,30 @@ pub fn read_commit(repo: &Path, commit: &str, file_bytes: u64, total_bytes: u64)
         let size: u64 = f[3].parse().map_err(|_| Denied("Malformed tree listing".into()))?;
         file_path(&name)?;
         ensure!(seen.insert(name.to_lowercase()), "Case-colliding filenames: {name}");
-        total += size;
-        ensure!(size <= file_bytes && total <= total_bytes, "Repository exceeds byte limits");
-        entries.push((name, f[0].to_string(), f[2].to_string(), size as usize));
+        tree_total += size;
+        ensure!(size <= MAX_BLOB && tree_total <= MAX_TREE, "Repository exceeds the maximum object or tree size");
+        let load = size <= file_bytes;
+        if load {
+            loaded_total += size;
+            ensure!(loaded_total <= total_bytes, "Repository exceeds inspectable byte limits");
+        }
+        entries.push((name, f[0].to_string(), f[2].to_string(), size, load));
     }
     tree_paths(entries.iter().map(|e| e.0.as_str()), true)?;
-    if entries.is_empty() { return Ok(Files::new()); }
-    let request: String = entries.iter().map(|e| format!("{}\n", e.2)).collect();
-    let stream = git_with(repo, &["cat-file", "--batch"], Some(request.as_bytes()), total as usize + entries.len() * 64 + 4096)?;
-    let (mut files, mut at) = (Files::new(), 0usize);
-    for (name, mode, blob, size) in entries {
-        let end = stream[at..].iter().position(|b| *b == b'\n').map(|p| p + at).ok_or_else(|| Denied("Malformed Git object stream".into()))?;
-        ensure!(stream[at..end] == *format!("{blob} blob {size}").as_bytes() && stream.get(end + 1 + size) == Some(&b'\n'), "Git object stream mismatch");
-        files.insert(name, Entry { mode, bytes: stream[end + 1..end + 1 + size].to_vec() });
-        at = end + 2 + size;
+    let mut files = Files::new();
+    let request: String = entries.iter().filter(|e| e.4).map(|e| format!("{}\n", e.2)).collect();
+    let stream = if request.is_empty() { Vec::new() } else { git_with(repo, &["cat-file", "--batch"], Some(request.as_bytes()), loaded_total as usize + entries.len() * 64 + 4096)? };
+    let mut at = 0usize;
+    for (name, mode, blob, size, load) in entries {
+        if load {
+            let sz = size as usize;
+            let end = stream[at..].iter().position(|b| *b == b'\n').map(|p| p + at).ok_or_else(|| Denied("Malformed Git object stream".into()))?;
+            ensure!(stream[at..end] == *format!("{blob} blob {size}").as_bytes() && stream.get(end + 1 + sz) == Some(&b'\n'), "Git object stream mismatch");
+            files.insert(name, Entry { mode, oid: blob, size, bytes: Some(stream[end + 1..end + 1 + sz].to_vec()) });
+            at = end + 2 + sz;
+        } else {
+            files.insert(name, Entry { mode, oid: blob, size, bytes: None });
+        }
     }
     ensure!(at == stream.len(), "Unexpected Git object stream data");
     Ok(files)
@@ -81,8 +115,11 @@ pub fn write_commit(repo: &Path, files: &Files, parent: Option<&str>, task: &str
     let (mut root, mut objects) = (BTreeMap::new(), Vec::<(String, &'static str, Vec<u8>)>::new());
     for (name, e) in files {
         ensure!(e.mode == "100644" || e.mode == "100755", "Invalid file mode");
-        let id = object_id("blob", &e.bytes);
-        objects.push((id.clone(), "blob", e.bytes.clone()));
+        let id = e.oid.clone();
+        match &e.bytes {
+            Some(bytes) => { ensure!(object_id("blob", bytes) == id, "Blob identity mismatch: {name}"); objects.push((id.clone(), "blob", bytes.clone())); }
+            None => objects.push((id.clone(), "blob", Vec::new())),
+        }
         let parts: Vec<&str> = name.split('/').collect();
         let mut node = &mut root;
         for part in &parts[..parts.len() - 1] {
@@ -124,21 +161,52 @@ pub fn write_commit(repo: &Path, files: &Files, parent: Option<&str>, task: &str
 }
 pub fn manifest(repo: &Path, commit: &str, file_bytes: u64, total_bytes: u64) -> R<Value> {
     let files = read_commit(repo, commit, file_bytes, total_bytes)?;
-    let entries: Vec<Value> = files.iter().map(|(p, e)| json!({ "path": p, "mode": e.mode, "size": e.bytes.len(), "sha256": sha256(&e.bytes) })).collect();
+    let mut entries: Vec<Value> = Vec::with_capacity(files.len());
+    for (p, e) in &files {
+        let sha = match &e.bytes { Some(b) => sha256(b), None => blob_sha256(repo, &e.oid, e.size)? };
+        entries.push(json!({ "path": p, "mode": e.mode, "size": e.size, "sha256": sha }));
+    }
     Ok(json!({ "version": 1, "commit": commit, "commit_sha256": sha256(git(repo, &["cat-file", "commit", commit], None)?), "tree_sha256": digest(&json!(entries))?, "files": entries }))
 }
 pub fn parents(repo: &Path, commit: &str) -> R<Vec<String>> {
     let raw = String::from_utf8_lossy(&git(repo, &["cat-file", "commit", oid(commit)?], None)?).to_string();
     Ok(raw.split("\n\n").next().unwrap_or("").lines().filter_map(|l| l.strip_prefix("parent ").map(str::to_string)).collect())
 }
-pub fn materialize(files: &Files, dest: &Path, grants: Option<&[String]>) -> R<()> {
+pub fn materialize(store: Option<&Path>, files: &Files, dest: &Path, grants: Option<&[String]>) -> R<()> {
     std::fs::create_dir_all(dest)?;
     for (name, e) in files {
         if grants.is_some_and(|g| !allowed(g, name)) { continue; }
         let target = name.split('/').fold(dest.to_path_buf(), |p, part| p.join(part));
         std::fs::create_dir_all(target.parent().unwrap_or(dest))?;
-        create_new(&target, &e.bytes, 0o444)?;
+        match &e.bytes {
+            Some(bytes) => create_new(&target, bytes, 0o444)?,
+            None => {
+                let s = store.ok_or_else(|| Denied(format!("Cannot materialize large object without a store: {name}")))?;
+                stream_blob_to(s, &e.oid, e.size, &target)?;
+            }
+        }
     }
+    Ok(())
+}
+fn stream_blob_to(repo: &Path, oid: &str, size: u64, target: &Path) -> R<()> {
+    let full: Vec<String> = ["--no-replace-objects", "-C"].iter().map(|s| s.to_string()).chain([repo.display().to_string(), "cat-file".into(), "blob".into(), oid.into()]).collect();
+    let mut cmd = std::process::Command::new(git_exe()?);
+    cmd.args(&full).env_clear().envs(safe_env(repo)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    let mut child = cmd.spawn().map_err(|e| Denied(format!("git cat-file could not start: {e}")))?;
+    let mut out = child.stdout.take().expect("piped stdout");
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(target).map_err(|e| Denied(format!("{}: {e}", target.display())))?;
+    let (mut buf, mut total) = ([0u8; 65536], 0u64);
+    loop {
+        let n = std::io::Read::read(&mut out, &mut buf).map_err(|e| Denied(e.to_string()))?;
+        if n == 0 { break; }
+        total += n as u64;
+        ensure!(total <= size, "Object {oid} larger than its tree entry");
+        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| Denied(e.to_string()))?;
+    }
+    let status = child.wait().map_err(|e| Denied(e.to_string()))?;
+    ensure!(status.success() && total == size, "Could not stream object {oid}");
     Ok(())
 }
 pub fn protected(name: &str) -> bool {
@@ -156,14 +224,15 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     let (mut result, mut lines) = (Vec::new(), 0u64);
     for name in names {
         let (a, b) = (base.get(name), candidate.get(name));
-        if let (Some(a), Some(b)) = (a, b) && a.mode == b.mode && a.bytes == b.bytes { continue; }
+        if let (Some(a), Some(b)) = (a, b) && a.mode == b.mode && a.oid == b.oid { continue; }
         ensure!(allowed(&policy.write, name), "Write outside contract: {name}");
         ensure!(!protected(name), "Protected dependency/configuration path: {name}");
         let mut texts = Vec::new();
         for e in [a, b] {
             let Some(e) = e else { texts.push(Vec::new()); continue; };
-            ensure!(!e.bytes.contains(&0), "Binary changes unsupported: {name}");
-            let s = std::str::from_utf8(&e.bytes).map_err(|_| Denied(format!("Invalid UTF-8 change: {name}")))?;
+            let bytes = e.bytes.as_deref().ok_or_else(|| Denied(format!("Binary or oversized change unsupported: {name}")))?;
+            ensure!(!bytes.contains(&0), "Binary changes unsupported: {name}");
+            let s = std::str::from_utf8(bytes).map_err(|_| Denied(format!("Invalid UTF-8 change: {name}")))?;
             texts.push(s.split('\n').collect::<Vec<&str>>());
         }
         let (x, y) = (&texts[0], &texts[1]);

@@ -134,7 +134,8 @@ fn read_into(dir: &Path, prefix: &str, files: &mut Files, total: &mut u64, file_
             file_path(&rel)?;
             *total += meta.len();
             ensure!(meta.len() <= file_bytes && *total <= total_bytes, "Workspace output exceeds byte limits at {rel}");
-            files.insert(rel, Entry { mode: "100644".into(), bytes: std::fs::read(e.path())? });
+            let data = std::fs::read(e.path())?;
+            files.insert(rel, Entry { mode: "100644".into(), oid: git::object_id("blob", &data), size: data.len() as u64, bytes: Some(data) });
         } else {
             deny!("Special file in workspace is unsupported: {rel}");
         }
@@ -249,7 +250,7 @@ pub fn local_run(job: &RunJob) -> R<Value> {
     let ws = root.join("ws");
     let tmp = root.join("tmp");
     std::fs::create_dir_all(&tmp)?;
-    git::materialize(&base_files, &ws, None)?;
+    git::materialize(Some(&job.repo), &base_files, &ws, None)?;
     let mut grants = vec![(ws.clone(), Access::ReadWrite), (tmp.clone(), Access::ReadWrite)];
     grants.extend(job.tools.iter().map(|t| (t.clone(), Access::ReadExec)));
     let env = run_env(&ws, &tmp, &job.tools);

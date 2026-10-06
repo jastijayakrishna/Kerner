@@ -14,7 +14,8 @@ pub struct Dependencies { pub volume: Volume, pub record: Value }
 pub fn validate_lockfile(files: &Files, registry: &str) -> R<Value> {
     ensure!(files.contains_key("package.json"), "Dependency installation requires a committed package.json");
     let lock = files.get("package-lock.json").ok_or_else(|| Denied("Dependency installation requires a committed package-lock.json".into()))?;
-    let v: Value = serde_json::from_slice(&lock.bytes)?;
+    let lock_bytes = lock.bytes.as_deref().ok_or_else(|| Denied("package-lock.json is too large to read".into()))?;
+    let v: Value = serde_json::from_slice(lock_bytes)?;
     ensure!(matches!(v["lockfileVersion"].as_u64(), Some(2 | 3)), "package-lock.json v2 or v3 required");
     let Some(packages) = v["packages"].as_object() else { deny!("package-lock.json has no packages map") };
     ensure!(packages.len() <= 20000, "Too many locked packages");
@@ -29,14 +30,14 @@ pub fn validate_lockfile(files: &Files, registry: &str) -> R<Value> {
         pinned += 1;
         if hashes.iter().all(|a| *a == "sha1") { sha1_only += 1; }
     }
-    Ok(json!({ "packages": pinned, "sha1_only": sha1_only, "lockfile_sha256": sha256(&lock.bytes) }))
+    Ok(json!({ "packages": pinned, "sha1_only": sha1_only, "lockfile_sha256": sha256(lock_bytes) }))
 }
 pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &str) -> R<Dependencies> {
     let registry = op.registry.as_deref().ok_or_else(|| Denied("Operator must name a registry for dependency installation".into()))?;
     let lockfile = validate_lockfile(files, registry)?;
     let input = root.join("dependency-input");
     let manifests: Files = files.iter().filter(|(k, _)| *k == "package.json" || *k == "package-lock.json").map(|(k, v)| (k.clone(), v.clone())).collect();
-    git::materialize(&manifests, &input, None)?;
+    git::materialize(None, &manifests, &input, None)?;
     std::fs::create_dir(input.join("node_modules"))?;
     let control = root.join("dependency-control");
     sandbox::control_dir(&control, Some(("setup.json", &json!({ "registry": registry, "timeout_seconds": SETUP.timeout_seconds }))))?;
@@ -62,9 +63,9 @@ fn candidate_files(base: &Files, wire: &Value, policy: &Contract) -> R<Files> {
         let bytes = unb64(text(item, "content")?)?;
         total += bytes.len() as u64;
         ensure!(bytes.len() as u64 <= policy.limits.file_bytes && total <= policy.limits.total_bytes, "Candidate byte budget exceeded");
-        result.insert(p.into(), git::Entry { mode: base.get(p).map_or("100644".into(), |e| e.mode.clone()), bytes });
+        result.insert(p.into(), git::Entry { mode: base.get(p).map_or("100644".into(), |e| e.mode.clone()), oid: git::object_id("blob", &bytes), size: bytes.len() as u64, bytes: Some(bytes) });
     }
-    ensure!(result.values().map(|e| e.bytes.len() as u64).sum::<u64>() <= policy.limits.total_bytes, "Artifact budget exceeded");
+    ensure!(result.values().filter_map(|e| e.bytes.as_ref().map(|b| b.len() as u64)).sum::<u64>() <= policy.limits.total_bytes, "Artifact budget exceeded");
     tree_paths(result.keys().map(String::as_str), true)?;
     Ok(result)
 }
@@ -82,12 +83,13 @@ pub fn run_agent(job: &Job, output: &Path) -> R<Value> {
     require_role("executor")?;
     let (policy, op) = (&job.contract, &job.operator);
     ensure!(op.executors.iter().any(|e| e == "kern-gvisor"), "Operator does not accept kern-gvisor execution");
+    ensure!(policy.write.iter().all(|w| w.ends_with('/')), "The kern-gvisor executor requires directory write grants; use file-level grants through the box/ingest path");
     let command = job.command.clone().ok_or_else(|| Denied("Job has no agent command".into()))?;
     let root = fresh_dir(output)?;
     let store = git::import_base(&job.repo, &job.base, &root.join("objects.git"))?;
     let original = git::read_commit(&store, &job.base, policy.limits.file_bytes, policy.limits.total_bytes)?;
     let snapshot = root.join("agent-input");
-    git::materialize(&original, &snapshot, Some(&policy.read))?;
+    git::materialize(Some(&store), &original, &snapshot, Some(&policy.read))?;
     for grant in &policy.write { std::fs::create_dir_all(snapshot.join(grant.trim_end_matches('/')))?; }
     let deps = if policy.dependencies {
         ensure!(!original.keys().any(|k| k.split('/').next() == Some("node_modules")), "Committed node_modules conflicts with dependency installation");
@@ -132,7 +134,7 @@ pub fn preflight(job: &Job, execute_agent: bool) -> Value {
         ensure!(git::trimmed(git::git(&job.repo, &["rev-parse", "--show-object-format"], None)?) == "sha1", "A SHA-1 Git repository is required");
         let files = git::read_commit(&job.repo, &job.base, job.contract.limits.file_bytes, job.contract.limits.total_bytes)?;
         tree_paths(files.keys().map(String::as_str).chain(job.contract.read.iter().chain(&job.contract.write).map(|g| g.trim_end_matches('/'))), false)?;
-        ensure!(job.contract.write.iter().all(|g| !files.contains_key(g.trim_end_matches('/'))), "Write directory overlaps a source file");
+        ensure!(job.contract.write.iter().filter(|g| g.ends_with('/')).all(|g| !files.contains_key(g.trim_end_matches('/'))), "Write directory overlaps a source file");
         let deps = if job.contract.dependencies {
             let l = validate_lockfile(&files, job.operator.registry.as_deref().unwrap_or(""))?;
             format!("; {} locked packages ({} with legacy SHA-1-only integrity)", l["packages"], l["sha1_only"])
@@ -255,7 +257,7 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     let capabilities = capability::check(&original, &candidate, &changed, &op.permissions)?;
     let mut checks = vec![json!({ "id": "artifact", "status": "PASS", "evidence_sha256": digest(&m)? }), json!({ "id": "path-and-budget", "status": "PASS", "evidence_sha256": digest(&changed)? }), json!({ "id": "capabilities", "status": "PASS", "evidence_sha256": digest(&capabilities)? })];
     let snapshot = root.join("artifact");
-    git::materialize(&candidate, &snapshot, None)?;
+    git::materialize(Some(&store), &candidate, &snapshot, None)?;
     let deps = if policy.dependencies {
         ensure!(!candidate.keys().any(|k| k.split('/').next() == Some("node_modules")), "Committed node_modules conflicts with dependency installation");
         std::fs::create_dir(snapshot.join("node_modules"))?;

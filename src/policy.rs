@@ -48,7 +48,6 @@ pub fn contract(input: &Value) -> R<Contract> {
     }
     let (read, write) = (lists[0].clone(), lists[1].clone());
     ensure!(write.iter().all(|w| allowed(&read, w)), "Write authority requires read authority");
-    ensure!(write.iter().all(|w| w.ends_with('/')), "Write capabilities must be directory prefixes ending in /");
     tree_paths(read.iter().chain(&write).map(|g| g.strip_suffix('/').unwrap_or(g)), false)?;
     ensure!(input["network"].as_array().is_some_and(Vec::is_empty), "Contracts grant no network");
     ensure!(input["secrets"].as_array().is_some_and(Vec::is_empty), "Contracts grant no secrets");
