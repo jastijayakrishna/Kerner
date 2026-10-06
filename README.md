@@ -30,6 +30,19 @@ kern run run-job.json
 
 `kern run` materializes the base commit into a throwaway workspace, runs the agent inside the box, then checks the result against the contract (paths, change budget, protected files) and the capability diff. A clean result becomes a create-only `kern/<task>/<run_id>` branch; the real working tree and `HEAD` never move, and a blocked result promotes nothing. The box grants read-write to one workspace only, read-execute to the tool directories it is given, and no network unless the job asks for it. Isolation is enforced by OS ACLs and AppContainer network restrictions.
 
+Add a `verifier` block (a pinned transport to an independent verifier that holds the signing key — the developer side never does) and `kern run` becomes the whole chain in one command: box → local gate → exact-hash export → `kern ingest` → independent gVisor verification of the real tests → verifier-signed attestation → create-only promotion → a dev-side signature and exact-commit confirmation. The developer sees only:
+
+```text
+✓ Isolated
+✓ Verified independently
+✓ Tests passed
+✓ Signed
+
+VERIFIED
+```
+
+or `BLOCKED: <reason>`. Any deviation — a failing agent, an out-of-contract change, an unreachable or failing verifier, a tampered or mismatched proof, a replayed run — fails closed and promotes nothing. `--show` prints the full JSON evidence.
+
 Proven on Windows 11 (`tests/kern.rs`, and reproducibly by hand): inside the box, writing or deleting outside the workspace, reading a secret file, connecting to a local service, and reaching the internet are all denied, while the same actions succeed in an identical run outside the box. Granting the network restores internet access without restoring local-service or filesystem access.
 
 ## Build

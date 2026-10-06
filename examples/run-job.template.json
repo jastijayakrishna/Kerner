@@ -6,6 +6,12 @@
   "tools": ["C:/Users/you/AppData/Local/nvm/<version>"],
   "command": ["C:/Users/you/AppData/Local/nvm/<version>/node.exe", "--preserve-symlinks-main", "agent-entry.js"],
   "network": false,
-  "output": "./kern-runs",
-  "promote": true
+  "output": "C:/path/to/kern-runs",
+  "promote": true,
+  "verifier": {
+    "transport": {"file": "C:/path/to/verify-transport.cmd", "sha256": "<kern pin: sha256 of the reviewed transport>"},
+    "arguments": [],
+    "public_key": "./verifier.pub",
+    "operator": "./operator.json"
+  }
 }

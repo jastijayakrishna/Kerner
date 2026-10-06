@@ -578,3 +578,19 @@ fn factory_lock_gate_allows_a_proven_commit_and_refuses_everything_else() {
     std::fs::write(cfg.join("verifier.pub"), &other).unwrap();
     denied(promote::gate_artifact(&f.store, &f.commit, &f.envelope, &cfg, now_ms()), "Untrusted");
 }
+
+#[test]
+fn dev_side_confirm_accepts_only_the_trusted_signed_proof_for_the_exact_commit() {
+    let f = fixture();
+    // the genuine verifier-signed proof for the approved commit is accepted
+    kern::local::confirm_attestation(&f.envelope, &f.public, &f.commit).unwrap();
+    // a different (untrusted) key is refused
+    let other = attest::public_pem(&SigningKey::from_bytes(&random_bytes::<32>().unwrap()).verifying_key()).unwrap();
+    denied(kern::local::confirm_attestation(&f.envelope, &other, &f.commit), "trusted verifier key");
+    // a tampered payload breaks the signature
+    let mut tampered = f.envelope.clone();
+    tampered["payload"] = json!(b64(b"{}"));
+    assert!(kern::local::confirm_attestation(&tampered, &f.public, &f.commit).is_err());
+    // a proof that binds a different commit is refused (exact-hash binding)
+    denied(kern::local::confirm_attestation(&f.envelope, &f.public, &f.base), "exact approved commit");
+}

@@ -1,11 +1,15 @@
+use crate::attest;
 use crate::capability;
+use crate::flow::{self, Source};
 use crate::git::{self, Entry, Files};
-use crate::policy::{Contract, contract};
+use crate::policy::{Contract, Job, Operator, Pin, contract, operator, pin, pinned};
 use crate::util::*;
 use crate::{deny, ensure};
+use ed25519_dalek::Signature;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access { ReadWrite, ReadExec, Deny }
@@ -138,13 +142,29 @@ fn read_into(dir: &Path, prefix: &str, files: &mut Files, total: &mut u64, file_
     Ok(())
 }
 
-pub struct RunJob { pub repo: PathBuf, pub base: String, pub contract: Contract, pub tools: Vec<PathBuf>, pub command: Vec<String>, pub network: bool, pub output: PathBuf, pub promote: bool }
+pub struct Verifier { pub transport: Pin, pub arguments: Vec<String>, pub public_key_pem: String, pub public_key_path: PathBuf, pub operator: Operator }
+fn verifier(v: &Value, dir: &Path) -> R<Verifier> {
+    exact(v, &["transport", "arguments", "public_key", "operator"], "verifier")?;
+    let transport = pin(&v["transport"], "verifier transport")?;
+    pinned(&transport)?;
+    let arguments = strings(v, "arguments", 32)?;
+    ensure!(arguments.iter().all(|a| a.len() <= 4096 && !a.contains('\0')), "Invalid verifier transport arguments");
+    let public_key_path = std::path::absolute(dir.join(text(v, "public_key")?))?;
+    let public_key_pem = std::fs::read_to_string(&public_key_path).map_err(|e| Denied(format!("verifier public_key: {e}")))?;
+    crate::attest::public_key(&public_key_pem)?;
+    let op = operator(&read_json(dir.join(text(v, "operator")?))?)?;
+    Ok(Verifier { transport, arguments, public_key_pem, public_key_path, operator: op })
+}
+
+pub struct RunJob { pub repo: PathBuf, pub base: String, pub contract: Contract, pub tools: Vec<PathBuf>, pub command: Vec<String>, pub network: bool, pub output: PathBuf, pub promote: bool, pub verifier: Option<Verifier> }
 pub fn run_job(path: &Path) -> R<RunJob> {
     let file = std::path::absolute(path)?;
     let dir = file.parent().unwrap_or(Path::new("/")).to_path_buf();
     let raw = read_json(&file)?;
     ensure!(raw["version"] == 1, "Run job v1 required");
-    exact(&raw, &["version", "repo", "base", "contract", "tools", "command", "network", "output", "promote"], "run job")?;
+    let mut fields = vec!["version", "repo", "base", "contract", "tools", "command", "network", "output", "promote"];
+    if raw.get("verifier").is_some() { fields.push("verifier"); }
+    exact(&raw, &fields, "run job")?;
     let repo = strip_verbatim(&std::fs::canonicalize(dir.join(text(&raw, "repo")?)).map_err(|e| Denied(format!("repo: {e}")))?);
     ensure!(repo.is_dir(), "repo must be an existing directory");
     let base = text(&raw, "base")?.to_string();
@@ -157,13 +177,68 @@ pub fn run_job(path: &Path) -> R<RunJob> {
     let exe = abs_existing(&command[0], "command executable")?;
     ensure!(exe.is_file(), "command executable must exist: {}", command[0]);
     command[0] = exe.display().to_string();
-    Ok(RunJob { repo, base, contract, tools, command, network: raw["network"] == true, output: std::path::absolute(dir.join(text(&raw, "output")?))?, promote: raw["promote"] == true })
+    let verifier = match raw.get("verifier") { Some(v) => Some(verifier(v, &dir)?), None => None };
+    Ok(RunJob { repo, base, contract, tools, command, network: raw["network"] == true, output: std::path::absolute(dir.join(text(&raw, "output")?))?, promote: raw["promote"] == true, verifier })
+}
+
+fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<Value> {
+    let _ = std::fs::remove_file(out);
+    let script = strip_verbatim(&pinned(&v.transport)?);
+    let (exe, mut args): (PathBuf, Vec<String>) = if cfg!(windows) {
+        (PathBuf::from("cmd.exe"), vec!["/c".into(), script.display().to_string()])
+    } else {
+        (PathBuf::from("/bin/sh"), vec![script.display().to_string()])
+    };
+    args.extend(v.arguments.clone());
+    args.push(handoff.display().to_string());
+    args.push(out.display().to_string());
+    args.push(commit.to_string());
+    run(&exe, &args, Run { cwd: None, env: safe_env(&std::env::temp_dir()), input: None, timeout: Duration::from_secs(1200), max_output: 1048576 })
+        .map_err(|e| Denied(format!("independent verifier unreachable or rejected the change: {}", e.0)))?;
+    ensure!(std::fs::symlink_metadata(out).is_ok_and(|m| m.is_file()), "the independent verifier returned no attestation");
+    read_json(out)
+}
+pub fn confirm_attestation(envelope: &Value, trusted_pem: &str, commit: &str) -> R<()> {
+    exact(envelope, &["payloadType", "payload", "signatures"], "attestation envelope")?;
+    ensure!(envelope["payloadType"] == attest::PAYLOAD_TYPE, "not an in-toto DSSE envelope");
+    let key = attest::public_key(trusted_pem)?;
+    let Some([sig]) = envelope["signatures"].as_array().map(Vec::as_slice) else { deny!("exactly one signature required") };
+    exact(sig, &["keyid", "sig"], "signature")?;
+    ensure!(text(sig, "keyid")? == attest::key_id(&key)?, "attestation is not signed by the trusted verifier key");
+    let bytes = unb64(text(envelope, "payload")?)?;
+    let signature = Signature::from_slice(&unb64(text(sig, "sig")?)?).map_err(|_| Denied("invalid signature encoding".into()))?;
+    ensure!(key.verify_strict(&attest::pae(attest::PAYLOAD_TYPE, &bytes), &signature).is_ok(), "attestation signature does not verify against the trusted key");
+    let stmt: Value = serde_json::from_slice(&bytes)?;
+    ensure!(stmt["subject"][0]["digest"]["gitCommit"] == commit, "attestation does not bind the exact approved commit");
+    ensure!(stmt["predicate"]["verificationResult"] == "PASSED", "independent verification did not pass");
+    let Some(checks) = stmt["predicate"][attest::EXTENSION]["checks"].as_array() else { deny!("attestation carries no checks") };
+    ensure!(!checks.is_empty() && checks.iter().all(|c| c["status"] == "PASS"), "a required check did not pass");
+    Ok(())
 }
 
 fn gate(label: &str, f: impl FnOnce() -> R<Value>, checks: &mut Vec<Value>) -> Option<Value> {
     match f() {
         Ok(v) => { checks.push(json!({ "id": label, "status": "PASS" })); Some(v) }
         Err(e) => { checks.push(json!({ "id": label, "status": "BLOCKED", "detail": e.0 })); None }
+    }
+}
+fn blocked(task: &str, ux: Vec<&str>, reason: &str) -> Value {
+    json!({ "status": "BLOCKED", "ux": ux, "task": task, "reason": reason })
+}
+fn finish(root: &Path, result: Value) -> R<Value> {
+    write_json(root.join("result.json"), &result)?;
+    Ok(result)
+}
+pub fn print_run(r: &Value) {
+    if let Some(ux) = r["ux"].as_array() {
+        for s in ux.iter().filter_map(Value::as_str) { println!("\u{2713} {s}"); }
+        println!();
+        match r["status"].as_str() {
+            Some("VERIFIED") => println!("VERIFIED"),
+            _ => println!("BLOCKED: {}", r["reason"].as_str().unwrap_or("unknown")),
+        }
+    } else if let Some(s) = r["summary"].as_str() {
+        println!("{s}");
     }
 }
 pub fn local_run(job: &RunJob) -> R<Value> {
@@ -178,26 +253,50 @@ pub fn local_run(job: &RunJob) -> R<Value> {
     let mut grants = vec![(ws.clone(), Access::ReadWrite), (tmp.clone(), Access::ReadWrite)];
     grants.extend(job.tools.iter().map(|t| (t.clone(), Access::ReadExec)));
     let env = run_env(&ws, &tmp, &job.tools);
-    let exit = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &ws, env: &env, timeout_ms: timeout_ms(job.contract.limits.timeout_seconds) })?;
+    let task = job.contract.task.clone();
 
+    let exit = match enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &ws, env: &env, timeout_ms: timeout_ms(l.timeout_seconds) }) {
+        Ok(code) => code,
+        Err(e) => return finish(&root, blocked(&task, vec![], &e.0)),
+    };
     let mut checks = vec![json!({ "id": "agent-exit", "status": if exit == 0 { "PASS" } else { "BLOCKED" }, "detail": exit })];
     let candidate = read_workspace(&ws, l.file_bytes, l.total_bytes)?;
     let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let changed = gate("contract", || git::changes(&base_files, &candidate, &job.contract), &mut checks);
     let caps = changed.as_ref().and_then(|ch| gate("capabilities", || capability::check(&base_files, &candidate, ch, &empty), &mut checks));
     let green = exit == 0 && checks.iter().all(|c| c["status"] == "PASS");
-
-    let mut result = json!({
-        "status": if green { "GREEN" } else { "BLOCKED" }, "stage": "run", "task": job.contract.task, "base": job.base,
-        "network": job.network, "workspace": ws.display().to_string(), "checks": checks,
-        "changes": changed.clone().unwrap_or(Value::Null), "capabilities": caps.unwrap_or(Value::Null),
-    });
     let files_changed = changed.as_ref().and_then(|c| c["files"].as_array().map(Vec::len)).unwrap_or(0);
-    let task = &job.contract.task;
+
+    if let Some(v) = &job.verifier {
+        if !green {
+            let reason = checks.iter().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("agent command exited with code {exit}"));
+            return finish(&root, blocked(&task, vec!["Isolated"], &reason));
+        }
+        let outcome = (|| -> R<(String, Value)> {
+            let c = git::write_commit(&job.repo, &candidate, Some(&job.base), &task)?;
+            let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: root.join("ingest") };
+            let ingest = flow::task(&pj, Source::Ingest(&job.repo, &c))?;
+            ensure!(ingest["status"] == "CANDIDATE", "{}", ingest["reason"].as_str().unwrap_or("the local gate rejected the change"));
+            let bundle = PathBuf::from(text(&ingest, "bundle")?);
+            let envelope = invoke_transport(v, &bundle.join("handoff"), &root.join("attestation.json"), &c)?;
+            confirm_attestation(&envelope, &v.public_key_pem, &c)?;
+            Ok((c, envelope))
+        })();
+        return match outcome {
+            Ok((c, envelope)) => finish(&root, json!({ "status": "VERIFIED", "ux": ["Isolated", "Verified independently", "Tests passed", "Signed"],
+                "task": task, "base": job.base, "commit": c, "files_changed": files_changed, "attestation_sha256": digest(&envelope).unwrap_or_default(), "checks": checks })),
+            Err(e) => finish(&root, blocked(&task, vec!["Isolated"], &e.0)),
+        };
+    }
+
+    let mut result = json!({ "status": if green { "GREEN" } else { "BLOCKED" }, "stage": "run", "task": task, "base": job.base,
+        "network": job.network, "workspace": ws.display().to_string(), "checks": checks,
+        "changes": changed.clone().unwrap_or(Value::Null), "capabilities": caps.unwrap_or(Value::Null) });
     if green && job.promote {
         let run_id = uuid4()?;
-        let branch = format!("kern/{}/{run_id}", job.contract.task);
-        let commit = git::write_commit(&job.repo, &candidate, Some(&job.base), &job.contract.task)?;
+        let branch = format!("kern/{task}/{run_id}");
+        let commit = git::write_commit(&job.repo, &candidate, Some(&job.base), &task)?;
         git::git(&job.repo, &["update-ref", &format!("refs/heads/{branch}"), &commit, &"0".repeat(40)], None)?;
         result["summary"] = json!(format!("OK  {task}: {files_changed} file(s) changed, no new module capabilities. Promoted to {branch} (reversible)."));
         result["promotion"] = json!({ "branch": branch, "commit": commit, "review": format!("git -C {} diff {}..{branch}", job.repo.display(), job.base), "undo": format!("git -C {} branch -D {branch}", job.repo.display()) });
