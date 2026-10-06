@@ -80,6 +80,16 @@ kern promote-github run out/attestation.json task.json operator.json expected.js
 
 The workflow uses `pull_request_target`, so its definition comes from the protected base branch and a PR cannot alter the check. Kern only reads git objects from the PR; it never executes PR code there. For `kern/*` branches the check requires exactly one valid attestation for the exact head and base, and recomputes the contract and capability diff. Other branches are reported as `SKIPPED`.
 
+## Enforce at deploy (factory lock)
+
+Merge enforcement does not cover a push straight to a branch or a deploy of a commit that was never Kern-verified. A release pipeline closes that gap:
+
+```sh
+kern gate-artifact <checkout-dir> <commit> attestation.json <trusted-config-dir>
+```
+
+It re-verifies the attestation's signature against the trusted verifier key, that the attestation binds that exact commit, and recomputes the contract and capability diff against the checkout. A commit without a valid proof exits non-zero, so the deploy step fails closed.
+
 ## Evidence (2026-10-04)
 
 All measurements were run on this implementation. The live runs used gVisor release-20260928.0 on a single Linux VM.
