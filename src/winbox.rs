@@ -16,6 +16,8 @@ use windows_sys::Win32::System::Threading::*;
 
 const PROFILE: &str = "kern-box";
 
+static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain([0]).collect() }
 
 struct LocalPtr(*mut core::ffi::c_void);
@@ -108,6 +110,7 @@ impl Drop for Owned {
 
 pub fn run_box(spec: &BoxSpec) -> R<u32> {
     ensure!(!spec.argv.is_empty(), "The box needs a command to run");
+    let _serialized = LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
     let sid = Sid::container()?;
     let mut applied: Vec<std::path::PathBuf> = Vec::new();
     let result = (|| -> R<u32> {
