@@ -109,7 +109,8 @@ All measurements were run on this implementation. The live runs used gVisor rele
 
 | What | Result |
 |---|---|
-| Unit and integration tests (real git, real Ed25519, git as the oracle) | 14/14, zero `clippy` warnings |
+| Unit and integration tests (real git, real Ed25519, git as the oracle) | 23/23, zero `clippy` warnings |
+| Onboarding benchmark: 10 real npm repos, 50 candidates (good + four defect classes), real suites in gVisor | 50/50 as expected: 0 wrong-VERIFIED, 0 false-blocks, 10/10 onboarded. Mix of `src/`, `lib/` and root-`index.js` (file grants), with 1–3 MiB assets streamed |
 | Escape probes inside the gVisor executor | Credentials EACCES; Docker socket, `.git`, host root and signing key absent; every write outside grants denied; env exactly `HOME LANG PATH`; IPv4, IPv6 and DNS unreachable; detached writer stopped before capture |
 | Hostile captures (symlink, hardlink, timeout) | All refused |
 | Live verification of upstream sprintf.js issue #181 | 433 locked packages installed in gVisor, 32 behavioural cases and the real `npm test` (ESLint + Mocha) in about 50 s; signed by an external signer |
