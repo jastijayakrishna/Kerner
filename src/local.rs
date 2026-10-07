@@ -1,8 +1,9 @@
 use crate::attest;
 use crate::capability;
+use crate::container::{self, BoxSpec, Mount};
 use crate::flow::{self, Source};
 use crate::git::{self, Entry, Files};
-use crate::policy::{Contract, Job, Operator, Pin, contract, operator, pin, pinned};
+use crate::policy::{Contract, Job, MAX_LIMITS, Operator, Pin, contract, image, operator, pin, pinned};
 use crate::util::*;
 use crate::{deny, ensure};
 use ed25519_dalek::Signature;
@@ -11,29 +12,28 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access { ReadWrite, ReadExec, Deny }
-
-pub struct BoxSpec<'a> {
-    pub argv: &'a [String],
-    pub grants: &'a [(PathBuf, Access)],
-    pub net: bool,
-    pub cwd: &'a Path,
-    pub env: &'a [(String, String)],
-    pub timeout_ms: u32,
-}
-
-#[cfg(windows)]
-pub fn enforce(spec: &BoxSpec) -> R<u32> { crate::winbox::run_box(spec) }
-#[cfg(not(windows))]
-pub fn enforce(_: &BoxSpec) -> R<u32> { deny!("The native Kern box currently runs on Windows only; use the gVisor executor on Linux") }
-
 fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     match s.strip_prefix(r"\\?\") {
         Some(rest) if rest.len() >= 2 && rest.as_bytes()[1] == b':' => PathBuf::from(rest),
         _ => p.to_path_buf(),
     }
+}
+fn resolved(p: &Path) -> PathBuf {
+    let parts: Vec<std::path::Component> = p.components().collect();
+    for keep in (1..=parts.len()).rev() {
+        let Ok(head) = std::fs::canonicalize(parts[..keep].iter().collect::<PathBuf>()) else { continue };
+        let mut out = strip_verbatim(&head);
+        for part in &parts[keep..] {
+            match part {
+                std::path::Component::ParentDir => { out.pop(); }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        return out;
+    }
+    p.to_path_buf()
 }
 fn abs_existing(s: &str, label: &str) -> R<PathBuf> {
     let p = Path::new(s);
@@ -42,79 +42,83 @@ fn abs_existing(s: &str, label: &str) -> R<PathBuf> {
     Ok(strip_verbatim(&c))
 }
 
-pub struct BoxJob { pub workspace: PathBuf, pub tools: Vec<PathBuf>, pub denied: Vec<PathBuf>, pub network: bool, pub command: Vec<String>, pub timeout_seconds: u64 }
+pub struct BoxJob { pub image: String, pub workspace: PathBuf, pub command: Vec<String>, pub network: bool, pub env: Vec<String>, pub mounts: Vec<Mount>, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64 }
+impl BoxJob {
+    fn spec(&self) -> BoxSpec<'_> {
+        BoxSpec { image: &self.image, command: &self.command, workspace: &self.workspace, mounts: &self.mounts, env: &self.env, network: self.network, timeout_seconds: self.timeout_seconds, memory_mb: self.memory_mb, pids: self.pids, feedback: None }
+    }
+}
+fn present<'a>(v: &Value, required: &[&'a str], optional: &[&'a str]) -> Vec<&'a str> {
+    required.iter().chain(optional.iter().filter(|k| v.get(**k).is_some())).copied().collect()
+}
+fn pinned_image(v: &Value) -> R<String> {
+    let s = text(v, "image")?;
+    ensure!(image(s), "image must be a Linux image pinned by digest, for example docker.io/library/node:22-bookworm-slim@sha256:<digest> \
+        (docker image inspect --format '{{{{index .RepoDigests 0}}}}' <image> prints it)");
+    Ok(s.to_string())
+}
+fn env_names(v: &Value) -> R<Vec<String>> {
+    if v.get("env").is_none() { return Ok(Vec::new()); }
+    let names = strings(v, "env", 32)?;
+    let valid = |n: &String| n.len() <= 128 && n != "HOME" && n.bytes().next().is_some_and(|b| !b.is_ascii_digit()) && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    ensure!(names.iter().enumerate().all(|(i, n)| valid(n) && !names[..i].contains(n)),
+        "env must list unique environment variable names (letters, digits and _) other than HOME; the agent gets their values from Kern's environment");
+    Ok(names)
+}
+fn mounts(v: &Value, private: &[&Path]) -> R<Vec<Mount>> {
+    let Some(raw) = v.get("mounts") else { return Ok(Vec::new()) };
+    let Some(list) = raw.as_array().filter(|l| l.len() <= 16) else { deny!("mounts must be an array of at most 16 read-only mounts") };
+    let mut out: Vec<Mount> = Vec::new();
+    for m in list {
+        exact(m, &["source", "target"], "mount")?;
+        let target = text(m, "target")?.to_string();
+        let parts: Vec<&str> = target.split('/').skip(1).collect();
+        let path = target.starts_with('/') && target.len() <= 256 && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+        let reserved = container::RESERVED.iter().any(|r| target == *r || target.starts_with(&format!("{r}/")));
+        ensure!(path && !reserved && !out.iter().any(|o| o.target == target), "mount target {target} must be a unique absolute container path outside {}", container::RESERVED.join(", "));
+        let source = abs_existing(text(m, "source")?, "mount source")?;
+        ensure!(!source.to_string_lossy().contains([',', '"', '\n', '\r']), "mount source {} cannot contain a comma, quote or line break", source.display());
+        for p in private {
+            ensure!(!source.starts_with(p) && !p.starts_with(&source), "mount source {} overlaps {}; the agent may only see its own workspace", source.display(), p.display());
+        }
+        out.push(Mount { source, target });
+    }
+    Ok(out)
+}
+fn flag(v: &Value, key: &str) -> R<bool> { v[key].as_bool().ok_or_else(|| Denied(format!("{key} must be a boolean"))) }
 pub fn box_job(v: &Value) -> R<BoxJob> {
-    ensure!(v["version"] == 1, "Box job v1 required");
-    exact(v, &["version", "workspace", "tools", "denied", "network", "command", "timeout_seconds"], "box job")?;
+    ensure!(v["version"] != 1, "Box job v1 ran on the retired Windows box; the local box now runs the command in a Linux container. Replace tools and denied with an image (and read-only mounts), see examples/box-job.template.json");
+    ensure!(v["version"] == 2, "Box job v2 required");
+    exact(v, &present(v, &["version", "image", "workspace", "command", "network", "timeout_seconds", "memory_mb", "pids"], &["env", "mounts"]), "box job")?;
     let workspace = abs_existing(text(v, "workspace")?, "workspace")?;
     ensure!(workspace.is_dir(), "workspace must be an existing directory");
-    let tools = strings(v, "tools", 32)?.iter().map(|t| abs_existing(t, "tool")).collect::<R<Vec<_>>>()?;
-    ensure!(tools.iter().all(|t| t.is_dir()), "each tool must be an existing directory");
-    let denied = strings(v, "denied", 64)?.iter().map(|d| abs_existing(d, "denied path")).collect::<R<Vec<_>>>()?;
-    for d in &denied {
-        let inside = std::iter::once(&workspace).chain(&tools).find(|g| d.starts_with(g));
-        ensure!(inside.is_none(), "Denied path {} is inside the granted {}; an app container cannot have an exception carved out of a grant, so grant narrower directories", d.display(), inside.map_or(String::new(), |g| g.display().to_string()));
-    }
-    ensure!(v["network"].is_boolean(), "network must be a boolean");
-    let timeout_seconds = int(v, "timeout_seconds", 1, 3600)?;
-    let mut command = argv_native(&v["command"])?;
-    let exe = abs_existing(&command[0], "command executable")?;
-    ensure!(exe.is_file(), "command executable must be an existing file: {}", command[0]);
-    command[0] = exe.display().to_string();
-    Ok(BoxJob { workspace, tools, denied, network: v["network"] == true, command, timeout_seconds })
-}
-fn timeout_ms(seconds: u64) -> u32 { (seconds * 1000).min(u32::MAX as u64) as u32 }
-fn argv_native(v: &Value) -> R<Vec<String>> {
-    let Some(a) = v.as_array() else { deny!("command must be an array") };
-    ensure!(!a.is_empty() && a.len() <= 256, "command must have 1..256 arguments");
-    let args: Vec<String> = a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
-    ensure!(args.len() == a.len() && args.iter().all(|s| s.len() <= 8192 && !s.contains('\0')), "command arguments must be plain strings");
-    Ok(args)
-}
-
-fn box_env(workspace: &Path, tools: &[PathBuf]) -> Vec<(String, String)> {
-    let mut path: Vec<String> = tools.iter().map(|t| t.display().to_string()).collect();
-    if let Ok(root) = std::env::var("SystemRoot") {
-        path.push(format!(r"{root}\System32"));
-        path.push(format!(r"{root}\System32\WindowsPowerShell\v1.0"));
-        path.push(root);
-    }
-    let ws = workspace.display().to_string();
-    let mut env = vec![("PATH".into(), path.join(";")), ("HOME".into(), ws.clone()), ("TEMP".into(), ws.clone()), ("TMP".into(), ws.clone())];
-    for key in ["SystemRoot", "WINDIR", "SystemDrive", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "COMSPEC", "PATHEXT",
-                "USERPROFILE", "LOCALAPPDATA", "APPDATA", "ALLUSERSPROFILE", "PROGRAMDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "PUBLIC", "OS", "COMPUTERNAME", "USERNAME"] {
-        if let Ok(v) = std::env::var(key) { env.push((key.into(), v)); }
-    }
-    for (k, v) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "NUL"), ("GIT_TERMINAL_PROMPT", "0"), ("GIT_OPTIONAL_LOCKS", "0")] {
-        env.push((k.into(), v.into()));
-    }
-    env
-}
-pub fn grants_for(job: &BoxJob) -> Vec<(PathBuf, Access)> {
-    let mut g = vec![(job.workspace.clone(), Access::ReadWrite)];
-    g.extend(job.tools.iter().map(|t| (t.clone(), Access::ReadExec)));
-    g.extend(job.denied.iter().map(|d| (d.clone(), Access::Deny)));
-    g
+    let m = MAX_LIMITS;
+    Ok(BoxJob {
+        image: pinned_image(v)?, command: argv(&v["command"]).map_err(|_| Denied("command must start with an absolute container path, such as /usr/local/bin/node".into()))?,
+        network: flag(v, "network")?, env: env_names(v)?, mounts: mounts(v, &[&workspace])?, timeout_seconds: int(v, "timeout_seconds", 1, m.timeout_seconds)?,
+        memory_mb: int(v, "memory_mb", 32, m.memory_mb)?, pids: int(v, "pids", 1, m.pids)?, workspace,
+    })
 }
 pub fn run_box_job(job: &BoxJob) -> R<Value> {
-    let grants = grants_for(job);
-    let env = box_env(&job.workspace, &job.tools);
-    let code = enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &job.workspace, env: &env, timeout_ms: timeout_ms(job.timeout_seconds) })?;
+    let o = container::run(&job.spec())?;
     Ok(json!({
-        "status": if code == 0 { "OK" } else { "EXITED" }, "stage": "box", "exit_code": code,
-        "workspace": job.workspace.display().to_string(), "network": job.network,
-        "granted": { "read_write": [job.workspace.display().to_string()], "read_execute": job.tools.iter().map(|t| t.display().to_string()).collect::<Vec<_>>(), "denied": job.denied.iter().map(|d| d.display().to_string()).collect::<Vec<_>>() },
+        "status": if o.exit_code == 0 { "OK" } else { "EXITED" }, "stage": "box", "exit_code": o.exit_code, "oom_killed": o.oom_killed,
+        "workspace": job.workspace.display().to_string(), "image": job.image, "network": job.network, "engine": o.engine, "isolation": o.isolation, "container": o.container,
     }))
 }
 
-fn run_env(ws: &Path, tmp: &Path, tools: &[PathBuf]) -> Vec<(String, String)> {
-    let mut env = box_env(ws, tools);
-    let tmp = tmp.display().to_string();
-    for (k, v) in env.iter_mut() {
-        if k == "TEMP" || k == "TMP" { *v = tmp.clone(); }
+#[cfg(unix)]
+fn editable(dir: &Path) -> R<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for e in std::fs::read_dir(dir)? {
+        let path = e?.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() { editable(&path)?; } else { std::fs::set_permissions(&path, std::fs::Permissions::from_mode(meta.permissions().mode() | 0o200))?; }
     }
-    env
+    Ok(())
 }
+#[cfg(not(unix))]
+fn editable(_: &Path) -> R<()> { Ok(()) }
 
 pub fn read_workspace(root: &Path, base: &Files, file_bytes: u64, total_bytes: u64) -> R<Files> {
     let dirs = base.keys().flat_map(|k| k.match_indices('/').map(move |(i, _)| &k[..i])).collect();
@@ -185,29 +189,29 @@ fn verifier(v: &Value, dir: &Path) -> R<Verifier> {
     Ok(Verifier { transport, public_key_pem, public_key_path, operator: op })
 }
 
-pub struct RunJob { pub repo: PathBuf, pub base: String, pub contract: Contract, pub tools: Vec<PathBuf>, pub command: Vec<String>, pub network: bool, pub output: PathBuf, pub promote: bool, pub verifier: Option<Verifier> }
+pub struct RunJob {
+    pub repo: PathBuf, pub base: String, pub contract: Contract, pub image: String, pub command: Vec<String>, pub network: bool, pub env: Vec<String>, pub mounts: Vec<Mount>,
+    pub output: PathBuf, pub promote: bool, pub verifier: Option<Verifier>, pub attempts: u64,
+}
 pub fn run_job(path: &Path) -> R<RunJob> {
     let file = std::path::absolute(path)?;
     let dir = file.parent().unwrap_or(Path::new("/")).to_path_buf();
     let raw = read_json(&file)?;
-    ensure!(raw["version"] == 1, "Run job v1 required");
-    let mut fields = vec!["version", "repo", "base", "contract", "tools", "command", "network", "output", "promote"];
-    if raw.get("verifier").is_some() { fields.push("verifier"); }
-    exact(&raw, &fields, "run job")?;
+    ensure!(raw["version"] != 1, "Run job v1 ran the agent on the retired Windows box; kern run now runs it in a Linux container. Replace tools with an image, \
+        make command[0] a path inside that image and add read-only mounts for host files the agent needs, see examples/run-job.template.json");
+    ensure!(raw["version"] == 2, "Run job v2 required");
+    exact(&raw, &present(&raw, &["version", "repo", "base", "contract", "image", "command", "network", "output", "promote"], &["env", "mounts", "verifier", "attempts"]), "run job")?;
     let repo = strip_verbatim(&std::fs::canonicalize(dir.join(text(&raw, "repo")?)).map_err(|e| Denied(format!("repo: {e}")))?);
     ensure!(repo.is_dir(), "repo must be an existing directory");
     let base = text(&raw, "base")?.to_string();
     ensure!(is_oid(&base), "base must be a full 40-hex commit id");
     let contract = contract(&read_json(dir.join(text(&raw, "contract")?))?)?;
-    let tools = strings(&raw, "tools", 32)?.iter().map(|t| abs_existing(t, "tool")).collect::<R<Vec<_>>>()?;
-    ensure!(tools.iter().all(|t| t.is_dir()), "each tool must be an existing directory");
-    ensure!(raw["network"].is_boolean() && raw["promote"].is_boolean(), "network and promote must be booleans");
-    let mut command = argv_native(&raw["command"])?;
-    let exe = abs_existing(&command[0], "command executable")?;
-    ensure!(exe.is_file(), "command executable must exist: {}", command[0]);
-    command[0] = exe.display().to_string();
+    let output = std::path::absolute(dir.join(text(&raw, "output")?))?;
+    ensure!(!output.to_string_lossy().contains([',', '"', '\n', '\r']), "output cannot contain a comma, quote or line break, because the agent's workspace is mounted from it");
+    let command = argv(&raw["command"]).map_err(|_| Denied("command must start with an absolute container path, such as /usr/local/bin/node".into()))?;
     let verifier = match raw.get("verifier") { Some(v) => Some(verifier(v, &dir)?), None => None };
-    Ok(RunJob { repo, base, contract, tools, command, network: raw["network"] == true, output: std::path::absolute(dir.join(text(&raw, "output")?))?, promote: raw["promote"] == true, verifier })
+    Ok(RunJob { image: pinned_image(&raw)?, command, network: flag(&raw, "network")?, env: env_names(&raw)?, mounts: mounts(&raw, &[&repo, &resolved(&output)])?,
+        promote: flag(&raw, "promote")?, attempts: if raw.get("attempts").is_some() { int(&raw, "attempts", 1, 10)? } else { 1 }, repo, base, contract, output, verifier })
 }
 
 fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<Value> {
@@ -267,20 +271,26 @@ fn gate<T>(label: &str, f: impl FnOnce() -> R<T>, checks: &mut Vec<Value>) -> Op
 fn blocked(task: &str, ux: Vec<&str>, reason: &str) -> Value {
     json!({ "status": "BLOCKED", "ux": ux, "task": task, "reason": reason })
 }
-fn finish(root: &Path, result: Value) -> R<Value> {
-    write_json(root.join("result.json"), &result)?;
-    Ok(result)
+fn plain(s: &str) -> String { s.chars().filter(|c| !c.is_control()).collect() }
+fn reason_of(r: &Value) -> String {
+    r["reason"].as_str().map(str::to_string)
+        .or_else(|| r["checks"].as_array().into_iter().flatten().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str().map(str::to_string)))
+        .unwrap_or_else(|| "the agent did not exit cleanly".into())
 }
 pub fn print_run(r: &Value) {
+    let attempts = r["attempts"].as_array().cloned().unwrap_or_default();
+    for a in attempts.iter().take(attempts.len().saturating_sub(1)) {
+        say(&format!("\u{21bb} Attempt {} rejected: {}", a["attempt"], plain(a["feedback"]["reason"].as_str().unwrap_or("unknown"))));
+    }
     if let Some(ux) = r["ux"].as_array() {
         for s in ux.iter().filter_map(Value::as_str) { say(&format!("\u{2713} {s}")); }
         say("");
         match r["status"].as_str() {
-            Some("VERIFIED") => say("VERIFIED"),
-            _ => say(&format!("BLOCKED: {}", r["reason"].as_str().unwrap_or("unknown"))),
+            Some("VERIFIED") => say(&format!("VERIFIED{}", r["accepted_after"].as_str().map_or(String::new(), |n| format!(" ({n})")))),
+            _ => say(&format!("BLOCKED: {}", plain(r["reason"].as_str().unwrap_or("unknown")))),
         }
     } else if let Some(s) = r["summary"].as_str() {
-        say(s);
+        say(&plain(s));
     }
 }
 pub fn local_run(job: &RunJob) -> R<Value> {
@@ -289,23 +299,54 @@ pub fn local_run(job: &RunJob) -> R<Value> {
     std::fs::create_dir_all(&job.output)?;
     let root = fresh_dir(job.output.join(format!("{}-{}", job.contract.task, short_id()?)))?;
     let ws = root.join("ws");
-    let tmp = root.join("tmp");
-    std::fs::create_dir_all(&tmp)?;
     git::materialize(Some(&job.repo), &base_files, &ws, None)?;
-    let mut grants = vec![(ws.clone(), Access::ReadWrite), (tmp.clone(), Access::ReadWrite)];
-    grants.extend(job.tools.iter().map(|t| (t.clone(), Access::ReadExec)));
-    let env = run_env(&ws, &tmp, &job.tools);
+    editable(&ws)?;
+    let (mut history, mut feedback) = (Vec::new(), None::<String>);
+    for attempt in 1..=job.attempts {
+        let dir = if job.attempts == 1 { root.clone() } else { fresh_dir(root.join(format!("attempt-{attempt}")))? };
+        let mut result = run_attempt(job, &dir, &ws, &base_files, feedback.as_deref())?;
+        let explained = (result["status"] == "BLOCKED").then(|| crate::feedback::explain(&reason_of(&result), Some(&job.contract)));
+        history.push(json!({ "attempt": attempt, "status": result["status"], "feedback": explained.clone().unwrap_or(Value::Null) }));
+        if attempt < job.attempts && let Some(mut f) = explained.as_ref().filter(|f| f["agent_fixable"] == true).map(crate::feedback::for_agent) {
+            f["attempt"] = json!(attempt);
+            f["max_attempts"] = json!(job.attempts);
+            feedback = Some(f.to_string());
+            continue;
+        }
+        if let Some(f) = explained { result["feedback"] = f; }
+        if job.attempts > 1 {
+            let before = (history.len() - 1) as u64;
+            if before > 0 && result["status"] != "BLOCKED" {
+                result["accepted_after"] = json!(crate::feedback::rejected(before));
+                if let Some(s) = result["summary"].as_str() { result["summary"] = json!(format!("{s} Accepted {}.", crate::feedback::rejected(before))); }
+            }
+            result["attempts"] = json!(history);
+        }
+        write_json(root.join("result.json"), &result)?;
+        return Ok(result);
+    }
+    deny!("A run job needs at least one attempt")
+}
+fn run_attempt(job: &RunJob, dir: &Path, ws: &Path, base_files: &Files, feedback: Option<&str>) -> R<Value> {
+    let l = &job.contract.limits;
     let task = job.contract.task.clone();
-
-    let exit = match enforce(&BoxSpec { argv: &job.command, grants: &grants, net: job.network, cwd: &ws, env: &env, timeout_ms: timeout_ms(l.timeout_seconds) }) {
-        Ok(code) => code,
-        Err(e) => return finish(&root, blocked(&task, vec![], &e.0)),
+    let spec = BoxSpec { image: &job.image, command: &job.command, workspace: ws, mounts: &job.mounts, env: &job.env, network: job.network,
+        timeout_seconds: l.timeout_seconds, memory_mb: l.memory_mb, pids: l.pids, feedback };
+    let agent = match container::run(&spec) {
+        Ok(o) => o,
+        Err(e) => return Ok(blocked(&task, vec![], &e.0)),
     };
-    let mut checks = vec![json!({ "id": "agent-exit", "status": if exit == 0 { "PASS" } else { "BLOCKED" }, "detail": exit })];
-    let candidate = gate("workspace", || read_workspace(&ws, &base_files, l.file_bytes, l.total_bytes), &mut checks);
+    let exit = agent.exit_code;
+    let mut checks = vec![match exit {
+        0 => json!({ "id": "agent-exit", "status": "PASS", "exit_code": 0 }),
+        _ if agent.oom_killed => json!({ "id": "agent-exit", "status": "BLOCKED", "exit_code": exit, "detail": format!("The agent ran out of memory; the contract allows {} MB (limits.memory_mb)", l.memory_mb) }),
+        _ => json!({ "id": "agent-exit", "status": "BLOCKED", "exit_code": exit, "detail": format!("The agent exited with code {exit}") }),
+    }];
+    let boxed = json!({ "engine": agent.engine, "isolation": agent.isolation, "image": job.image, "network": job.network });
+    let candidate = gate("workspace", || read_workspace(ws, base_files, l.file_bytes, l.total_bytes), &mut checks);
     let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let changed = candidate.as_ref().and_then(|c| gate("contract", || git::changes(&base_files, c, &job.contract), &mut checks));
-    let caps = candidate.as_ref().zip(changed.as_ref()).and_then(|(c, ch)| gate("capabilities", || capability::check(&base_files, c, ch, &empty), &mut checks));
+    let changed = candidate.as_ref().and_then(|c| gate("contract", || git::changes(base_files, c, &job.contract), &mut checks));
+    let caps = candidate.as_ref().zip(changed.as_ref()).and_then(|(c, ch)| gate("capabilities", || capability::check(base_files, c, ch, &empty), &mut checks));
     let green = exit == 0 && checks.iter().all(|c| c["status"] == "PASS");
     let files_changed = changed.as_ref().and_then(|c| c["files"].as_array().map(Vec::len)).unwrap_or(0);
 
@@ -313,28 +354,28 @@ pub fn local_run(job: &RunJob) -> R<Value> {
         let Some(candidate) = candidate.as_ref().filter(|_| green) else {
             let reason = checks.iter().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("agent command exited with code {exit}"));
-            return finish(&root, blocked(&task, vec!["Isolated"], &reason));
+            return Ok(blocked(&task, vec!["Isolated"], &reason));
         };
         let outcome = (|| -> R<(String, Value)> {
             let c = git::write_commit(&job.repo, candidate, Some(&job.base), &task)?;
-            let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: root.join("ingest") };
+            let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: dir.join("ingest") };
             let ingest = flow::task(&pj, Source::Ingest(&job.repo, &c))?;
             let preflight = ingest["checks"].as_array().into_iter().flatten().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str());
             ensure!(ingest["status"] == "CANDIDATE", "{}", ingest["reason"].as_str().or(preflight).unwrap_or("the local gate rejected the change"));
             let bundle = PathBuf::from(text(&ingest, "bundle")?);
-            let envelope = invoke_transport(v, &bundle.join("handoff"), &root.join("attestation.json"), &c)?;
+            let envelope = invoke_transport(v, &bundle.join("handoff"), &dir.join("attestation.json"), &c)?;
             confirm_attestation(&envelope, &v.public_key_pem, &c)?;
             Ok((c, envelope))
         })();
-        return match outcome {
-            Ok((c, envelope)) => finish(&root, json!({ "status": "VERIFIED", "ux": ["Isolated", "Verified independently", "Tests passed", "Signed"],
-                "task": task, "base": job.base, "commit": c, "files_changed": files_changed, "attestation_sha256": digest(&envelope).unwrap_or_default(), "checks": checks })),
-            Err(e) => finish(&root, blocked(&task, vec!["Isolated"], &e.0)),
-        };
+        return Ok(match outcome {
+            Ok((c, envelope)) => json!({ "status": "VERIFIED", "ux": ["Isolated", "Verified independently", "Tests passed", "Signed"],
+                "task": task, "base": job.base, "commit": c, "files_changed": files_changed, "attestation_sha256": digest(&envelope).unwrap_or_default(), "checks": checks, "box": boxed }),
+            Err(e) => blocked(&task, vec!["Isolated"], &e.0),
+        });
     }
 
     let mut result = json!({ "status": if green { "GREEN" } else { "BLOCKED" }, "stage": "run", "task": task, "base": job.base,
-        "network": job.network, "workspace": ws.display().to_string(), "checks": checks,
+        "network": job.network, "workspace": ws.display().to_string(), "box": boxed, "checks": checks,
         "changes": changed.clone().unwrap_or(Value::Null), "capabilities": caps.unwrap_or(Value::Null) });
     if let Some(candidate) = candidate.as_ref().filter(|_| green && job.promote) {
         let run_id = uuid4()?;
@@ -346,9 +387,7 @@ pub fn local_run(job: &RunJob) -> R<Value> {
     } else if green {
         result["summary"] = json!(format!("OK  {task}: {files_changed} file(s) changed, verified. Promotion disabled; review {}.", ws.display()));
     } else {
-        let reason = checks.iter().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str().map(str::to_string)).unwrap_or_else(|| "agent did not exit cleanly".into());
-        result["summary"] = json!(format!("BLOCKED  {task}: {reason}. Nothing was promoted; the real repository is untouched."));
+        result["summary"] = json!(format!("BLOCKED  {task}: {}. Nothing was promoted; the real repository is untouched.", reason_of(&result)));
     }
-    write_json(root.join("result.json"), &result)?;
     Ok(result)
 }

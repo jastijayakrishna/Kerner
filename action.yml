@@ -10,11 +10,36 @@ inputs:
   build-from-source:
     description: Build Kern with cargo instead of downloading the release binary pinned below
     default: "false"
+  comment:
+    description: Post Kern's verdict as a pull request comment with a machine-readable block an agent can act on (the workflow needs pull-requests write)
+    default: "true"
+  agent-mention:
+    description: Who to mention when the agent can fix the problem, for example @claude or @copilot; leave empty to mention nobody
+    default: ""
+  max-attempts:
+    description: How many rejected attempts Kern asks the agent to fix before it asks a human instead
+    default: "3"
+  install-only:
+    description: Only install Kern and set KERN_BIN, for workflows that run other Kern commands such as audit-merges
+    default: "false"
+outputs:
+  status:
+    description: PASS, SKIPPED or DENIED
+    value: ${{ steps.verify.outputs.status }}
+  feedback:
+    description: Path of the machine-readable verdict (kern-feedback/v1) when the change was denied
+    value: ${{ steps.verify.outputs.feedback }}
+  kern-bin:
+    description: Path of the installed Kern binary
+    value: ${{ steps.install.outputs.bin }}
 runs:
   using: composite
   steps:
     - name: Install Kern
+      id: install
       shell: bash
+      # Never the pull request's directory: cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory.
+      working-directory: ${{ github.action_path }}
       env:
         KERN_VERSION: ""
         KERN_SHA256_LINUX_X64: ""
@@ -23,7 +48,15 @@ runs:
         BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
       run: bash "$GITHUB_ACTION_PATH/scripts/install-kern.sh"
     - name: Verify the agent change
+      id: verify
+      if: inputs.install-only != 'true'
       shell: bash
       env:
         KERN_CONFIG: ${{ inputs.config-path }}
+        KERN_PR_COMMENTS: ${{ inputs.comment }}
+        KERN_AGENT_MENTION: ${{ inputs.agent-mention }}
+        KERN_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+        KERN_FEEDBACK_PATH: ${{ runner.temp }}/kern-feedback.json
+        KERN_BIN: ${{ steps.install.outputs.bin }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: '"$KERN_BIN" check-pr "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE" "$KERN_CONFIG"'

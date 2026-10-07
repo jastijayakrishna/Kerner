@@ -12,8 +12,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        include:
+          # Linux runners have Docker, so the local box tests must run there; Windows runners
+          # only offer Windows containers and macOS runners have no engine, so those skip them.
+          - os: ubuntu-24.04
+            require_container: "1"
+          - os: windows-2025
+            require_container: "0"
+          - os: macos-15
+            require_container: "0"
     runs-on: ${{ matrix.os }}
+    env:
+      KERN_REQUIRE_CONTAINER: ${{ matrix.require_container }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

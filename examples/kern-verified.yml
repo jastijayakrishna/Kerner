@@ -4,13 +4,20 @@ on:
     types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
+  pull-requests: write
 jobs:
   kern-verified:
     runs-on: ubuntu-24.04
     steps:
+      # Only same-repository agent branches are checked out; other pull requests are reported as SKIPPED.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: startsWith(github.event.pull_request.head.ref, 'kern/') && github.event.pull_request.head.repo.full_name == github.repository
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 2
           persist-credentials: false
       - uses: OWNER/kern@FULL_COMMIT_SHA
+        with:
+          comment: "true"
+          agent-mention: "" # for example @claude or @copilot
+          max-attempts: "3"

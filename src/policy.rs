@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub const BUILTIN_CHECKS: [&str; 4] = ["artifact", "behavior", "capabilities", "path-and-budget"];
+pub const HONEST_FIX: &str = "honest-fix";
 
 fn identifier(s: &str, digit_first: bool) -> bool {
     let b = s.as_bytes();
@@ -25,15 +26,29 @@ pub fn image(s: &str) -> bool {
 pub struct Limits { pub files_changed: u64, pub lines_changed: u64, pub file_bytes: u64, pub total_bytes: u64, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64 }
 pub const MAX_LIMITS: Limits = Limits { files_changed: 1000, lines_changed: 100000, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 3600, memory_mb: 8192, pids: 1024 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind { Bugfix, Feature, Refactor }
+impl Kind {
+    pub fn name(self) -> &'static str { match self { Kind::Bugfix => "bugfix", Kind::Feature => "feature", Kind::Refactor => "refactor" } }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runner { Mocha, Jest, Vitest, Node }
+impl Runner {
+    pub fn name(self) -> &'static str { match self { Runner::Mocha => "mocha", Runner::Jest => "jest", Runner::Vitest => "vitest", Runner::Node => "node" } }
+    fn parse(s: &str) -> Option<Runner> { [Runner::Mocha, Runner::Jest, Runner::Vitest, Runner::Node].into_iter().find(|r| r.name() == s) }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tests { pub paths: Vec<String>, pub kind: Kind, pub runner: Runner, pub command: Vec<String> }
 #[derive(Clone, Debug)]
-pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String> }
+pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String>, pub tests: Option<Tests> }
 
 pub fn contract(input: &Value) -> R<Contract> {
     let version = input.get("version").and_then(Value::as_u64);
-    ensure!(matches!(version, Some(1..=3)), "Unsupported contract version");
+    ensure!(matches!(version, Some(1..=4)), "Unsupported contract version");
     let mut fields = vec!["version", "task", "filesystem", "network", "secrets", "publish", "limits", "required_checks"];
     if version >= Some(2) { fields.push("dependencies"); }
-    if version == Some(3) { fields.push("behaviors"); }
+    if version >= Some(3) { fields.push("behaviors"); }
+    if version >= Some(4) { fields.push("tests"); }
     exact(input, &fields, "contract")?;
     let task = text(input, "task")?.to_string();
     ensure!(task_id(&task), "Invalid task ID");
@@ -74,15 +89,37 @@ pub fn contract(input: &Value) -> R<Contract> {
     let mut checks = strings(input, "required_checks", 16)?;
     checks.sort();
     ensure!(!checks.is_empty() && checks.windows(2).all(|w| w[0] != w[1]) && checks.iter().all(|c| identifier(c, false)), "Required checks must be unique nonempty IDs");
-    let mut behaviors = if version == Some(3) { strings(input, "behaviors", 64)? } else { Vec::new() };
+    let mut behaviors = if version >= Some(3) { strings(input, "behaviors", 64)? } else { Vec::new() };
     behaviors.sort();
     let known = |b: &String| b.len() <= 200 && !b.chars().any(char::is_control) && b.split_once(':').is_some_and(|(k, v)| ["net", "dns", "exec", "env"].contains(&k) && !v.is_empty());
     ensure!(behaviors.windows(2).all(|w| w[0] != w[1]) && behaviors.iter().all(known), "behaviors must be unique net:, dns:, exec: or env: entries");
     let mut value = input.clone();
     value["filesystem"] = json!({ "read": read, "write": write });
     value["required_checks"] = json!(checks);
-    if version == Some(3) { value["behaviors"] = json!(behaviors); }
-    Ok(Contract { value, task, read, write, dependencies, limits, checks, behaviors })
+    if version >= Some(3) { value["behaviors"] = json!(behaviors); }
+    let tests = match input.get("tests") {
+        None | Some(Value::Null) => None,
+        Some(t) => {
+            exact(t, &["paths", "kind", "runner", "command"], "tests")?;
+            let mut paths = strings(t, "paths", 16)?;
+            ensure!(!paths.is_empty(), "tests.paths must name at least one test directory or file");
+            for p in &paths { capability(p)?; }
+            ensure!(paths.iter().enumerate().all(|(i, g)| paths.iter().enumerate().all(|(j, h)| i == j || !covers(h, g))), "Overlapping or duplicate capabilities are ambiguous");
+            ensure!(paths.iter().all(|p| allowed(&read, p)), "tests.paths must lie inside filesystem.read, so the agent can read the tests it has to keep passing");
+            paths.sort();
+            let kind = match text(t, "kind")? { "bugfix" => Kind::Bugfix, "feature" => Kind::Feature, "refactor" => Kind::Refactor, _ => deny!("tests.kind must be bugfix, feature or refactor") };
+            ensure!(kind != Kind::Bugfix || paths.iter().all(|p| allowed(&write, p)), "A bug fix must be able to add a test that proves it: tests.paths must lie inside filesystem.write");
+            let runner = t["runner"].as_str().and_then(Runner::parse).ok_or_else(|| Denied("tests.runner must be mocha, jest, vitest or node".into()))?;
+            let command = argv(&t["command"])?;
+            let reporter = |a: &String| a == "-R" || ["--reporter", "--json", "--test-reporter", "--outputFile", "--output-file"].iter().any(|f| a.starts_with(f));
+            ensure!(!command.iter().any(reporter), "tests.command must not choose a reporter or an output file: Kern adds the {} reporter it reads", runner.name());
+            ensure!(runner != Runner::Vitest || command.iter().any(|a| a == "run"), "tests.command for vitest must use vitest run, so it runs once instead of watching for changes");
+            ensure!(runner != Runner::Node || command.iter().any(|a| a == "--test"), "tests.command for node must include --test");
+            value["tests"]["paths"] = json!(paths);
+            Some(Tests { paths, kind, runner, command })
+        }
+    };
+    Ok(Contract { value, task, read, write, dependencies, limits, checks, behaviors, tests })
 }
 pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     let (a, b) = (contract(original)?, contract(requested)?);
@@ -96,6 +133,7 @@ pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     ensure!(a.checks.iter().all(|c| b.checks.contains(c)), "Cannot remove a required check");
     ensure!(!b.dependencies || a.dependencies, "Cannot add dependency installation");
     ensure!(b.behaviors.iter().all(|x| a.behaviors.contains(x)), "Cannot allow new runtime behavior");
+    ensure!(a.tests.is_none() || a.tests == b.tests, "Cannot change or remove the test proof");
     Ok(b)
 }
 pub fn contract_digest(c: &Contract) -> R<String> { digest(&c.value) }
@@ -131,7 +169,7 @@ pub fn operator(v: &Value) -> R<Operator> {
     for c in raw {
         exact(c, &["id", "file", "sha256"], "operator check")?;
         let (id, file, sha) = (text(c, "id")?, text(c, "file")?, text(c, "sha256")?);
-        ensure!(identifier(id, false) && !BUILTIN_CHECKS.contains(&id) && !checks.iter().any(|x| x.id == id), "Duplicate or reserved check ID: {id}");
+        ensure!(identifier(id, false) && !BUILTIN_CHECKS.contains(&id) && id != HONEST_FIX && !checks.iter().any(|x| x.id == id), "Duplicate or reserved check ID: {id}");
         ensure!((file.starts_with('/') || Path::new(file).is_absolute()) && is_hex64(sha), "Check {id} needs an absolute file and SHA-256 pin");
         checks.push(CheckSpec { id: id.into(), file: file.into(), sha256: sha.into() });
     }

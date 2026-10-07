@@ -8,8 +8,11 @@ case "${RUNNER_OS}-${RUNNER_ARCH}" in
   *) asset="" digest="" ;;
 esac
 if [[ "${BUILD_FROM_SOURCE:-false}" == "true" || -z "${KERN_VERSION:-}" || -z "$digest" ]]; then
+  cd "$GITHUB_ACTION_PATH"
   cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
-  echo "KERN_BIN=$GITHUB_ACTION_PATH/target/release/kern" >> "$GITHUB_ENV"
+  bin="$GITHUB_ACTION_PATH/target/release/kern"
+  echo "bin=$bin" >> "$GITHUB_OUTPUT"
+  echo "KERN_BIN=$bin" >> "$GITHUB_ENV"
   exit 0
 fi
 bin="$RUNNER_TEMP/$asset"
@@ -23,4 +26,5 @@ if [[ "$actual" != "$digest" ]]; then
   exit 1
 fi
 chmod +x "$bin"
+echo "bin=$bin" >> "$GITHUB_OUTPUT"
 echo "KERN_BIN=$bin" >> "$GITHUB_ENV"

@@ -267,7 +267,9 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     }
     let (n, l) = (result.len() as u64, &policy.limits);
     ensure!(n <= l.files_changed && lines <= l.lines_changed, "Change budget exceeded: {n} file{} and up to {lines} lines changed; the contract allows {} files and {} lines. Raise limits.files_changed or limits.lines_changed if this is intended", if n == 1 { "" } else { "s" }, l.files_changed, l.lines_changed);
-    Ok(json!({ "files": result, "lines_upper_bound": lines }))
+    let mut out = json!({ "files": result, "lines_upper_bound": lines });
+    if let Some(t) = &policy.tests { out["tests"] = crate::proof::screen(base, candidate, &out, t)?; }
+    Ok(out)
 }
 
 pub fn import_base(source: &Path, base: &str, dest: &Path) -> R<PathBuf> {

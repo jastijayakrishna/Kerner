@@ -1,7 +1,8 @@
 use crate::attest::{self, KeySource};
 use crate::capability;
 use crate::git::{self, Files};
-use crate::policy::{BUILTIN_CHECKS, CheckSpec, Contract, Job, Limits, Operator, contract_digest, require_role, verifier_digest};
+use crate::policy::{BUILTIN_CHECKS, CheckSpec, Contract, HONEST_FIX, Job, Limits, Operator, contract_digest, require_role, verifier_digest};
+use crate::proof;
 use crate::sandbox::{self, Spec, Volume};
 use crate::util::*;
 use crate::{deny, ensure};
@@ -193,7 +194,12 @@ pub fn task(job: &Job, source: Source) -> R<Value> {
             result["status"] = json!("CANDIDATE");
             result["next_action"] = json!("Review changes.patch, then transfer only the handoff directory to the verifier (kern import). This candidate is unsigned and unverified.");
         }
-        Err(e) => { result["status"] = json!("BLOCKED"); result["stage"] = json!("execution"); result["reason"] = json!(e.0); }
+        Err(e) => {
+            result["status"] = json!("BLOCKED");
+            result["stage"] = json!("execution");
+            result["feedback"] = crate::feedback::explain(&e.0, Some(&job.contract));
+            result["reason"] = json!(e.0);
+        }
     }
     result["bundle"] = json!(root.display().to_string());
     write_json(root.join("result.json"), &result)?;
@@ -303,6 +309,29 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     write_json(root.join("behavior.json"), &observed)?;
     ensure!(blocking.is_empty(), "Tests show new runtime behavior: {}. If this is intended, allow it in the task contract (version 3): \"behaviors\": {}", blocking.join(", "), serde_json::to_string(&blocking)?);
     checks.push(json!({ "id": "behavior", "status": "PASS", "evidence_sha256": digest(&observed)? }));
+    if let Some(tests) = &policy.tests {
+        let proof_root = root.join("honest-fix");
+        std::fs::create_dir(&proof_root)?;
+        let control = proof_root.join("control");
+        sandbox::control_dir(&control, None)?;
+        let mut old: Files = original.clone();
+        old.extend(candidate.iter().filter(|(k, _)| allowed(&tests.paths, k) && !original.contains_key(*k)).map(|(k, v)| (k.clone(), v.clone())));
+        let old_snapshot = proof_root.join("old");
+        git::materialize(Some(&store), &old, &old_snapshot, None)?;
+        if policy.dependencies { std::fs::create_dir(old_snapshot.join("node_modules"))?; }
+        let entry: Vec<String> = std::iter::once("__exec".to_string()).chain(proof::command(tests)).collect();
+        let mut run_tests = |which: proof::Run| -> R<proof::Output> {
+            let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
+            let at = match which { proof::Run::Base => &baseline_snapshot, proof::Run::New => &snapshot, proof::Run::Old => &old_snapshot };
+            let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control: &control, writable: &[], limits: l, entry: entry.clone(), network: "none", volumes, root: false, home_mb: 0 })?;
+            let (report, behavior) = sandbox::split_behavior(&out.stdout);
+            ensure!(behavior.is_some(), "the test command did not run to completion");
+            Ok(proof::Output { stdout: report.to_vec(), exit_code: out.exit_code })
+        };
+        let evidence = proof::prove(tests, &original, &candidate, &changed, &mut run_tests)?;
+        write_json(root.join("honest-fix.json"), &evidence)?;
+        checks.push(json!({ "id": proof::CHECK, "status": "PASS", "evidence_sha256": digest(&evidence)? }));
+    }
     ensure!(digest(&git::manifest(&store, commit, l.file_bytes, l.total_bytes)?)? == text(&run, "manifest_sha256")?, "Artifact changed during verification");
     ensure!(sandbox::doctor().builder.map(|b| b.0) == Some(op.verifier_builder.clone()), "Verifier platform changed during checks");
     let issued = now_ms();
@@ -317,4 +346,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     write_json(root.join("capabilities.json"), &capabilities)?;
     Ok(envelope)
 }
-pub fn required_checks(policy: &Contract) -> Vec<String> { BUILTIN_CHECKS.iter().map(|s| s.to_string()).chain(policy.checks.iter().cloned()).collect() }
+pub fn required_checks(policy: &Contract) -> Vec<String> {
+    BUILTIN_CHECKS.iter().map(|s| s.to_string()).chain(policy.tests.as_ref().map(|_| HONEST_FIX.to_string())).chain(policy.checks.iter().cloned()).collect()
+}

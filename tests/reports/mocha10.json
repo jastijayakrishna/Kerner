@@ -1,0 +1,107 @@
+{"stats": "not the report"}
+{
+  "stats": {
+    "suites": 1,
+    "tests": 5,
+    "passes": 2,
+    "pending": 2,
+    "failures": 1,
+    "start": "2026-10-07T19:13:35.855Z",
+    "end": "2026-10-07T19:13:35.857Z",
+    "duration": 2
+  },
+  "tests": [
+    {
+      "title": "logs",
+      "fullTitle": "logs",
+      "file": "/workspace/test/console.test.js",
+      "duration": 1,
+      "currentRetry": 0,
+      "speed": "fast",
+      "err": {}
+    },
+    {
+      "title": "adds",
+      "fullTitle": "math adds",
+      "file": "/workspace/test/math.test.js",
+      "duration": 0,
+      "currentRetry": 0,
+      "speed": "fast",
+      "err": {}
+    },
+    {
+      "title": "fails",
+      "fullTitle": "math fails",
+      "file": "/workspace/test/math.test.js",
+      "duration": 0,
+      "currentRetry": 0,
+      "err": {
+        "stack": "Error: boom\n    at Context.<anonymous> (test/math.test.js:3:36)\n    at process.processImmediate (node:internal/timers:484:21)",
+        "message": "boom"
+      }
+    },
+    {
+      "title": "skipped",
+      "fullTitle": "math skipped",
+      "file": "/workspace/test/math.test.js",
+      "currentRetry": 0,
+      "err": {}
+    },
+    {
+      "title": "pending",
+      "fullTitle": "math pending",
+      "file": "/workspace/test/math.test.js",
+      "currentRetry": 0,
+      "err": {}
+    }
+  ],
+  "pending": [
+    {
+      "title": "skipped",
+      "fullTitle": "math skipped",
+      "file": "/workspace/test/math.test.js",
+      "currentRetry": 0,
+      "err": {}
+    },
+    {
+      "title": "pending",
+      "fullTitle": "math pending",
+      "file": "/workspace/test/math.test.js",
+      "currentRetry": 0,
+      "err": {}
+    }
+  ],
+  "failures": [
+    {
+      "title": "fails",
+      "fullTitle": "math fails",
+      "file": "/workspace/test/math.test.js",
+      "duration": 0,
+      "currentRetry": 0,
+      "err": {
+        "stack": "Error: boom\n    at Context.<anonymous> (test/math.test.js:3:36)\n    at process.processImmediate (node:internal/timers:484:21)",
+        "message": "boom"
+      }
+    }
+  ],
+  "passes": [
+    {
+      "title": "logs",
+      "fullTitle": "logs",
+      "file": "/workspace/test/console.test.js",
+      "duration": 1,
+      "currentRetry": 0,
+      "speed": "fast",
+      "err": {}
+    },
+    {
+      "title": "adds",
+      "fullTitle": "math adds",
+      "file": "/workspace/test/math.test.js",
+      "duration": 0,
+      "currentRetry": 0,
+      "speed": "fast",
+      "err": {}
+    }
+  ]
+}

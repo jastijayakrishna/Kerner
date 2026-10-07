@@ -12,7 +12,8 @@ const HELP: &str = "kern 0.3 - admission control for AI-written code
 Setup:
   profile <operator-template.json> <public.pem>        verifier side: export a verifier profile
   init <repo-dir> <profile.json|https://verifier> <owner/kern@sha> [task]
-Native box (developer-local, no Docker):
+Local box (the agent runs in a Linux container: Docker, Podman or Rancher Desktop; KERN_CONTAINER_CLI picks one):
+  doctor                          check that this machine can run the local box
   box <box-job.json>              run one command inside the box
   run <run-job.json> [--show]     box an agent, verify independently, promote (one command)
 Executor (--control executor.json):
@@ -34,6 +35,8 @@ Factory lock (deploy-time enforcement):
   gate-artifact <checkout-dir> <commit> <attestation.json> <trusted-config-dir>
 Audit (set KERN_AUDIT_LOG=<file> to record every decision; kern run records to <output>/audit.jsonl):
   audit <log> | report <log> <out.html>
+  audit-merges <checkout> <branch> <2026-Q3|from..until> <out-dir> [verifier.pub]
+                                  re-verify every change merged in a period (needs GITHUB_TOKEN)
 Utilities:
   contract <contract> [narrower-contract] | pin-check <id> <file>";
 const AUDITED: [&str; 12] = ["box", "plan", "task", "ingest", "import", "verify", "verify-external", "authorize", "promote-local", "promote-github", "check-pr", "gate-artifact"];
@@ -54,6 +57,10 @@ fn cli() -> R<(Option<Value>, i32)> {
         Some("__runner") => return sandbox::runner().map(|_| (None, 0)),
         Some("__setup") => return sandbox::setup().map(|_| (None, 0)),
         Some("__exec") => return sandbox::exec(&args[1..]).map(|_| (None, 0)),
+        Some("__reap") => {
+            ensure!(args.len() == 3, "Expected an engine and a container");
+            return kern::container::reap(Path::new(&args[1]), &args[2]).map(|_| (None, 0));
+        }
         Some("--control") => {
             ensure!(args.len() >= 3, "Expected control JSON and a command");
             policy::configure(&read_json(&args[1])?)?;
@@ -77,7 +84,11 @@ fn cli() -> R<(Option<Value>, i32)> {
             let code = i32::from(r["status"] == "BLOCKED");
             (if a.get(1).map(String::as_str) == Some("--show") { Some(r) } else { None }, code)
         }
-        "doctor" => { count(a, 0)?; let d = sandbox::doctor(); let code = if d.ready { 0 } else { 2 }; (Some(d.report), code) }
+        "doctor" => {
+            count(a, 0)?;
+            let (ready, report) = if policy::control().is_ok() { let d = sandbox::doctor(); (d.ready, d.report) } else { kern::container::doctor() };
+            (Some(report), if ready { 0 } else { 2 })
+        }
         "plan" => { count(a, 1)?; let r = flow::preflight(&policy::job(Path::new(&a[0]))?, true); let code = i32::from(r["status"] != "READY"); (Some(r), code) }
         "task" => { count(a, 1)?; let r = flow::task(&policy::job(Path::new(&a[0]))?, Source::Agent)?; let code = i32::from(r["status"] != "CANDIDATE"); (Some(r), code) }
         "ingest" => { count(a, 3)?; let r = flow::task(&policy::job(Path::new(&a[0]))?, Source::Ingest(Path::new(&a[1]), &a[2]))?; let code = i32::from(r["status"] != "CANDIDATE"); (Some(r), code) }
@@ -125,13 +136,23 @@ fn cli() -> R<(Option<Value>, i32)> {
         }
         "serve" => { count(a, 1)?; kern::serve::serve(Path::new(&a[0]))?; (None, 0) }
         "audit" => { count(a, 1)?; (Some(kern::audit::verify(Path::new(&a[0]))?), 0) }
+        "audit-merges" => {
+            ensure!(a.len() == 4 || a.len() == 5, "Expected a checkout, a branch, a period (2026-Q3 or 2026-07-01..2026-09-30), an output directory and an optional verifier key");
+            let key = a.get(4).map(std::fs::read_to_string).transpose()?;
+            let report = kern::merges::audit(Path::new(&a[0]), &a[1], &a[2], key.as_deref(), now)?;
+            let files = kern::merges::write(Path::new(&a[3]), &report)?;
+            let code = if report["summary"]["status"] == "COVERED" { 0 } else { 2 };
+            (Some(json!({ "status": report["summary"]["status"], "summary": report["summary"], "files": files })), code)
+        }
         "report" => { count(a, 2)?; std::fs::write(&a[1], kern::audit::report(Path::new(&a[0]))?)?; (Some(json!({ "report": std::path::absolute(&a[1])? })), 0) }
         "gate-artifact" => { count(a, 4)?; (Some(promote::gate_artifact(Path::new(&a[0]), &a[1], &read_json(&a[2])?, Path::new(&a[3]), now)?), 0) }
         "check-pr" => {
             ensure!(a.len() == 2 || a.len() == 3, "Expected event JSON, checkout and optional config path");
-            let result = promote::check_pr(&read_json(&a[0])?, Path::new(&a[1]), a.get(2).map_or(".github/kern", String::as_str), now);
+            let event = read_json(&a[0])?;
+            let result = promote::check_pr(&event, Path::new(&a[1]), a.get(2).map_or(".github/kern", String::as_str), now);
+            let notes = kern::feedback::publish(&event, &result);
             if let Ok(summary) = std::env::var("GITHUB_STEP_SUMMARY") {
-                let line = promote::step_summary(&result);
+                let line = format!("{}\n{notes}", promote::step_summary(&result));
                 let _ = std::fs::OpenOptions::new().append(true).create(true).open(summary).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
             }
             (Some(result?), 0)

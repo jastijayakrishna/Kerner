@@ -1,0 +1,50 @@
+name: kern-audit
+on:
+  schedule:
+    - cron: "0 6 1 1,4,7,10 *" # the first day of each quarter audits the quarter that just ended
+  workflow_dispatch:
+    inputs:
+      period:
+        description: Period to audit, for example 2026-Q3 or 2026-07-01..2026-09-30
+        required: true
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Fetch pull request heads
+        run: git fetch --no-tags origin '+refs/pull/*/head:refs/remotes/pull/*'
+      - uses: OWNER/kern@FULL_COMMIT_SHA
+        with:
+          install-only: "true"
+      - name: Choose the period
+        id: period
+        env:
+          REQUESTED: ${{ inputs.period }}
+        run: |
+          if [ -n "$REQUESTED" ]; then echo "period=$REQUESTED" >> "$GITHUB_OUTPUT"; exit 0; fi
+          y=$(date -u +%Y); q=$(( ($(date -u +%-m) - 1) / 3 ))
+          if [ "$q" -eq 0 ]; then y=$((y - 1)); q=4; fi
+          echo "period=$y-Q$q" >> "$GITHUB_OUTPUT"
+      - name: Re-verify every merged change
+        id: audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PERIOD: ${{ steps.period.outputs.period }}
+        run: |
+          set +e
+          "$KERN_BIN" audit-merges . HEAD "$PERIOD" kern-audit
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kern-audit
+          path: kern-audit/
+      - name: Fail when the audit found gaps
+        if: steps.audit.outputs.code != '0'
+        run: exit 1

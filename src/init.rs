@@ -32,13 +32,21 @@ pub fn load_profile(source: &str) -> R<Value> {
     ensure!(v["version"] == 1, "Unsupported verifier profile");
     profile(&v["operator"], text(&v, "public_key")?)
 }
-fn origin(repo: &Path) -> R<String> {
+pub(crate) fn origin(repo: &Path) -> R<String> {
     let url = git::trimmed(git::git(repo, &["config", "--get", "remote.origin.url"], None).map_err(|_| Denied("The repository has no origin remote; add one pointing at GitHub".into()))?);
     let path = url.strip_suffix(".git").unwrap_or(&url);
     let found = path.rsplit_once("github.com/").or_else(|| path.rsplit_once("github.com:")).map(|(_, p)| p.to_string());
     found.ok_or_else(|| Denied(format!("Origin {url} is not a GitHub repository")))
 }
 fn pretty(v: &Value) -> R<String> { Ok(format!("{}\n", serde_json::to_string_pretty(v)?)) }
+fn runner(package: Option<&[u8]>) -> Option<(&'static str, Vec<String>)> {
+    let pkg: Value = serde_json::from_slice(package?).ok()?;
+    let has = |name: &str| ["devDependencies", "dependencies"].iter().any(|k| pkg[*k].get(name).is_some());
+    let bin = |name: &str| format!("/workspace/node_modules/.bin/{name}");
+    if has("vitest") { return Some(("vitest", vec![bin("vitest"), "run".into()])); }
+    if let Some(name) = ["jest", "mocha"].into_iter().find(|n| has(n)) { return Some((name, vec![bin(name)])); }
+    pkg["scripts"]["test"].as_str().filter(|t| t.contains("node --test")).map(|_| ("node", vec!["/usr/local/bin/node".into(), "--test".into()]))
+}
 
 pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> {
     ensure!(task_id(task), "Invalid task ID: lowercase letters, digits, '-' and '_' only");
@@ -60,7 +68,10 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
     if files.contains_key("README.md") { read.push("README.md".into()); }
     let deps = files.contains_key("package-lock.json");
     let checks: Vec<Value> = profile["operator"]["checks"].as_array().into_iter().flatten().map(|c| c["id"].clone()).collect();
-    let c = contract(&json!({ "version": 2, "task": task, "filesystem": { "read": read, "write": write }, "network": [], "secrets": [], "publish": false,
+    let package = files.contains_key("package.json").then(|| git::git(repo, &["cat-file", "blob", &format!("{head}:package.json")], None).ok()).flatten();
+    let found = runner(package.as_deref()).filter(|(_, c)| deps || !c[0].starts_with("/workspace/node_modules/"));
+    let proof = match (&found, tests.is_empty()) { (Some((name, cmd)), false) => json!({ "paths": tests, "kind": "feature", "runner": name, "command": cmd }), _ => Value::Null };
+    let c = contract(&json!({ "version": 4, "task": task, "behaviors": [], "tests": proof, "filesystem": { "read": read, "write": write }, "network": [], "secrets": [], "publish": false,
         "dependencies": if deps { json!({ "manager": "npm", "lockfile": "package-lock.json" }) } else { Value::Null },
         "limits": { "files_changed": 25, "lines_changed": 2000, "file_bytes": git::MAX_FILE, "total_bytes": (inspectable * 2).clamp(git::MAX_FILE, git::MAX_TOTAL), "timeout_seconds": 900, "memory_mb": 2048, "pids": 512 },
         "required_checks": checks }))?;
@@ -70,8 +81,8 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
     operator(&op)?;
     let ruleset = json!({ "name": "kern-verified", "target": "branch", "enforcement": "active", "bypass_actors": [],
         "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
-        "rules": [{ "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": false, "required_status_checks": [{ "context": "kern-verified", "integration_id": GITHUB_ACTIONS_APP }] } }] });
-    let workflow = format!("name: kern-verified\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened, edited]\npermissions:\n  contents: read\njobs:\n  kern-verified:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          ref: ${{{{ github.event.pull_request.head.sha }}}}\n          fetch-depth: 2\n          persist-credentials: false\n      - uses: {action}\n");
+        "rules": [{ "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": true, "required_status_checks": [{ "context": "kern-verified", "integration_id": GITHUB_ACTIONS_APP }] } }] });
+    let workflow = format!("name: kern-verified\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened, edited]\npermissions:\n  contents: read\n  pull-requests: write\njobs:\n  kern-verified:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        if: startsWith(github.event.pull_request.head.ref, 'kern/') && github.event.pull_request.head.repo.full_name == github.repository\n        with:\n          ref: ${{{{ github.event.pull_request.head.sha }}}}\n          fetch-depth: 2\n          persist-credentials: false\n      - uses: {action}\n        with:\n          comment: \"true\"\n          agent-mention: \"\"\n          max-attempts: \"3\"\n");
     let kern = repo.join(".github").join("kern");
     let outputs = [(kern.join("operator.json"), pretty(&op)?), (kern.join("verifier.pub"), text(profile, "public_key")?.to_string()), (kern.join("tasks").join(format!("{task}.json")), pretty(&c.value)?),
         (kern.join("ruleset.json"), pretty(&ruleset)?), (repo.join(".github").join("workflows").join("kern-verified.yml"), workflow)];
@@ -85,5 +96,10 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
             "Review .github/kern/tasks and commit .github/kern and .github/workflows/kern-verified.yml to the default branch",
             format!("Require the check from GitHub Actions: gh api -X POST repos/{repository}/rulesets --input .github/kern/ruleset.json"),
             format!("Agents open pull requests from kern/{task}/<run_id> branches with a verifier-signed attestation; other branches are reported as SKIPPED"),
+            if c.tests.is_some() { "The task contract locks existing tests and requires every test that ran before to still run and pass; for a bug-fix task set tests.kind to bugfix, so every fix must come with a test that fails before it".to_string() }
+            else { "Kern found no test runner it can read (mocha, jest, vitest or node --test); add a \"tests\" section to the task contract to require proof of honest fixes".to_string() },
+            "The ruleset requires pull requests to be up to date with their base, so the merged result is the commit Kern verified".to_string(),
+            "Kern comments its verdict on agent pull requests; set agent-mention in the workflow (for example @claude) so the agent is asked to fix what it can".to_string(),
+            format!("Each quarter, run kern audit-merges on a full clone of {repository} to re-verify every merged change and list any gaps"),
         ] }))
 }

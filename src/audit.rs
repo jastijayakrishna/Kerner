@@ -48,7 +48,7 @@ pub fn verify(path: &Path) -> R<Value> {
     Ok(json!({ "status": "INTACT", "entries": entries, "head_sha256": prev }))
 }
 
-fn esc(s: &str) -> String { s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;") }
+pub(crate) fn esc(s: &str) -> String { s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;") }
 fn field<'a>(e: &'a Value, key: &str) -> &'a str { e["event"][key].as_str().or(e["event"]["result"][key].as_str()).unwrap_or("") }
 fn blocked(e: &Value) -> bool { matches!(field(e, "status"), "BLOCKED" | "DENIED") }
 pub fn report(path: &Path) -> R<String> {

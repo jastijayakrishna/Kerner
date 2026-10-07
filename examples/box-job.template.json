@@ -1,9 +1,12 @@
 {
-  "version": 1,
-  "workspace": "C:/path/to/throwaway-workspace",
-  "tools": ["C:/Users/you/AppData/Local/nvm/<version>"],
-  "denied": [],
+  "version": 2,
+  "image": "docker.io/library/node:22-bookworm-slim@sha256:<digest>",
+  "workspace": "/absolute/path/to/throwaway-workspace",
+  "command": ["/usr/local/bin/node", "/opt/agent/agent.js"],
+  "mounts": [{ "source": "/absolute/path/to/agent", "target": "/opt/agent" }],
+  "env": [],
   "network": false,
   "timeout_seconds": 900,
-  "command": ["C:/Users/you/AppData/Local/nvm/<version>/node.exe", "--preserve-symlinks-main", "agent.js"]
+  "memory_mb": 2048,
+  "pids": 256
 }

@@ -2,13 +2,16 @@ pub mod util;
 pub mod policy;
 pub mod git;
 pub mod capability;
+pub mod proof;
 pub mod sandbox;
 pub mod attest;
+pub mod feedback;
 pub mod flow;
+pub mod github;
 pub mod promote;
+pub mod container;
 pub mod local;
+pub mod merges;
 pub mod audit;
 pub mod init;
 pub mod serve;
-#[cfg(windows)]
-pub mod winbox;

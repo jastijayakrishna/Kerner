@@ -1,6 +1,7 @@
 use ed25519_dalek::SigningKey;
 use kern::attest::{self, KeySource};
 use kern::capability;
+use kern::container;
 use kern::flow::{self, required_checks};
 use kern::git::{self, Entry, Files};
 use kern::policy::{self, Contract, Operator, attenuate, contract, contract_digest, operator, verifier_digest};
@@ -288,16 +289,14 @@ fn hosted_verifier_serves_profiles_and_verifies_only_authorised_known_runs() {
     // a valid request is imported and matched to the trusted contract; this machine then has no gVisor to verify with
     let (code, r) = post(token, &body);
     assert!(code == 422 && r["reason"].as_str().unwrap().contains("Verifier builder identity"), "{r}");
-    #[cfg(windows)]
-    {
+    if container_ready() {
         // kern run hands its boxed result to the same service and reports the service's verdict
         std::fs::write(f.t.join("task.json"), policy_value().to_string()).unwrap();
         std::fs::write(f.t.join("token.txt"), format!("{token}\n")).unwrap();
         std::fs::create_dir_all(f.t.join("keys")).unwrap();
         std::fs::write(f.t.join("keys/verifier.pub"), &public).unwrap();
-        let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-        let job = json!({ "version": 1, "repo": win(&f.store), "base": f.base, "contract": "./task.json", "tools": [], "network": false, "output": win(&f.t.join("runs")), "promote": false,
-            "command": [ps, "-NoProfile", "-NonInteractive", "-Command", "[IO.File]::WriteAllText('src\\add.mjs', \"export const add = (a, b) => a + b;`n\")"],
+        let job = json!({ "version": 2, "repo": f.store, "base": f.base, "contract": "./task.json", "image": NODE, "network": false, "output": f.t.join("runs"), "promote": false,
+            "command": ["/usr/local/bin/node", "-e", "require('fs').writeFileSync('src/add.mjs', 'export const add = (a, b) => a + b;\\n')"],
             "verifier": { "url": url, "token_file": "./token.txt", "public_key": "./keys/verifier.pub", "operator": "./svc/operator.json" } });
         std::fs::write(f.t.join("run.json"), job.to_string()).unwrap();
         let r = kern::local::local_run(&kern::local::run_job(&f.t.join("run.json")).unwrap()).unwrap();
@@ -307,13 +306,26 @@ fn hosted_verifier_serves_profiles_and_verifies_only_authorised_known_runs() {
 }
 
 #[test]
+fn the_action_builds_kern_from_its_own_source_never_inside_the_pull_request() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let action = std::fs::read_to_string(root.join("action.yml")).unwrap();
+    // cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory, which holds the pull request's files
+    let install = action.split("- name: Install Kern").nth(1).unwrap().split("- name:").next().unwrap();
+    assert!(install.contains("id: install") && install.contains("working-directory: ${{ github.action_path }}"), "{install}");
+    let verify = action.split("- name: Verify the agent change").nth(1).unwrap();
+    assert!(verify.contains("KERN_BIN: ${{ steps.install.outputs.bin }}"), "the verify step runs the binary the install step made: {verify}");
+    let script = std::fs::read_to_string(root.join("scripts/install-kern.sh")).unwrap();
+    assert!(script.contains("bin=") && script.contains(">> \"$GITHUB_OUTPUT\""), "{script}");
+}
+
+#[test]
 fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     let t = Temp::new();
     let repo = t.join("widget");
     sh(&t.0, &["init", "-q", "widget"]);
     sh(&repo, &["remote", "add", "origin", "https://github.com/acme/widget.git"]);
     for (p, c) in [("src/add.js", "module.exports = (a, b) => a + b;\n"), ("test/add.test.js", "require('node:assert');\n"), ("index.js", "module.exports = require('./src/add');\n"),
-        ("jest.config.js", "module.exports = {};\n"), ("README.md", "# widget\n"), ("package.json", "{}\n"), ("package-lock.json", "{\"lockfileVersion\":3,\"packages\":{}}\n")] {
+        ("jest.config.js", "module.exports = {};\n"), ("README.md", "# widget\n"), ("package.json", "{\"scripts\":{\"test\":\"mocha\"},\"devDependencies\":{\"mocha\":\"^10.0.0\"}}\n"), ("package-lock.json", "{\"lockfileVersion\":3,\"packages\":{}}\n")] {
         std::fs::create_dir_all(repo.join(p).parent().unwrap()).unwrap();
         std::fs::write(repo.join(p), c).unwrap();
     }
@@ -329,11 +341,19 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     let c = contract(&read_json(repo.join(".github/kern/tasks/agent.json")).unwrap()).unwrap();
     assert_eq!((c.read.clone(), c.write.clone()), (vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()], vec!["index.js".to_string(), "src/".into(), "test/".into()]));
     assert!(c.dependencies && c.checks == vec!["addition".to_string()]);
+    let tests = c.tests.clone().expect("a test runner was found, so the contract keeps the tests honest");
+    assert_eq!((tests.paths, tests.kind, tests.runner, tests.command), (vec!["test/".to_string()], policy::Kind::Feature, policy::Runner::Mocha, vec!["/workspace/node_modules/.bin/mocha".to_string()]));
+    assert!(required_checks(&c).contains(&"honest-fix".to_string()));
     let op = operator(&read_json(repo.join(".github/kern/operator.json")).unwrap()).unwrap();
     assert_eq!(op.repository, "acme/widget");
     assert_eq!(std::fs::read_to_string(repo.join(".github/kern/verifier.pub")).unwrap(), public);
     let workflow = std::fs::read_to_string(repo.join(".github/workflows/kern-verified.yml")).unwrap();
     assert!(workflow.contains("uses: acme/kern@0123456789abcdef0123456789abcdef01234567") && workflow.contains("pull_request_target"));
+    assert!(workflow.contains("pull-requests: write") && workflow.contains("agent-mention:") && workflow.contains("max-attempts:"), "{workflow}");
+    assert!(workflow.contains("if: startsWith(github.event.pull_request.head.ref, 'kern/') && github.event.pull_request.head.repo.full_name == github.repository"),
+        "only same-repository agent branches are checked out, so ordinary and fork pull requests are skipped instead of failing: {workflow}");
+    assert_eq!(read_json(repo.join(".github/kern/ruleset.json")).unwrap()["rules"][0]["parameters"]["strict_required_status_checks_policy"], true, "a pull request must be up to date with its base");
+    assert!(r["next_steps"].as_array().unwrap().iter().any(|s| s.as_str().unwrap().contains("audit-merges")), "{r}");
     let ruleset = read_json(repo.join(".github/kern/ruleset.json")).unwrap();
     assert_eq!(ruleset["rules"][0]["parameters"]["required_status_checks"][0], json!({ "context": "kern-verified", "integration_id": 15368 }));
     // never overwrites an existing setup
@@ -342,6 +362,19 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     std::fs::remove_dir_all(repo.join(".github")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_kern")).current_dir(&t.0).args(["init", "widget", "profile.json", "acme/kern@0123456789abcdef0123456789abcdef01234567", "second"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // without a test runner Kern can read, the contract has no test proof and says how to add one
+    let plain = t.join("plain");
+    sh(&t.0, &["init", "-q", "plain"]);
+    sh(&plain, &["remote", "add", "origin", "https://github.com/acme/plain.git"]);
+    for (p, c) in [("src/a.js", "module.exports = 1;\n"), ("test/a.js", "require('node:assert');\n"), ("package.json", "{}\n")] {
+        std::fs::create_dir_all(plain.join(p).parent().unwrap()).unwrap();
+        std::fs::write(plain.join(p), c).unwrap();
+    }
+    sh(&plain, &["add", "-A"]);
+    sh(&plain, &["commit", "-qm", "base"]);
+    let r = kern::init::init(&plain, &profile, "agent", "acme/kern@0123456789abcdef0123456789abcdef01234567").unwrap();
+    assert!(contract(&read_json(plain.join(".github/kern/tasks/agent.json")).unwrap()).unwrap().tests.is_none());
+    assert!(r["next_steps"].as_array().unwrap().iter().any(|s| s.as_str().unwrap().contains("\"tests\"")), "{r}");
 }
 
 #[test]
@@ -412,6 +445,349 @@ fn contracts_parse_strictly_and_only_attenuate() {
     narrower["limits"]["timeout_seconds"] = json!(10);
     assert_eq!(attenuate(&p, &narrower).unwrap().write, vec!["src/".to_string()]);
 }
+fn tested(kind: &str) -> Value {
+    let mut v = policy_value();
+    v["version"] = json!(4);
+    v["behaviors"] = json!([]);
+    v["tests"] = json!({ "paths": ["test/"], "kind": kind, "runner": "node", "command": ["/usr/local/bin/node", "--test"] });
+    v
+}
+#[test]
+fn contracts_can_require_a_proof_of_honest_fix() {
+    let c = contract(&tested("bugfix")).unwrap();
+    let t = c.tests.clone().unwrap();
+    assert_eq!((t.paths.clone(), t.kind, t.runner, t.command[0].as_str()), (vec!["test/".to_string()], policy::Kind::Bugfix, policy::Runner::Node, "/usr/local/bin/node"));
+    assert!(required_checks(&c).contains(&"honest-fix".to_string()));
+    assert!(!required_checks(&contract(&policy_value()).unwrap()).contains(&"honest-fix".to_string()));
+    let mut none = tested("bugfix");
+    none["tests"] = Value::Null;
+    assert!(contract(&none).unwrap().tests.is_none());
+    for (key, value, needle) in [
+        ("kind", json!("hotfix"), "kind"), ("command", json!(["node", "--test"]), "absolute"), ("paths", json!(["docs/"]), "tests.paths"),
+        ("paths", json!(["test/", "test/unit/"]), "Overlapping"), ("paths", json!([]), "tests.paths"), ("runner", json!("ava"), "tests.runner"),
+        ("command", json!(["/usr/local/bin/node", "test/"]), "--test"), ("command", json!(["/usr/local/bin/node", "--test", "--test-reporter=spec"]), "reporter"),
+    ] {
+        let mut bad = tested("bugfix");
+        bad["tests"][key] = value;
+        denied(contract(&bad), needle);
+    }
+    let mut unnamed = tested("bugfix");
+    unnamed["tests"].as_object_mut().unwrap().remove("runner");
+    denied(contract(&unnamed), "missing or unknown fields");
+    // Kern adds the one reporter it reads, so the command may not pick its own, and vitest has to run once instead of watching
+    let with = |runner: &str, command: Value| { let mut v = tested("bugfix"); v["tests"]["runner"] = json!(runner); v["tests"]["command"] = command; contract(&v) };
+    denied(with("vitest", json!(["/workspace/node_modules/.bin/vitest"])), "vitest run");
+    for flags in [vec!["--reporter", "dot"], vec!["-R", "dot"], vec!["--reporter=spec"]] {
+        denied(with("mocha", json!(std::iter::once("/workspace/node_modules/.bin/mocha").chain(flags).collect::<Vec<_>>())), "reporter");
+    }
+    denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--json"])), "reporter");
+    denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--outputFile=x.json"])), "reporter");
+    for (runner, command, want) in [
+        ("node", json!(["/usr/local/bin/node", "--test", "test/"]), vec!["/usr/local/bin/node", "--test", "--test-reporter=tap", "test/"]),
+        ("mocha", json!(["/workspace/node_modules/.bin/mocha", "--recursive"]), vec!["/workspace/node_modules/.bin/mocha", "--recursive", "--reporter", "json"]),
+        ("jest", json!(["/workspace/node_modules/.bin/jest"]), vec!["/workspace/node_modules/.bin/jest", "--json"]),
+        ("vitest", json!(["/workspace/node_modules/.bin/vitest", "run"]), vec!["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache"]),
+    ] {
+        assert_eq!(kern::proof::command(with(runner, command).unwrap().tests.as_ref().unwrap()), want);
+    }
+    // a bug fix needs room to add the test that proves it; a refactor does not
+    let mut locked = tested("bugfix");
+    locked["filesystem"]["write"] = json!(["src/"]);
+    denied(contract(&locked), "add a test");
+    locked["tests"]["kind"] = json!("refactor");
+    contract(&locked).unwrap();
+    // only version 4 carries the section, and version 4 must state it (null is allowed)
+    let mut v3 = tested("bugfix");
+    v3["version"] = json!(3);
+    denied(contract(&v3), "missing or unknown fields");
+    let mut v4 = tested("bugfix");
+    v4.as_object_mut().unwrap().remove("tests");
+    denied(contract(&v4), "missing or unknown fields");
+    // a narrower contract can never weaken or drop the proof, but may add one
+    denied(attenuate(&tested("bugfix"), &tested("feature")), "test proof");
+    denied(attenuate(&tested("bugfix"), &none), "test proof");
+    attenuate(&none, &tested("bugfix")).unwrap();
+    // operators cannot shadow the built-in check
+    let mut op = operator_value(&["external"]);
+    op["checks"][0]["id"] = json!("honest-fix");
+    denied(operator(&op), "reserved");
+}
+
+const ADD_TEST: &str = "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/add.mjs';\ntest('adds', () => assert.equal(add(1, 2), 3));\n";
+fn honest_base() -> Files {
+    files(&[("src/add.mjs", "export const add = (a, b) => a - b;\n"), ("test/add.test.mjs", ADD_TEST), ("test/fixtures/data.json", "{}\n"), ("README.md", "x\n")])
+}
+fn honest_change(changes: &[(&str, Option<&str>)]) -> Files {
+    let mut candidate = honest_base();
+    for (path, text) in changes {
+        match text { Some(t) => { candidate.insert(path.to_string(), file(t)); } None => { candidate.remove(*path); } }
+    }
+    candidate
+}
+const FIX: (&str, Option<&str>) = ("src/add.mjs", Some("export const add = (a, b) => a + b;\n"));
+const REGRESSION: (&str, Option<&str>) = ("test/regression.test.mjs", Some("import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/add.mjs';\ntest('adds 2 + 2', () => assert.equal(add(2, 2), 4));\n"));
+fn screened(kind: &str, changes: &[(&str, Option<&str>)]) -> R<Value> { git::changes(&honest_base(), &honest_change(changes), &contract(&tested(kind)).unwrap()) }
+
+#[test]
+fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
+    let ok = screened("bugfix", &[FIX, REGRESSION]).unwrap();
+    assert_eq!((ok["tests"]["new_test_files"].clone(), ok["tests"]["locked_test_files"].as_u64(), ok["tests"]["runner"].as_str()), (json!(["test/regression.test.mjs"]), Some(2), Some("node")));
+    denied(screened("bugfix", &[FIX, ("test/add.test.mjs", Some("// gutted\n"))]), "Existing test file changed");
+    denied(screened("bugfix", &[FIX, ("test/add.test.mjs", None)]), "Existing test file deleted");
+    denied(screened("bugfix", &[FIX, ("test/fixtures/data.json", Some("{\"x\": 1}\n"))]), "Existing test file changed");
+    denied(screened("bugfix", &[FIX]), "must add a test");
+    denied(screened("bugfix", &[FIX, ("test/helpers/build.mjs", Some("export const x = 1;\n"))]), "must add a test");
+    screened("refactor", &[FIX]).unwrap();
+    // a new test file may not skip or focus tests; the runner's own report catches the rest, however it is written
+    for (code, marker) in [
+        ("test.only('x', () => {});", "test.only"), ("describe.skip('x', () => {});", "describe.skip"), ("it.todo('x');", "it.todo"),
+        ("xit('x', () => {});", "xit"), ("fdescribe('x', () => {});", "fdescribe"), ("test('x', { skip: true }, () => {});", "skip option"),
+        ("test('x', { only: 1 }, () => {});", "only option"), ("const only = describe['only'];\nonly('x', () => {});", "describe.only"), ("describe[`skip`]('x', () => {});", "describe.skip"),
+    ] {
+        let body = format!("import {{ test, describe, it }} from 'node:test';\n{code}\n");
+        denied(screened("feature", &[FIX, ("test/new.test.mjs", Some(&body))]), marker);
+    }
+    // what a test decides while it runs is judged from the runner's report instead, so ordinary code is not refused up front
+    for code in ["test('x', (t) => { if (process.platform === 'win32') t.skip(); });", "class Store { skip() {} }\nnew Store().skip();", "process.on('exit', () => {});", "test('x', { skip: false }, () => {});"] {
+        let body = format!("import {{ test }} from 'node:test';\n{code}\n");
+        screened("feature", &[FIX, ("test/new.test.mjs", Some(&body))]).unwrap();
+    }
+    screened("feature", &[FIX, ("test/fixtures/more.json", Some("{}\n")), ("test/helpers/build.mjs", Some("export const x = 1;\n"))]).unwrap();
+    // code outside the tests may not reach into the test runner or the assertion library, or check whether tests are running
+    for (path, code, marker) in [
+        ("src/add.mjs", "export const add = (a, b) => a + b;\nit.only('x', () => {});\n", "the test global it"),
+        ("src/add.mjs", "export const add = (a, b) => (typeof describe === 'function' ? 4 : a + b);\n", "the test global describe"),
+        ("src/add.mjs", "globalThis.expect = () => ({ toBe() {} });\nexport const add = (a, b) => a + b;\n", "globalThis.expect"),
+        ("src/add.mjs", "import assert from 'node:assert';\nassert.strictEqual = () => {};\nexport const add = (a, b) => a + b;\n", "a change to node:assert"),
+        ("src/add.mjs", "import * as a from 'assert';\nObject.assign(a.default, { equal() {} });\nexport const add = (x, y) => x + y;\n", "a change to assert"),
+        ("src/patch.cjs", "require('assert').equal = () => {};\n", "a change to assert"),
+        ("src/patch.cjs", "const a = require('node:assert/strict');\nReflect.set(a, 'equal', () => {});\n", "a change to node:assert/strict"),
+        ("src/add.mjs", "export const add = (a, b) => (process.env.JEST_WORKER_ID ? 4 : a + b);\n", "JEST_WORKER_ID"),
+        ("src/add.mjs", "export const add = (a, b) => (process.env['VITEST'] ? 4 : a + b);\n", "VITEST"),
+    ] {
+        denied(screened("feature", &[(path, Some(code))]), marker);
+    }
+    // a local name that happens to match is not the test runner, and code that already did this before is judged as before
+    screened("feature", &[("src/add.mjs", Some("export const add = (a, b) => { for (const it of [a, b]) it.toString(); return a + b; };\n"))]).unwrap();
+    let mut before = honest_base();
+    before.insert("src/env.mjs".into(), file("export const worker = process.env.JEST_WORKER_ID;\n"));
+    let mut after = before.clone();
+    after.insert("src/env.mjs".into(), file("export const worker = process.env.JEST_WORKER_ID || '1';\n"));
+    git::changes(&before, &after, &contract(&tested("feature")).unwrap()).unwrap();
+    // the test runner's settings decide which tests run and how they check results
+    for config in ["test/.mocharc.json", "test/mocha.opts", "test/jest.config.js", "test/vitest.config.mts", "src/setupTests.js", "test/vite.config.ts", "src/.babelrc", "test/babel.config.cjs", "test/jest.setup.js"] {
+        denied(screened("feature", &[FIX, (config, Some("{}\n"))]), "Test runner configuration");
+    }
+}
+
+fn report_fixture(name: &str) -> Vec<u8> { std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reports").join(name)).unwrap() }
+#[test]
+fn runner_reports_are_read_test_by_test() {
+    use kern::policy::Runner;
+    use kern::proof::{Count, read_report};
+    let c = |passed: u32, failed: u32, skipped: u32| Count { passed, failed, skipped };
+    let tests = |items: &[(&str, Count)]| items.iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>();
+    // mocha 10 names each test's file, and JSON that a test prints before the report is not mistaken for it
+    let m = read_report(Runner::Mocha, &report_fixture("mocha10.json")).unwrap();
+    assert_eq!(m.tests, tests(&[("test/console.test.js > logs", c(1, 0, 0)), ("test/math.test.js > math adds", c(1, 0, 0)), ("test/math.test.js > math fails", c(0, 1, 0)),
+        ("test/math.test.js > math pending", c(0, 0, 1)), ("test/math.test.js > math skipped", c(0, 0, 1))]));
+    assert!(m.problems.is_empty());
+    // mocha 5 does not, so the full title identifies a test
+    assert_eq!(read_report(Runner::Mocha, &report_fixture("mocha5.json")).unwrap().tests.keys().map(String::as_str).collect::<Vec<_>>(), ["logs", "math adds", "math fails", "math pending", "math skipped"]);
+    // jest and vitest: a todo counts as skipped, and a test file that cannot load is a failure of its own
+    let j = read_report(Runner::Jest, &report_fixture("jest.json")).unwrap();
+    assert_eq!(j.tests, tests(&[("test/math.jest.test.js > math > adds", c(1, 0, 0)), ("test/math.jest.test.js > math > fails", c(0, 1, 0)),
+        ("test/math.jest.test.js > math > later", c(0, 0, 1)), ("test/math.jest.test.js > math > skipped", c(0, 0, 1))]));
+    assert_eq!(j.problems, vec!["test/broken.test.js".to_string()]);
+    let v = read_report(Runner::Vitest, &report_fixture("vitest.json")).unwrap();
+    assert_eq!(v.tests, tests(&[("test/math.vitest.test.mjs > math > adds", c(1, 0, 0)), ("test/math.vitest.test.mjs > math > fails", c(0, 1, 0)),
+        ("test/math.vitest.test.mjs > math > later", c(0, 0, 1)), ("test/math.vitest.test.mjs > math > skipped", c(0, 0, 1))]));
+    // node --test: suites group their tests, and a file that cannot load is reported as a failed test
+    let n = read_report(Runner::Node, &report_fixture("node.tap")).unwrap();
+    assert_eq!(n.tests, tests(&[("adds", c(1, 0, 0)), ("fails", c(0, 1, 0)), ("group > inner", c(1, 0, 0)), ("later", c(0, 0, 1)), ("skipped", c(0, 0, 1))]));
+    assert_eq!(read_report(Runner::Node, &report_fixture("node-broken.tap")).unwrap().tests.get("test/broken.test.js"), Some(&c(0, 1, 0)));
+    // no report, a report cut short, or a second report is never taken as results
+    let text = |name: &str| String::from_utf8(report_fixture(name)).unwrap();
+    let (mocha, jest, tap) = (text("mocha10.json"), text("jest.json"), text("node.tap"));
+    for (runner, out, why) in [
+        (Runner::Mocha, String::new(), "no mocha report"), (Runner::Mocha, mocha[..mocha.len() / 2].to_string(), "no mocha report"), (Runner::Mocha, format!("{mocha}\n{mocha}"), "more than one"),
+        (Runner::Jest, format!("{jest}\n{jest}"), "more than one"), (Runner::Node, tap.replace("1..5", ""), "incomplete"), (Runner::Node, format!("{tap}\n{tap}"), "more than one"),
+        (Runner::Node, "not ok 1 - fake\n".into(), "no TAP report"),
+    ] {
+        let why_not = read_report(runner, out.as_bytes()).unwrap_err();
+        assert!(why_not.contains(why), "{why}: {why_not}");
+    }
+}
+
+fn tap(tests: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = String::from("TAP version 13\n");
+    for (i, (name, status)) in tests.iter().enumerate() {
+        let point = match *status { "passed" => format!("ok {} - {name}", i + 1), "failed" => format!("not ok {} - {name}", i + 1), _ => format!("ok {} - {name} # SKIP", i + 1) };
+        out.push_str(&format!("# Subtest: {name}\n{point}\n  ---\n  duration_ms: 1\n  type: 'test'\n  ...\n"));
+    }
+    out.push_str(&format!("1..{}\n# tests {}\n", tests.len(), tests.len()));
+    out.into_bytes()
+}
+fn runs(r: kern::proof::Run, base: &[(&str, &str)], new: &[(&str, &str)], old: &[(&str, &str)]) -> R<kern::proof::Output> {
+    let tests = match r { kern::proof::Run::Base => base, kern::proof::Run::New => new, kern::proof::Run::Old => old };
+    Ok(kern::proof::Output { stdout: tap(tests), exit_code: i64::from(tests.iter().any(|t| t.1 == "failed")) })
+}
+#[test]
+fn honest_fix_proof_compares_what_the_runner_says_ran() {
+    use kern::proof::{Output, Run, prove};
+    let (base, candidate) = (honest_base(), honest_change(&[FIX, REGRESSION]));
+    let prove_with = |kind: &str, candidate: &Files, run: &mut dyn FnMut(Run) -> R<Output>| -> R<Value> {
+        let policy = contract(&tested(kind)).unwrap();
+        let changed = git::changes(&base, candidate, &policy)?;
+        prove(policy.tests.as_ref().unwrap(), &base, candidate, &changed, run)
+    };
+    let (before, fixed, failing) = ([("adds", "passed")], [("adds", "passed"), ("adds 2 + 2", "passed")], [("adds", "passed"), ("adds 2 + 2", "failed")]);
+    let mut calls = Vec::new();
+    let evidence = prove_with("bugfix", &candidate, &mut |r| { calls.push(r); runs(r, &before, &fixed, &failing) }).unwrap();
+    assert_eq!(calls, vec![Run::Base, Run::New, Run::Old], "the existing suite on the old code, everything on the new code, then everything on the old code with the new tests added");
+    assert_eq!(evidence["new_tests"], json!([{ "test": "adds 2 + 2", "old": "failed", "new": "passed" }]));
+    assert_eq!((evidence["fail_to_pass"].as_u64(), evidence["pass_to_pass"].as_u64(), evidence["locked_test_files"].as_u64(), evidence["runner"].as_str()), (Some(1), Some(1), Some(2), Some("node")), "{evidence}");
+    assert!(evidence["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "{evidence}");
+    // whatever the trick, the runner's own report shows what happened
+    let refuse = |new: &[(&str, &str)], old: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &mut |r| runs(r, &before, new, old)), why);
+    refuse(&fixed, &fixed, "None of the new tests fails on the old code");
+    refuse(&[("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
+    refuse(&[("adds", "skipped"), ("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
+    refuse(&[("adds (renamed)", "passed"), ("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
+    refuse(&[("adds", "passed"), ("adds 2 + 2", "skipped")], &failing, "Tests did not run on the new code: \"adds 2 + 2\"");
+    refuse(&[("adds", "failed"), ("adds 2 + 2", "passed")], &failing, "The test suite fails on the new code: \"adds\"");
+    refuse(&before, &failing, "No new test ran");
+    // a new test that cannot even load on the old code does not show which behaviour was wrong
+    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::Old { Ok(Output { stdout: b"Error: Cannot find module '../src/new.mjs'\n".to_vec(), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }),
+        "The test run on the old code with the new tests added gave no usable results");
+    // a run that fails although every test passed, and a run that could not happen, are never taken as a pass or as proof
+    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::New { Ok(Output { stdout: tap(&fixed), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }), "although no test failed");
+    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::Old { Err(Denied("docker timed out after 35s".into())) } else { runs(r, &before, &fixed, &failing) }),
+        "Kern could not run the test suite on the old code with the new tests added: docker timed out");
+    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::Base { Ok(Output { stdout: Vec::new(), exit_code: 0 }) } else { runs(r, &before, &fixed, &failing) }), "Kern could not read the test results of the old code");
+    // a suite that already failed before the change is reported as such
+    denied(prove_with("bugfix", &candidate, &mut |r| runs(r, &[("adds", "failed")], &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing)), "already fails before the change");
+    // two tests may share a title (mocha 5 does not name files): counting keeps them apart
+    prove_with("bugfix", &candidate, &mut |r| runs(r, &before, &[("adds", "passed"), ("adds", "passed")], &[("adds", "passed"), ("adds", "failed")])).unwrap();
+    // a feature's new tests need not fail first and a refactor needs no new test; neither runs the old code with the new tests
+    let mut seen = Vec::new();
+    prove_with("feature", &candidate, &mut |r| { seen.push(r); runs(r, &before, &fixed, &fixed) }).unwrap();
+    assert_eq!(seen, vec![Run::Base, Run::New]);
+    let mut seen = Vec::new();
+    prove_with("refactor", &honest_change(&[FIX]), &mut |r| { seen.push(r); runs(r, &before, &before, &[]) }).unwrap();
+    assert_eq!(seen, vec![Run::Base, Run::New]);
+    denied(prove_with("refactor", &honest_change(&[FIX]), &mut |r| runs(r, &before, &[], &[])), "Tests did not run on the new code");
+}
+
+fn reason<T: std::fmt::Debug>(r: R<T>) -> String { r.expect_err("expected a block").0 }
+#[test]
+fn every_block_becomes_feedback_an_agent_can_act_on() {
+    use kern::feedback::explain;
+    let policy = contract(&policy_value()).unwrap();
+    let base = files(&[("src/add.mjs", "export const add = (a, b) => a - b;\n"), ("README.md", "x\n")]);
+    let with = |changes: &[(&str, &str)]| { let mut c = base.clone(); for (p, t) in changes { c.insert(p.to_string(), file(t)); } c };
+    let check = |reason: String, rule: &str, fixable: bool, path: Option<&str>, words: &[&str]| {
+        let f = explain(&reason, Some(&policy));
+        assert_eq!((f["schema"].as_str(), f["status"].as_str(), f["reason"].as_str()), (Some("kern-feedback/v1"), Some("BLOCKED"), Some(reason.as_str())), "{f}");
+        assert_eq!(f["agent_fixable"], fixable, "{reason}: {f}");
+        let v = &f["violations"][0];
+        assert_eq!(v["rule"], rule, "{reason}: {f}");
+        if let Some(p) = path { assert_eq!(v["path"], p, "{reason}: {f}"); }
+        let instruction = v["instruction"].as_str().unwrap();
+        for w in words { assert!(instruction.contains(w), "{reason}: instruction {instruction:?} lacks {w:?}"); }
+        assert!(!instruction.contains("operator.json") && !instruction.contains("task contract"), "agents are told how to fix code, never how to loosen the gate: {instruction}");
+        f
+    };
+    check(reason(git::changes(&base, &with(&[("README.md", "y\n")]), &policy)), "scope", true, Some("README.md"), &["`README.md`", "`src/`"]);
+    check(reason(git::changes(&base, &with(&[("src/.env", "K=v\n")]), &policy)), "protected-path", true, Some("src/.env"), &["`src/.env`"]);
+    let nine: Vec<(String, String)> = (0..9).map(|i| (format!("src/f{i}.mjs"), "export const x = 1;\n".to_string())).collect();
+    let nine: Vec<(&str, &str)> = nine.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+    check(reason(git::changes(&base, &with(&nine), &policy)), "budget", true, None, &["8 files", "200"]);
+    check(reason(git::changes(&base, &with(&[("src/blob.bin", "a\0b")]), &policy)), "unsupported-change", true, Some("src/blob.bin"), &["`src/blob.bin`"]);
+    let grown = with(&[("src/add.mjs", "import { exec } from 'node:child_process';\nexport const add = (a, b) => a + b;\n"), ("src/net.mjs", "export const get = () => fetch('https://x');\n")]);
+    let changed = git::changes(&base, &grown, &policy).unwrap();
+    let f = check(reason(capability::check(&base, &grown, &changed, &std::collections::BTreeMap::new())), "capability", true, Some("src/add.mjs"), &["`node:child_process`", "`src/add.mjs`"]);
+    assert_eq!((f["violations"][1]["path"].as_str(), f["violations"][1]["detail"].as_str()), (Some("src/net.mjs"), Some("global:fetch")), "one violation per file: {f}");
+    assert!(f["violations"][0]["allow"].as_str().unwrap().contains("operator.json"), "humans still learn how to allow it: {f}");
+    let broken = with(&[("src/add.mjs", "export const add = (a, b) => a +;\n")]);
+    check(reason(capability::check(&base, &broken, &git::changes(&base, &broken, &policy).unwrap(), &std::collections::BTreeMap::new())), "syntax", true, Some("src/add.mjs"), &["`src/add.mjs`"]);
+    check("Tests show new runtime behavior: exec:id, net:api.example.com:443. If this is intended, allow it in the task contract (version 3): \"behaviors\": [\"exec:id\",\"net:api.example.com:443\"]".into(), "behavior", true, None, &["`exec:id`", "`net:api.example.com:443`"]);
+    check("Check addition case 2 failed (exit code 1)".into(), "check-failed", true, None, &["`addition`"]);
+    check("Check addition case 1 output differs from the expected answer".into(), "check-failed", true, None, &["`addition`"]);
+    // honest-fix messages come from the real proof
+    check(reason(screened("bugfix", &[FIX, ("test/add.test.mjs", Some("// gutted\n"))])), "test-locked", true, Some("test/add.test.mjs"), &["`test/add.test.mjs`"]);
+    check(reason(screened("feature", &[FIX, ("test/new.test.mjs", Some("import { test } from 'node:test';\ntest.only('x', () => {});\n"))])), "test-marker", true, Some("test/new.test.mjs"), &["`test.only`"]);
+    check(reason(screened("feature", &[FIX, ("test/.mocharc.json", Some("{}\n"))])), "test-config", true, Some("test/.mocharc.json"), &["`test/.mocharc.json`"]);
+    check(reason(screened("feature", &[("src/add.mjs", Some("globalThis.expect = 1;\nexport const add = (a, b) => a + b;\n"))])), "test-tamper", true, Some("src/add.mjs"), &["`globalThis.expect`", "`src/add.mjs`"]);
+    check(reason(screened("bugfix", &[FIX])), "test-missing", true, None, &["`test/`"]);
+    let (b, c) = (honest_base(), honest_change(&[FIX, REGRESSION]));
+    let p = contract(&tested("bugfix")).unwrap();
+    let ch = git::changes(&b, &c, &p).unwrap();
+    let proved = |new: &[(&str, &str)], old: &[(&str, &str)]| reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &mut |r| runs(r, &[("adds", "passed")], new, old)));
+    let fixed = [("adds", "passed"), ("adds 2 + 2", "passed")];
+    check(proved(&fixed, &fixed), "test-proof", true, None, &["`\"adds 2 + 2\"`", "fails on the old code"]);
+    check(proved(&[("adds", "failed"), ("adds 2 + 2", "passed")], &[]), "tests-failing", true, None, &["`\"adds\"`"]);
+    check(proved(&[("adds 2 + 2", "passed")], &[]), "tests-not-run", true, None, &["`\"adds\"`"]);
+    check(proved(&[("adds", "passed")], &[]), "test-missing", true, None, &["`test/`"]);
+    check(reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &mut |r| if r == kern::proof::Run::New { Ok(kern::proof::Output { stdout: b"Segmentation fault\n".to_vec(), exit_code: 139 }) } else { runs(r, &[("adds", "passed")], &fixed, &fixed) })),
+        "test-results", true, None, &["new code"]);
+    // the agent's own run
+    check("The agent exited with code 3".into(), "agent", true, None, &["code 3"]);
+    check(reason(kern::util::tree_paths(["src/aux.js"], true)), "file-name", true, Some("src/aux.js"), &["`src/aux.js`"]);
+    check(reason(kern::util::tree_paths(["src/A.js", "src/a.js"], true)), "file-name", true, None, &["upper and lower case"]);
+    let ws = Temp::new();
+    std::fs::create_dir_all(ws.0.join("src")).unwrap();
+    std::fs::write(ws.0.join("src/big.txt"), "x".repeat(70000)).unwrap();
+    check(reason(kern::local::read_workspace(&ws.0, &base, 65536, 1048576)), "workspace", true, Some("src/big.txt"), &["`src/big.txt`"]);
+    // a proof that no longer matches the pull request is renewed by running Kern again, not by pushing to the branch
+    for r in ["Attestation mismatch: commit", "Attestation mismatch: base", "Pull request must carry exactly one Kern attestation block"] {
+        check(r.into(), "proof-stale", true, None, &["kern run"]);
+    }
+    // an independent verifier's verdict arrives wrapped, and is explained the same way
+    check("independent verifier rejected the change: Check addition case 2 failed (exit code 1)".into(), "check-failed", true, None, &["`addition`"]);
+    let transported = format!("independent verifier unreachable or rejected the change: sh failed (1): {}\n ", json!({ "status": "DENIED", "reason": "Check addition case 2 failed (exit code 1)" }));
+    check(transported, "check-failed", true, None, &["`addition`"]);
+    // what an agent cannot fix stops the loop, and text that only looks like a known block is never trusted
+    for r in ["The agent ran out of memory; the contract allows 256 MB (limits.memory_mb)", "The agent did not finish within 3 seconds (limits.timeout_seconds); its container was stopped and nothing was accepted",
+              "Interrupted: the agent was stopped and nothing was accepted", "Invalid attestation signature", "Untrusted signing key", "independent verifier unreachable: connection refused",
+              "Kern runs agents in a Linux container, but no container runtime is ready (docker: not installed)", "Something nobody planned for",
+              "The test suite already fails before the change: \"adds\". The test proof needs a suite that passes; fix it on the base branch first",
+              "Kern could not read the test results of the old code: the output contains no TAP report. Check tests.runner and tests.command in the task contract",
+              "Check addition case @everyone failed (exit code 1)", "The agent exited with code 3 @everyone", "Sandbox crashed. Write outside contract: src/x.js. To allow it, add \"src/x.js\" to filesystem.read and filesystem.write in the task contract"] {
+        let f = explain(r, None);
+        assert_eq!(f["agent_fixable"], false, "{r}: {f}");
+        let instruction = f["violations"][0]["instruction"].as_str().unwrap();
+        assert!(!instruction.is_empty() && !instruction.contains("@everyone") && !instruction.contains(r), "raw reasons stay out of instructions: {f}");
+    }
+    // what the agent is handed carries no hint about loosening the gate
+    let agent = kern::feedback::for_agent(&f);
+    assert!(agent.get("reason").is_none() && agent["violations"].as_array().unwrap().iter().all(|v| v.get("allow").is_none() && v["instruction"].is_string()), "{agent}");
+}
+
+#[test]
+fn feedback_comments_cannot_be_used_to_ping_people_or_break_out_of_code() {
+    use kern::feedback::{comment_body, explain};
+    let p = "src/@acme/owners [click](https://evil.example) ```x";
+    let hostile = format!("Write outside contract: {p}. To allow it, add \"{p}\" to filesystem.read and filesystem.write in the task contract");
+    let f = explain(&hostile, None);
+    assert_eq!(f["agent_fixable"], true, "{f}");
+    let head = "ab".repeat(20);
+    let body = comment_body(&f, 1, 3, Some("@claude"), &head);
+    assert!(body.contains("@claude") && body.contains("attempt 1 of 3") && body.contains(&format!("<!-- kern-feedback:v1 head={head} -->")), "{body}");
+    let prose: String = body.split("````").step_by(2).collect();
+    for line in prose.lines() {
+        let outside: String = line.split('`').step_by(2).collect();
+        assert!(!outside.contains("@acme") && !outside.contains("](https"), "agent-controlled text must stay inside code: {line}");
+    }
+    let json = body.split("````json\n").nth(1).unwrap().split("\n````").next().unwrap();
+    assert!(!json.contains('`') && serde_json::from_str::<Value>(json).unwrap() == kern::feedback::for_agent(&f), "the machine-readable block round-trips and cannot close its fence");
+    assert!(!json.contains("filesystem.write"), "the agent's copy carries no hint about loosening the gate: {json}");
+    // no mention when the agent cannot fix it or when retries are used up; the history stays visible either way
+    assert!(!comment_body(&explain("Invalid attestation signature", None), 1, 3, Some("@claude"), &head).contains("@claude"));
+    let exhausted = comment_body(&f, 4, 3, Some("@claude"), &head);
+    assert!(!exhausted.contains("@claude") && exhausted.contains("human"), "{exhausted}");
+}
+
 #[test]
 fn operators_bind_deployment_executors_and_builders() {
     operator(&operator_value(&["external"])).unwrap();
@@ -577,6 +953,355 @@ fn github_required_check_reverifies_the_exact_pr_head() {
     let wrong_key = attest::sign(&kern_payload(&policy, &opr, &run_id, &base, &head, &manifest, now_ms() - 1000), &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
     denied(promote::check_pr(&event(&head, &base, &d.branch, &promote::pr_body("fix-addition", &d, &wrong_key).unwrap()), &repo, ".github/kern", now_ms()), "Untrusted");
 }
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+struct StubApi { url: String, seen: Seen }
+fn stub_api(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> StubApi {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen: Seen = Default::default();
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut reader = std::io::BufReader::new(s.try_clone().unwrap());
+            let mut request = String::new();
+            if std::io::BufRead::read_line(&mut reader, &mut request).is_err() { continue; }
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 || line == "\r\n" { break; }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = v.trim().parse().unwrap_or(0); }
+            }
+            let mut body = vec![0u8; length];
+            let _ = std::io::Read::read_exact(&mut reader, &mut body);
+            let parts: Vec<&str> = request.split_whitespace().collect();
+            let (method, path) = (parts.first().copied().unwrap_or(""), parts.get(1).copied().unwrap_or(""));
+            log.lock().unwrap().push((method.to_string(), path.to_string(), String::from_utf8_lossy(&body).to_string()));
+            let (status, reply) = route(method, path);
+            let _ = std::io::Write::write_all(&mut s, format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes());
+        }
+    });
+    StubApi { url, seen }
+}
+
+struct PrGate { t: Temp, repo: PathBuf, base: String, head: String, envelope: Value, branch: String }
+fn pr_gate(head_code: &str) -> PrGate {
+    let f = fixture();
+    let repo = f.t.join("gh");
+    sh(&f.t.0, &["init", "-q", "gh"]);
+    sh(&repo, &["config", "core.autocrlf", "false"]);
+    for (p, c) in &f.original { std::fs::create_dir_all(repo.join(p).parent().unwrap()).unwrap(); std::fs::write(repo.join(p), c.bytes.as_deref().unwrap()).unwrap(); }
+    std::fs::create_dir_all(repo.join(".github/kern/tasks")).unwrap();
+    let op = operator_value(&["external"]);
+    std::fs::write(repo.join(".github/kern/operator.json"), op.to_string()).unwrap();
+    std::fs::write(repo.join(".github/kern/verifier.pub"), &f.public).unwrap();
+    std::fs::write(repo.join(".github/kern/tasks/fix-addition.json"), policy_value().to_string()).unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "base"]);
+    let base = sh(&repo, &["rev-parse", "HEAD"]);
+    let mut candidate = git::read_commit(&repo, &base, 1048576, 16777216).unwrap();
+    candidate.insert("src/add.mjs".into(), file(head_code));
+    let head = git::write_commit(&repo, &candidate, Some(&base), "fix-addition").unwrap();
+    let (policy, opr) = (contract(&policy_value()).unwrap(), operator(&op).unwrap());
+    let manifest = digest(&git::manifest(&repo, &head, 65536, 1048576).unwrap()).unwrap();
+    let run_id = uuid4().unwrap();
+    let envelope = attest::sign(&kern_payload(&policy, &opr, &run_id, &base, &head, &manifest, now_ms() - 1000), &KeySource::File(f.key.clone())).unwrap();
+    let branch = format!("kern/fix-addition/{run_id}");
+    PrGate { t: f.t, repo, base, head, envelope, branch }
+}
+struct Checked { code: Option<i32>, summary: String, output: String, feedback: Option<Value>, posted: Vec<String> }
+fn check_pr_with(g: &PrGate, envelope: &Value, api: &StubApi, env: &[(&str, &str)]) -> Checked {
+    let d = promote::Decision { repository: "acme/project".into(), branch: g.branch.clone(), base: g.base.clone(), commit: g.head.clone(), run_id: String::new(), attestation: Value::Null };
+    let event = json!({ "repository": { "full_name": "acme/project" }, "pull_request": { "number": 7, "head": { "sha": g.head, "ref": g.branch }, "base": { "sha": g.base, "repo": { "full_name": "acme/project" } },
+        "body": promote::pr_body("fix-addition", &d, envelope).unwrap() } });
+    let dir = g.t.join(&format!("check-{}", uuid4().unwrap()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
+    api.seen.lock().unwrap().clear();
+    let out = Command::new(env!("CARGO_BIN_EXE_kern")).arg("check-pr").arg(dir.join("event.json")).arg(&g.repo).envs(env.iter().copied())
+        .env("GITHUB_STEP_SUMMARY", dir.join("summary.md")).env("GITHUB_OUTPUT", dir.join("output.txt")).env("KERN_FEEDBACK_PATH", dir.join("feedback.json"))
+        .env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k3n").output().unwrap();
+    let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap_or_default();
+    let posted = api.seen.lock().unwrap().iter().filter(|(m, p, _)| m == "POST" && p == "/repos/acme/project/issues/7/comments")
+        .map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["body"].as_str().unwrap().to_string()).collect();
+    Checked { code: out.status.code(), summary: read("summary.md"), output: read("output.txt"), feedback: serde_json::from_str(&read("feedback.json")).ok(), posted }
+}
+fn previous(comments: &[(&str, &str)]) -> String {
+    json!(comments.iter().map(|(author, head)| json!({ "user": { "login": author }, "body": format!("### Kern blocked this change\n<!-- kern-feedback:v1 head={head} -->") })).collect::<Vec<_>>()).to_string()
+}
+fn comments_api(page: String) -> StubApi {
+    stub_api(move |method, path| match (method, path) {
+        ("GET", p) if p.starts_with("/repos/acme/project/issues/7/comments") && p.ends_with("&page=1") => (200, page.clone()),
+        ("GET", _) => (200, "[]".into()),
+        ("POST", "/repos/acme/project/issues/7/comments") => (201, json!({ "html_url": "https://github.com/acme/project/pull/7#c" }).to_string()),
+        _ => (404, "{}".into()),
+    })
+}
+
+#[test]
+fn the_pr_gate_hands_its_verdict_to_the_agent_with_a_retry_cap() {
+    let widened = pr_gate("import { exec } from 'node:child_process';\nexport const add = (a, b) => a + b;\n");
+    let on = [("KERN_PR_COMMENTS", "true"), ("KERN_AGENT_MENTION", "@claude"), ("KERN_MAX_ATTEMPTS", "2")];
+    // first rejection: the agent is asked, with a machine-readable verdict in the comment, a file and a step output
+    let first = check_pr_with(&widened, &widened.envelope, &comments_api("[]".into()), &on);
+    assert_eq!(first.code, Some(1));
+    let f = first.feedback.clone().expect("feedback file");
+    assert_eq!((f["schema"].as_str(), f["violations"][0]["rule"].as_str(), f["attempt"].as_u64(), f["max_attempts"].as_u64()), (Some("kern-feedback/v1"), Some("capability"), Some(1), Some(2)), "{f}");
+    assert!(first.output.contains("status=DENIED") && first.output.contains("feedback="), "{}", first.output);
+    assert!(first.summary.contains("`node:child_process`"), "{}", first.summary);
+    assert!(f.get("reason").is_none() && f["violations"][0].get("allow").is_none(), "the agent's copy carries no hint about loosening the gate: {f}");
+    assert!(first.summary.contains("operator.json"), "maintainers still see how to allow it: {}", first.summary);
+    assert_eq!(first.posted.len(), 1);
+    assert!(first.posted[0].contains("@claude") && first.posted[0].contains("attempt 1 of 2") && first.posted[0].contains(&format!("<!-- kern-feedback:v1 head={} -->", widened.head)), "{}", first.posted[0]);
+    // the cap counts the commits Kern rejected, from Kern's own comments only; once used up a human is asked instead
+    let (a, b) = ("1".repeat(40), "2".repeat(40));
+    let bot = "github-actions[bot]";
+    let exhausted = check_pr_with(&widened, &widened.envelope, &comments_api(previous(&[(bot, &a), ("mallory", &"3".repeat(40)), (bot, &b), (bot, &b)])), &on);
+    assert!(!exhausted.posted[0].contains("@claude") && exhausted.posted[0].contains("attempt 3") && exhausted.posted[0].contains("human"), "{}", exhausted.posted[0]);
+    // a re-run or an edited description on the same commit is not another attempt and adds no comment
+    let rerun = check_pr_with(&widened, &widened.envelope, &comments_api(previous(&[(bot, &a), (bot, &widened.head)])), &on);
+    assert!(rerun.code == Some(1) && rerun.posted.is_empty() && rerun.feedback.as_ref().unwrap()["attempt"] == 2, "{:?} {:?}", rerun.posted, rerun.feedback);
+    // an agent that pushes its fix to the kern/ branch is told to run Kern again, because the proof covers one exact commit
+    let mut pushed = pr_gate("export const add = (a, b) => a + b;\n");
+    let mut files = git::read_commit(&pushed.repo, &pushed.head, 1048576, 16777216).unwrap();
+    files.insert("src/add.mjs".into(), file("export const add = (a, b) => b + a;\n"));
+    pushed.head = git::write_commit(&pushed.repo, &files, Some(&pushed.head), "pushed").unwrap();
+    let stale = check_pr_with(&pushed, &pushed.envelope, &comments_api("[]".into()), &on);
+    let sf = stale.feedback.clone().unwrap();
+    assert!(stale.code == Some(1) && sf["agent_fixable"] == true && sf["violations"][0]["rule"] == "proof-stale", "{sf}");
+    assert!(stale.posted[0].contains("@claude") && stale.posted[0].contains("kern run"), "{}", stale.posted[0]);
+    // something the agent cannot fix never pings it
+    let forged = attest::sign(&serde_json::from_slice::<Value>(&unb64(widened.envelope["payload"].as_str().unwrap()).unwrap()).unwrap()["predicate"][attest::EXTENSION], &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
+    let untrusted = check_pr_with(&widened, &forged, &comments_api("[]".into()), &on);
+    assert!(untrusted.code == Some(1) && !untrusted.posted[0].contains("@claude") && untrusted.posted[0].contains("not something the agent can fix"), "{}", untrusted.posted[0]);
+    // a verified change after earlier rejections says so, and the rejected attempts stay in the thread
+    let fixed = pr_gate("export const add = (a, b) => a + b;\n");
+    let pass = check_pr_with(&fixed, &fixed.envelope, &comments_api(previous(&[(bot, &a)])), &on);
+    assert_eq!(pass.code, Some(0));
+    assert!(pass.summary.contains("after 1 rejected attempt") && pass.output.contains("status=PASS"), "{}", pass.summary);
+    assert!(pass.posted.len() == 1 && pass.posted[0].contains("after 1 rejected attempt") && !pass.posted[0].contains("<!-- kern-feedback:v1 head="), "{:?}", pass.posted);
+    assert!(check_pr_with(&fixed, &fixed.envelope, &comments_api("[]".into()), &on).posted.is_empty(), "a first-time pass adds no comment");
+    // the verdict never depends on GitHub accepting the comment, and comments are opt-in
+    let down = stub_api(|_, _| (500, "{}".into()));
+    let failed_post = check_pr_with(&widened, &widened.envelope, &down, &on);
+    assert!(failed_post.code == Some(1) && failed_post.summary.contains("could not post") && failed_post.feedback.is_some(), "{}", failed_post.summary);
+    let quiet = check_pr_with(&widened, &widened.envelope, &comments_api("[]".into()), &[]);
+    assert!(quiet.code == Some(1) && quiet.posted.is_empty() && quiet.feedback.is_some());
+    assert!(quiet.output.contains("status=DENIED"));
+}
+
+#[test]
+fn container_run_feeds_rejections_back_to_the_agent_until_it_complies() {
+    if !container_ready() { return; }
+    let t = Temp::new();
+    let repo = t.join("repo");
+    sh(&t.0, &["init", "-q", "repo"]);
+    sh(&repo, &["config", "core.autocrlf", "false"]);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/add.mjs"), "export const add = (a, b) => a - b;\n").unwrap();
+    std::fs::write(repo.join("README.md"), "# fixture\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "base"]);
+    let base = sh(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
+    // attempt 1 strays outside its grant; told why, it restores README.md and makes the real fix
+    let agent = "const fs = require('fs'); const raw = process.env.KERN_FEEDBACK; \
+        if (!raw) { fs.writeFileSync('README.md', 'agent was here\\n'); process.exit(0); } \
+        const f = JSON.parse(raw); \
+        if (f.schema !== 'kern-feedback/v1' || f.attempt !== 1 || f.max_attempts !== 3 || f.violations[0].rule !== 'scope' || f.violations[0].path !== 'README.md') process.exit(9); \
+        fs.writeFileSync('README.md', '# fixture\\n'); fs.writeFileSync('src/add.mjs', 'export const add = (a, b) => a + b;\\n');";
+    let run = |name: &str, script: &str, attempts: u64| {
+        std::fs::write(t.join(name), json!({ "version": 2, "repo": "./repo", "base": base, "contract": "./task.json", "image": NODE, "attempts": attempts,
+            "command": ["/usr/local/bin/node", "-e", script], "network": false, "output": "./runs", "promote": true }).to_string()).unwrap();
+        kern::local::local_run(&kern::local::run_job(&t.join(name)).unwrap()).unwrap()
+    };
+    let r = run("loop.json", agent, 3);
+    assert_eq!(r["status"], "GREEN", "{r}");
+    let attempts = r["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{r}");
+    assert_eq!((attempts[0]["status"].as_str(), attempts[0]["feedback"]["violations"][0]["rule"].as_str(), attempts[1]["status"].as_str()), (Some("BLOCKED"), Some("scope"), Some("GREEN")), "{r}");
+    assert!(r["summary"].as_str().unwrap().contains("after 1 rejected attempt"), "{r}");
+    let branch = r["promotion"]["branch"].as_str().unwrap();
+    assert_eq!(sh(&repo, &["show", &format!("{branch}:src/add.mjs")]), "export const add = (a, b) => a + b;");
+    assert_eq!(sh(&repo, &["show", &format!("{branch}:README.md")]), "# fixture", "the agent undid its out-of-scope edit");
+    // the job's own attempt cap holds, and something the agent cannot fix is not retried
+    let stubborn = run("stubborn.json", "require('fs').writeFileSync('README.md', 'again\\n')", 2);
+    assert!(stubborn["status"] == "BLOCKED" && stubborn["attempts"].as_array().unwrap().len() == 2 && stubborn["feedback"]["violations"][0]["rule"] == "scope", "{stubborn}");
+    let hungry = run("hungry.json", "const a = []; for (;;) a.push(Buffer.alloc(1 << 20, 1));", 3);
+    assert!(hungry["status"] == "BLOCKED" && hungry["attempts"].as_array().unwrap().len() == 1 && hungry["feedback"]["agent_fixable"] == false, "{hungry}");
+}
+
+fn git_at(dir: &Path, date: &str, args: &[&str]) -> String {
+    let out = Command::new("git").args(args).current_dir(dir).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_AUTHOR_DATE", date).env("GIT_COMMITTER_DATE", date).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+#[test]
+fn merge_audit_reverifies_every_change_to_the_branch_and_lists_the_gaps() {
+    let f = fixture();
+    let repo = f.t.join("audited");
+    sh(&f.t.0, &["init", "-q", "audited"]);
+    sh(&repo, &["config", "core.autocrlf", "false"]);
+    for (p, c) in &f.original { std::fs::create_dir_all(repo.join(p).parent().unwrap()).unwrap(); std::fs::write(repo.join(p), c.bytes.as_deref().unwrap()).unwrap(); }
+    std::fs::create_dir_all(repo.join(".github/kern/tasks")).unwrap();
+    std::fs::write(repo.join(".github/kern/operator.json"), operator_value(&["external"]).to_string()).unwrap();
+    std::fs::write(repo.join(".github/kern/verifier.pub"), &f.public).unwrap();
+    std::fs::write(repo.join(".github/kern/tasks/fix-addition.json"), policy_value().to_string()).unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2026-01-10T10:00:00Z", &["commit", "-qm", "setup"]);
+    let main = |sha: &str| { sh(&repo, &["update-ref", "refs/heads/audit-main", sha]); sh(&repo, &["reset", "-q", "--hard", sha]); };
+    let setup = sh(&repo, &["rev-parse", "HEAD"]);
+    let (policy, op) = (contract(&policy_value()).unwrap(), operator(&operator_value(&["external"])).unwrap());
+    let agent_change = |base: &str, text: &str| -> String {
+        let mut files = git::read_commit(&repo, base, 1048576, 16777216).unwrap();
+        files.insert("src/add.mjs".into(), file(text));
+        git::write_commit(&repo, &files, Some(base), "fix-addition").unwrap()
+    };
+    let proof = |base: &str, head: &str, key: &SigningKey| -> (String, Value) {
+        let run_id = uuid4().unwrap();
+        let manifest = digest(&git::manifest(&repo, head, 65536, 1048576).unwrap()).unwrap();
+        (run_id.clone(), attest::sign(&kern_payload(&policy, &op, &run_id, base, head, &manifest, now_ms() - 1000), &KeySource::File(key.clone())).unwrap())
+    };
+    let squash = |head: &str, parent: &str, date: &str, title: &str| git_at(&repo, date, &["commit-tree", &format!("{head}^{{tree}}"), "-p", parent, "-m", title]);
+    // PR 1: an agent change with a valid proof, squash-merged
+    let h1 = agent_change(&setup, "export const add = (a, b) => a + b;\n");
+    sh(&repo, &["update-ref", "refs/remotes/pull/1/head", &h1]);
+    let (run1, env1) = proof(&setup, &h1, &f.key);
+    let m1 = squash(&h1, &setup, "2026-04-02T10:00:00Z", "Kern: fix-addition (#1)");
+    main(&m1);
+    // PR 2: an ordinary human change
+    std::fs::write(repo.join("README.md"), "A fixture, now documented\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2026-04-10T10:00:00Z", &["commit", "-qm", "Docs (#2)"]);
+    let m2 = sh(&repo, &["rev-parse", "HEAD"]);
+    // a direct push that skipped pull requests, with a hostile subject
+    std::fs::write(repo.join("src/other.mjs"), "export const other = 1;\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2026-04-15T10:00:00Z", &["commit", "-qm", "=cmd|' /C calc'!A0 <script>alert(1)</script>"]);
+    let d1 = sh(&repo, &["rev-parse", "HEAD"]);
+    // PR 3: an agent branch whose proof was signed by some other key
+    let h3 = agent_change(&d1, "export const add = (a, b) => b + a;\n");
+    sh(&repo, &["update-ref", "refs/remotes/pull/3/head", &h3]);
+    let (run3, env3) = proof(&d1, &h3, &SigningKey::from_bytes(&random_bytes::<32>().unwrap()));
+    let m3 = squash(&h3, &d1, "2026-04-20T10:00:00Z", "Kern: fix-addition (#3)");
+    main(&m3);
+    // PR 4: someone changes the gate's own configuration
+    std::fs::write(repo.join(".github/kern/tasks/fix-addition.json"), serde_json::to_string_pretty(&policy_value()).unwrap()).unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2026-05-01T10:00:00Z", &["commit", "-qm", "Tune the Kern task (#4)"]);
+    let c1 = sh(&repo, &["rev-parse", "HEAD"]);
+    // PR 5: an agent change whose head commit was never fetched into this checkout
+    let h5 = agent_change(&c1, "export const add = (a, b) => (a + b);\n");
+    let (run5, env5) = proof(&c1, &h5, &f.key);
+    let m5 = squash(&h5, &c1, "2026-05-10T10:00:00Z", "Kern: fix-addition (#5)");
+    main(&m5);
+    // PR 6 went into another branch; the same commit then reached this branch by a direct push
+    std::fs::write(repo.join("src/release.mjs"), "export const r = 1;\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2026-05-12T10:00:00Z", &["commit", "-qm", "Release fix (#6)"]);
+    let r6 = sh(&repo, &["rev-parse", "HEAD"]);
+    // a direct push dated before the quarter, then an ordinary change: a false date hides neither
+    std::fs::write(repo.join("src/late.mjs"), "export const late = 1;\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2025-12-01T10:00:00Z", &["commit", "-qm", "Backdated push"]);
+    let bd = sh(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("README.md"), "A fixture, documented twice\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    git_at(&repo, "2026-05-20T10:00:00Z", &["commit", "-qm", "Docs again (#7)"]);
+    let m7 = sh(&repo, &["rev-parse", "HEAD"]);
+    main(&m7);
+    sh(&repo, &["reflog", "expire", "--expire=now", "--all"]);
+    sh(&repo, &["gc", "-q", "--prune=now"]);
+    assert!(Command::new("git").args(["cat-file", "-e", &h5]).current_dir(&repo).status().unwrap().code() != Some(0), "the head of PR 5 must be absent");
+
+    let pr_into = |into: &str, n: u64, branch: &str, head: &str, base: &str, merged: &str, body: String| json!([{ "number": n, "title": format!("PR {n}"), "html_url": format!("https://github.com/acme/project/pull/{n}"),
+        "merged_at": "2026-04-30T00:00:00Z", "merge_commit_sha": merged, "user": { "login": "dev" }, "head": { "ref": branch, "sha": head }, "base": { "ref": into, "sha": base }, "body": body }]);
+    let pr = |n: u64, branch: &str, head: &str, base: &str, merged: &str, body: String| pr_into("audit-main", n, branch, head, base, merged, body);
+    let body = |run_id: &str, head: &str, base: &str, envelope: &Value| promote::pr_body("fix-addition", &promote::Decision { repository: "acme/project".into(), branch: format!("kern/fix-addition/{run_id}"),
+        base: base.into(), commit: head.into(), run_id: run_id.into(), attestation: Value::Null }, envelope).unwrap();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(format!("/repos/acme/project/commits/{m1}/pulls"), pr(1, &format!("kern/fix-addition/{run1}"), &h1, &setup, &m1, body(&run1, &h1, &setup, &env1)).to_string());
+    routes.insert(format!("/repos/acme/project/commits/{m2}/pulls"), pr(2, "feature/docs", &m2, &m1, &m2, "Docs".into()).to_string());
+    routes.insert(format!("/repos/acme/project/commits/{d1}/pulls"), "[]".into());
+    routes.insert(format!("/repos/acme/project/commits/{m3}/pulls"), pr(3, &format!("kern/fix-addition/{run3}"), &h3, &d1, &m3, body(&run3, &h3, &d1, &env3)).to_string());
+    routes.insert(format!("/repos/acme/project/commits/{c1}/pulls"), pr(4, "chore/kern", &c1, &m3, &c1, "Tune".into()).to_string());
+    routes.insert(format!("/repos/acme/project/commits/{m5}/pulls"), pr(5, &format!("kern/fix-addition/{run5}"), &h5, &c1, &m5, body(&run5, &h5, &c1, &env5)).to_string());
+    routes.insert(format!("/repos/acme/project/commits/{r6}/pulls"), pr_into("release", 6, "fix/release", &r6, &m5, &r6, "Release".into()).to_string());
+    routes.insert(format!("/repos/acme/project/commits/{bd}/pulls"), "[]".into());
+    routes.insert(format!("/repos/acme/project/commits/{m7}/pulls"), pr(7, "feature/more-docs", &m7, &bd, &m7, "More docs".into()).to_string());
+    for (head, conclusion) in [(&h1, "success"), (&h3, "failure"), (&h5, "success")] {
+        routes.insert(format!("/repos/acme/project/commits/{head}/check-runs"), json!({ "total_count": 1, "check_runs": [{ "name": "kern-verified", "conclusion": conclusion }] }).to_string());
+    }
+    let api = stub_api(move |method, path| {
+        let route = path.split('?').next().unwrap_or(path);
+        match (method, routes.get(route)) { ("GET", Some(reply)) => (200, reply.clone()), _ => (404, "{}".into()) }
+    });
+    let audit = |period: &str, key: Option<&Path>, name: &str| {
+        let out = f.t.join(name);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kern"));
+        cmd.arg("audit-merges").arg(&repo).arg("audit-main").arg(period).arg(&out);
+        if let Some(k) = key { cmd.arg(k); }
+        let done = cmd.env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k").env("GITHUB_REPOSITORY", "acme/project").output().unwrap();
+        (done.status.code(), out, String::from_utf8_lossy(&done.stderr).to_string())
+    };
+
+    let (code, out, err) = audit("2026-Q2", None, "q2");
+    assert_eq!(code, Some(2), "a quarter with gaps fails: {err}");
+    let report: Value = serde_json::from_str(&std::fs::read_to_string(out.join("report.json")).unwrap()).unwrap();
+    let change = |sha: &str| report["changes"].as_array().unwrap().iter().find(|c| c["commit"] == sha).cloned().unwrap_or_else(|| panic!("{sha} missing: {report}"));
+    assert_eq!(report["schema"], "kern-merge-audit/v1");
+    assert_eq!(report["changes"].as_array().unwrap().len(), 9, "every change in the quarter, and nothing from before it: {report}");
+    assert_eq!((report["history"]["first"].as_str(), report["history"]["last"].as_str(), report["history"]["tip"].as_str()), (Some(m1.as_str()), Some(m7.as_str()), Some(m7.as_str())), "{report}");
+    let (v1, o2, p1, x3, g4, u5) = (change(&m1), change(&m2), change(&d1), change(&m3), change(&c1), change(&m5));
+    let (r6, bd, o7) = (change(&r6), change(&bd), change(&m7));
+    assert!(r6["category"] == "direct-push" && r6["gap"] == true && r6["reason"].as_str().unwrap().contains("audit-main"), "a pull request into another branch does not cover this one: {r6}");
+    assert!(bd["category"] == "direct-push" && bd["flags"].as_array().unwrap().iter().any(|f| f == "backdated"), "{bd}");
+    assert_eq!(o7["category"], "ordinary", "{o7}");
+    assert_eq!((v1["category"].as_str(), v1["gap"].as_bool(), v1["proof"]["task"].as_str(), v1["proof"]["check_run"].as_str()), (Some("verified"), Some(false), Some("fix-addition"), Some("success")), "{v1}");
+    assert!(v1["proof"]["checks"].as_array().unwrap().iter().any(|c| c == "capabilities"), "{v1}");
+    assert_eq!((o2["category"].as_str(), o2["gap"].as_bool()), (Some("ordinary"), Some(false)), "{o2}");
+    assert_eq!((p1["category"].as_str(), p1["gap"].as_bool()), (Some("direct-push"), Some(true)), "{p1}");
+    assert!(x3["category"] == "invalid-proof" && x3["gap"] == true && x3["reason"].as_str().unwrap().contains("Untrusted signing key"), "{x3}");
+    assert!(g4["category"] == "ordinary" && g4["flags"].as_array().unwrap().iter().any(|f| f == "gate-config"), "{g4}");
+    assert!(u5["category"] == "unverifiable" && u5["gap"] == true && u5["reason"].as_str().unwrap().contains("git fetch"), "{u5}");
+    let s = &report["summary"];
+    assert_eq!((s["status"].as_str(), s["changes"].as_u64(), s["verified"].as_u64(), s["gaps"].as_u64(), s["gate_config_changes"].as_u64(), s["date_anomalies"].as_u64()), (Some("GAPS"), Some(9), Some(1), Some(5), Some(1), Some(1)), "{s}");
+    let statement = report["statement"].as_str().unwrap();
+    assert!(statement.contains("not what the agent did while writing it") && !statement.contains("protected"), "{report}");
+    assert!(report["controls"].as_array().unwrap().iter().any(|c| c["control"].as_str().unwrap().contains("CC8.1")), "{report}");
+    let html = std::fs::read_to_string(out.join("report.html")).unwrap();
+    assert!(html.contains("&lt;script&gt;") && !html.contains("<script>alert"), "agent and author text is escaped in the dashboard");
+    let csv = std::fs::read_to_string(out.join("report.csv")).unwrap();
+    assert_eq!(csv.lines().count(), 10, "{csv}");
+    assert!(csv.lines().any(|l| l.contains("\"'=cmd|")), "spreadsheet formulas in commit subjects are neutralised: {csv}");
+    // a period holding only the verified agent change is covered
+    let (code, out, err) = audit("2026-04-01..2026-04-05", None, "early");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(out.join("report.json")).unwrap()).unwrap()["summary"]["status"], "COVERED");
+    // an auditor can insist on their own copy of the verifier key
+    std::fs::write(f.t.join("auditor.pub"), attest::keypair().unwrap().1).unwrap();
+    let (code, out, _) = audit("2026-04-01..2026-04-05", Some(&f.t.join("auditor.pub")), "own-key");
+    assert_eq!(code, Some(2));
+    let own: Value = serde_json::from_str(&std::fs::read_to_string(out.join("report.json")).unwrap()).unwrap();
+    assert!(own["changes"][0]["category"] == "invalid-proof" && own["trusted_key"].as_str().unwrap().contains("supplied"), "{own}");
+    // an incomplete history is refused rather than audited
+    let path = repo.display().to_string().replace('\\', "/");
+    sh(&f.t.0, &["clone", "-q", "--depth", "1", &if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") }, "shallow"]);
+    let shallow = Command::new(env!("CARGO_BIN_EXE_kern")).arg("audit-merges").arg(f.t.join("shallow")).arg("HEAD").arg("2026-Q2").arg(f.t.join("shallow-out"))
+        .env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k").env("GITHUB_REPOSITORY", "acme/project").output().unwrap();
+    assert!(shallow.status.code() == Some(1) && String::from_utf8_lossy(&shallow.stderr).contains("shallow"), "{shallow:?}");
+    sh(&f.t.0, &["clone", "-q", &if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") }, "partial"]);
+    sh(&f.t.join("partial"), &["config", "remote.origin.promisor", "true"]);
+    sh(&f.t.join("partial"), &["config", "remote.origin.partialclonefilter", "blob:none"]);
+    let partial = Command::new(env!("CARGO_BIN_EXE_kern")).arg("audit-merges").arg(f.t.join("partial")).arg("HEAD").arg("2026-Q2").arg(f.t.join("partial-out"))
+        .env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k").env("GITHUB_REPOSITORY", "acme/project").output().unwrap();
+    assert!(partial.status.code() == Some(1) && String::from_utf8_lossy(&partial.stderr).contains("partial clone"), "{partial:?}");
+    denied(kern::merges::period("2026-Q5"), "period");
+    assert_eq!(kern::merges::period("2026-Q1").unwrap(), ("2026-01-01".to_string(), "2026-03-31".to_string()));
+    assert_eq!(kern::merges::period("2026-02-01..2026-02-28").unwrap(), ("2026-02-01".to_string(), "2026-02-28".to_string()));
+}
+
 #[test]
 fn ingest_accepts_external_agent_commits_only_within_the_contract() {
     let t = Temp::new();
@@ -618,6 +1343,7 @@ fn ingest_accepts_external_agent_commits_only_within_the_contract() {
     let blocked = flow::task(&job, flow::Source::Ingest(&agent, &bad)).unwrap();
     assert_eq!(blocked["status"], "BLOCKED");
     assert!(blocked["reason"].as_str().unwrap().contains("outside contract"));
+    assert_eq!((blocked["feedback"]["schema"].as_str(), blocked["feedback"]["violations"][0]["rule"].as_str()), (Some("kern-feedback/v1"), Some("scope")), "{blocked}");
 }
 #[test]
 fn lockfiles_must_pin_every_package_to_the_registry_with_integrity() {
@@ -669,111 +1395,465 @@ fn docker_and_container_configuration_cannot_be_widened() {
     denied(sandbox::container_args(&Spec { network: "bridge", ..spec }, "kern-x"), "Only dependency setup");
 }
 
-#[cfg(windows)]
-fn win(p: &Path) -> String { p.display().to_string() }
-#[cfg(windows)]
-#[test]
-fn windows_box_blocks_escape_reads_writes_and_local_network() {
-    let t = Temp::new();
-    let ws = t.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    let outside = t.join("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    let victim = outside.join("victim.txt");
-    std::fs::write(&victim, "keep").unwrap();
-    let secret = outside.join("secret.env");
-    std::fs::write(&secret, "TOPSECRET=42").unwrap();
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || { for s in listener.incoming() { drop(s); } });
-    let control_reached = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
-
-    let rep = win(&ws.join("report.txt"));
-    let tpl = "$r='REP'; \
-        try{Set-Content -LiteralPath 'INS' -Value ok -ErrorAction Stop; Add-Content $r 'A inside ALLOWED'}catch{Add-Content $r 'A inside DENIED'}; \
-        try{Set-Content -LiteralPath 'VIC' -Value pwned -ErrorAction Stop; Add-Content $r 'B write-outside ALLOWED'}catch{Add-Content $r 'B write-outside DENIED'}; \
-        try{$c=[IO.File]::ReadAllText('SEC'); Add-Content $r ('D read-secret ALLOWED '+$c)}catch{Add-Content $r 'D read-secret DENIED'}; \
-        try{Remove-Item -LiteralPath 'VIC' -ErrorAction Stop; Add-Content $r 'C delete-outside ALLOWED'}catch{Add-Content $r 'C delete-outside DENIED'}; \
-        try{$t=New-Object Net.Sockets.TcpClient; $i=$t.BeginConnect('127.0.0.1',PORT,$null,$null); if($i.AsyncWaitHandle.WaitOne(1500) -and $t.Connected){Add-Content $r 'F loopback ALLOWED'}else{Add-Content $r 'F loopback DENIED'}; $t.Close()}catch{Add-Content $r 'F loopback DENIED'}";
-    let script = tpl
-        .replace("REP", &rep)
-        .replace("INS", &win(&ws.join("inside.txt")))
-        .replace("VIC", &win(&victim))
-        .replace("SEC", &win(&secret))
-        .replace("PORT", &port.to_string());
-    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    let job = json!({ "version": 1, "workspace": win(&ws), "tools": [], "denied": [], "network": false, "timeout_seconds": 60,
-        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", script] });
-    let parsed = kern::local::box_job(&job).unwrap();
-    let result = kern::local::run_box_job(&parsed).unwrap();
-    assert_eq!(result["status"], "OK", "{result}");
-
-    let report = std::fs::read_to_string(ws.join("report.txt")).expect("boxed process wrote report inside workspace");
-    assert!(report.contains("A inside ALLOWED"), "{report}");
-    assert!(report.contains("B write-outside DENIED"), "{report}");
-    assert!(report.contains("C delete-outside DENIED"), "{report}");
-    assert!(report.contains("D read-secret DENIED"), "{report}");
-    assert!(report.contains("F loopback DENIED"), "{report}");
-    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep", "box must not have modified the outside victim file");
-    assert!(control_reached, "independent control: the test process itself must reach the loopback listener the box was denied");
+const NODE: &str = "docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392";
+const IMAGE_ENV: [&str; 2] = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.23.3"];
+fn docker_info() -> Value {
+    json!({ "OSType": "linux", "OperatingSystem": "Docker Desktop", "ServerVersion": "29.8.1", "KernelVersion": "5.15.167.4-microsoft-standard-WSL2",
+        "SecurityOptions": ["name=seccomp,profile=builtin"], "MemoryLimit": true, "SwapLimit": true, "PidsLimit": true, "Runtimes": { "runc": {} } })
+}
+fn podman_info(controllers: &[&str]) -> Value {
+    json!({ "host": { "os": "linux", "cgroupControllers": controllers, "security": { "rootless": true, "capabilities": "CAP_CHOWN,CAP_KILL", "seccompEnabled": true, "selinuxEnabled": false } },
+        "version": { "Version": "4.9.3" } })
+}
+fn engine_of(info: &Value) -> container::Engine { container::engine_from_info(Path::new("/usr/bin/docker"), info).unwrap() }
+fn box_spec<'a>(ws: &'a Path, command: &'a [String], mounts: &'a [container::Mount], env: &'a [String], network: bool) -> container::BoxSpec<'a> {
+    container::BoxSpec { image: NODE, command, workspace: ws, mounts, env, network, timeout_seconds: 30, memory_mb: 256, pids: 64, feedback: None }
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_run_flow_boxes_agent_gates_output_and_promotes_create_only() {
+fn container_engines_are_recognised_from_docker_and_podman_info() {
+    let d = engine_of(&docker_info());
+    assert!(!d.podman && !d.rootless && !d.gvisor && !d.selinux && !d.desktop_vm && d.name == "Docker 29.8.1 (Docker Desktop)", "{d:?}");
+    d.usable().unwrap();
+    let mut info = docker_info();
+    info["Runtimes"]["runsc"] = json!({});
+    info["SecurityOptions"] = json!(["name=seccomp,profile=builtin", "name=rootless", "name=selinux"]);
+    let g = engine_of(&info);
+    assert!(g.gvisor && g.rootless && g.selinux && g.isolation() == "gVisor");
+    info["OSType"] = json!("windows");
+    denied(container::engine_from_info(Path::new("docker"), &info), "Linux containers");
+    // Docker Desktop's own VM (linuxkit kernel) maps the host user to root inside containers; WSL2 does not
+    let mut vm = docker_info();
+    vm["KernelVersion"] = json!("6.10.14-linuxkit");
+    assert!(engine_of(&vm).desktop_vm);
+    // without swap accounting a memory limit can be bypassed through swap
+    let mut swap = docker_info();
+    swap["SwapLimit"] = json!(false);
+    denied(engine_of(&swap).usable(), "memory and process limits");
+    // an engine without seccomp is refused, unless gVisor is the kernel boundary
+    let mut open = docker_info();
+    open["SecurityOptions"] = json!(["name=seccomp,profile=unconfined"]);
+    denied(engine_of(&open).usable(), "seccomp");
+    open["Runtimes"]["runsc"] = json!({});
+    engine_of(&open).usable().unwrap();
+    let p = engine_of(&podman_info(&["cpu", "memory", "pids"]));
+    assert!(p.podman && p.rootless && p.name == "Podman 4.9.3" && p.default_caps == ["CAP_CHOWN", "CAP_KILL"], "{p:?}");
+    p.usable().unwrap();
+    // rootless Podman on cgroup v1 silently ignores memory and process limits, so Kern refuses it
+    denied(engine_of(&podman_info(&[])).usable(), "memory and process limits");
+    let mut unconfined = podman_info(&["memory", "pids"]);
+    unconfined["host"]["security"]["seccompEnabled"] = json!(false);
+    denied(engine_of(&unconfined).usable(), "seccomp");
+    #[cfg(target_os = "linux")]
+    assert_eq!(container::identity(&engine_of(&vm)).0, "0:0", "Docker Desktop's VM shares files as root, so the agent runs as root there");
+}
+
+#[test]
+fn container_box_arguments_confine_the_agent() {
+    let t = Temp::new();
+    let command = vec!["/usr/local/bin/node".to_string(), "--agent-flag".into(), "--network=host".into()];
+    let mounts = vec![container::Mount { source: t.join("tool"), target: "/opt/tool".into() }];
+    let env = vec!["AGENT_TOKEN".to_string()];
+    let e = engine_of(&docker_info());
+    let a = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &e, "kern-box-1-x").unwrap();
+    for want in ["create", "--name=kern-box-1-x", "--label=kern.box=kern-box-1-x", "--read-only", "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64",
+                 "--memory=256m", "--memory-swap=256m", "--ipc=private", "--pull=never", "--log-driver=none", "--workdir=/workspace", "--entrypoint=/usr/local/bin/node", "--env=HOME=/home/kern", "--env=AGENT_TOKEN"] {
+        assert!(a.iter().any(|x| x == want), "{want} missing from {a:?}");
+    }
+    assert!(a.contains(&format!("--user={}", container::identity(&e).0)), "{a:?}");
+    let tmpfs: Vec<&String> = a.iter().filter(|x| x.starts_with("--tmpfs=")).collect();
+    assert!(tmpfs.len() == 2 && tmpfs.iter().all(|x| x.contains(",exec,") && !x.contains("noexec")), "every engine gets the same exec setting: {tmpfs:?}");
+    let image = a.iter().position(|x| x == NODE).unwrap();
+    assert_eq!(a[image + 1..], command[1..], "the agent's own flags follow the image, where the engine parses no options");
+    let binds: Vec<&String> = a.iter().filter(|x| x.starts_with("--mount=")).collect();
+    assert_eq!(binds.len(), 2, "{a:?}");
+    assert!(binds[0].starts_with("--mount=type=bind,source=") && binds[0].ends_with(",target=/workspace"), "{}", binds[0]);
+    assert!(binds[1].ends_with(",target=/opt/tool,readonly"), "{}", binds[1]);
+    assert!(!a[..image].iter().any(|x| x.starts_with("--runtime") || x == "--privileged" || x.starts_with("--network=host") || x.contains("docker.sock") || x.starts_with("--http-proxy")), "{a:?}");
+    let open = container::create_args(&box_spec(&t.0, &command, &mounts, &env, true), &e, "kern-box-1-x").unwrap();
+    let image = open.iter().position(|x| x == NODE).unwrap();
+    assert!(!open[..image].iter().any(|x| x.starts_with("--network")), "granted network is the engine's default network, never the host's");
+    let mut g = e.clone();
+    g.gvisor = true;
+    assert!(container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &g, "kern-box-1-x").unwrap().contains(&"--runtime=runsc".to_string()));
+    denied(container::create_args(&box_spec(&t.join("a,b"), &command, &mounts, &env, false), &e, "kern-box-1-x"), "comma");
+    // Podman copies the host's proxy variables (often with credentials) into containers unless told not to
+    let p = engine_of(&podman_info(&["memory", "pids"]));
+    let pa = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &p, "kern-box-1-x").unwrap();
+    assert!(pa.contains(&"--http-proxy=false".to_string()) && pa.contains(&"--memory-swap=256m".to_string()), "{pa:?}");
+    assert!(pa.iter().any(|x| x.starts_with("--tmpfs=/home/kern:") && x.ends_with(",U")), "{pa:?}");
+    // SELinux hosts relabel only the workspace Kern owns; the developer's own folders are never relabelled
+    let mut ps = p.clone();
+    ps.selinux = true;
+    let sa = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &ps, "kern-box-1-x").unwrap();
+    assert!(sa.iter().any(|x| x.starts_with("--mount=type=bind,") && x.ends_with(",target=/workspace,relabel=private")), "{sa:?}");
+    assert!(sa.iter().any(|x| x.ends_with(",target=/opt/tool,readonly")), "{sa:?}");
+    #[cfg(unix)]
+    {
+        // Docker's --mount cannot relabel, so SELinux Docker hosts (always Linux) get the workspace through --volume
+        let mut ds = e.clone();
+        ds.selinux = true;
+        let da = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &ds, "kern-box-1-x").unwrap();
+        assert!(da.contains(&format!("--volume={}:/workspace:Z", t.0.display())) && !da.iter().any(|x| x.ends_with(",target=/workspace")), "{da:?}");
+    }
+}
+
+fn inspected(spec: &container::BoxSpec, e: &container::Engine) -> Value {
+    let mut env: Vec<String> = IMAGE_ENV.iter().map(|s| s.to_string()).collect();
+    env.push("HOME=/home/kern".into());
+    env.extend(spec.env.iter().map(|n| format!("{n}=value")));
+    json!({ "Config": { "User": container::identity(e).0, "Env": env },
+        "HostConfig": { "ReadonlyRootfs": true, "Privileged": false, "NetworkMode": "none", "PidMode": "", "IpcMode": "private", "Devices": [], "CapDrop": ["ALL"], "CapAdd": null,
+            "SecurityOpt": ["no-new-privileges"], "Memory": spec.memory_mb * 1048576, "MemorySwap": spec.memory_mb * 1048576, "PidsLimit": spec.pids, "Runtime": "runc" },
+        "Mounts": [{ "Type": "bind", "Destination": "/workspace", "RW": true }, { "Type": "bind", "Destination": "/opt/tool", "RW": false }] })
+}
+#[test]
+fn container_inspection_refuses_a_box_the_engine_weakened() {
+    let t = Temp::new();
+    let command = vec!["/usr/local/bin/node".to_string()];
+    let mounts = vec![container::Mount { source: t.join("tool"), target: "/opt/tool".into() }];
+    let listed = vec!["AGENT_TOKEN".to_string()];
+    let image_env: Vec<String> = IMAGE_ENV.iter().map(|s| s.to_string()).collect();
+    let e = engine_of(&docker_info());
+    let spec = box_spec(&t.0, &command, &mounts, &listed, false);
+    container::confirm(&inspected(&spec, &e), &spec, &e, &image_env).unwrap();
+    for (pointer, value, needle) in [
+        ("/HostConfig/Memory", json!(0), "memory and process limits"), ("/HostConfig/PidsLimit", json!(0), "memory and process limits"),
+        ("/HostConfig/MemorySwap", json!(-1), "memory and process limits"), ("/HostConfig/NetworkMode", json!("bridge"), "network"),
+        ("/HostConfig/ReadonlyRootfs", json!(false), "read-only"), ("/HostConfig/Privileged", json!(true), "unprivileged"),
+        ("/HostConfig/CapDrop", json!([]), "capabilit"), ("/HostConfig/CapAdd", json!(["NET_RAW"]), "capabilit"),
+        ("/HostConfig/SecurityOpt", json!([]), "no-new-privileges"), ("/HostConfig/SecurityOpt", json!(["no-new-privileges", "seccomp=unconfined"]), "unconfined"),
+        ("/HostConfig/SecurityOpt", json!(["no-new-privileges", "label=disable"]), "unconfined"), ("/HostConfig/PidMode", json!("host"), "namespace"),
+        ("/HostConfig/IpcMode", json!("host"), "namespace"), ("/HostConfig/Devices", json!([{ "PathOnHost": "/dev/kvm" }]), "device"),
+        ("/Config/User", json!("4242:4242"), "user"), ("/Mounts/1/RW", json!(true), "mount"),
+    ] {
+        let mut i = inspected(&spec, &e);
+        *i.pointer_mut(pointer).unwrap() = value;
+        denied(container::confirm(&i, &spec, &e, &image_env), needle);
+    }
+    let mut extra = inspected(&spec, &e);
+    extra["Mounts"].as_array_mut().unwrap().push(json!({ "Type": "bind", "Destination": "/host", "RW": false }));
+    denied(container::confirm(&extra, &spec, &e, &image_env), "mount");
+    // variables the engine adds on its own (Docker's config.json proxies, Podman's containers.conf) are refused by name
+    let mut leaked = inspected(&spec, &e);
+    leaked["Config"]["Env"].as_array_mut().unwrap().extend([json!("HTTPS_PROXY=http://user:secret@proxy:3128"), json!("https_proxy=http://user:secret@proxy:3128")]);
+    denied(container::confirm(&leaked, &spec, &e, &image_env), "HTTPS_PROXY, https_proxy");
+    let open = box_spec(&t.0, &command, &mounts, &listed, true);
+    let mut host = inspected(&open, &e);
+    host["HostConfig"]["NetworkMode"] = json!("host");
+    denied(container::confirm(&host, &open, &e, &image_env), "network");
+    host["HostConfig"]["NetworkMode"] = json!("bridge");
+    container::confirm(&host, &open, &e, &image_env).unwrap();
+    // Podman lists each dropped capability instead of ALL, and always sets container=podman
+    let p = engine_of(&podman_info(&["memory", "pids"]));
+    let mut listed_caps = inspected(&spec, &p);
+    listed_caps["HostConfig"]["CapDrop"] = json!(["CAP_CHOWN", "CAP_KILL"]);
+    listed_caps["HostConfig"]["PidMode"] = json!("private");
+    listed_caps["Config"]["Env"].as_array_mut().unwrap().push(json!("container=podman"));
+    container::confirm(&listed_caps, &spec, &p, &image_env).unwrap();
+    listed_caps["HostConfig"]["CapDrop"] = json!(["CAP_CHOWN"]);
+    denied(container::confirm(&listed_caps, &spec, &p, &image_env), "capabilit");
+    let mut g = e.clone();
+    g.gvisor = true;
+    denied(container::confirm(&inspected(&spec, &g), &spec, &g, &image_env), "gVisor");
+}
+
+#[test]
+fn only_a_container_that_really_ran_counts_as_finished() {
+    let ran = |status: &str, code: i64, oom: bool, started: &str| json!({ "Status": status, "Running": status == "running", "ExitCode": code, "OOMKilled": oom, "StartedAt": started, "Error": "" });
+    assert_eq!(container::finished(&ran("exited", 3, false, "2026-10-07T16:52:14.4Z")).unwrap(), (3, false));
+    assert_eq!(container::finished(&ran("exited", 137, true, "2026-10-07 12:52:14 -0400 EDT")).unwrap(), (137, true));
+    // a container whose start never happened reports exit code 0; it must not read as success
+    denied(container::finished(&ran("created", 0, false, "0001-01-01T00:00:00Z")), "never started");
+    denied(container::finished(&ran("created", 0, false, "0001-01-01 00:00:00 +0000 UTC")), "never started");
+    denied(container::finished(&ran("running", 0, false, "2026-10-07T16:52:14.4Z")), "lost contact");
+    let mut failed = ran("exited", 127, false, "0001-01-01T00:00:00Z");
+    failed["Error"] = json!("exec: \"/usr/local/bin/agent\": no such file or directory");
+    denied(container::finished(&failed), "could not start the agent");
+}
+
+#[test]
+fn agent_output_cannot_imitate_or_hide_kern_messages() {
+    let line = container::agent_line(b"\x1b[8m\xe2\x9c\x93 Verified independently\rVERIFIED\x07\t\xc2\x9b2J\x7f done\n");
+    assert!(line.starts_with("[agent] "), "{line:?}");
+    assert!(!line.chars().any(|c| c.is_control() && c != '\t'), "terminal control characters reach the terminal: {line:?}");
+    assert!(line.contains("VERIFIED") && line.contains('\t'), "{line:?}");
+}
+
+#[test]
+fn box_and_run_jobs_name_a_pinned_linux_image_and_container_paths() {
+    let t = Temp::new();
+    let (ws, tool, comma) = (t.join("ws"), t.join("tool"), t.join("a,b"));
+    for d in [&ws, &tool, &comma] { std::fs::create_dir_all(d).unwrap(); }
+    let job = |patch: Value| {
+        let mut j = json!({ "version": 2, "image": NODE, "workspace": ws, "command": ["/usr/local/bin/node", "agent.js"], "network": false, "timeout_seconds": 60, "memory_mb": 512, "pids": 128,
+            "env": ["AGENT_TOKEN"], "mounts": [{ "source": tool, "target": "/opt/tool" }] });
+        for (k, v) in patch.as_object().unwrap() { if v.is_null() { j.as_object_mut().unwrap().remove(k); } else { j[k] = v.clone(); } }
+        j
+    };
+    let ok = kern::local::box_job(&job(json!({}))).unwrap();
+    assert_eq!((ok.memory_mb, ok.pids, ok.env.clone(), ok.mounts[0].target.as_str()), (512, 128, vec!["AGENT_TOKEN".to_string()], "/opt/tool"));
+    let bare = kern::local::box_job(&job(json!({ "env": null, "mounts": null }))).unwrap();
+    assert!(bare.env.is_empty() && bare.mounts.is_empty());
+    denied(kern::local::box_job(&json!({ "version": 1, "workspace": ws, "tools": [], "denied": [], "network": false, "timeout_seconds": 60, "command": ["C:/node.exe"] })), "Linux container");
+    denied(kern::local::box_job(&job(json!({ "image": "node:22" }))), "pinned by digest");
+    denied(kern::local::box_job(&job(json!({ "command": ["node", "agent.js"] }))), "absolute container path");
+    for names in [json!(["HOME"]), json!(["BAD-NAME"]), json!([""]), json!(["1X"]), json!(["A", "A"])] { denied(kern::local::box_job(&job(json!({ "env": names }))), "env"); }
+    for target in ["/workspace", "/workspace/x", "/tmp", "/home/kern/.cache", "relative", "/opt/../etc", "/", "/proc/x", "/opt/x,readonly=false"] {
+        denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": tool, "target": target }] }))), "mount target");
+    }
+    denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": tool, "target": "/opt/a" }, { "source": tool, "target": "/opt/a" }] }))), "mount target");
+    denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": t.join("missing"), "target": "/opt/x" }] }))), "mount source");
+    denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": comma, "target": "/opt/x" }] }))), "comma");
+    denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": ws, "target": "/opt/x" }] }))), "overlaps");
+    denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": t.0, "target": "/opt/x" }] }))), "overlaps");
+    denied(kern::local::box_job(&job(json!({ "memory_mb": 9000 }))), "memory_mb");
+    // run jobs: the retired Windows format gets a migration hint, and mounts may not expose the real repository
+    std::fs::create_dir_all(t.join("repo")).unwrap();
+    std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
+    let run = |patch: Value| {
+        let mut j = json!({ "version": 2, "repo": "./repo", "base": "a".repeat(40), "contract": "./task.json", "image": NODE, "command": ["/usr/local/bin/node", "agent.js"], "network": true,
+            "env": ["AGENT_TOKEN"], "mounts": [{ "source": tool, "target": "/opt/tool" }], "output": "./runs", "promote": false });
+        for (k, v) in patch.as_object().unwrap() { j[k] = v.clone(); }
+        std::fs::write(t.join("run.json"), j.to_string()).unwrap();
+        kern::local::run_job(&t.join("run.json"))
+    };
+    let r = run(json!({})).unwrap();
+    assert!(r.network && r.image == NODE && r.command[0] == "/usr/local/bin/node" && r.mounts.len() == 1 && r.env == ["AGENT_TOKEN"]);
+    denied(run(json!({ "version": 1, "tools": [] })), "Linux container");
+    denied(run(json!({ "mounts": [{ "source": t.join("repo"), "target": "/opt/repo" }] })), "overlaps");
+    denied(run(json!({ "output": "./a,b/runs" })), "comma");
+    // the overlap check sees through `..` and links in the output path
+    std::fs::create_dir_all(t.join("sub")).unwrap();
+    std::fs::create_dir_all(t.join("runs")).unwrap();
+    denied(run(json!({ "output": "./sub/../runs", "mounts": [{ "source": t.join("runs"), "target": "/opt/runs" }] })), "overlaps");
+}
+
+#[test]
+fn without_a_container_runtime_kern_says_what_to_install() {
+    let t = Temp::new();
+    let missing = t.join("no-such-runtime");
+    let repo = t.join("repo");
+    sh(&t.0, &["init", "-q", "repo"]);
+    std::fs::write(repo.join("README.md"), "x\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "base"]);
+    std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
+    std::fs::write(t.join("run.json"), json!({ "version": 2, "repo": "./repo", "base": sh(&repo, &["rev-parse", "HEAD"]), "contract": "./task.json", "image": NODE,
+        "command": ["/usr/local/bin/node", "-e", "0"], "network": false, "output": "./runs", "promote": false }).to_string()).unwrap();
+    std::fs::write(t.join("box.json"), json!({ "version": 2, "image": NODE, "workspace": repo, "command": ["/usr/local/bin/node", "-e", "0"], "network": false, "timeout_seconds": 10, "memory_mb": 64, "pids": 16 }).to_string()).unwrap();
+    let kern = |args: &[&std::ffi::OsStr]| Command::new(env!("CARGO_BIN_EXE_kern")).args(args).env("KERN_CONTAINER_CLI", &missing).output().unwrap();
+    let explains = |text: &str| text.contains("no container runtime is ready") && text.contains("Docker Desktop") && text.contains("WSL2");
+    let boxed = kern(&["box".as_ref(), t.join("box.json").as_os_str()]);
+    assert!(boxed.status.code() == Some(1) && explains(&String::from_utf8_lossy(&boxed.stderr)), "{boxed:?}");
+    let doctor = kern(&["doctor".as_ref()]);
+    assert!(doctor.status.code() == Some(2) && explains(&String::from_utf8_lossy(&doctor.stdout)), "{doctor:?}");
+    let run = kern(&["run".as_ref(), t.join("run.json").as_os_str()]);
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.code() == Some(1) && out.contains("BLOCKED: Kern runs agents in a Linux container") && explains(&out), "{run:?}");
+    assert!(std::fs::read_to_string(t.join("runs/audit.jsonl")).unwrap().contains("BLOCKED"), "the blocked run is still audited");
+}
+
+fn container_ready() -> bool {
+    match container::engine() {
+        Ok(_) => true,
+        Err(e) => {
+            assert!(std::env::var("KERN_REQUIRE_CONTAINER").as_deref() != Ok("1"), "KERN_REQUIRE_CONTAINER=1, but {e}");
+            eprintln!("skipping a container test: {e}");
+            false
+        }
+    }
+}
+fn containers_using(ws: &Path) -> usize {
+    let e = container::engine().unwrap();
+    let ids = Command::new(&e.cli).args(["ps", "--all", "--quiet", "--filter", "label=kern.box"]).output().unwrap().stdout;
+    String::from_utf8_lossy(&ids).split_whitespace().filter(|id| {
+        let out = Command::new(&e.cli).args(["inspect", "--type", "container", id]).output().unwrap().stdout;
+        serde_json::from_slice::<Value>(&out).ok().is_some_and(|v| v[0]["Mounts"].as_array().is_some_and(|m| m.iter().any(|m| m["Source"].as_str().is_some_and(|s| Path::new(s) == ws))))
+    }).count()
+}
+const PROBE: &str = r#"
+const fs = require('fs'), net = require('net'), os = require('os');
+const r = {};
+const attempt = (key, f) => { try { f(); r[key] = 'ok'; } catch (e) { r[key] = e.code || String(e); } };
+attempt('workspace', () => fs.writeFileSync('/workspace/inside.txt', 'x'));
+attempt('rootfs', () => fs.writeFileSync('/etc/kern-escape', 'x'));
+attempt('mount', () => fs.writeFileSync('/opt/tool/escape', 'x'));
+attempt('home', () => fs.writeFileSync(os.homedir() + '/state', 'x'));
+attempt('docker_socket', () => fs.statSync('/var/run/docker.sock'));
+r.passed = process.env.KERN_TEST_PASSED ?? null;
+r.hidden = process.env.KERN_TEST_HIDDEN ?? null;
+r.env = Object.keys(process.env).sort();
+const number = (...files) => { for (const f of files) { try { const v = fs.readFileSync(f, 'utf8').trim(); if (/^\d+$/.test(v)) return Number(v); } catch {} } return null; };
+r.memory = number('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes');
+r.pids = number('/sys/fs/cgroup/pids.max', '/sys/fs/cgroup/pids/pids.max');
+const finish = (v) => { r.network = v; fs.writeFileSync('/workspace/report.json', JSON.stringify(r)); process.exit(3); };
+const s = net.connect({ host: '1.1.1.1', port: 443, timeout: 3000 });
+s.on('connect', () => finish('reached'));
+s.on('error', (e) => finish('blocked ' + e.code));
+s.on('timeout', () => finish('blocked timeout'));
+"#;
+
+#[test]
+fn container_box_confines_the_agent_to_its_workspace() {
+    if !container_ready() { return; }
+    let t = Temp::new();
+    let (ws, tool) = (t.join("ws"), t.join("tool"));
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&tool).unwrap();
+    std::fs::write(tool.join("probe.js"), PROBE).unwrap();
+    std::fs::write(t.join("box.json"), json!({ "version": 2, "image": NODE, "workspace": ws, "command": ["/usr/local/bin/node", "/opt/tool/probe.js"], "network": false,
+        "timeout_seconds": 120, "memory_mb": 256, "pids": 64, "env": ["KERN_TEST_PASSED"], "mounts": [{ "source": tool, "target": "/opt/tool" }] }).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_kern")).arg("box").arg(t.join("box.json")).env("KERN_TEST_PASSED", "visible").env("KERN_TEST_HIDDEN", "secret").output().unwrap();
+    let r: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!((out.status.code(), r["status"].as_str(), r["exit_code"].as_i64()), (Some(3), Some("EXITED"), Some(3)), "the agent's exit code comes back: {r}");
+    let report: Value = serde_json::from_slice(&std::fs::read(ws.join("report.json")).unwrap()).unwrap();
+    assert_eq!([&report["workspace"], &report["rootfs"], &report["mount"], &report["home"], &report["docker_socket"]], [&json!("ok"), &json!("EROFS"), &json!("EROFS"), &json!("ok"), &json!("ENOENT")], "{report}");
+    assert_eq!((&report["passed"], &report["hidden"]), (&json!("visible"), &Value::Null), "only listed variables reach the agent: {report}");
+    for host_only in ["USERPROFILE", "SystemRoot", "USER", "SHELL", "SSH_AUTH_SOCK", "KERN_TEST_HIDDEN"] {
+        assert!(!report["env"].as_array().unwrap().iter().any(|k| k == host_only), "{host_only} reached the agent: {report}");
+    }
+    assert!(report["network"].as_str().unwrap().starts_with("blocked"), "{report}");
+    if !report["memory"].is_null() { assert_eq!(report["memory"], 256 * 1048576, "{report}"); }
+    if !report["pids"].is_null() { assert_eq!(report["pids"], 64, "{report}"); }
+    assert_eq!(containers_using(&ws), 0, "the container is gone before Kern returns");
+}
+
+#[test]
+fn container_run_boxes_the_agent_gates_its_output_and_promotes_create_only() {
+    if !container_ready() { return; }
     let t = Temp::new();
     let repo = t.join("repo");
-    std::fs::create_dir_all(repo.join("src")).unwrap();
     sh(&t.0, &["init", "-q", "repo"]);
     sh(&repo, &["config", "core.autocrlf", "false"]);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src/add.mjs"), "export const add = (a, b) => a - b;\n").unwrap();
     std::fs::write(repo.join("README.md"), "# fixture\n").unwrap();
     sh(&repo, &["add", "-A"]);
     sh(&repo, &["commit", "-qm", "base"]);
     let base = sh(&repo, &["rev-parse", "HEAD"]);
-
-    let contract = json!({ "version": 2, "task": "fix-addition", "filesystem": { "read": ["README.md", "src/", "test/"], "write": ["src/", "test/"] },
-        "network": [], "secrets": [], "publish": false, "dependencies": null,
-        "limits": { "files_changed": 8, "lines_changed": 200, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 30, "memory_mb": 256, "pids": 64 }, "required_checks": ["build"] });
-    std::fs::write(t.join("task.json"), contract.to_string()).unwrap();
-    let cmd = r"C:\Windows\System32\cmd.exe";
-    let runs = win(&t.join("runs"));
-
-    let green = json!({ "version": 1, "repo": win(&repo), "base": base, "contract": "./task.json", "tools": [],
-        "command": [cmd, "/c", ">src\\note.txt echo hello"], "network": false, "output": runs, "promote": true });
-    std::fs::write(t.join("run-green.json"), green.to_string()).unwrap();
-    let r = kern::local::local_run(&kern::local::run_job(&t.join("run-green.json")).unwrap()).unwrap();
+    std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
+    let run = |name: &str, script: &str| {
+        std::fs::write(t.join(name), json!({ "version": 2, "repo": "./repo", "base": base, "contract": "./task.json", "image": NODE,
+            "command": ["/usr/local/bin/node", "-e", script], "network": false, "output": "./runs", "promote": true }).to_string()).unwrap();
+        kern::local::local_run(&kern::local::run_job(&t.join(name)).unwrap()).unwrap()
+    };
+    let r = run("green.json", "require('fs').writeFileSync('src/add.mjs', 'export const add = (a, b) => a + b;\\n')");
     assert_eq!(r["status"], "GREEN", "{r}");
     let branch = r["promotion"]["branch"].as_str().unwrap().to_string();
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), base, "the real HEAD must not move");
     assert_eq!(std::fs::read_to_string(repo.join("src/add.mjs")).unwrap(), "export const add = (a, b) => a - b;\n", "the real working tree must be untouched");
-    assert_eq!(sh(&repo, &["cat-file", "-t", &format!("{branch}:src/note.txt")]), "blob", "the promoted branch must carry the agent's change");
+    assert_eq!(sh(&repo, &["show", &format!("{branch}:src/add.mjs")]), "export const add = (a, b) => a + b;", "the promoted branch carries the agent's change");
+    assert!(r["box"]["engine"].is_string() && r["box"]["image"] == NODE, "{r}");
+    let outside = run("outside.json", "require('fs').writeFileSync('README.md', 'x\\n')");
+    assert!(outside["status"] == "BLOCKED" && outside["promotion"].is_null(), "an out-of-contract change is not promoted: {outside}");
+    let big = run("big.json", "require('fs').writeFileSync('src/big.txt', 'x'.repeat(100000))");
+    assert!(big["status"] == "BLOCKED" && big["summary"].as_str().unwrap().contains("byte limits"), "unreadable output is a verdict, not an error: {big}");
+    let hungry = run("hungry.json", "const a = []; for (;;) a.push(Buffer.alloc(1 << 20, 1));");
+    assert!(hungry["status"] == "BLOCKED" && hungry["summary"].as_str().unwrap().contains("ran out of memory"), "{hungry}");
+    let branches = sh(&repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/kern/"]);
+    assert_eq!(branches.lines().count(), 1, "only the green run may create a branch: {branches}");
+}
 
-    let blocked = json!({ "version": 1, "repo": win(&repo), "base": base, "contract": "./task.json", "tools": [],
-        "command": [cmd, "/c", ">README.md echo x"], "network": false, "output": runs, "promote": true });
-    std::fs::write(t.join("run-blocked.json"), blocked.to_string()).unwrap();
-    let r2 = kern::local::local_run(&kern::local::run_job(&t.join("run-blocked.json")).unwrap()).unwrap();
-    assert_eq!(r2["status"], "BLOCKED", "{r2}");
-    assert!(r2["promotion"].is_null(), "an out-of-contract change must not be promoted");
-    let kern_branches = sh(&repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/kern/"]);
-    assert_eq!(kern_branches.lines().count(), 1, "only the green run may create a branch: {kern_branches}");
+#[test]
+fn container_box_stops_an_agent_that_outlives_its_deadline() {
+    if !container_ready() { return; }
+    let t = Temp::new();
+    let ws = t.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let job = json!({ "version": 2, "image": NODE, "workspace": ws, "command": ["/usr/local/bin/node", "-e", "setInterval(() => {}, 1000)"], "network": false, "timeout_seconds": 3, "memory_mb": 128, "pids": 32 });
+    let started = std::time::Instant::now();
+    let r = kern::local::run_box_job(&kern::local::box_job(&job).unwrap());
+    assert!(started.elapsed() < std::time::Duration::from_secs(60), "the box gave up after {:?}", started.elapsed());
+    denied(r, "did not finish within 3 seconds");
+    assert_eq!(containers_using(&ws), 0, "a stopped agent's container is removed");
+}
+
+fn slow_box(t: &Temp, name: &str, configure: impl FnOnce(&mut Command)) -> (std::process::Child, PathBuf) {
+    let ws = t.join(name);
+    std::fs::create_dir_all(&ws).unwrap();
+    let job = t.join(&format!("{name}.json"));
+    std::fs::write(&job, json!({ "version": 2, "image": NODE, "workspace": ws, "network": false, "timeout_seconds": 600, "memory_mb": 256, "pids": 64,
+        "command": ["/usr/local/bin/node", "-e", "require('fs').writeFileSync('started', ''); setInterval(() => {}, 1000)"] }).to_string()).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_kern"));
+    cmd.arg("box").arg(&job).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    configure(&mut cmd);
+    let child = cmd.spawn().unwrap();
+    let started = std::time::Instant::now();
+    while !ws.join("started").exists() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(120), "the agent never started");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    (child, ws)
+}
+fn stopped_cleanly(child: std::process::Child, ws: &Path, how: &str) {
+    let sent = std::time::Instant::now();
+    let out = child.wait_with_output().unwrap();
+    assert!(sent.elapsed() < std::time::Duration::from_secs(60), "{how}: Kern took {:?} to stop", sent.elapsed());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.code() == Some(1) && err.contains("Interrupted"), "{how}: {out:?}");
+    assert_eq!(containers_using(ws), 0, "{how} left a container behind");
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupting_or_hanging_up_stops_the_agent_and_removes_its_container() {
+    if !container_ready() { return; }
+    let t = Temp::new();
+    for (i, (signal, how)) in [(libc::SIGINT, "Ctrl+C"), (libc::SIGTERM, "SIGTERM"), (libc::SIGHUP, "a closed terminal")].into_iter().enumerate() {
+        let (child, ws) = slow_box(&t, &format!("ws{i}"), |_| {});
+        unsafe { libc::kill(child.id() as libc::pid_t, signal); }
+        stopped_cleanly(child, &ws, how);
+    }
 }
 
 #[cfg(windows)]
 #[test]
-fn windows_box_terminates_a_runaway_agent_on_timeout() {
+fn ctrl_break_stops_the_agent_and_removes_its_container() {
+    if !container_ready() { return; }
+    #[link(name = "kernel32")]
+    unsafe extern "system" { fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32; }
     let t = Temp::new();
+    let (mut child, ws) = slow_box(&t, "ws", |c| { std::os::windows::process::CommandExt::creation_flags(c, 0x0000_0200); });
+    if unsafe { GenerateConsoleCtrlEvent(1, child.id()) } == 0 {
+        eprintln!("skipping: this test process has no console to send Ctrl+Break through");
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+    stopped_cleanly(child, &ws, "Ctrl+Break");
+}
+
+#[test]
+fn a_killed_kern_leaves_no_agent_behind() {
+    if !container_ready() { return; }
+    let t = Temp::new();
+    let (mut child, ws) = slow_box(&t, "ws", |_| {});
+    child.kill().unwrap(); // SIGKILL or TerminateProcess: none of Kern's own cleanup runs
+    let _ = child.wait();
+    let killed = std::time::Instant::now();
+    while containers_using(&ws) > 0 {
+        assert!(killed.elapsed() < std::time::Duration::from_secs(60), "the agent outlived the Kern process that started it");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+#[test]
+fn variables_an_engine_adds_on_its_own_are_refused() {
+    if !container_ready() || container::engine().unwrap().podman { return; }
+    let t = Temp::new();
+    let config = t.join("docker-config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.json"), json!({ "proxies": { "default": { "httpsProxy": "http://user:secret@proxy.example:3128" } } }).to_string()).unwrap();
     let ws = t.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    let job = json!({ "version": 1, "workspace": win(&ws), "tools": [], "denied": [], "network": false, "timeout_seconds": 2,
-        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"] });
-    let parsed = kern::local::box_job(&job).unwrap();
-    let start = std::time::Instant::now();
-    let r = kern::local::run_box_job(&parsed);
-    assert!(start.elapsed() < std::time::Duration::from_secs(20), "the box must give up well before the 30s command would finish");
-    match r { Ok(v) => panic!("expected a timeout denial, got {v}"), Err(e) => assert!(e.0.contains("timed out"), "{}", e.0) }
+    std::fs::write(t.join("box.json"), json!({ "version": 2, "image": NODE, "workspace": ws, "command": ["/usr/local/bin/node", "-e", "require('fs').writeFileSync('ran', '')"],
+        "network": false, "timeout_seconds": 60, "memory_mb": 256, "pids": 64 }).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_kern")).arg("box").arg(t.join("box.json")).env("DOCKER_CONFIG", &config).env_remove("DOCKER_CONTEXT").output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.code() == Some(1) && err.contains("HTTPS_PROXY") && !err.contains("secret"), "Docker's proxy settings must not reach the agent: {out:?}");
+    assert!(!ws.join("ran").exists(), "the agent must not start");
+    assert_eq!(containers_using(&ws), 0);
 }
 
 #[test]
@@ -1063,101 +2143,4 @@ fn run_returns_at_its_deadline_even_if_a_background_process_holds_the_output() {
     let r = run(&exe, &args, Run { timeout: std::time::Duration::from_secs(2), ..Default::default() });
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "run() must honour its timeout, took {:?}", started.elapsed());
     denied(r, "background process");
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_run_reports_unreadable_agent_output_as_blocked() {
-    let t = Temp::new();
-    let repo = t.join("repo");
-    std::fs::create_dir_all(repo.join("src")).unwrap();
-    sh(&t.0, &["init", "-q", "repo"]);
-    std::fs::write(repo.join("src/add.mjs"), "export const add = (a, b) => a - b;\n").unwrap();
-    sh(&repo, &["add", "-A"]);
-    sh(&repo, &["commit", "-qm", "base"]);
-    let base = sh(&repo, &["rev-parse", "HEAD"]);
-    std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
-    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    let job = json!({ "version": 1, "repo": win(&repo), "base": base, "contract": "./task.json", "tools": [], "network": false, "output": win(&t.join("runs")), "promote": true,
-        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", "[IO.File]::WriteAllText('src\\big.txt', ('x' * 100000))"] });
-    std::fs::write(t.join("run.json"), job.to_string()).unwrap();
-    let r = kern::local::local_run(&kern::local::run_job(&t.join("run.json")).unwrap()).unwrap();
-    assert_eq!(r["status"], "BLOCKED", "{r}");
-    assert!(r["summary"].as_str().unwrap().contains("byte limits"), "{r}");
-    assert!(r["promotion"].is_null(), "{r}");
-}
-
-#[cfg(windows)]
-fn icacls(args: &[&std::ffi::OsStr]) -> String { String::from_utf8_lossy(&Command::new(r"C:\Windows\System32\icacls.exe").args(args).output().unwrap().stdout).to_string() }
-
-#[cfg(windows)]
-#[test]
-fn windows_box_enforces_denied_paths_without_touching_them() {
-    let t = Temp::new();
-    let (ws, tool, outside) = (t.join("ws"), t.join("tool"), t.join("outside"));
-    for d in [&ws, &tool.join("private"), &outside.join("secrets")] { std::fs::create_dir_all(d).unwrap(); }
-    std::fs::write(tool.join("private/key.txt"), "TOPSECRET").unwrap();
-    std::fs::write(outside.join("secrets/key.txt"), "TOPSECRET").unwrap();
-    std::fs::write(outside.join("shared.txt"), "shared").unwrap();
-    icacls(&[outside.join("shared.txt").as_os_str(), "/grant".as_ref(), "*S-1-15-2-1:(R)".as_ref()]);
-    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    let job = |denied: &Path, script: &str| json!({ "version": 1, "workspace": win(&ws), "tools": [win(&tool)], "denied": [win(denied)], "network": false, "timeout_seconds": 60,
-        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", script] });
-    // AppContainer access checks ignore deny entries, so an exception inside a grant cannot be enforced: refuse it
-    denied(kern::local::box_job(&job(&tool.join("private"), "exit 0")), "inside the granted");
-    // a path every app container may read cannot be denied without changing it: refuse it
-    denied(kern::local::run_box_job(&kern::local::box_job(&job(&outside.join("shared.txt"), "exit 0")).unwrap()), "Every app container can read");
-    // an enforceable denied path stays unreadable and its permissions are never modified
-    let before = (icacls(&[outside.join("secrets").as_os_str()]), icacls(&[outside.join("secrets/key.txt").as_os_str()]));
-    let script = "try{[IO.File]::ReadAllText('KEY') | Out-Null; Add-Content 'REP' 'K ALLOWED'}catch{Add-Content 'REP' 'K DENIED'}"
-        .replace("KEY", &win(&outside.join("secrets/key.txt"))).replace("REP", &win(&ws.join("report.txt")));
-    assert_eq!(kern::local::run_box_job(&kern::local::box_job(&job(&outside.join("secrets"), &script)).unwrap()).unwrap()["status"], "OK");
-    assert!(std::fs::read_to_string(ws.join("report.txt")).unwrap().contains("K DENIED"));
-    assert_eq!((icacls(&[outside.join("secrets").as_os_str()]), icacls(&[outside.join("secrets/key.txt").as_os_str()])), before);
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_box_cannot_change_permissions_in_its_workspace() {
-    let t = Temp::new();
-    let ws = t.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::write(ws.join("f.txt"), "x").unwrap();
-    let job = json!({ "version": 1, "workspace": win(&ws), "tools": [], "denied": [], "network": false, "timeout_seconds": 60,
-        "command": [r"C:\Windows\System32\icacls.exe", win(&ws.join("f.txt")), "/grant", "*S-1-15-2-1:(F)"] });
-    kern::local::run_box_job(&kern::local::box_job(&job).unwrap()).unwrap();
-    let acl = icacls(&[ws.join("f.txt").as_os_str()]);
-    assert!(!acl.contains("ALL APPLICATION PACKAGES"), "the agent widened a workspace file's permissions: {acl}");
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_box_grants_do_not_outlive_an_interrupted_run() {
-    let t = Temp::new();
-    let (ws1, ws2) = (t.join("ws1"), t.join("ws2"));
-    std::fs::create_dir_all(&ws1).unwrap();
-    std::fs::create_dir_all(&ws2).unwrap();
-    std::fs::write(ws1.join("secret.txt"), "TOPSECRET").unwrap();
-    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    let first = json!({ "version": 1, "workspace": win(&ws1), "tools": [], "denied": [], "network": false, "timeout_seconds": 120,
-        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", format!("Set-Content -LiteralPath '{}' -Value x; Start-Sleep -Seconds 60", win(&ws1.join("started.txt")))] });
-    std::fs::write(t.join("first.json"), first.to_string()).unwrap();
-    let mut kern = Command::new(env!("CARGO_BIN_EXE_kern")).arg("box").arg(t.join("first.json")).stdout(std::process::Stdio::null()).spawn().unwrap();
-    let started = std::time::Instant::now();
-    while !ws1.join("started.txt").exists() {
-        assert!(started.elapsed() < std::time::Duration::from_secs(60), "first box never started");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    kern.kill().unwrap(); // interrupted: kern never gets to revoke its grants
-    kern.wait().unwrap();
-    let packages = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Packages");
-    let orphans = || std::fs::read_dir(&packages).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("kern-box-{}-", kern.id()))).count();
-    assert_eq!(orphans(), 1, "the interrupted run's identity is left behind");
-    let script = "try{[IO.File]::ReadAllText('SEC') | Out-Null; Add-Content 'REP' 'S ALLOWED'}catch{Add-Content 'REP' 'S DENIED'}".replace("SEC", &win(&ws1.join("secret.txt"))).replace("REP", &win(&ws2.join("report.txt")));
-    let second = json!({ "version": 1, "workspace": win(&ws2), "tools": [], "denied": [], "network": false, "timeout_seconds": 60,
-        "command": [ps, "-NoProfile", "-NonInteractive", "-Command", script] });
-    assert_eq!(kern::local::run_box_job(&kern::local::box_job(&second).unwrap()).unwrap()["status"], "OK");
-    let report = std::fs::read_to_string(ws2.join("report.txt")).unwrap();
-    assert!(report.contains("S DENIED"), "a later box must not reach an earlier run's workspace: {report}");
-    assert_eq!(orphans(), 0, "the next box sweeps identities whose process is gone");
 }

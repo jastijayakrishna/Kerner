@@ -1,0 +1,95 @@
+TAP version 13
+# node:internal/modules/cjs/loader:1433
+#   throw err;
+#   ^
+# Error: Cannot find module './does-not-exist'
+# Require stack:
+# - /workspace/test/broken.test.js
+#     at Function._resolveFilename (node:internal/modules/cjs/loader:1430:15)
+#     at defaultResolveImpl (node:internal/modules/cjs/loader:1040:19)
+#     at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1045:22)
+#     at Function._load (node:internal/modules/cjs/loader:1216:25)
+#     at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+#     at Module.require (node:internal/modules/cjs/loader:1527:12)
+#     at require (node:internal/modules/helpers:147:16)
+#     at Object.<anonymous> (/workspace/test/broken.test.js:1:1)
+#     at Module._compile (node:internal/modules/cjs/loader:1781:14)
+#     at Object..js (node:internal/modules/cjs/loader:1913:10) {
+#   code: 'MODULE_NOT_FOUND',
+#   requireStack: [ '/workspace/test/broken.test.js' ]
+# }
+# Node.js v22.23.3
+# Subtest: test/broken.test.js
+not ok 1 - test/broken.test.js
+  ---
+  duration_ms: 23.94312
+  type: 'test'
+  location: '/workspace/test/broken.test.js:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: adds
+ok 2 - adds
+  ---
+  duration_ms: 0.550698
+  type: 'test'
+  ...
+# Subtest: fails
+not ok 3 - fails
+  ---
+  duration_ms: 0.43906
+  type: 'test'
+  location: '/workspace/test/math.node.test.mjs:4:1'
+  failureType: 'testCodeFailure'
+  error: '1 == 2'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 1
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///workspace/test/math.node.test.mjs:4:28)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: skipped
+ok 4 - skipped # SKIP
+  ---
+  duration_ms: 0.066576
+  type: 'test'
+  ...
+# Subtest: later
+ok 5 - later # TODO
+  ---
+  duration_ms: 0.07184
+  type: 'test'
+  ...
+# Subtest: group
+    # Subtest: inner
+    ok 1 - inner
+      ---
+      duration_ms: 0.681641
+      type: 'test'
+      ...
+    1..1
+ok 6 - group
+  ---
+  duration_ms: 0.834361
+  type: 'suite'
+  ...
+1..6
+# tests 6
+# suites 1
+# pass 2
+# fail 2
+# cancelled 0
+# skipped 1
+# todo 1
+# duration_ms 48.081842

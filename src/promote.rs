@@ -140,6 +140,30 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     Ok(json!({ "status": "PASS", "head": head, "base": base, "task": task, "run_id": run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities }))
 }
 
+pub struct Merged<'a> { pub repository: &'a str, pub branch: &'a str, pub head: &'a str, pub config: &'a str, pub auditor_key: Option<&'a str>, pub now: u64 }
+pub fn verify_merged(checkout: &Path, envelope: &Value, m: &Merged) -> R<Value> {
+    let stmt: Value = serde_json::from_slice(&unb64(text(envelope, "payload")?)?)?;
+    let k = &stmt["predicate"][attest::EXTENSION];
+    let (task, run_id, base, commit) = (text(k, "task")?.to_string(), text(k, "run_id")?.to_string(), text(k, "base")?.to_string(), text(k, "commit")?.to_string());
+    ensure!(task_id(&task) && is_uuid(&run_id) && m.branch == format!("kern/{task}/{run_id}"), "The pull request branch {} does not match its proof", m.branch);
+    ensure!(commit == m.head, "The proof is for commit {commit}, not the pull request head {}", m.head);
+    git::oid(&base)?;
+    let trusted = |name: &str| -> R<Vec<u8>> { git::git(checkout, &["cat-file", "blob", &format!("{base}:{}/{name}", m.config)], None).map_err(|_| Denied(format!("The base commit {base} lacks {}/{name}", m.config))) };
+    let policy = contract(&serde_json::from_slice(&trusted(&format!("tasks/{task}.json"))?)?)?;
+    let op = operator(&serde_json::from_slice(&trusted("operator.json")?)?)?;
+    ensure!(policy.task == task && op.repository == m.repository, "The trusted configuration at {base} does not match this repository and task");
+    let key_pem = match m.auditor_key { Some(k) => k.to_string(), None => String::from_utf8(trusted("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))? };
+    let key = attest::public_key(&key_pem)?;
+    let verified = verify_against(checkout, envelope, &key, &policy, &op, Claim { run_id: &run_id, base: &base, commit: &commit, now: m.now, enforce_expiry: false })?;
+    let l = &policy.limits;
+    let (original, candidate) = (git::read_commit(checkout, &base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, &commit, l.file_bytes, l.total_bytes)?);
+    let changed = git::changes(&original, &candidate, &policy)?;
+    capability::check(&original, &candidate, &changed, &op.permissions)?;
+    let checks: Vec<Value> = verified["checks"].as_array().into_iter().flatten().map(|c| c["id"].clone()).collect();
+    Ok(json!({ "task": task, "run_id": run_id, "base": base, "commit": commit, "verified_at": iso8601(verified["issued_at"].as_u64().unwrap_or(0)),
+        "executor": verified["executor"]["kind"], "checks": checks, "key_id": attest::key_id(&key)? }))
+}
+
 pub fn gate_artifact(checkout: &Path, commit: &str, envelope: &Value, config: &Path, now: u64) -> R<Value> {
     git::oid(commit)?;
     let read = |name: &str| -> R<Vec<u8>> { std::fs::read(config.join(name)).map_err(|_| Denied(format!("Trusted deploy config lacks {name}"))) };
