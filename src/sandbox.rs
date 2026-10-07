@@ -5,27 +5,43 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub const MONITOR: &str = include_str!("monitor.cjs");
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
-pub fn docker_invocation(c: &Control, args: &[&str], dir: &Path) -> R<Invocation> {
+pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
     let binary = pinned(&c.docker)?;
     let mut full = vec!["--config".to_string(), dir.display().to_string(), "--host".into(), c.endpoint.clone()];
-    full.extend(args.iter().map(|a| a.to_string()));
+    full.extend(args.iter().chain(command).map(|a| a.to_string()));
     let mut env: Vec<(String, String)> = safe_env(dir).into_iter().filter(|(k, _)| k != "PATH").collect();
     env.extend([("PATH".into(), String::new()), ("DOCKER_CONFIG".into(), dir.display().to_string()), ("XDG_CONFIG_HOME".into(), dir.display().to_string())]);
     Ok((binary, full, env))
 }
-pub fn docker(args: &[&str], timeout: Duration, max_output: usize) -> R<Vec<u8>> {
+pub const BEHAVIOR: &str = "\n\u{1e}kern-behavior\u{1e}\n";
+fn with_docker<T>(args: &[&str], command: &[&str], f: impl FnOnce(&Path, &[String], Vec<(String, String)>, &Path) -> R<T>) -> R<T> {
     let c = control()?;
     let dir = fresh_dir(std::env::temp_dir().join(format!("kern-docker-{}", uuid4()?)))?;
     let config = dir.join("config.json");
     let result = create_new(&config, b"{}\n", 0o600).and_then(|_| {
-        let (binary, full, env) = docker_invocation(c, args, &dir)?;
-        run(&binary, &full, Run { cwd: Some(&dir), env, input: None, timeout, max_output })
+        let (binary, full, env) = docker_invocation(c, args, command, &dir)?;
+        f(&binary, &full, env, &dir)
     });
     let _ = std::fs::remove_file(&config);
     let _ = std::fs::remove_dir(&dir);
     result
+}
+pub fn docker(args: &[&str], timeout: Duration, max_output: usize) -> R<Vec<u8>> { docker_with(args, &[], timeout, max_output) }
+fn docker_with(args: &[&str], command: &[&str], timeout: Duration, max_output: usize) -> R<Vec<u8>> {
+    with_docker(args, command, |b, full, env, dir| run(b, full, Run { cwd: Some(dir), env, input: None, timeout, max_output }))
+}
+fn docker_full(args: &[&str], timeout: Duration, max_output: usize) -> R<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    with_docker(args, &[], |b, full, env, dir| run_full(b, full, Run { cwd: Some(dir), env, input: None, timeout, max_output }))
+}
+pub fn split_behavior(stdout: &[u8]) -> (&[u8], Option<std::collections::BTreeSet<String>>) {
+    let mark = BEHAVIOR.as_bytes();
+    match stdout.windows(mark.len()).rposition(|w| w == mark) {
+        Some(i) => (&stdout[..i], Some(String::from_utf8_lossy(&stdout[i + mark.len()..]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect())),
+        None => (stdout, None),
+    }
 }
 fn docker_json(args: &[&str]) -> R<Value> { Ok(serde_json::from_slice(&docker(args, Duration::from_secs(60), 16 * 1048576)?)?) }
 
@@ -116,10 +132,9 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
         a.extend(["--mount".into(), format!("type=volume,source={volume},target={target}{}", if *readonly { ",readonly" } else { "" })]);
     }
     a.push(spec.image.into());
-    a.extend(spec.entry.iter().cloned());
     Ok(a)
 }
-pub struct Execution { pub stdout: Vec<u8>, pub builder: (String, Value) }
+pub struct Execution { pub stdout: Vec<u8>, pub exit_code: i64, pub builder: (String, Value) }
 pub fn execute(spec: &Spec) -> R<Execution> {
     let status = doctor();
     ensure!(status.ready, "Sandbox unavailable: {}", status.report["explanation"].as_str().unwrap_or("runsc not ready"));
@@ -128,8 +143,9 @@ pub fn execute(spec: &Spec) -> R<Execution> {
     let name = format!("kern-{}", uuid4()?);
     let args = container_args(spec, &name)?;
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    docker(&refs, Duration::from_secs(120), 65536)?;
-    let outcome = (|| -> R<Vec<u8>> {
+    let entry: Vec<&str> = spec.entry.iter().map(String::as_str).collect();
+    docker_with(&refs, &entry, Duration::from_secs(120), 65536)?;
+    let outcome = (|| -> R<(Vec<u8>, i64)> {
         let i = &docker_json(&["inspect", &name])?[0];
         let h = &i["HostConfig"];
         let memory = spec.limits.memory_mb * 1048576;
@@ -142,13 +158,14 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         ensure!(binds.len() == 3 && binds.iter().all(|m| m["RW"] == false), "Unexpected or writable host mount");
         ensure!(volumes.len() == spec.volumes.len() && spec.volumes.iter().all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro)), "Unexpected volume mount");
         ensure!(mounts.iter().all(|m| m["Type"] == "bind" || m["Type"] == "volume" || m["Type"] == "tmpfs"), "Unexpected mount type");
-        let out = docker(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
+        let (_, out, _) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
         let f = &docker_json(&["inspect", &name])?[0]["State"];
-        ensure!(f["Running"] == false && f["OOMKilled"] == false && f["ExitCode"] == 0, "Sandbox failed or exceeded limits");
-        Ok(out)
+        ensure!(f["Running"] == false && f["OOMKilled"] == false && f["ExitCode"].is_i64(), "Sandbox failed or exceeded limits");
+        Ok((out, f["ExitCode"].as_i64().unwrap_or(-1)))
     })();
     docker(&["rm", "--force", &name], Duration::from_secs(120), 65536).map_err(|e| Denied(format!("Sandbox removal failed; no artifact accepted: {e}")))?;
-    Ok(Execution { stdout: outcome?, builder })
+    let (stdout, exit_code) = outcome?;
+    Ok(Execution { stdout, exit_code, builder })
 }
 pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     std::fs::create_dir(dir)?;
@@ -156,6 +173,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     std::fs::copy(std::env::current_exe()?, &target)?;
     #[cfg(unix)]
     std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o555))?;
+    create_new(dir.join("monitor.cjs"), MONITOR.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
 }
@@ -283,9 +301,15 @@ mod inside {
         Ok(())
     }
     pub fn exec(command: &[String]) -> R<()> {
-        use std::os::unix::process::CommandExt;
         let c = argv(&json!(command))?;
-        Err(Denied(format!("exec failed: {}", Command::new(&c[0]).args(&c[1..]).current_dir("/workspace").env_clear().envs(ENV).exec())))
+        let log = Path::new("/tmp/.kern-behavior");
+        let status = Command::new(&c[0]).args(&c[1..]).current_dir("/workspace").env_clear().envs(ENV)
+            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", log).stdin(Stdio::null()).status()?;
+        quiesce()?;
+        print!("{BEHAVIOR}{}", std::fs::read_to_string(log).unwrap_or_default());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        ensure!(status.success(), "Check command failed: {status}");
+        Ok(())
     }
 }
 #[cfg(not(unix))]

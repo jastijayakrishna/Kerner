@@ -6,6 +6,7 @@ use crate::sandbox::{self, Spec, Volume};
 use crate::util::*;
 use crate::{deny, ensure};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const SETUP: Limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 900, memory_mb: 3072, pids: 512 };
@@ -43,6 +44,7 @@ pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &s
     sandbox::control_dir(&control, Some(("setup.json", &json!({ "registry": registry, "timeout_seconds": SETUP.timeout_seconds }))))?;
     let volume = Volume::create()?;
     let out = sandbox::execute(&Spec { image, snapshot: &input, control: &control, writable: &[], limits: &SETUP, entry: vec!["__setup".into()], network: "bridge", volumes: vec![(&volume.0, "/workspace/node_modules", false)], root: true, home_mb: 1024 })?;
+    ensure!(out.exit_code == 0, "Dependency installation failed in the sandbox");
     let record: Value = serde_json::from_slice(&out.stdout)?;
     exact(&record, &["version", "entries", "bytes", "sha256"], "dependency record")?;
     ensure!(record["sha256"].as_str().is_some_and(is_hex64), "Invalid dependency record");
@@ -100,6 +102,7 @@ pub fn run_agent(job: &Job, output: &Path) -> R<Value> {
     sandbox::control_dir(&control, Some(("config.json", &json!({ "write": policy.write, "limits": policy.value["limits"], "command": command }))))?;
     let volumes = deps.as_ref().map(|d| vec![(d.volume.0.as_str(), "/workspace/node_modules", true)]).unwrap_or_default();
     let exec = sandbox::execute(&Spec { image: &op.image, snapshot: &snapshot, control: &control, writable: &policy.write, limits: &policy.limits, entry: vec!["__runner".into()], network: "none", volumes, root: false, home_mb: 0 })?;
+    ensure!(exec.exit_code == 0, "Agent command failed or exceeded its limits in the sandbox");
     ensure!(Some(&exec.builder.0) == op.executor_builder.as_ref(), "Executor builder identity mismatch");
     let candidate = candidate_files(&original, &serde_json::from_slice(&exec.stdout)?, policy)?;
     let executor = json!({ "kind": "kern-gvisor", "builder_sha256": exec.builder.0, "builder": exec.builder.1, "runtime": "runsc", "image": op.image, "exit_code": 0, "output_sha256": sha256(&exec.stdout) });
@@ -171,7 +174,7 @@ pub fn task(job: &Job, source: Source) -> R<Value> {
     let report = preflight(job, matches!(source, Source::Agent));
     if report["status"] != "READY" { return Ok(report); }
     std::fs::create_dir_all(&job.output)?;
-    let root = fresh_dir(job.output.join(format!("{}-{}", job.contract.task, uuid4()?)))?;
+    let root = fresh_dir(job.output.join(format!("{}-{}", job.contract.task, short_id()?)))?;
     let mut result = report.clone();
     let outcome = (|| -> R<Value> {
         let run_dir = root.join("run");
@@ -211,12 +214,12 @@ fn read_check(spec: &CheckSpec) -> R<Vec<(Vec<String>, Option<String>)>> {
         Ok((argv(&c["command"])?, stdout))
     }).collect()
 }
-fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limits: &Limits, volume: Option<&str>) -> R<String> {
+fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limits: &Limits, volume: Option<&str>, judge: bool) -> R<(String, BTreeSet<String>)> {
     let cases = read_check(spec)?;
     let control = root.join(format!("check-{}", spec.id));
-    sandbox::control_dir(&control, None)?;
+    if !control.exists() { sandbox::control_dir(&control, None)?; }
     let deadline = now_ms() + limits.timeout_seconds * 1000;
-    let mut evidence = Vec::new();
+    let (mut evidence, mut seen) = (Vec::new(), BTreeSet::new());
     for (i, (command, expected)) in cases.iter().enumerate() {
         let remaining = deadline.saturating_sub(now_ms()) / 1000;
         ensure!(remaining > 0, "Behavioral verification exceeded its total deadline");
@@ -225,10 +228,29 @@ fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limit
         let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
         let out = sandbox::execute(&Spec { image, snapshot, control: &control, writable: &[], limits: &case_limits, entry, network: "none", volumes, root: false, home_mb: 0 })
             .map_err(|e| Denied(format!("Check {} case {} failed: {e}", spec.id, i + 1)))?;
-        if let Some(want) = expected { ensure!(out.stdout == want.as_bytes(), "Check {} case {} output differs from the expected answer", spec.id, i + 1); }
-        evidence.push(json!({ "case": i + 1, "stdout_sha256": sha256(&out.stdout), "builder_sha256": out.builder.0 }));
+        let (stdout, behavior) = sandbox::split_behavior(&out.stdout);
+        seen.extend(behavior.ok_or_else(|| Denied(format!("Check {} case {} left no behavior record{}", spec.id, i + 1, if judge { "" } else { " on the base commit; re-run or raise limits.timeout_seconds" })))?);
+        if judge {
+            ensure!(out.exit_code == 0, "Check {} case {} failed (exit code {})", spec.id, i + 1, out.exit_code);
+            if let Some(want) = expected { ensure!(stdout == want.as_bytes(), "Check {} case {} output differs from the expected answer", spec.id, i + 1); }
+        }
+        evidence.push(json!({ "case": i + 1, "stdout_sha256": sha256(stdout), "builder_sha256": out.builder.0 }));
     }
-    digest(&json!(evidence))
+    Ok((digest(&json!(evidence))?, seen))
+}
+fn secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY", "APIKEY", "PRIVATE_KEY", "ACCESS_KEY", "AUTH", "SESSION", "COOKIE"].iter().any(|s| n.contains(s))
+        || ["AWS_", "AZURE_", "GCP_", "GOOGLE_", "GITHUB_", "GH_", "GITLAB_", "NPM_", "SLACK_", "STRIPE_", "OPENAI_", "ANTHROPIC_", "DATABASE_URL"].iter().any(|p| n.starts_with(p))
+}
+pub fn behavior_diff(base: &BTreeSet<String>, candidate: &BTreeSet<String>, allowed: &[String]) -> (Vec<String>, Vec<String>) {
+    let new: Vec<String> = candidate.difference(base).filter(|b| !allowed.contains(b)).cloned().collect();
+    let blocking = new.iter().filter(|b| match b.split_once(':') {
+        Some(("net", t)) => t != "loopback" && t != "ipc",
+        Some(("env", name)) => name == "*" || secret(name),
+        _ => true,
+    }).cloned().collect();
+    (new, blocking)
 }
 pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, signer: &KeySource) -> R<Value> {
     require_role("verifier")?;
@@ -263,11 +285,24 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         std::fs::create_dir(snapshot.join("node_modules"))?;
         Some(install_dependencies(&candidate, op, &root, &op.image)?)
     } else { None };
-    for id in &policy.checks {
-        let spec = op.checks.iter().find(|c| &c.id == id).ok_or_else(|| Denied(format!("No trusted check: {id}")))?;
-        let evidence = behavioral(spec, &root, &op.image, &snapshot, l, deps.as_ref().map(|d| d.volume.0.as_str()))?;
-        checks.push(json!({ "id": id, "status": "PASS", "evidence_sha256": evidence }));
+    let volume = deps.as_ref().map(|d| d.volume.0.as_str());
+    let specs = policy.checks.iter().map(|id| op.checks.iter().find(|c| &c.id == id).ok_or_else(|| Denied(format!("No trusted check: {id}")))).collect::<R<Vec<_>>>()?;
+    let mut behavior = BTreeSet::new();
+    for spec in &specs {
+        let (evidence, seen) = behavioral(spec, &root, &op.image, &snapshot, l, volume, true)?;
+        behavior.extend(seen);
+        checks.push(json!({ "id": spec.id, "status": "PASS", "evidence_sha256": evidence }));
     }
+    let baseline_snapshot = root.join("baseline");
+    git::materialize(Some(&store), &original, &baseline_snapshot, None)?;
+    if policy.dependencies { std::fs::create_dir(baseline_snapshot.join("node_modules"))?; }
+    let mut baseline = BTreeSet::new();
+    for spec in &specs { baseline.extend(behavioral(spec, &root, &op.image, &baseline_snapshot, l, volume, false)?.1); }
+    let (new, blocking) = behavior_diff(&baseline, &behavior, &policy.behaviors);
+    let observed = json!({ "base": baseline, "candidate": behavior, "new": new, "blocking": blocking });
+    write_json(root.join("behavior.json"), &observed)?;
+    ensure!(blocking.is_empty(), "Tests show new runtime behavior: {}. If this is intended, allow it in the task contract (version 3): \"behaviors\": {}", blocking.join(", "), serde_json::to_string(&blocking)?);
+    checks.push(json!({ "id": "behavior", "status": "PASS", "evidence_sha256": digest(&observed)? }));
     ensure!(digest(&git::manifest(&store, commit, l.file_bytes, l.total_bytes)?)? == text(&run, "manifest_sha256")?, "Artifact changed during verification");
     ensure!(sandbox::doctor().builder.map(|b| b.0) == Some(op.verifier_builder.clone()), "Verifier platform changed during checks");
     let issued = now_ms();

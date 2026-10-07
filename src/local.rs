@@ -51,6 +51,10 @@ pub fn box_job(v: &Value) -> R<BoxJob> {
     let tools = strings(v, "tools", 32)?.iter().map(|t| abs_existing(t, "tool")).collect::<R<Vec<_>>>()?;
     ensure!(tools.iter().all(|t| t.is_dir()), "each tool must be an existing directory");
     let denied = strings(v, "denied", 64)?.iter().map(|d| abs_existing(d, "denied path")).collect::<R<Vec<_>>>()?;
+    for d in &denied {
+        let inside = std::iter::once(&workspace).chain(&tools).find(|g| d.starts_with(g));
+        ensure!(inside.is_none(), "Denied path {} is inside the granted {}; an app container cannot have an exception carved out of a grant, so grant narrower directories", d.display(), inside.map_or(String::new(), |g| g.display().to_string()));
+    }
     ensure!(v["network"].is_boolean(), "network must be a boolean");
     let timeout_seconds = int(v, "timeout_seconds", 1, 3600)?;
     let mut command = argv_native(&v["command"])?;
@@ -112,49 +116,73 @@ fn run_env(ws: &Path, tmp: &Path, tools: &[PathBuf]) -> Vec<(String, String)> {
     env
 }
 
-pub fn read_workspace(root: &Path, file_bytes: u64, total_bytes: u64) -> R<Files> {
-    let mut files = Files::new();
-    let mut total = 0u64;
-    read_into(root, "", &mut files, &mut total, file_bytes, total_bytes)?;
-    Ok(files)
+pub fn read_workspace(root: &Path, base: &Files, file_bytes: u64, total_bytes: u64) -> R<Files> {
+    let dirs = base.keys().flat_map(|k| k.match_indices('/').map(move |(i, _)| &k[..i])).collect();
+    let mut r = WorkspaceReader { base, dirs, file_bytes, total_bytes, total: 0, files: Files::new() };
+    r.read(root, "", false)?;
+    Ok(r.files)
 }
-fn read_into(dir: &Path, prefix: &str, files: &mut Files, total: &mut u64, file_bytes: u64, total_bytes: u64) -> R<()> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for e in entries {
-        let name = e.file_name().to_string_lossy().to_string();
-        let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-        let meta = std::fs::symlink_metadata(e.path())?;
-        if meta.file_type().is_symlink() { deny!("Symlink in workspace is unsupported: {rel}"); }
-        if meta.is_dir() {
-            let lower = name.to_ascii_lowercase();
-            if lower == ".git" || lower == "node_modules" { continue; }
-            read_into(&e.path(), &rel, files, total, file_bytes, total_bytes)?;
-        } else if meta.is_file() {
-            file_path(&rel)?;
-            *total += meta.len();
-            ensure!(meta.len() <= file_bytes && *total <= total_bytes, "Workspace output exceeds byte limits at {rel}");
-            let data = std::fs::read(e.path())?;
-            files.insert(rel, Entry { mode: "100644".into(), oid: git::object_id("blob", &data), size: data.len() as u64, bytes: Some(data) });
-        } else {
-            deny!("Special file in workspace is unsupported: {rel}");
+struct WorkspaceReader<'a> { base: &'a Files, dirs: std::collections::HashSet<&'a str>, file_bytes: u64, total_bytes: u64, total: u64, files: Files }
+impl WorkspaceReader<'_> {
+    fn limits_hint(&self) -> String { format!("The contract allows {} bytes per file and {} in total; raise limits.file_bytes or limits.total_bytes if this is intended", self.file_bytes, self.total_bytes) }
+    fn read(&mut self, dir: &Path, prefix: &str, tracked_only: bool) -> R<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for e in entries {
+            let name = e.file_name().to_string_lossy().to_string();
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            if tracked_only && !self.base.contains_key(&rel) && !self.dirs.contains(rel.as_str()) { continue; }
+            let meta = std::fs::symlink_metadata(e.path())?;
+            if meta.file_type().is_symlink() { deny!("Symlink in workspace is unsupported: {rel}. Kern only accepts regular files"); }
+            if meta.is_dir() {
+                let lower = name.to_ascii_lowercase();
+                if lower == ".git" { continue; }
+                self.read(&e.path(), &rel, tracked_only || lower == "node_modules")?;
+            } else if meta.is_file() {
+                file_path(&rel)?;
+                let committed = self.base.get(&rel);
+                let mode = committed.map_or("100644", |b| b.mode.as_str()).to_string();
+                if meta.len() > self.file_bytes {
+                    let unchanged = |b: &&Entry| b.bytes.is_none() && b.size == meta.len() && git::file_oid(&e.path(), meta.len()).is_ok_and(|oid| oid == b.oid);
+                    let Some(asset) = committed.filter(unchanged) else { deny!("Workspace output exceeds byte limits at {rel}. {}", self.limits_hint()) };
+                    self.files.insert(rel, Entry { mode, oid: asset.oid.clone(), size: meta.len(), bytes: None });
+                    continue;
+                }
+                self.total += meta.len();
+                ensure!(self.total <= self.total_bytes, "Workspace output exceeds byte limits at {rel}. {}", self.limits_hint());
+                let data = std::fs::read(e.path())?;
+                self.files.insert(rel, Entry { mode, oid: git::object_id("blob", &data), size: data.len() as u64, bytes: Some(data) });
+            } else {
+                deny!("Special file in workspace is unsupported: {rel}. Kern only accepts regular files");
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
-pub struct Verifier { pub transport: Pin, pub arguments: Vec<String>, pub public_key_pem: String, pub public_key_path: PathBuf, pub operator: Operator }
+pub enum Transport { Script(Pin, Vec<String>), Https(String, String) }
+pub struct Verifier { pub transport: Transport, pub public_key_pem: String, pub public_key_path: PathBuf, pub operator: Operator }
 fn verifier(v: &Value, dir: &Path) -> R<Verifier> {
-    exact(v, &["transport", "arguments", "public_key", "operator"], "verifier")?;
-    let transport = pin(&v["transport"], "verifier transport")?;
-    pinned(&transport)?;
-    let arguments = strings(v, "arguments", 32)?;
-    ensure!(arguments.iter().all(|a| a.len() <= 4096 && !a.contains('\0')), "Invalid verifier transport arguments");
+    let transport = if v.get("url").is_some() {
+        exact(v, &["url", "token_file", "public_key", "operator"], "verifier")?;
+        let url = text(v, "url")?.trim_end_matches('/').to_string();
+        ensure!(url.starts_with("https://") || ["http://127.0.0.1:", "http://localhost:"].iter().any(|p| url.starts_with(p)), "The verifier URL must use https");
+        let token = std::fs::read_to_string(dir.join(text(v, "token_file")?)).map_err(|e| Denied(format!("verifier token_file: {e}")))?.trim().to_string();
+        ensure!(!token.is_empty() && !token.contains(['\r', '\n']), "The verifier token file must hold one bearer token");
+        Transport::Https(url, token)
+    } else {
+        exact(v, &["transport", "arguments", "public_key", "operator"], "verifier")?;
+        let transport = pin(&v["transport"], "verifier transport")?;
+        pinned(&transport)?;
+        let arguments = strings(v, "arguments", 32)?;
+        ensure!(arguments.iter().all(|a| a.len() <= 4096 && !a.contains('\0')), "Invalid verifier transport arguments");
+        Transport::Script(transport, arguments)
+    };
     let public_key_path = std::path::absolute(dir.join(text(v, "public_key")?))?;
     let public_key_pem = std::fs::read_to_string(&public_key_path).map_err(|e| Denied(format!("verifier public_key: {e}")))?;
     crate::attest::public_key(&public_key_pem)?;
     let op = operator(&read_json(dir.join(text(v, "operator")?))?)?;
-    Ok(Verifier { transport, arguments, public_key_pem, public_key_path, operator: op })
+    Ok(Verifier { transport, public_key_pem, public_key_path, operator: op })
 }
 
 pub struct RunJob { pub repo: PathBuf, pub base: String, pub contract: Contract, pub tools: Vec<PathBuf>, pub command: Vec<String>, pub network: bool, pub output: PathBuf, pub promote: bool, pub verifier: Option<Verifier> }
@@ -184,13 +212,26 @@ pub fn run_job(path: &Path) -> R<RunJob> {
 
 fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<Value> {
     let _ = std::fs::remove_file(out);
-    let script = strip_verbatim(&pinned(&v.transport)?);
+    let (pin, arguments) = match &v.transport {
+        Transport::Script(pin, arguments) => (pin, arguments),
+        Transport::Https(url, token) => {
+            let body = json!({ "run": read_json(handoff.join("run.json"))?, "bundle": b64(&std::fs::read(handoff.join("artifact.bundle"))?) }).to_string();
+            let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(Duration::from_secs(1200))).build().into();
+            let sent = agent.post(&format!("{url}/v1/verify")).header("Authorization", &format!("Bearer {token}")).header("Content-Type", "application/json").send(body);
+            let mut r = sent.map_err(|e| Denied(format!("independent verifier unreachable: {e}")))?;
+            let reply: Value = serde_json::from_str(&r.body_mut().read_to_string().map_err(|e| Denied(format!("independent verifier unreachable: {e}")))?)?;
+            ensure!(r.status().is_success(), "independent verifier rejected the change: {}", reply["reason"].as_str().unwrap_or("no reason given"));
+            create_new(out, format!("{reply}\n").as_bytes(), 0o600)?;
+            return Ok(reply);
+        }
+    };
+    let script = strip_verbatim(&pinned(pin)?);
     let (exe, mut args): (PathBuf, Vec<String>) = if cfg!(windows) {
         (PathBuf::from("cmd.exe"), vec!["/c".into(), script.display().to_string()])
     } else {
         (PathBuf::from("/bin/sh"), vec![script.display().to_string()])
     };
-    args.extend(v.arguments.clone());
+    args.extend(arguments.iter().cloned());
     args.push(handoff.display().to_string());
     args.push(out.display().to_string());
     args.push(commit.to_string());
@@ -217,7 +258,7 @@ pub fn confirm_attestation(envelope: &Value, trusted_pem: &str, commit: &str) ->
     Ok(())
 }
 
-fn gate(label: &str, f: impl FnOnce() -> R<Value>, checks: &mut Vec<Value>) -> Option<Value> {
+fn gate<T>(label: &str, f: impl FnOnce() -> R<T>, checks: &mut Vec<Value>) -> Option<T> {
     match f() {
         Ok(v) => { checks.push(json!({ "id": label, "status": "PASS" })); Some(v) }
         Err(e) => { checks.push(json!({ "id": label, "status": "BLOCKED", "detail": e.0 })); None }
@@ -232,21 +273,21 @@ fn finish(root: &Path, result: Value) -> R<Value> {
 }
 pub fn print_run(r: &Value) {
     if let Some(ux) = r["ux"].as_array() {
-        for s in ux.iter().filter_map(Value::as_str) { println!("\u{2713} {s}"); }
-        println!();
+        for s in ux.iter().filter_map(Value::as_str) { say(&format!("\u{2713} {s}")); }
+        say("");
         match r["status"].as_str() {
-            Some("VERIFIED") => println!("VERIFIED"),
-            _ => println!("BLOCKED: {}", r["reason"].as_str().unwrap_or("unknown")),
+            Some("VERIFIED") => say("VERIFIED"),
+            _ => say(&format!("BLOCKED: {}", r["reason"].as_str().unwrap_or("unknown"))),
         }
     } else if let Some(s) = r["summary"].as_str() {
-        println!("{s}");
+        say(s);
     }
 }
 pub fn local_run(job: &RunJob) -> R<Value> {
     let l = &job.contract.limits;
     let base_files = git::read_commit(&job.repo, &job.base, l.file_bytes, l.total_bytes)?;
     std::fs::create_dir_all(&job.output)?;
-    let root = fresh_dir(job.output.join(format!("{}-{}", job.contract.task, uuid4()?)))?;
+    let root = fresh_dir(job.output.join(format!("{}-{}", job.contract.task, short_id()?)))?;
     let ws = root.join("ws");
     let tmp = root.join("tmp");
     std::fs::create_dir_all(&tmp)?;
@@ -261,24 +302,25 @@ pub fn local_run(job: &RunJob) -> R<Value> {
         Err(e) => return finish(&root, blocked(&task, vec![], &e.0)),
     };
     let mut checks = vec![json!({ "id": "agent-exit", "status": if exit == 0 { "PASS" } else { "BLOCKED" }, "detail": exit })];
-    let candidate = read_workspace(&ws, l.file_bytes, l.total_bytes)?;
+    let candidate = gate("workspace", || read_workspace(&ws, &base_files, l.file_bytes, l.total_bytes), &mut checks);
     let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let changed = gate("contract", || git::changes(&base_files, &candidate, &job.contract), &mut checks);
-    let caps = changed.as_ref().and_then(|ch| gate("capabilities", || capability::check(&base_files, &candidate, ch, &empty), &mut checks));
+    let changed = candidate.as_ref().and_then(|c| gate("contract", || git::changes(&base_files, c, &job.contract), &mut checks));
+    let caps = candidate.as_ref().zip(changed.as_ref()).and_then(|(c, ch)| gate("capabilities", || capability::check(&base_files, c, ch, &empty), &mut checks));
     let green = exit == 0 && checks.iter().all(|c| c["status"] == "PASS");
     let files_changed = changed.as_ref().and_then(|c| c["files"].as_array().map(Vec::len)).unwrap_or(0);
 
     if let Some(v) = &job.verifier {
-        if !green {
+        let Some(candidate) = candidate.as_ref().filter(|_| green) else {
             let reason = checks.iter().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("agent command exited with code {exit}"));
             return finish(&root, blocked(&task, vec!["Isolated"], &reason));
-        }
+        };
         let outcome = (|| -> R<(String, Value)> {
-            let c = git::write_commit(&job.repo, &candidate, Some(&job.base), &task)?;
+            let c = git::write_commit(&job.repo, candidate, Some(&job.base), &task)?;
             let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: root.join("ingest") };
             let ingest = flow::task(&pj, Source::Ingest(&job.repo, &c))?;
-            ensure!(ingest["status"] == "CANDIDATE", "{}", ingest["reason"].as_str().unwrap_or("the local gate rejected the change"));
+            let preflight = ingest["checks"].as_array().into_iter().flatten().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str());
+            ensure!(ingest["status"] == "CANDIDATE", "{}", ingest["reason"].as_str().or(preflight).unwrap_or("the local gate rejected the change"));
             let bundle = PathBuf::from(text(&ingest, "bundle")?);
             let envelope = invoke_transport(v, &bundle.join("handoff"), &root.join("attestation.json"), &c)?;
             confirm_attestation(&envelope, &v.public_key_pem, &c)?;
@@ -294,10 +336,10 @@ pub fn local_run(job: &RunJob) -> R<Value> {
     let mut result = json!({ "status": if green { "GREEN" } else { "BLOCKED" }, "stage": "run", "task": task, "base": job.base,
         "network": job.network, "workspace": ws.display().to_string(), "checks": checks,
         "changes": changed.clone().unwrap_or(Value::Null), "capabilities": caps.unwrap_or(Value::Null) });
-    if green && job.promote {
+    if let Some(candidate) = candidate.as_ref().filter(|_| green && job.promote) {
         let run_id = uuid4()?;
         let branch = format!("kern/{task}/{run_id}");
-        let commit = git::write_commit(&job.repo, &candidate, Some(&job.base), &task)?;
+        let commit = git::write_commit(&job.repo, candidate, Some(&job.base), &task)?;
         git::git(&job.repo, &["update-ref", &format!("refs/heads/{branch}"), &commit, &"0".repeat(40)], None)?;
         result["summary"] = json!(format!("OK  {task}: {files_changed} file(s) changed, no new module capabilities. Promoted to {branch} (reversible)."));
         result["promotion"] = json!({ "branch": branch, "commit": commit, "review": format!("git -C {} diff {}..{branch}", job.repo.display(), job.base), "undo": format!("git -C {} branch -D {branch}", job.repo.display()) });

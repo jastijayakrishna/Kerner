@@ -32,6 +32,7 @@ macro_rules! deny {
     ($($msg:tt)+) => { return Err($crate::util::Denied(format!($($msg)+))) };
 }
 
+pub fn say(text: &str) { let _ = writeln!(std::io::stdout().lock(), "{text}"); }
 pub fn sha256(bytes: impl AsRef<[u8]>) -> String { hex::encode(Sha256::digest(bytes.as_ref())) }
 pub fn is_hex64(s: &str) -> bool { s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) }
 pub fn is_oid(s: &str) -> bool { s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) }
@@ -183,6 +184,7 @@ pub fn uuid4() -> R<String> {
     let h = hex::encode(b);
     Ok(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
 }
+pub fn short_id() -> R<String> { Ok(hex::encode(random_bytes::<6>()?)) }
 pub fn is_uuid(s: &str) -> bool { s.len() == 36 && s.bytes().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { b == b'-' } else { matches!(b, b'0'..=b'9' | b'a'..=b'f') }) }
 
 pub fn safe_env(home: &Path) -> Vec<(String, String)> {
@@ -218,6 +220,13 @@ fn bounded(mut reader: impl Read + Send + 'static, max: usize) -> std::thread::J
     })
 }
 pub fn run(exe: &Path, args: &[String], opts: Run) -> R<Vec<u8>> {
+    let (status, stdout, stderr) = run_full(exe, args, opts)?;
+    let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tail = |b: &[u8]| String::from_utf8_lossy(&b[b.len().saturating_sub(1500)..]).trim().to_string();
+    ensure!(status.success(), "{name} failed ({}): {} {}", status.code().map_or("signal".into(), |c| c.to_string()), tail(&stderr), tail(&stdout));
+    Ok(stdout)
+}
+pub fn run_full(exe: &Path, args: &[String], opts: Run) -> R<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
     let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let mut cmd = Command::new(exe);
     cmd.args(args).env_clear().envs(opts.env.iter().map(|(k, v)| (k, v))).stdin(if opts.input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -225,7 +234,7 @@ pub fn run(exe: &Path, args: &[String], opts: Run) -> R<Vec<u8>> {
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
     let mut child = cmd.spawn().map_err(|e| Denied(format!("{name} could not start: {e}")))?;
-    let writer = opts.input.map(|input| {
+    let _writer = opts.input.map(|input| {
         let mut stdin = child.stdin.take().expect("piped stdin");
         let data = input.to_vec();
         std::thread::spawn(move || { let _ = stdin.write_all(&data); })
@@ -233,17 +242,20 @@ pub fn run(exe: &Path, args: &[String], opts: Run) -> R<Vec<u8>> {
     let out = bounded(child.stdout.take().expect("piped stdout"), opts.max_output);
     let err = bounded(child.stderr.take().expect("piped stderr"), 65536);
     let started = Instant::now();
+    let mut exited = None;
     let status = loop {
-        if let Some(status) = child.try_wait()? { break Some(status); }
-        if started.elapsed() > opts.timeout { let _ = child.kill(); let _ = child.wait(); break None; }
+        if exited.is_none() { exited = child.try_wait()?; }
+        if let Some(status) = exited.filter(|_| out.is_finished() && err.is_finished()) { break status; }
+        if started.elapsed() > opts.timeout {
+            if exited.is_some() { deny!("{name} exited but left a background process holding its output") }
+            let _ = child.kill();
+            let _ = child.wait();
+            deny!("{name} timed out after {}s", opts.timeout.as_secs());
+        }
         std::thread::sleep(Duration::from_millis(2));
     };
-    if let Some(w) = writer { let _ = w.join(); }
     let (stdout, overflow) = out.join().map_err(|_| Denied("output reader failed".into()))?;
     let (stderr, _) = err.join().map_err(|_| Denied("error reader failed".into()))?;
-    let Some(status) = status else { deny!("{name} timed out after {}s", opts.timeout.as_secs()) };
     ensure!(!overflow, "{name} output exceeded {} bytes", opts.max_output);
-    let tail = |b: &[u8]| String::from_utf8_lossy(&b[b.len().saturating_sub(1500)..]).trim().to_string();
-    ensure!(status.success(), "{name} failed ({}): {} {}", status.code().map_or("signal".into(), |c| c.to_string()), tail(&stderr), tail(&stdout));
-    Ok(stdout)
+    Ok((status, stdout, stderr))
 }

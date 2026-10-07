@@ -2,7 +2,7 @@ use crate::attest::{self, Expect};
 use crate::capability;
 use crate::flow::required_checks;
 use crate::git;
-use crate::policy::{Contract, Operator, Pin, configure_git, contract, contract_digest, operator, pinned, verifier_digest};
+use crate::policy::{Contract, Operator, Pin, configure_git, contract, contract_digest, operator, pinned, task_id, verifier_digest};
 use crate::util::*;
 use crate::{deny, ensure};
 use ed25519_dalek::VerifyingKey;
@@ -64,6 +64,7 @@ pub fn pr_body(task: &str, d: &Decision, envelope: &Value) -> R<String> {
     Ok(format!("Kern-verified agent change for task `{task}`.\n\nCommit: `{}`\nAttestation SHA-256: `{}`\n\nReview before merging. The `kern-verified` check re-verifies this attestation against the PR head.\n\n{MARKER}{}\n-->\n", d.commit, digest(envelope)?, b64(canonical(envelope)?.as_bytes())))
 }
 pub fn extract_attestation(body: &str) -> R<Value> {
+    let body = body.replace("\r\n", "\n");
     ensure!(body.len() <= 65536 && body.matches(MARKER).count() == 1, "Pull request must carry exactly one Kern attestation block");
     let rest = &body[body.find(MARKER).unwrap_or(0) + MARKER.len()..];
     let end = rest.find("\n-->").ok_or_else(|| Denied("Unterminated Kern attestation block".into()))?;
@@ -95,7 +96,7 @@ pub fn promote_github(store: &Path, d: &Decision, policy: &Contract, envelope: &
     let mut env: Vec<(String, String)> = safe_env(store).into_iter().filter(|(k, _)| k != "PATH").collect();
     env.extend([("PATH".into(), String::new()), ("GIT_CONFIG_COUNT".into(), "1".into()), ("GIT_CONFIG_KEY_0".into(), header.split_once('=').map(|h| h.0.to_string()).unwrap_or_default()), ("GIT_CONFIG_VALUE_0".into(), header.split_once('=').map(|h| h.1.to_string()).unwrap_or_default())]);
     let reference = format!("refs/heads/{}", d.branch);
-    let args: Vec<String> = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.followRedirects=false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-C"].iter().map(|s| s.to_string())
+    let args: Vec<String> = ["-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.followRedirects=false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-C"].iter().map(|s| s.to_string())
         .chain([store.display().to_string(), "push".into(), "--no-verify".into(), "--porcelain".into(), format!("--force-with-lease={reference}:"), format!("https://github.com/{}.git", d.repository), format!("{}:{reference}", d.commit)]).collect();
     run(&git_exe, &args, Run { cwd: Some(store), env, input: None, timeout: Duration::from_secs(120), max_output: 1048576 }).map_err(|_| Denied("Exact create-only push failed; no existing branch was overwritten".into()))?;
     ensure!(api("GET", &refpath(&d.branch), None)?["object"]["sha"] == d.commit.as_str(), "Remote branch does not match the verified artifact");
@@ -110,6 +111,11 @@ pub fn git_pin(file: &Path) -> R<Pin> {
     Ok(p)
 }
 
+pub fn step_summary(result: &R<Value>) -> String {
+    let (status, detail) = match result { Ok(r) => (r["status"].as_str().unwrap_or("UNKNOWN").to_string(), serde_json::to_string_pretty(r).unwrap_or_default()), Err(e) => ("DENIED".into(), e.0.clone()) };
+    let status: String = status.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    format!("### kern-verified: {status}\n\n{}\n", detail.lines().map(|l| format!("    {l}\n")).collect::<String>())
+}
 pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Value> {
     let pr = &event["pull_request"];
     ensure!(pr.is_object(), "Not a pull_request event");
@@ -117,7 +123,7 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     let repository = text(&pr["base"]["repo"], "full_name")?;
     let Some(rest) = head_ref.strip_prefix("kern/") else { return Ok(json!({ "status": "SKIPPED", "reason": "Not a Kern agent branch; ordinary review rules apply", "head": head })) };
     let (task, run_id) = rest.split_once('/').ok_or_else(|| Denied("Kern branches must be kern/<task>/<run_id>".into()))?;
-    ensure!(is_uuid(run_id) && !config.contains("..") && !config.starts_with('/'), "Invalid Kern branch or configuration path");
+    ensure!(task_id(task) && is_uuid(run_id) && !config.contains("..") && !config.starts_with('/'), "Invalid Kern branch or configuration path");
     git::oid(head)?;
     git::oid(base)?;
     let trusted = |name: &str| -> R<Vec<u8>> { git::git(checkout, &["cat-file", "blob", &format!("{base}:{config}/{name}")], None).map_err(|_| Denied(format!("Trusted base commit lacks {config}/{name}"))) };
@@ -141,6 +147,7 @@ pub fn gate_artifact(checkout: &Path, commit: &str, envelope: &Value, config: &P
     let stmt: Value = serde_json::from_slice(&payload)?;
     let k = &stmt["predicate"][attest::EXTENSION];
     let (task, run_id, base) = (text(k, "task")?.to_string(), text(k, "run_id")?.to_string(), text(k, "base")?.to_string());
+    ensure!(task_id(&task), "Invalid task in attestation");
     git::oid(&base)?;
     let op = operator(&serde_json::from_slice(&read("operator.json")?)?)?;
     let key_pem = String::from_utf8(read("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))?;

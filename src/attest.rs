@@ -77,7 +77,7 @@ pub fn statement(k: &Value) -> R<Value> {
         "subject": [{ "name": repo, "digest": { "gitCommit": text(k, "commit")? } }],
         "predicateType": PREDICATE,
         "predicate": {
-            "verifier": { "id": format!("https://kern.invalid/verifier/{}", text(k, "verifier_builder_sha256")?), "version": { "kern": env!("CARGO_PKG_VERSION"), "implementation": text(k, "verifier_sha256")? } },
+            "verifier": { "id": format!("https://kern.invalid/verifier/{}", text(k, "verifier_builder_sha256")?), "version": { "kern": env!("CARGO_PKG_VERSION"), "configuration": text(k, "verifier_sha256")? } },
             "timeVerified": iso8601(k["issued_at"].as_u64().unwrap_or(0)),
             "resourceUri": format!("git+https://github.com/{repo}"),
             "policy": { "uri": format!("kern:contract/{task}"), "digest": { "sha256": text(k, "contract_sha256")? } },

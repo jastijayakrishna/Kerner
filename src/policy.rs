@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-pub const BUILTIN_CHECKS: [&str; 3] = ["artifact", "capabilities", "path-and-budget"];
+pub const BUILTIN_CHECKS: [&str; 4] = ["artifact", "behavior", "capabilities", "path-and-budget"];
 
 fn identifier(s: &str, digit_first: bool) -> bool {
     let b = s.as_bytes();
     !b.is_empty() && b.len() <= 64 && (b[0].is_ascii_lowercase() || (digit_first && b[0].is_ascii_digit())) && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
 }
+pub fn task_id(s: &str) -> bool { identifier(s, true) }
 fn repository(s: &str) -> bool {
     let parts: Vec<&str> = s.split('/').collect();
     parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.len() <= 100 && p.bytes().all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)))
@@ -25,16 +26,17 @@ pub struct Limits { pub files_changed: u64, pub lines_changed: u64, pub file_byt
 pub const MAX_LIMITS: Limits = Limits { files_changed: 1000, lines_changed: 100000, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 3600, memory_mb: 8192, pids: 1024 };
 
 #[derive(Clone, Debug)]
-pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub limits: Limits, pub checks: Vec<String> }
+pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String> }
 
 pub fn contract(input: &Value) -> R<Contract> {
     let version = input.get("version").and_then(Value::as_u64);
-    ensure!(matches!(version, Some(1 | 2)), "Unsupported contract version");
+    ensure!(matches!(version, Some(1..=3)), "Unsupported contract version");
     let mut fields = vec!["version", "task", "filesystem", "network", "secrets", "publish", "limits", "required_checks"];
-    if version == Some(2) { fields.push("dependencies"); }
+    if version >= Some(2) { fields.push("dependencies"); }
+    if version == Some(3) { fields.push("behaviors"); }
     exact(input, &fields, "contract")?;
     let task = text(input, "task")?.to_string();
-    ensure!(identifier(&task, true), "Invalid task ID");
+    ensure!(task_id(&task), "Invalid task ID");
     let fs = &input["filesystem"];
     exact(fs, &["read", "write"], "filesystem")?;
     let mut lists = Vec::new();
@@ -72,10 +74,15 @@ pub fn contract(input: &Value) -> R<Contract> {
     let mut checks = strings(input, "required_checks", 16)?;
     checks.sort();
     ensure!(!checks.is_empty() && checks.windows(2).all(|w| w[0] != w[1]) && checks.iter().all(|c| identifier(c, false)), "Required checks must be unique nonempty IDs");
+    let mut behaviors = if version == Some(3) { strings(input, "behaviors", 64)? } else { Vec::new() };
+    behaviors.sort();
+    let known = |b: &String| b.len() <= 200 && !b.chars().any(char::is_control) && b.split_once(':').is_some_and(|(k, v)| ["net", "dns", "exec", "env"].contains(&k) && !v.is_empty());
+    ensure!(behaviors.windows(2).all(|w| w[0] != w[1]) && behaviors.iter().all(known), "behaviors must be unique net:, dns:, exec: or env: entries");
     let mut value = input.clone();
     value["filesystem"] = json!({ "read": read, "write": write });
     value["required_checks"] = json!(checks);
-    Ok(Contract { value, task, read, write, dependencies, limits, checks })
+    if version == Some(3) { value["behaviors"] = json!(behaviors); }
+    Ok(Contract { value, task, read, write, dependencies, limits, checks, behaviors })
 }
 pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     let (a, b) = (contract(original)?, contract(requested)?);
@@ -88,6 +95,7 @@ pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     }
     ensure!(a.checks.iter().all(|c| b.checks.contains(c)), "Cannot remove a required check");
     ensure!(!b.dependencies || a.dependencies, "Cannot add dependency installation");
+    ensure!(b.behaviors.iter().all(|x| a.behaviors.contains(x)), "Cannot allow new runtime behavior");
     Ok(b)
 }
 pub fn contract_digest(c: &Contract) -> R<String> { digest(&c.value) }
@@ -124,7 +132,7 @@ pub fn operator(v: &Value) -> R<Operator> {
         exact(c, &["id", "file", "sha256"], "operator check")?;
         let (id, file, sha) = (text(c, "id")?, text(c, "file")?, text(c, "sha256")?);
         ensure!(identifier(id, false) && !BUILTIN_CHECKS.contains(&id) && !checks.iter().any(|x| x.id == id), "Duplicate or reserved check ID: {id}");
-        ensure!(Path::new(file).is_absolute() && is_hex64(sha), "Check {id} needs an absolute file and SHA-256 pin");
+        ensure!((file.starts_with('/') || Path::new(file).is_absolute()) && is_hex64(sha), "Check {id} needs an absolute file and SHA-256 pin");
         checks.push(CheckSpec { id: id.into(), file: file.into(), sha256: sha.into() });
     }
     checks.sort_by(|a, b| a.id.cmp(&b.id));
@@ -152,7 +160,7 @@ pub fn implementation_digest() -> R<String> {
 pub fn verifier_digest(op: &Operator) -> R<String> {
     let checks: Vec<Value> = op.checks.iter().map(|c| json!({ "id": c.id, "sha256": c.sha256 })).collect();
     digest(&json!({
-        "version": 3, "implementation": implementation_digest()?, "builders": op.value["builders"], "image": op.image, "checks": checks,
+        "version": 4, "builders": op.value["builders"], "image": op.image, "checks": checks,
         "deployment": op.value["deployment"], "executors": op.executors, "registry": op.registry, "permissions": op.permissions, "capability_policy": crate::capability::POLICY,
     }))
 }

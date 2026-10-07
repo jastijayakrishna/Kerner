@@ -7,14 +7,23 @@ inputs:
   config-path:
     description: Directory on the base branch containing operator.json, verifier.pub and tasks/<task>.json
     default: .github/kern
+  build-from-source:
+    description: Build Kern with cargo instead of downloading the release binary pinned below
+    default: "false"
 runs:
   using: composite
   steps:
-    - name: Build Kern
+    - name: Install Kern
       shell: bash
-      run: cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+      env:
+        KERN_VERSION: ""
+        KERN_SHA256_LINUX_X64: ""
+        KERN_SHA256_WINDOWS_X64: ""
+        KERN_SHA256_MACOS_ARM64: ""
+        BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/install-kern.sh"
     - name: Verify the agent change
       shell: bash
       env:
         KERN_CONFIG: ${{ inputs.config-path }}
-      run: '"$GITHUB_ACTION_PATH/target/release/kern" check-pr "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE" "$KERN_CONFIG"'
+      run: '"$KERN_BIN" check-pr "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE" "$KERN_CONFIG"'

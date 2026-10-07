@@ -18,7 +18,7 @@ const BUNDLE_BYTES: usize = 64 * 1048576;
 
 pub fn blob_sha256(repo: &Path, oid: &str, size: u64) -> R<String> {
     use sha2::{Digest, Sha256};
-    let full: Vec<String> = ["--no-replace-objects", "-C"].iter().map(|s| s.to_string()).chain([repo.display().to_string(), "cat-file".into(), "blob".into(), oid.into()]).collect();
+    let full: Vec<String> = ["--no-replace-objects", "-c", "core.longpaths=true", "-C"].iter().map(|s| s.to_string()).chain([repo.display().to_string(), "cat-file".into(), "blob".into(), oid.into()]).collect();
     let mut cmd = std::process::Command::new(git_exe()?);
     cmd.args(&full).env_clear().envs(safe_env(repo)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     #[cfg(windows)]
@@ -39,10 +39,11 @@ pub fn blob_sha256(repo: &Path, oid: &str, size: u64) -> R<String> {
 }
 
 pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: usize) -> R<Vec<u8>> {
-    let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"].map(String::from).to_vec();
+    let repo = std::path::absolute(repo)?;
+    let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"].map(String::from).to_vec();
     full.push(repo.display().to_string());
     full.extend(args.iter().map(|a| a.to_string()));
-    run(&git_exe()?, &full, Run { cwd: Some(repo), env: safe_env(repo), input, timeout: Duration::from_secs(600), max_output })
+    run(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input, timeout: Duration::from_secs(600), max_output })
 }
 pub fn git(repo: &Path, args: &[&str], input: Option<&[u8]>) -> R<Vec<u8>> { git_with(repo, args, input, BUNDLE_BYTES) }
 pub fn trimmed(bytes: Vec<u8>) -> String { String::from_utf8_lossy(&bytes).trim().to_string() }
@@ -56,11 +57,26 @@ pub fn object_id(kind: &str, body: &[u8]) -> String {
     h.update(body);
     hex::encode(h.finalize())
 }
+pub fn file_oid(path: &Path, size: u64) -> R<String> {
+    let mut file = std::fs::File::open(path)?;
+    let (mut h, mut buf, mut total) = (Sha1::new(), [0u8; 65536], 0u64);
+    h.update(format!("blob {size}\0").as_bytes());
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 { break; }
+        total += n as u64;
+        ensure!(total <= size, "File changed while reading: {}", path.display());
+        h.update(&buf[..n]);
+    }
+    ensure!(total == size, "File changed while reading: {}", path.display());
+    Ok(hex::encode(h.finalize()))
+}
 pub fn init_store(dir: &Path) -> R<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let args: Vec<String> = ["-c", "init.templateDir=", "init", "--bare", "--object-format=sha1", "-q"].iter().map(|s| s.to_string()).chain([dir.display().to_string()]).collect();
-    run(&git_exe()?, &args, Run { cwd: Some(dir), env: safe_env(dir), ..Default::default() })?;
-    Ok(std::path::absolute(dir)?)
+    let dir = std::path::absolute(dir)?;
+    std::fs::create_dir_all(&dir)?;
+    let args: Vec<String> = ["-c", "core.longpaths=true", "-c", "init.templateDir=", "init", "--bare", "--object-format=sha1", "-q"].iter().map(|s| s.to_string()).chain([dir.display().to_string()]).collect();
+    run(&git_exe()?, &args, Run { cwd: Some(&dir), env: safe_env(&dir), ..Default::default() })?;
+    Ok(dir)
 }
 
 pub fn read_commit(repo: &Path, commit: &str, file_bytes: u64, total_bytes: u64) -> R<Files> {
@@ -178,25 +194,32 @@ pub fn materialize(store: Option<&Path>, files: &Files, dest: &Path, grants: Opt
         if grants.is_some_and(|g| !allowed(g, name)) { continue; }
         let target = name.split('/').fold(dest.to_path_buf(), |p, part| p.join(part));
         std::fs::create_dir_all(target.parent().unwrap_or(dest))?;
+        let mode = if e.mode == "100755" { 0o555 } else { 0o444 };
         match &e.bytes {
-            Some(bytes) => create_new(&target, bytes, 0o444)?,
+            Some(bytes) => create_new(&target, bytes, mode)?,
             None => {
                 let s = store.ok_or_else(|| Denied(format!("Cannot materialize large object without a store: {name}")))?;
-                stream_blob_to(s, &e.oid, e.size, &target)?;
+                stream_blob_to(s, &e.oid, e.size, &target, mode)?;
             }
         }
     }
     Ok(())
 }
-fn stream_blob_to(repo: &Path, oid: &str, size: u64, target: &Path) -> R<()> {
-    let full: Vec<String> = ["--no-replace-objects", "-C"].iter().map(|s| s.to_string()).chain([repo.display().to_string(), "cat-file".into(), "blob".into(), oid.into()]).collect();
+fn stream_blob_to(repo: &Path, oid: &str, size: u64, target: &Path, mode: u32) -> R<()> {
+    let full: Vec<String> = ["--no-replace-objects", "-c", "core.longpaths=true", "-C"].iter().map(|s| s.to_string()).chain([repo.display().to_string(), "cat-file".into(), "blob".into(), oid.into()]).collect();
     let mut cmd = std::process::Command::new(git_exe()?);
     cmd.args(&full).env_clear().envs(safe_env(repo)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
     let mut child = cmd.spawn().map_err(|e| Denied(format!("git cat-file could not start: {e}")))?;
     let mut out = child.stdout.take().expect("piped stdout");
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(target).map_err(|e| Denied(format!("{}: {e}", target.display())))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut file = options.open(target).map_err(|e| Denied(format!("{}: {e}", target.display())))?;
     let (mut buf, mut total) = ([0u8; 65536], 0u64);
     loop {
         let n = std::io::Read::read(&mut out, &mut buf).map_err(|e| Denied(e.to_string()))?;
@@ -225,14 +248,14 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     for name in names {
         let (a, b) = (base.get(name), candidate.get(name));
         if let (Some(a), Some(b)) = (a, b) && a.mode == b.mode && a.oid == b.oid { continue; }
-        ensure!(allowed(&policy.write, name), "Write outside contract: {name}");
-        ensure!(!protected(name), "Protected dependency/configuration path: {name}");
+        ensure!(allowed(&policy.write, name), "Write outside contract: {name}. To allow it, add \"{name}\" to filesystem.read and filesystem.write in the task contract");
+        ensure!(!protected(name), "Protected dependency/configuration path: {name}. Agents may never change dependency, CI or secret files; make this change yourself");
         let mut texts = Vec::new();
         for e in [a, b] {
             let Some(e) = e else { texts.push(Vec::new()); continue; };
-            let bytes = e.bytes.as_deref().ok_or_else(|| Denied(format!("Binary or oversized change unsupported: {name}")))?;
-            ensure!(!bytes.contains(&0), "Binary changes unsupported: {name}");
-            let s = std::str::from_utf8(bytes).map_err(|_| Denied(format!("Invalid UTF-8 change: {name}")))?;
+            let bytes = e.bytes.as_deref().ok_or_else(|| Denied(format!("Binary or oversized change unsupported: {name}. Kern verifies text changes up to limits.file_bytes; make this change yourself")))?;
+            ensure!(!bytes.contains(&0), "Binary changes unsupported: {name}. Kern verifies text changes only; make this change yourself");
+            let s = std::str::from_utf8(bytes).map_err(|_| Denied(format!("Invalid UTF-8 change: {name}. Kern verifies UTF-8 text only; make this change yourself")))?;
             texts.push(s.split('\n').collect::<Vec<&str>>());
         }
         let (x, y) = (&texts[0], &texts[1]);
@@ -242,7 +265,8 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
         lines += (ea + eb - 2 * start) as u64;
         result.push(json!({ "path": name, "operation": if a.is_none() { "add" } else if b.is_none() { "delete" } else { "modify" } }));
     }
-    ensure!(result.len() as u64 <= policy.limits.files_changed && lines <= policy.limits.lines_changed, "Change budget exceeded");
+    let (n, l) = (result.len() as u64, &policy.limits);
+    ensure!(n <= l.files_changed && lines <= l.lines_changed, "Change budget exceeded: {n} file{} and up to {lines} lines changed; the contract allows {} files and {} lines. Raise limits.files_changed or limits.lines_changed if this is intended", if n == 1 { "" } else { "s" }, l.files_changed, l.lines_changed);
     Ok(json!({ "files": result, "lines_upper_bound": lines }))
 }
 
