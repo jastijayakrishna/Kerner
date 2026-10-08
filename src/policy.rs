@@ -24,7 +24,7 @@ pub fn image(s: &str) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct Limits { pub files_changed: u64, pub lines_changed: u64, pub file_bytes: u64, pub total_bytes: u64, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64 }
-pub const MAX_LIMITS: Limits = Limits { files_changed: 1000, lines_changed: 100000, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 3600, memory_mb: 8192, pids: 1024 };
+pub const MAX_LIMITS: Limits = Limits { files_changed: 1000, lines_changed: 100000, file_bytes: 1048576, total_bytes: 64 << 20, timeout_seconds: 3600, memory_mb: 8192, pids: 1024 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind { Bugfix, Feature, Refactor }
@@ -56,7 +56,7 @@ pub fn contract(input: &Value) -> R<Contract> {
     exact(fs, &["read", "write"], "filesystem")?;
     let mut lists = Vec::new();
     for action in ["read", "write"] {
-        let mut list = strings(fs, action, 64)?;
+        let mut list = strings(fs, action, 256)?;
         for g in &list { capability(g)?; }
         ensure!(list.iter().enumerate().all(|(i, g)| list.iter().enumerate().all(|(j, h)| i == j || !covers(h, g))), "Overlapping or duplicate capabilities are ambiguous");
         ensure!(list.iter().all(|g| g.split('/').next() != Some("node_modules")), "Dependency trees are not grantable paths");

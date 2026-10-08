@@ -8,7 +8,6 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
-use oxc_span::SourceType;
 use oxc_syntax::operator::UnaryOperator;
 use oxc_syntax::symbol::SymbolId;
 use serde_json::{Value, json};
@@ -189,8 +188,7 @@ impl<'a> Visit<'a> for Scan<'_> {
     }
 }
 fn markers(path: &str, source: &str, test: bool) -> R<BTreeSet<String>> {
-    let st = SourceType::from_path(path).map_err(|_| Denied(format!("Unsupported code file: {path}")))?;
-    let attempts = if path.ends_with(".js") || path.ends_with(".jsx") { vec![st, st.with_module(false)] } else { vec![st] };
+    let attempts = crate::capability::source_types(path).ok_or_else(|| Denied(format!("Unsupported code file: {path}")))?;
     for st in attempts {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, st).parse();

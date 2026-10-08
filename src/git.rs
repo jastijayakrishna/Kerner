@@ -9,9 +9,13 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Entry { pub mode: String, pub oid: String, pub size: u64, pub bytes: Option<Vec<u8>> }
+impl Entry {
+    /// A symlink or a submodule: carried along unchanged, never read as code, never written into a snapshot, and never changed by a task.
+    pub fn link(&self) -> bool { self.mode == "120000" || self.mode == "160000" }
+}
 pub type Files = BTreeMap<String, Entry>;
 pub const MAX_FILE: u64 = 1048576;
-pub const MAX_TOTAL: u64 = 16777216;
+pub const MAX_TOTAL: u64 = 64 << 20;
 pub const MAX_BLOB: u64 = 64 * 1048576;
 pub const MAX_TREE: u64 = 1024 * 1048576;
 const BUNDLE_BYTES: usize = 64 * 1048576;
@@ -91,13 +95,14 @@ pub fn read_commit(repo: &Path, commit: &str, file_bytes: u64, total_bytes: u64)
         let header = std::str::from_utf8(&row[..tab]).map_err(|_| Denied("Malformed tree listing".into()))?;
         let name = std::str::from_utf8(&row[tab + 1..]).map_err(|_| Denied("Nonportable path: invalid UTF-8".into()))?.to_string();
         let f: Vec<&str> = header.split_whitespace().collect();
-        ensure!(f.len() == 4 && (f[0] == "100644" || f[0] == "100755") && f[1] == "blob" && is_oid(f[2]), "Symlinks, submodules and special files are unsupported: {name}");
-        let size: u64 = f[3].parse().map_err(|_| Denied("Malformed tree listing".into()))?;
+        let kind = (f.first().copied(), f.get(1).copied());
+        ensure!(f.len() == 4 && matches!(kind, (Some("100644" | "100755" | "120000"), Some("blob")) | (Some("160000"), Some("commit"))) && is_oid(f[2]), "Special files are unsupported: {name}");
+        let size: u64 = if f[0] == "160000" { 0 } else { f[3].parse().map_err(|_| Denied("Malformed tree listing".into()))? };
         file_path(&name)?;
         ensure!(seen.insert(name.to_lowercase()), "Case-colliding filenames: {name}");
         tree_total += size;
         ensure!(size <= MAX_BLOB && tree_total <= MAX_TREE, "Repository exceeds the maximum object or tree size");
-        let load = size <= file_bytes;
+        let load = size <= file_bytes && (f[0] == "100644" || f[0] == "100755");
         if load {
             loaded_total += size;
             ensure!(loaded_total <= total_bytes, "Repository exceeds inspectable byte limits");
@@ -130,10 +135,12 @@ pub fn write_commit(repo: &Path, files: &Files, parent: Option<&str>, task: &str
     tree_paths(files.keys().map(String::as_str), true)?;
     let (mut root, mut objects) = (BTreeMap::new(), Vec::<(String, &'static str, Vec<u8>)>::new());
     for (name, e) in files {
-        ensure!(e.mode == "100644" || e.mode == "100755", "Invalid file mode");
+        ensure!(["100644", "100755", "120000", "160000"].contains(&e.mode.as_str()), "Invalid file mode");
         let id = e.oid.clone();
+        // A submodule names a commit of another repository, so there is no object to write here.
         match &e.bytes {
             Some(bytes) => { ensure!(object_id("blob", bytes) == id, "Blob identity mismatch: {name}"); objects.push((id.clone(), "blob", bytes.clone())); }
+            None if e.mode == "160000" => {}
             None => objects.push((id.clone(), "blob", Vec::new())),
         }
         let parts: Vec<&str> = name.split('/').collect();
@@ -179,6 +186,7 @@ pub fn manifest(repo: &Path, commit: &str, file_bytes: u64, total_bytes: u64) ->
     let files = read_commit(repo, commit, file_bytes, total_bytes)?;
     let mut entries: Vec<Value> = Vec::with_capacity(files.len());
     for (p, e) in &files {
+        if e.mode == "160000" { entries.push(json!({ "path": p, "mode": e.mode, "size": 0, "commit": e.oid })); continue; }
         let sha = match &e.bytes { Some(b) => sha256(b), None => blob_sha256(repo, &e.oid, e.size)? };
         entries.push(json!({ "path": p, "mode": e.mode, "size": e.size, "sha256": sha }));
     }
@@ -191,7 +199,8 @@ pub fn parents(repo: &Path, commit: &str) -> R<Vec<String>> {
 pub fn materialize(store: Option<&Path>, files: &Files, dest: &Path, grants: Option<&[String]>) -> R<()> {
     std::fs::create_dir_all(dest)?;
     for (name, e) in files {
-        if grants.is_some_and(|g| !allowed(g, name)) { continue; }
+        // No link is ever created on the host: a symlink could point anywhere, and a submodule's content is not in this repository.
+        if e.link() || grants.is_some_and(|g| !allowed(g, name)) { continue; }
         let target = name.split('/').fold(dest.to_path_buf(), |p, part| p.join(part));
         std::fs::create_dir_all(target.parent().unwrap_or(dest))?;
         let mode = if e.mode == "100755" { 0o555 } else { 0o444 };
@@ -240,6 +249,25 @@ pub fn protected(name: &str) -> bool {
         || base.starts_with(".env.")
         || (base.starts_with("requirements") && base.ends_with(".txt"))
 }
+/// Lines deleted plus lines added between two versions, as a line diff counts them (Myers' algorithm), up to `cap`.
+fn diff_lines(a: &[&str], b: &[&str], cap: usize) -> usize {
+    let (n, m) = (a.len(), b.len());
+    let max = (n + m).min(cap);
+    let offset = max as isize + 1;
+    // v[k + offset]: how far along `a` the best path on diagonal k (x - y = k) has come.
+    let mut v = vec![0usize; 2 * max + 3];
+    for d in 0..=max as isize {
+        for k in (-d..=d).step_by(2) {
+            let i = (k + offset) as usize;
+            let mut x = if k == -d || (k != d && v[i - 1] < v[i + 1]) { v[i + 1] } else { v[i - 1] + 1 };
+            let mut y = (x as isize - k) as usize;
+            while x < n && y < m && a[x] == b[y] { x += 1; y += 1; }
+            v[i] = x;
+            if x >= n && y >= m { return d as usize; }
+        }
+    }
+    cap
+}
 pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     let mut names: Vec<&String> = base.keys().chain(candidate.keys()).collect();
     names.sort();
@@ -248,6 +276,7 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     for name in names {
         let (a, b) = (base.get(name), candidate.get(name));
         if let (Some(a), Some(b)) = (a, b) && a.mode == b.mode && a.oid == b.oid { continue; }
+        ensure!(![a, b].iter().flatten().any(|e| e.link()), "Symlinks and submodules cannot change: {name}. Kern checks regular files only; make this change yourself");
         ensure!(allowed(&policy.write, name), "Write outside contract: {name}. To allow it, add \"{name}\" to filesystem.read and filesystem.write in the task contract");
         ensure!(!protected(name), "Protected dependency/configuration path: {name}. Agents may never change dependency, CI or secret files; make this change yourself");
         let mut texts = Vec::new();
@@ -262,12 +291,14 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
         let (mut start, mut ea, mut eb) = (0, x.len(), y.len());
         while start < ea && start < eb && x[start] == y[start] { start += 1; }
         while ea > start && eb > start && x[ea - 1] == y[eb - 1] { ea -= 1; eb -= 1; }
-        lines += (ea + eb - 2 * start) as u64;
+        // Counted only as far as the budget, so a large rewrite costs no more than the limit to measure.
+        lines += diff_lines(&x[start..ea], &y[start..eb], (policy.limits.lines_changed.saturating_sub(lines) + 1) as usize) as u64;
         result.push(json!({ "path": name, "operation": if a.is_none() { "add" } else if b.is_none() { "delete" } else { "modify" } }));
     }
     let (n, l) = (result.len() as u64, &policy.limits);
-    ensure!(n <= l.files_changed && lines <= l.lines_changed, "Change budget exceeded: {n} file{} and up to {lines} lines changed; the contract allows {} files and {} lines. Raise limits.files_changed or limits.lines_changed if this is intended", if n == 1 { "" } else { "s" }, l.files_changed, l.lines_changed);
-    let mut out = json!({ "files": result, "lines_upper_bound": lines });
+    let counted = if lines > l.lines_changed { format!("more than {} line{}", l.lines_changed, if l.lines_changed == 1 { "" } else { "s" }) } else { format!("{lines} line{}", if lines == 1 { "" } else { "s" }) };
+    ensure!(n <= l.files_changed && lines <= l.lines_changed, "Change budget exceeded: {n} file{} and {counted} changed; the contract allows {} files and {} lines. Raise limits.files_changed or limits.lines_changed if this is intended", if n == 1 { "" } else { "s" }, l.files_changed, l.lines_changed);
+    let mut out = json!({ "files": result, "lines_changed": lines });
     if let Some(t) = &policy.tests { out["tests"] = crate::proof::screen(base, candidate, &out, t)?; }
     Ok(out)
 }

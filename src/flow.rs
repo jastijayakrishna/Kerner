@@ -55,7 +55,7 @@ pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &s
 fn candidate_files(base: &Files, wire: &Value, policy: &Contract) -> R<Files> {
     exact(wire, &["version", "files"], "candidate")?;
     let Some(items) = wire["files"].as_array().filter(|f| wire["version"] == 1 && f.len() <= 10000) else { deny!("Invalid candidate format") };
-    let mut result: Files = base.iter().filter(|(n, _)| !allowed(&policy.write, n)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut result: Files = base.iter().filter(|(n, e)| e.link() || !allowed(&policy.write, n)).map(|(k, v)| (k.clone(), v.clone())).collect();
     let (mut seen, mut total) = (std::collections::HashSet::new(), 0u64);
     for item in items {
         exact(item, &["path", "content"], "candidate file")?;

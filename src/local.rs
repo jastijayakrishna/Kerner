@@ -124,6 +124,8 @@ pub fn read_workspace(root: &Path, base: &Files, file_bytes: u64, total_bytes: u
     let dirs = base.keys().flat_map(|k| k.match_indices('/').map(move |(i, _)| &k[..i])).collect();
     let mut r = WorkspaceReader { base, dirs, file_bytes, total_bytes, total: 0, files: Files::new() };
     r.read(root, "", false)?;
+    // Symlinks and submodules never reach a workspace, so whatever is at their place now is a change only if it is there at all.
+    for (k, e) in base.iter().filter(|(_, e)| e.link()) { r.files.entry(k.clone()).or_insert_with(|| e.clone()); }
     Ok(r.files)
 }
 struct WorkspaceReader<'a> { base: &'a Files, dirs: std::collections::HashSet<&'a str>, file_bytes: u64, total_bytes: u64, total: u64, files: Files }

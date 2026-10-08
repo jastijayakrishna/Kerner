@@ -29,7 +29,10 @@ const CODE_GLOBALS: [&str; 3] = ["eval", "Function", "WebAssembly"];
 fn extension(name: &str) -> &str { name.rsplit_once('.').map_or("", |(_, e)| e) }
 fn declaration(name: &str) -> bool { [".d.ts", ".d.mts", ".d.cts"].iter().any(|s| name.ends_with(s)) }
 pub fn is_code(name: &str) -> bool { CODE.contains(&extension(name)) && !declaration(name) }
-pub fn is_data(name: &str) -> bool { DATA.contains(&extension(name)) || declaration(name) }
+/// Contributor lists and change logs that often have no extension: text, inspected like the other data files.
+const TEXT_NAMES: [&str; 8] = ["AUTHORS", "CONTRIBUTORS", "MAINTAINERS", "CHANGELOG", "CHANGES", "HISTORY", "THANKS", "CREDITS"];
+pub fn text_name(name: &str) -> bool { TEXT_NAMES.contains(&name.rsplit('/').next().unwrap_or(name)) }
+pub fn is_data(name: &str) -> bool { DATA.contains(&extension(name)) || declaration(name) || text_name(name) }
 fn word(s: &str) -> bool { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') }
 fn package(s: &str) -> bool {
     let name_ok = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
@@ -225,9 +228,18 @@ fn parse(name: &str, source: &str, st: SourceType) -> Option<BTreeSet<String>> {
     v.visit_program(&parsed.program);
     Some(v.caps)
 }
+/// The ways Kern reads a code file, in order: as its extension says, then for .js and .jsx as a script, and only then, for .js, with JSX,
+/// which React projects write in plain .js files. Plain JavaScript that parses keeps its meaning.
+pub fn source_types(name: &str) -> Option<Vec<SourceType>> {
+    let st = SourceType::from_path(name).ok()?;
+    Some(match extension(name) {
+        "js" => vec![st, st.with_module(false), st.with_jsx(true), st.with_module(false).with_jsx(true)],
+        "jsx" => vec![st, st.with_module(false)],
+        _ => vec![st],
+    })
+}
 pub fn footprint(name: &str, source: &str) -> R<BTreeSet<String>> {
-    let st = SourceType::from_path(name).map_err(|_| Denied(format!("Unsupported code file: {name}")))?;
-    let attempts = if extension(name) == "js" || extension(name) == "jsx" { vec![st, st.with_module(false)] } else { vec![st] };
+    let attempts = source_types(name).ok_or_else(|| Denied(format!("Unsupported code file: {name}")))?;
     attempts.into_iter().find_map(|st| parse(name, source, st)).ok_or_else(|| Denied(format!("Changed code cannot be parsed for capability analysis: {name}. Fix its syntax, or make this change yourself")))
 }
 fn analyze(name: &str, source: &str) -> R<Option<BTreeSet<String>>> {

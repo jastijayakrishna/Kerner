@@ -108,7 +108,7 @@ fn symlinks_submodules_case_collisions_and_reserved_names_are_refused() {
     let blob = sh(&repo, &["hash-object", "-w", "a"]);
     sh(&repo, &["update-index", "--add", "--cacheinfo", &format!("120000,{blob},link")]);
     sh(&repo, &["commit", "-qm", "link"]);
-    denied(git::read_commit(&repo, &sh(&repo, &["rev-parse", "HEAD"]), 1048576, 16777216), "Symlinks");
+    assert!(git::read_commit(&repo, &sh(&repo, &["rev-parse", "HEAD"]), 1048576, 16777216).unwrap()["link"].link(), "a symlink is carried as a link, never as a file");
 }
 #[test]
 fn shallow_import_and_bundle_handoff_round_trip_and_reject_tampering() {
@@ -157,7 +157,7 @@ fn shallow_import_and_bundle_handoff_round_trip_and_reject_tampering() {
 #[test]
 fn change_gate_enforces_grants_protected_paths_budgets_and_text() {
     let f = fixture();
-    assert_eq!(git::changes(&f.original, &f.candidate, &f.policy).unwrap()["lines_upper_bound"], 2);
+    assert_eq!(git::changes(&f.original, &f.candidate, &f.policy).unwrap()["lines_changed"], 2);
     for (name, needle) in [("README.md", "outside contract"), ("src/package.json", "Protected"), ("src/.npmrc", "Protected"), ("src/.github/workflows/a.yml", "Protected"), ("src/.env.local", "Protected"), ("src/node_modules/x.js", "Protected")] {
         let mut c = f.candidate.clone();
         c.insert(name.into(), file("x"));
@@ -169,6 +169,68 @@ fn change_gate_enforces_grants_protected_paths_budgets_and_text() {
     let mut tight = policy_value();
     tight["limits"]["lines_changed"] = json!(1);
     denied(git::changes(&f.original, &f.candidate, &contract(&tight).unwrap()), "budget");
+    // lines are counted with a real diff: an edit at the top and one at the bottom of a long file are 4 changed lines, not the whole file
+    // (8 of 320 real agent PRs, some of 3 files and 65 lines, were refused as over 2000 lines before)
+    let long: String = (1..=1000).map(|i| format!("export const v{i} = {i};\n")).collect();
+    let edited = long.replacen("export const v1 = 1;", "export const v1 = 0;", 1).replacen("export const v1000 = 1000;", "export const v1000 = 0;", 1);
+    tight["limits"]["lines_changed"] = json!(10);
+    let (before, after) = (files(&[("src/long.mjs", &long)]), files(&[("src/long.mjs", &edited)]));
+    assert_eq!(git::changes(&before, &after, &contract(&tight).unwrap()).unwrap()["lines_changed"], 4);
+    // moving a block is deleting and adding it
+    let moved: String = long.lines().skip(10).chain(long.lines().take(10)).map(|l| format!("{l}\n")).collect();
+    assert_eq!(git::changes(&before, &files(&[("src/long.mjs", &moved)]), &contract(&policy_value()).unwrap()).unwrap()["lines_changed"], 20);
+    // and a change too big for the budget says by how much it may change, without counting the whole file
+    let rewritten: String = (1..=1000).map(|i| format!("export const w{i} = {i};\n")).collect();
+    denied(git::changes(&before, &files(&[("src/long.mjs", &rewritten)]), &contract(&tight).unwrap()), "1 file and more than 10 lines changed; the contract allows");
+}
+#[test]
+fn symlinks_and_submodules_ride_along_unchanged_and_never_reach_the_sandbox() {
+    // 29 of 320 real agent PRs came from repositories Kern refused outright because some folder held a symlink or a submodule.
+    let t = Temp::new();
+    let repo = t.join("r");
+    sh(&t.0, &["init", "-q", "r"]);
+    sh(&repo, &["config", "core.autocrlf", "false"]);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/a.js"), "module.exports = 1;\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    let link = git::trimmed(git::git(&repo, &["hash-object", "-w", "--stdin"], Some(b"../src/a.js")).unwrap());
+    sh(&repo, &["update-index", "--add", "--cacheinfo", &format!("120000,{link},docs/a.js")]);
+    sh(&repo, &["update-index", "--add", "--cacheinfo", &format!("160000,{},vendor/lib", "e".repeat(40))]);
+    sh(&repo, &["commit", "-qm", "base"]);
+    let base = sh(&repo, &["rev-parse", "HEAD"]);
+    let files = git::read_commit(&repo, &base, 65536, 1048576).unwrap();
+    let (l, s) = (&files["docs/a.js"], &files["vendor/lib"]);
+    assert!(l.link() && s.link() && !files["src/a.js"].link() && l.bytes.is_none() && s.bytes.is_none(), "links are carried, never read as code");
+    // a Kern commit of the same files is the same tree, links included
+    let again = git::write_commit(&repo, &files, None, "x").unwrap();
+    assert_eq!(sh(&repo, &["rev-parse", &format!("{again}^{{tree}}")]), sh(&repo, &["rev-parse", &format!("{base}^{{tree}}")]));
+    // the manifest names them, and a snapshot never contains them: no link is ever created on the verifier host
+    let manifest = git::manifest(&repo, &base, 65536, 1048576).unwrap();
+    assert!(manifest["files"].as_array().unwrap().iter().any(|f| f["path"] == "vendor/lib" && f["commit"] == "e".repeat(40)), "{manifest}");
+    git::materialize(Some(&repo), &files, &t.join("snap"), None).unwrap();
+    assert!(t.join("snap/src/a.js").exists() && !t.join("snap/docs/a.js").exists() && !t.join("snap/vendor/lib").exists());
+    // ordinary changes pass; changing, adding or removing a link does not
+    let mut policy = policy_value();
+    policy["filesystem"] = json!({ "read": ["src/", "docs/", "vendor/"], "write": ["src/", "docs/", "vendor/"] });
+    let policy = contract(&policy).unwrap();
+    let mut edit = files.clone();
+    edit.insert("src/a.js".into(), file("module.exports = 2;\n"));
+    git::changes(&files, &edit, &policy).unwrap();
+    let mut retarget = files.clone();
+    retarget.insert("docs/a.js".into(), Entry { mode: "120000".into(), oid: git::object_id("blob", b"/etc/passwd"), size: 11, bytes: None });
+    let mut added = files.clone();
+    added.insert("src/b.js".into(), Entry { mode: "120000".into(), oid: git::object_id("blob", b"../../secret"), size: 12, bytes: None });
+    let mut removed = files.clone();
+    removed.remove("vendor/lib");
+    let mut replaced = files.clone();
+    replaced.insert("docs/a.js".into(), file("now a file\n"));
+    for c in [&retarget, &added, &removed, &replaced] { denied(git::changes(&files, c, &policy), "Symlinks and submodules cannot change"); }
+    // a workspace never holds them, so reading one back keeps them as they were
+    let ws = t.join("ws");
+    git::materialize(Some(&repo), &files, &ws, None).unwrap();
+    let back = kern::local::read_workspace(&ws, &files, 65536, 1048576).unwrap();
+    assert_eq!(back.get("docs/a.js").map(|e| &e.oid), Some(&link));
+    assert!(git::changes(&files, &back, &policy).unwrap()["files"].as_array().unwrap().is_empty());
 }
 #[test]
 fn step_summary_keeps_agent_text_inside_a_code_block() {
@@ -339,7 +401,7 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     let r = kern::init::init(&repo, &kern::init::load_profile(t.join("profile.json").to_str().unwrap()).unwrap(), "agent", "acme/kern@0123456789abcdef0123456789abcdef01234567").unwrap();
     assert_eq!(r["status"], "INITIALIZED", "{r}");
     let c = contract(&read_json(repo.join(".github/kern/tasks/agent.json")).unwrap()).unwrap();
-    assert_eq!((c.read.clone(), c.write.clone()), (vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()], vec!["index.js".to_string(), "src/".into(), "test/".into()]));
+    assert_eq!((c.read.clone(), c.write.clone()), (vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()], vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()]));
     assert!(c.dependencies && c.checks == vec!["addition".to_string()]);
     let tests = c.tests.clone().expect("a test runner was found, so the contract keeps the tests honest");
     assert_eq!((tests.paths, tests.kind, tests.runner, tests.command), (vec!["test/".to_string()], policy::Kind::Feature, policy::Runner::Mocha, vec!["/workspace/node_modules/.bin/mocha".to_string()]));
@@ -378,6 +440,32 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
 }
 
 #[test]
+fn init_grants_the_folders_people_edit_and_keeps_config_generated_and_agent_files_out() {
+    // A Next.js-style app with no src/ folder, the commonest shape among 320 real agent PRs: 41 such repos could not be set up at all, and
+    // in the rest 127 PRs were refused for touching README.md, components/, public/ or index.html.
+    let repo = files(&[("app/page.tsx", "export default 1;\n"), ("components/Button.tsx", "export const B = 1;\n"), ("hooks/use.ts", "export {};\n"), ("lib/db.ts", "export {};\n"),
+        ("public/index.html", "<p></p>\n"), ("styles/globals.css", "p {}\n"), ("scripts/seed.js", "1;\n"), ("supabase/functions/x.ts", "export {};\n"), ("docs/guide.md", "x\n"),
+        ("assets/logo.png", "png"), ("dist/bundle.js", "1;\n"), ("build/x.js", "1;\n"), ("coverage/lcov.info", "x\n"), ("vendor/lib.js", "1;\n"), (".vscode/settings.json", "{}\n"),
+        (".github/workflows/ci.yml", "x\n"), ("README.md", "x\n"), ("CHANGELOG.md", "x\n"), ("AUTHORS", "x\n"), ("Makefile", "x\n"), ("index.html", "<p></p>\n"), ("styles.css", "p {}\n"), ("CLAUDE.md", "x\n"), ("AGENTS.md", "x\n"),
+        ("next.config.js", "module.exports = {};\n"), ("tsconfig.json", "{}\n"), ("vercel.json", "{}\n"), (".env.example", "X=1\n"), ("package.json", "{}\n"), ("package-lock.json", "{\"lockfileVersion\":3,\"packages\":{}}\n")]);
+    let (c, _) = kern::init::draft(&repo, Some(b"{}"), "agent", vec![json!("smoke")]).unwrap();
+    assert_eq!(c.write, ["AUTHORS", "CHANGELOG.md", "README.md", "app/", "components/", "docs/", "hooks/", "index.html", "lib/", "public/", "scripts/", "styles.css", "styles/", "supabase/"]);
+    assert_eq!(c.read, c.write);
+    // the change budget fits 99% of those PRs (they changed at most 33 files; 2 of 320 changed more than 5000 lines)
+    assert_eq!((c.limits.files_changed, c.limits.lines_changed), (40, 4000));
+    // repositories up to 64 MiB of text can be set up (21 of the 44 refused at 16 MiB held at most 32 MiB, 28 at most 64 MiB)
+    let sized = |mib: usize| -> Files { (0..mib).map(|i| (format!("src/f{i}.js"), Entry { mode: "100644".into(), oid: "a".repeat(40), size: 1048576, bytes: None })).collect() };
+    let (c, _) = kern::init::draft(&sized(40), None, "agent", vec![json!("smoke")]).unwrap();
+    assert_eq!(c.limits.total_bytes, 64 << 20);
+    denied(kern::init::draft(&sized(65), None, "agent", vec![json!("smoke")]), "Kern supports up to 67108864");
+    // apps that keep every component at the top level (one real repo had 101 entries there) still fit in a contract
+    let flat: Files = (0..120).map(|i| (format!("Screen{i}.jsx"), file("export default 1;\n"))).collect();
+    assert_eq!(kern::init::draft(&flat, None, "agent", vec![json!("smoke")]).unwrap().0.write.len(), 120);
+    // a repository with nothing to grant still says so
+    denied(kern::init::draft(&files(&[("assets/logo.png", "png"), (".github/workflows/ci.yml", "x\n")]), None, "agent", vec![json!("smoke")]), "write the task contract by hand");
+}
+
+#[test]
 fn audit_log_chains_every_decision_and_the_report_escapes_agent_text() {
     let t = Temp::new();
     let log = t.join("audit.jsonl");
@@ -406,7 +494,7 @@ fn block_messages_say_why_and_how_to_allow() {
     denied(git::changes(&f.original, &c, &f.policy), "add \"README.md\" to filesystem.read and filesystem.write");
     let mut tight = policy_value();
     tight["limits"]["lines_changed"] = json!(1);
-    denied(git::changes(&f.original, &f.candidate, &contract(&tight).unwrap()), "1 file and up to 2 lines changed; the contract allows 8 files and 1 lines");
+    denied(git::changes(&f.original, &f.candidate, &contract(&tight).unwrap()), "1 file and more than 1 line changed; the contract allows 8 files and 1 lines");
     let mut c = f.candidate.clone();
     c.insert("src/run.js".into(), file("require('child_process').exec('id');\n"));
     c.insert("index.js".into(), file("fetch('https://x.invalid');\n"));
@@ -826,6 +914,16 @@ fn capability_footprint_reads_js_ts_and_jsx_semantically() {
     ];
     for (code, cap) in attacks { assert!(caps("src/a.js", code).contains(&cap.to_string()), "{code} missing {cap}"); }
     assert!(capability::footprint("src/a.js", "const = broken").is_err());
+    // React projects (Create React App, Next.js) write JSX in plain .js files; 3 of 320 real agent PRs were refused before this was read
+    let component = "import { useState } from 'react';\nexport default function Chat({ msgs }) {\n  const [text, setText] = useState('');\n  return (\n    <div style={{ display: 'flex' }}>\n      {msgs.length === 0 && <div>No messages</div>}\n      <input value={text} onChange={(e) => setText(e.target.value)} />\n    </div>\n  );\n}\n";
+    assert_eq!(caps("components/Chat.js", component), ["package:react"]);
+    assert_eq!(caps("components/Old.js", "var React = require('react');\nmodule.exports = function Old() { return <p onClick={() => fetch('/x')}>old</p>; };\n"), ["global:fetch", "package:react"]);
+    // JSX is only a fallback: plain JavaScript keeps its meaning, so comparisons are never read as tags
+    assert!(caps("src/cmp.js", "const a = 1, b = 2, c = 3;\nmodule.exports = a < b > c;\n").is_empty());
+    assert!(capability::footprint("components/Broken.js", "export default () => <div>;\n").is_err());
+    // the test-proof screen reads the same files
+    let screened = kern::proof::screen(&files(&[]), &files(&[("components/Chat.js", component)]), &json!({ "files": [{ "path": "components/Chat.js", "operation": "add" }] }), contract(&tested("feature")).unwrap().tests.as_ref().unwrap());
+    assert!(screened.is_ok(), "{screened:?}");
 }
 #[test]
 fn capability_check_blocks_only_widening_with_file_directory_and_operator_baselines() {
@@ -852,6 +950,21 @@ fn capability_check_blocks_only_widening_with_file_directory_and_operator_baseli
     let mut shell = base.clone();
     shell.insert("src/run.sh".into(), file("curl x\n"));
     denied(check(&shell), "Unsupported changed file type");
+    // contributor lists and change logs often have no extension (mathjs asks every contributor to add themselves to AUTHORS, so 2 of 4 real
+    // mathjs pull requests were refused); they are text, still checked for code hidden in them, while extensionless build files stay out
+    for name in ["src/AUTHORS", "src/CONTRIBUTORS", "src/CHANGELOG"] {
+        let mut docs = base.clone();
+        docs.insert(name.into(), file("Jane Doe <jane@example.com>\n"));
+        check(&docs).unwrap();
+        let mut hidden = base.clone();
+        hidden.insert(name.into(), file("require('child_process').exec('id');\n"));
+        denied(check(&hidden), "widens module capabilities");
+    }
+    for name in ["src/Makefile", "src/Dockerfile", "src/LICENSE"] {
+        let mut build = base.clone();
+        build.insert(name.into(), file("all:\n\tcurl x\n"));
+        denied(check(&build), "Unsupported changed file type");
+    }
 }
 
 #[test]

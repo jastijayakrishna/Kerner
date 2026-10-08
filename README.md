@@ -4,7 +4,7 @@
 
 Sandboxes such as OpenShell control what an agent can *do while it runs*. Kern controls what the agent's *output may become*:
 
-- **Task contract.** The agent may change only the granted directories, within a change budget. Lockfiles, `.github/`, `.env*` and other dependency or CI files are always protected.
+- **Task contract.** The agent may change only the granted directories, within a change budget counted with a real line diff. Lockfiles, `.github/`, `.env*` and other dependency or CI files are always protected.
 - **Capability diff.** JS/TS/JSX are parsed with `oxc`. A patch is refused if it gives a module new authority, such as `child_process`, `fetch`, `process.env`, `eval`, dynamic `require`, or a new package. Unchanged authority never blocks an edit. A text, Markdown, CSS, HTML or `.d.ts` file that parses as JavaScript is checked the same way, since `require()` executes it, and loading a declaration file at runtime counts as new authority.
 - **Independent verification.** A separate verifier runs the project's real test suite and operator-owned cases on the exact commit, each in a fresh gVisor sandbox with no network. Dependencies come only from the committed lockfile.
 - **Behaviour diff.** The verifier runs the same checks on the base commit too and compares what the code actually did: network destinations, DNS names, programs started and secret-looking environment reads. A change that newly reaches out is blocked unless the task contract allows it, which catches a module that already had network or process access starting to use it somewhere new.
@@ -34,7 +34,7 @@ git add .github && git commit -m "Add the Kern merge gate"
 gh api -X POST repos/OWNER/REPO/rulesets --input .github/kern/ruleset.json
 ```
 
-`kern init` reads the committed tree to find source and test directories, root-level code files and the lockfile, and writes a contract that grants those and nothing else. Build and test configuration (`*.config.js`), CI files, lockfiles and manifests stay out of reach. Every file it writes is validated by Kern's own parsers, and it refuses to overwrite an existing setup. The ruleset requires the `kern-verified` check from GitHub Actions only, so no other app can satisfy it, and it adds to existing branch protection rather than replacing it. Organizations can apply the same requirement to every repository with an org-level ruleset that requires the workflow.
+`kern init` reads the committed tree and grants every top-level folder that holds code, docs or styles, and the root-level code, Markdown, HTML and CSS files. It leaves out dot folders (tool settings such as `.vscode/` or `.cursor/`), generated or vendored output (`dist/`, `build/`, `out/`, `coverage/`, `vendor/`), build and test configuration (`*.config.*`, `tsconfig*`), and the instructions coding agents read (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`), since an agent that rewrites those steers the next agent. CI files, lockfiles and manifests stay protected whatever the grants say. The change budget is 40 files and 4,000 changed lines, which fits 99% of 320 real agent pull requests. Every file it writes is validated by Kern's own parsers, and it refuses to overwrite an existing setup. The ruleset requires the `kern-verified` check from GitHub Actions only, so no other app can satisfy it, and it adds to existing branch protection rather than replacing it. Organizations can apply the same requirement to every repository with an org-level ruleset that requires the workflow.
 
 ## Proof of honest fix
 
@@ -259,7 +259,7 @@ All measurements were run on this implementation; the live runs used gVisor rele
 
 ## Limits
 
-- Changed code must be JS/TS/JSX or text/JSON/CSS/HTML/Markdown. Repositories must be SHA-1 git, at most 10,000 files and 16 MiB, with no symlinks or submodules.
+- Changed code must be JS/TS/JSX or text/JSON/CSS/HTML/Markdown, or a contributor list or change log without an extension (`AUTHORS`, `CONTRIBUTORS`, `CHANGELOG` and the like), which is checked for hidden code like any other text. Repositories must be SHA-1 git, at most 10,000 files and 64 MiB of text (files up to 1 MiB each). Symlinks and submodules are carried unchanged: a task cannot change them, and tests run without them.
 - Dependency setup supports npm `package-lock.json` v2/v3 from one registry, with install scripts disabled. Legacy SHA-1-only lock pins are accepted and counted in the record.
 - The capability check is static: it stops new authority from being granted, not misuse of authority a module already has. Names are resolved through `oxc_semantic`, so `process` or `self` count only when they are the real globals, and `this` counts as the global object inside plain non-strict functions. New code that passes such a `this` on as a value (for example `$(this)` or `fn.apply(this, arguments)` in a non-strict file) is refused; existing code is covered by its baseline.
 - A new file may use any authority its directory already uses, including combinations no single file had; files in one directory can already import each other, so the directory is the unit of authority.

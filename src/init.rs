@@ -1,14 +1,17 @@
-use crate::capability::is_code;
+use crate::capability::{is_code, is_data};
 use crate::ensure;
 use crate::git;
-use crate::policy::{contract, operator, task_id};
+use crate::policy::{Contract, contract, operator, task_id};
 use crate::util::*;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-const SOURCE: [&str; 5] = ["src", "lib", "app", "source", "packages"];
+/// Build output and vendored code: not what a task changes.
+const GENERATED: [&str; 6] = ["node_modules", "dist", "build", "out", "coverage", "vendor"];
+/// Instructions coding agents read; an agent that rewrites them steers the next agent, so they are granted only by hand.
+const AGENT_NOTES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"];
 const TESTS: [&str; 4] = ["test", "tests", "__tests__", "spec"];
 const GITHUB_ACTIONS_APP: u64 = 15368;
 
@@ -48,6 +51,32 @@ fn runner(package: Option<&[u8]>) -> Option<(&'static str, Vec<String>)> {
     pkg["scripts"]["test"].as_str().filter(|t| t.contains("node --test")).map(|_| ("node", vec!["/usr/local/bin/node".into(), "--test".into()]))
 }
 
+/// The task contract `kern init` proposes for a commit with these files, and the operator permissions its tests need.
+pub fn draft(files: &git::Files, package: Option<&[u8]>, task: &str, checks: Vec<Value>) -> R<(Contract, Value)> {
+    let inspectable: u64 = files.values().map(|e| e.size).filter(|s| *s <= git::MAX_FILE).sum();
+    ensure!(inspectable <= git::MAX_TOTAL, "The repository holds {inspectable} bytes of inspectable files; Kern supports up to {}", git::MAX_TOTAL);
+    let top: BTreeSet<&str> = files.keys().filter_map(|k| k.split_once('/').map(|(d, _)| d)).collect();
+    let tests: Vec<String> = TESTS.iter().filter(|d| top.contains(*d)).map(|d| format!("{d}/")).collect();
+    // Every top-level folder with code, docs or styles in it, except tool settings (dot folders), generated output and vendored code. The
+    // dependency, CI and secret files stay protected wherever they are (git::protected), so wider grants never reach them.
+    let dirs = files.keys().filter_map(|k| k.split_once('/').filter(|(d, _)| !d.starts_with('.') && !GENERATED.contains(d) && (is_code(k) || is_data(k))).map(|(d, _)| format!("{d}/")));
+    // Root files: code, docs, pages and styles, but not build and test configuration, and not the instructions agents read.
+    let roots = files.keys().filter(|k| !k.contains('/') && !k.starts_with('.') && !git::protected(k) && !AGENT_NOTES.contains(&k.as_str())
+        && !k.contains(".config.") && !k.starts_with("tsconfig") && !k.starts_with("jsconfig") && !["gulpfile.js", "Gruntfile.js"].contains(&k.as_str())
+        && (is_code(k) || crate::capability::text_name(k) || [".md", ".html", ".css"].iter().any(|e| k.ends_with(e)))).cloned();
+    let write: Vec<String> = dirs.chain(roots).chain(tests.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect();
+    ensure!(!write.is_empty(), "No folder or root file with code, docs or styles found; write the task contract by hand");
+    let read = write.clone();
+    let deps = files.contains_key("package-lock.json");
+    let found = runner(package).filter(|(_, c)| deps || !c[0].starts_with("/workspace/node_modules/"));
+    let proof = match (&found, tests.is_empty()) { (Some((name, cmd)), false) => json!({ "paths": tests, "kind": "feature", "runner": name, "command": cmd }), _ => Value::Null };
+    let c = contract(&json!({ "version": 4, "task": task, "behaviors": [], "tests": proof, "filesystem": { "read": read, "write": write }, "network": [], "secrets": [], "publish": false,
+        "dependencies": if deps { json!({ "manager": "npm", "lockfile": "package-lock.json" }) } else { Value::Null },
+        "limits": { "files_changed": 40, "lines_changed": 4000, "file_bytes": git::MAX_FILE, "total_bytes": (inspectable * 2).clamp(git::MAX_FILE, git::MAX_TOTAL), "timeout_seconds": 900, "memory_mb": 2048, "pids": 512 },
+        "required_checks": checks }))?;
+    Ok((c, tests.iter().map(|t| (t.clone(), json!(["node:assert", "node:test"]))).collect::<serde_json::Map<_, _>>().into()))
+}
+
 pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> {
     ensure!(task_id(task), "Invalid task ID: lowercase letters, digits, '-' and '_' only");
     let valid_action = action.split_once('@').is_some_and(|(r, v)| r.split('/').count() == 2 && !v.is_empty()) && action.bytes().all(|b| b.is_ascii_alphanumeric() || b"/@._-".contains(&b));
@@ -55,29 +84,12 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
     let repository = origin(repo)?;
     let head = git::trimmed(git::git(repo, &["rev-parse", "HEAD"], None)?);
     let files = git::read_commit(repo, &head, 0, git::MAX_TOTAL)?;
-    let inspectable: u64 = files.values().map(|e| e.size).filter(|s| *s <= git::MAX_FILE).sum();
-    ensure!(inspectable <= git::MAX_TOTAL, "The repository holds {inspectable} bytes of inspectable files; Kern supports up to {}", git::MAX_TOTAL);
-    let top: BTreeSet<&str> = files.keys().filter_map(|k| k.split_once('/').map(|(d, _)| d)).collect();
-    let dirs = |names: &[&str]| names.iter().filter(|d| top.contains(*d)).map(|d| format!("{d}/")).collect::<Vec<_>>();
-    let (sources, tests) = (dirs(&SOURCE), dirs(&TESTS));
-    let roots: Vec<String> = files.keys().filter(|k| !k.contains('/') && is_code(k) && !k.starts_with('.') && !k.contains(".config.") && !["gulpfile.js", "Gruntfile.js"].contains(&k.as_str())).cloned().collect();
-    ensure!(!sources.is_empty() || !roots.is_empty(), "No source directory ({}) or root-level code file found; write the task contract by hand", SOURCE.join(", "));
-    let mut write: Vec<String> = sources.iter().chain(&tests).chain(&roots).cloned().collect();
-    if top.contains("docs") { write.push("docs/".into()); }
-    let mut read = write.clone();
-    if files.contains_key("README.md") { read.push("README.md".into()); }
-    let deps = files.contains_key("package-lock.json");
     let checks: Vec<Value> = profile["operator"]["checks"].as_array().into_iter().flatten().map(|c| c["id"].clone()).collect();
     let package = files.contains_key("package.json").then(|| git::git(repo, &["cat-file", "blob", &format!("{head}:package.json")], None).ok()).flatten();
-    let found = runner(package.as_deref()).filter(|(_, c)| deps || !c[0].starts_with("/workspace/node_modules/"));
-    let proof = match (&found, tests.is_empty()) { (Some((name, cmd)), false) => json!({ "paths": tests, "kind": "feature", "runner": name, "command": cmd }), _ => Value::Null };
-    let c = contract(&json!({ "version": 4, "task": task, "behaviors": [], "tests": proof, "filesystem": { "read": read, "write": write }, "network": [], "secrets": [], "publish": false,
-        "dependencies": if deps { json!({ "manager": "npm", "lockfile": "package-lock.json" }) } else { Value::Null },
-        "limits": { "files_changed": 25, "lines_changed": 2000, "file_bytes": git::MAX_FILE, "total_bytes": (inspectable * 2).clamp(git::MAX_FILE, git::MAX_TOTAL), "timeout_seconds": 900, "memory_mb": 2048, "pids": 512 },
-        "required_checks": checks }))?;
+    let (c, permissions) = draft(&files, package.as_deref(), task, checks)?;
     let mut op = profile["operator"].clone();
     op["repository"] = json!(repository);
-    op["permissions"] = tests.iter().map(|t| (t.clone(), json!(["node:assert", "node:test"]))).collect::<serde_json::Map<_, _>>().into();
+    op["permissions"] = permissions;
     operator(&op)?;
     let ruleset = json!({ "name": "kern-verified", "target": "branch", "enforcement": "active", "bypass_actors": [],
         "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
