@@ -81,7 +81,14 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     }
     if let Some((list, grant)) = r.strip_prefix("Tests show new runtime behavior: ").and_then(|x| x.rsplit_once(". If this is intended, allow it in the task contract (version 3): \"behaviors\": "))
         && serde_json::from_str::<Value>(grant).is_ok_and(|g| g.is_array()) {
-        let mut v = fix("behavior", None, format!("Remove what makes the tests newly reach {}. With the old code the tests did not use this network access, start these programs or read these variables.", codes(list.split(", "))));
+        let mut v = fix("behavior", None, format!("Remove what makes the tests newly reach {}. With the old code the tests did not use this network access, start these programs, read these variables or delete or overwrite these files.", codes(list.split(", "))));
+        v.detail = Some(list.into());
+        v.allow = Some("A human can allow it in the task contract's behaviors list.".into());
+        return (true, vec![v]);
+    }
+    if let Some((list, grant)) = r.strip_prefix("Calling the new code shows new runtime behavior: ").and_then(|x| x.rsplit_once(". If this is intended, allow it in the task contract: \"behaviors\": "))
+        && serde_json::from_str::<Value>(grant).is_ok_and(|g| g.is_array()) {
+        let mut v = fix("behavior", None, format!("Remove what makes the new code newly reach {} when Kern calls it. Called with the same inputs, the old code did not use this network access, start these programs, read these variables or delete or overwrite these files.", codes(list.split(", "))));
         v.detail = Some(list.into());
         v.allow = Some("A human can allow it in the task contract's behaviors list.".into());
         return (true, vec![v]);
@@ -94,6 +101,51 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
             else { String::new() };
         if !instruction.is_empty() { return (true, vec![fix("check-failed", None, instruction)]); }
     }
+    // The comparison of the old and the new code (contract version 5): the old code is the rulebook for everything the task does not state.
+    let delta_hint = |v: &mut Violation, what: &str| v.allow = Some(format!("A human can state {what} in the task contract's delta."));
+    if let Some(list) = shaped(r, "New crash where the old code worked: ", ". The new code must handle every input the old code handled") {
+        let mut v = fix("never-worse", None, format!("Make these calls work again as they did on the old code: {}. The new code must handle every input the old code handled.", code(list)));
+        delta_hint(&mut v, "this change");
+        return (true, vec![v]);
+    }
+    if let Some(list) = shaped(r, "The new code did not answer calls the old code answered: ", ". The new code must answer every call the old code answered, in about the same time") {
+        let mut v = fix("unanswered", None, format!("Make the new code answer these calls as the old code did, in about the same time: {}. It stopped early or became much slower.", code(list)));
+        delta_hint(&mut v, "this change");
+        return (true, vec![v]);
+    }
+    if let Some(list) = shaped(r, "Behaviour changed outside the task's stated change: ", ". Everything the task did not state must behave exactly as before") {
+        let mut v = fix("unstated-change", None, format!("Keep these calls behaving exactly as on the old code: {}. Only the change the task states may differ.", code(list)));
+        delta_hint(&mut v, "this change");
+        return (true, vec![v]);
+    }
+    if let Some(list) = shaped(r, "Removed without the task stating it: ", ". Restore it; deleting files or exports needs the task's delta to list them under removes") {
+        let mut v = fix("unstated-removal", None, format!("Restore {}: this task does not remove them.", code(list)));
+        delta_hint(&mut v, "the removal");
+        return (true, vec![v]);
+    }
+    if let Some(list) = shaped(r, "New code deletes files: ", ". Code may not newly delete or truncate files unless the task's delta allows delete") {
+        let mut v = fix("deletes-files", None, format!("Remove the new calls that delete or truncate files: {}.", code(list)));
+        delta_hint(&mut v, "that the task deletes files");
+        return (true, vec![v]);
+    }
+    if let Some(list) = shaped(r, "Access widened: ", ". A route that refused a user before must still refuse them") {
+        let mut v = fix("access-widened", None, format!("Restore the access checks, so these routes refuse as before: {}.", code(list)));
+        delta_hint(&mut v, "an intended access change");
+        return (true, vec![v]);
+    }
+    if let Some(list) = shaped(r, "The task's examples do not hold: ", ". The new code must give the answers the task states") {
+        return (true, vec![fix("examples", None, format!("Make these calls give the answers the task states: {}.", code(list)))]);
+    }
+    if let Some(list) = shaped(r, "Access changed outside the task's stated change: ", ". Routes must answer as before") {
+        return (true, vec![fix("access-changed", None, format!("Make these routes answer as before: {}.", code(list)))]);
+    }
+    if let Some(list) = shaped(r, "Slower than the old code: ", ". The task did not allow slower code") {
+        return (true, vec![fix("slower", None, format!("Make these functions about as fast as before: {}.", code(list)))]);
+    }
+    if let Some(list) = shaped(r, "More paid API calls than the old code: ", ". The task did not allow more paid API calls") {
+        return (true, vec![fix("paid-calls", None, format!("Remove the extra paid API calls: {}.", code(list)))]);
+    }
+    if r.starts_with("Kern could not compare the old and the new code: ") { return human("compare", "Kern could not compare the old and the new code. A human has to check the verifier and the task's app recipe."); }
     let locked = "The test proof locks existing tests so they keep checking the old behaviour; ";
     for (start, end) in [("Existing test file changed: ", "put new tests in a new file and leave existing ones unchanged"), ("Existing test file deleted: ", "leave existing tests in place")] {
         if let Some(p) = shaped(r, start, &format!(". {locked}{end}")) {

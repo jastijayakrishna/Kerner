@@ -526,6 +526,7 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     let c = contract(&read_json(repo.join(".github/kern/tasks/agent.json")).unwrap()).unwrap();
     assert_eq!((c.read.clone(), c.write.clone()), (vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()], vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()]));
     assert!(c.dependencies && c.checks == vec!["addition".to_string()]);
+    assert!(c.compare && c.delta.is_none() && c.app.is_none(), "every change is compared with the old code; the task states its change when it has one");
     let tests = c.tests.clone().expect("a test runner was found, so the contract keeps the tests honest");
     assert_eq!((tests.paths, tests.kind, tests.runner, tests.command), (vec!["test/".to_string()], policy::Kind::Feature, policy::Runner::Mocha, vec!["/workspace/node_modules/.bin/mocha".to_string()]));
     assert!(required_checks(&c).contains(&"honest-fix".to_string()));
@@ -1557,7 +1558,7 @@ fn github_required_check_reverifies_the_exact_pr_head() {
     let envelope = attest::sign(&kern_payload(&policy, &opr, &run_id, &base, &head, &manifest, now_ms() - 7_200_000), &KeySource::File(f.key.clone())).unwrap();
     let d = promote::Decision { repository: "acme/project".into(), branch: format!("kern/fix-addition/{run_id}"), base: base.clone(), commit: head.clone(), run_id: run_id.clone(), attestation: Value::Null };
     let event = |head_sha: &str, base_sha: &str, branch: &str, body: &str| json!({ "pull_request": { "head": { "sha": head_sha, "ref": branch }, "base": { "sha": base_sha, "repo": { "full_name": "acme/project" } }, "body": body } });
-    let body = promote::pr_body("fix-addition", &d, &envelope).unwrap();
+    let body = promote::pr_body("fix-addition", &d, &envelope, None).unwrap();
     let pass = promote::check_pr(&event(&head, &base, &d.branch, &body), &repo, ".github/kern", now_ms()).unwrap();
     assert_eq!(pass["status"], "PASS");
     assert_eq!(promote::check_pr(&event(&head, &base, "feature/human", ""), &repo, ".github/kern", now_ms()).unwrap()["status"], "SKIPPED");
@@ -1570,7 +1571,7 @@ fn github_required_check_reverifies_the_exact_pr_head() {
     let next_base = git::write_commit(&repo, &f.original, Some(&base), "moved").unwrap();
     denied(promote::check_pr(&event(&head, &next_base, &d.branch, &body), &repo, ".github/kern", now_ms()), "");
     let wrong_key = attest::sign(&kern_payload(&policy, &opr, &run_id, &base, &head, &manifest, now_ms() - 1000), &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
-    denied(promote::check_pr(&event(&head, &base, &d.branch, &promote::pr_body("fix-addition", &d, &wrong_key).unwrap()), &repo, ".github/kern", now_ms()), "Untrusted");
+    denied(promote::check_pr(&event(&head, &base, &d.branch, &promote::pr_body("fix-addition", &d, &wrong_key, None).unwrap()), &repo, ".github/kern", now_ms()), "Untrusted");
 }
 type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
 struct StubApi { url: String, seen: Seen }
@@ -1633,7 +1634,7 @@ struct Checked { code: Option<i32>, summary: String, output: String, feedback: O
 fn check_pr_with(g: &PrGate, envelope: &Value, api: &StubApi, env: &[(&str, &str)]) -> Checked {
     let d = promote::Decision { repository: "acme/project".into(), branch: g.branch.clone(), base: g.base.clone(), commit: g.head.clone(), run_id: String::new(), attestation: Value::Null };
     let event = json!({ "repository": { "full_name": "acme/project" }, "pull_request": { "number": 7, "head": { "sha": g.head, "ref": g.branch }, "base": { "sha": g.base, "repo": { "full_name": "acme/project" } },
-        "body": promote::pr_body("fix-addition", &d, envelope).unwrap() } });
+        "body": promote::pr_body("fix-addition", &d, envelope, None).unwrap() } });
     let dir = g.t.join(&format!("check-{}", uuid4().unwrap()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
@@ -1756,7 +1757,7 @@ impl Hub {
     }
     fn body(&self, envelope: &Value, commit: &str) -> String {
         let d = promote::Decision { repository: "acme/project".into(), branch: self.branch.clone(), base: self.base0.clone(), commit: commit.into(), run_id: self.run_id.clone(), attestation: Value::Null };
-        promote::pr_body("fix-addition", &d, envelope).unwrap()
+        promote::pr_body("fix-addition", &d, envelope, None).unwrap()
     }
 }
 
@@ -2088,7 +2089,7 @@ fn merge_audit_reverifies_every_change_to_the_branch_and_lists_the_gaps() {
         "merged_at": "2026-04-30T00:00:00Z", "merge_commit_sha": merged, "user": { "login": "dev" }, "head": { "ref": branch, "sha": head }, "base": { "ref": into, "sha": base }, "body": body }]);
     let pr = |n: u64, branch: &str, head: &str, base: &str, merged: &str, body: String| pr_into("audit-main", n, branch, head, base, merged, body);
     let body = |run_id: &str, head: &str, base: &str, envelope: &Value| promote::pr_body("fix-addition", &promote::Decision { repository: "acme/project".into(), branch: format!("kern/fix-addition/{run_id}"),
-        base: base.into(), commit: head.into(), run_id: run_id.into(), attestation: Value::Null }, envelope).unwrap();
+        base: base.into(), commit: head.into(), run_id: run_id.into(), attestation: Value::Null }, envelope, None).unwrap();
     let mut routes = std::collections::HashMap::new();
     routes.insert(format!("/repos/acme/project/commits/{m1}/pulls"), pr(1, &format!("kern/fix-addition/{run1}"), &h1, &setup, &m1, body(&run1, &h1, &setup, &env1)).to_string());
     routes.insert(format!("/repos/acme/project/commits/{m2}/pulls"), pr(2, "feature/docs", &m2, &m1, &m2, "Docs".into()).to_string());
@@ -2293,7 +2294,7 @@ fn podman_info(controllers: &[&str]) -> Value {
 }
 fn engine_of(info: &Value) -> container::Engine { container::engine_from_info(Path::new("/usr/bin/docker"), info).unwrap() }
 fn box_spec<'a>(ws: &'a Path, command: &'a [String], mounts: &'a [container::Mount], env: &'a [String], network: bool) -> container::BoxSpec<'a> {
-    container::BoxSpec { image: NODE, command, workspace: ws, mounts, env, network, timeout_seconds: 30, memory_mb: 256, pids: 64, feedback: None }
+    container::BoxSpec { image: NODE, command, workspace: ws, mounts, env, network, timeout_seconds: 30, memory_mb: 256, pids: 64, feedback: None, delta: None }
 }
 
 #[test]
@@ -2985,7 +2986,7 @@ fn capability_footprint_treats_relative_imports_into_node_modules_as_packages() 
 fn pr_attestation_survives_crlf_bodies_from_web_edits() {
     let f = fixture();
     let d = promote::Decision { repository: "acme/project".into(), branch: format!("kern/fix-addition/{}", f.run_id), base: f.base.clone(), commit: f.commit.clone(), run_id: f.run_id.clone(), attestation: Value::Null };
-    let body = promote::pr_body("fix-addition", &d, &f.envelope).unwrap();
+    let body = promote::pr_body("fix-addition", &d, &f.envelope, None).unwrap();
     assert_eq!(promote::extract_attestation(&body.replace('\n', "\r\n")).unwrap(), f.envelope);
 }
 

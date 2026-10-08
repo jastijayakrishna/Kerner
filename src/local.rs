@@ -45,7 +45,7 @@ fn abs_existing(s: &str, label: &str) -> R<PathBuf> {
 pub struct BoxJob { pub image: String, pub workspace: PathBuf, pub command: Vec<String>, pub network: bool, pub env: Vec<String>, pub mounts: Vec<Mount>, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64 }
 impl BoxJob {
     fn spec(&self) -> BoxSpec<'_> {
-        BoxSpec { image: &self.image, command: &self.command, workspace: &self.workspace, mounts: &self.mounts, env: &self.env, network: self.network, timeout_seconds: self.timeout_seconds, memory_mb: self.memory_mb, pids: self.pids, feedback: None }
+        BoxSpec { image: &self.image, command: &self.command, workspace: &self.workspace, mounts: &self.mounts, env: &self.env, network: self.network, timeout_seconds: self.timeout_seconds, memory_mb: self.memory_mb, pids: self.pids, feedback: None, delta: None }
     }
 }
 fn present<'a>(v: &Value, required: &[&'a str], optional: &[&'a str]) -> Vec<&'a str> {
@@ -216,19 +216,25 @@ pub fn run_job(path: &Path) -> R<RunJob> {
         promote: flag(&raw, "promote")?, attempts: if raw.get("attempts").is_some() { int(&raw, "attempts", 1, 10)? } else { 1 }, repo, base, contract, output, verifier })
 }
 
-pub fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<Value> {
+/// Sends the handoff to the independent verifier and returns its attestation and, when it sent one, its comparison of the old and the new
+/// code (null otherwise). The comparison is never trusted on its own: callers show it only when the attestation covers it.
+pub fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<(Value, Value)> {
     let _ = std::fs::remove_file(out);
+    let beside = out.with_file_name("compare.json");
+    let _ = std::fs::remove_file(&beside);
     let (pin, arguments) = match &v.transport {
         Transport::Script(pin, arguments) => (pin, arguments),
         Transport::Https(url, token) => {
-            let body = json!({ "run": read_json(handoff.join("run.json"))?, "bundle": b64(&std::fs::read(handoff.join("artifact.bundle"))?) }).to_string();
+            let body = json!({ "run": read_json(handoff.join("run.json"))?, "bundle": b64(&std::fs::read(handoff.join("artifact.bundle"))?), "evidence": true }).to_string();
             let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(Duration::from_secs(1200))).build().into();
             let sent = agent.post(&format!("{url}/v1/verify")).header("Authorization", &format!("Bearer {token}")).header("Content-Type", "application/json").send(body);
             let mut r = sent.map_err(|e| Denied(format!("independent verifier unreachable: {e}")))?;
             let reply: Value = serde_json::from_str(&r.body_mut().read_to_string().map_err(|e| Denied(format!("independent verifier unreachable: {e}")))?)?;
             ensure!(r.status().is_success(), "independent verifier rejected the change: {}", reply["reason"].as_str().unwrap_or("no reason given"));
-            create_new(out, format!("{reply}\n").as_bytes(), 0o600)?;
-            return Ok(reply);
+            let (envelope, evidence) = if reply.get("attestation").is_some() { (reply["attestation"].clone(), reply["evidence"].clone()) } else { (reply, Value::Null) };
+            create_new(out, format!("{envelope}\n").as_bytes(), 0o600)?;
+            if !evidence.is_null() { create_new(&beside, format!("{evidence}\n").as_bytes(), 0o600)?; }
+            return Ok((envelope, evidence));
         }
     };
     let script = strip_verbatim(&pinned(pin)?);
@@ -244,7 +250,9 @@ pub fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) 
     run(&exe, &args, Run { cwd: None, env: safe_env(&std::env::temp_dir()), input: None, timeout: Duration::from_secs(1200), max_output: 1048576 })
         .map_err(|e| Denied(format!("independent verifier unreachable or rejected the change: {}", e.0)))?;
     ensure!(std::fs::symlink_metadata(out).is_ok_and(|m| m.is_file()), "the independent verifier returned no attestation");
-    read_json(out)
+    // A transport script may leave the verifier's comparison beside the attestation, as compare.json.
+    let evidence = if std::fs::symlink_metadata(&beside).is_ok_and(|m| m.is_file()) { read_json(&beside)? } else { Value::Null };
+    Ok((read_json(out)?, evidence))
 }
 pub fn confirm_attestation(envelope: &Value, trusted_pem: &str, commit: &str) -> R<()> {
     exact(envelope, &["payloadType", "payload", "signatures"], "attestation envelope")?;
@@ -291,6 +299,10 @@ pub fn print_run(r: &Value) {
             Some("VERIFIED") => say(&format!("VERIFIED{}", r["accepted_after"].as_str().map_or(String::new(), |n| format!(" ({n})")))),
             _ => say(&format!("BLOCKED: {}", plain(r["reason"].as_str().unwrap_or("unknown")))),
         }
+        if let Some(lines) = r["what_changed"].as_array() {
+            say("");
+            for l in lines.iter().filter_map(Value::as_str) { say(&format!("  {}", plain(l))); }
+        }
     } else if let Some(s) = r["summary"].as_str() {
         say(&plain(s));
     }
@@ -332,8 +344,10 @@ pub fn local_run(job: &RunJob) -> R<Value> {
 fn run_attempt(job: &RunJob, dir: &Path, ws: &Path, base_files: &Files, feedback: Option<&str>) -> R<Value> {
     let l = &job.contract.limits;
     let task = job.contract.task.clone();
+    // The agent is told what the task states will change (KERN_DELTA), so it can keep everything else exactly as it was.
+    let delta = job.contract.delta.as_ref().map(|_| job.contract.value["delta"].to_string());
     let spec = BoxSpec { image: &job.image, command: &job.command, workspace: ws, mounts: &job.mounts, env: &job.env, network: job.network,
-        timeout_seconds: l.timeout_seconds, memory_mb: l.memory_mb, pids: l.pids, feedback };
+        timeout_seconds: l.timeout_seconds, memory_mb: l.memory_mb, pids: l.pids, feedback, delta: delta.as_deref() };
     let agent = match container::run(&spec) {
         Ok(o) => o,
         Err(e) => return Ok(blocked(&task, vec![], &e.0)),
@@ -358,20 +372,25 @@ fn run_attempt(job: &RunJob, dir: &Path, ws: &Path, base_files: &Files, feedback
                 .unwrap_or_else(|| format!("agent command exited with code {exit}"));
             return Ok(blocked(&task, vec!["Isolated"], &reason));
         };
-        let outcome = (|| -> R<(String, Value)> {
+        let outcome = (|| -> R<(String, Value, Value)> {
             let c = git::write_commit(&job.repo, candidate, Some(&job.base), &task)?;
             let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: dir.join("ingest"), run_id: None };
             let ingest = flow::task(&pj, Source::Ingest(&job.repo, &c))?;
             let preflight = ingest["checks"].as_array().into_iter().flatten().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str());
             ensure!(ingest["status"] == "CANDIDATE", "{}", ingest["reason"].as_str().or(preflight).unwrap_or("the local gate rejected the change"));
             let bundle = PathBuf::from(text(&ingest, "bundle")?);
-            let envelope = invoke_transport(v, &bundle.join("handoff"), &dir.join("attestation.json"), &c)?;
+            let (envelope, evidence) = invoke_transport(v, &bundle.join("handoff"), &dir.join("attestation.json"), &c)?;
             confirm_attestation(&envelope, &v.public_key_pem, &c)?;
-            Ok((c, envelope))
+            Ok((c, envelope, evidence))
         })();
         return Ok(match outcome {
-            Ok((c, envelope)) => json!({ "status": "VERIFIED", "ux": ["Isolated", "Verified independently", "Tests passed", "Signed"],
-                "task": task, "base": job.base, "commit": c, "files_changed": files_changed, "attestation_sha256": digest(&envelope).unwrap_or_default(), "checks": checks, "box": boxed }),
+            Ok((c, envelope, evidence)) => {
+                let mut r = json!({ "status": "VERIFIED", "ux": ["Isolated", "Verified independently", "Tests passed", "Signed"],
+                    "task": task, "base": job.base, "commit": c, "files_changed": files_changed, "attestation_sha256": digest(&envelope).unwrap_or_default(), "checks": checks, "box": boxed });
+                // What the verifier saw comparing the old and the new code, when the signed proof covers exactly that comparison.
+                if crate::compare::attested(&envelope, &evidence) { r["what_changed"] = json!(crate::compare::summary(&evidence)); }
+                r
+            }
             Err(e) => blocked(&task, vec!["Isolated"], &e.0),
         });
     }

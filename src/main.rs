@@ -128,7 +128,9 @@ fn cli() -> R<(Option<Value>, i32)> {
             let (store, envelope, c, op, expected, key) = promotion(a)?;
             let d = promote::authorize(&store, &envelope, &key, &c, &op, &expected, now)?;
             let token = std::fs::read_to_string(&a[6])?;
-            (Some(promote::promote_github(&store, &d, &c, &envelope, &key, GitHub { token: token.trim(), base_branch: &a[7], ledger: Path::new(&a[8]), git: git_pin })?), 0)
+            // The verifier writes its comparison of the old and the new code beside the attestation; it goes into the description when the proof covers it.
+            let evidence = read_json(Path::new(&a[1]).with_file_name("compare.json")).ok().filter(|e| kern::compare::attested(&envelope, e));
+            (Some(promote::promote_github(&store, &d, &c, &envelope, &key, GitHub { token: token.trim(), base_branch: &a[7], ledger: Path::new(&a[8]), git: git_pin, evidence: evidence.as_ref() })?), 0)
         }
         "profile" => { count(a, 2)?; (Some(kern::init::profile(&read_json(&a[0])?, &std::fs::read_to_string(&a[1])?)?), 0) }
         "init" => {

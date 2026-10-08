@@ -125,22 +125,23 @@ fn handle(s: &Service, stream: &TcpStream) -> std::io::Result<()> {
 fn verify(s: &Service, r: &mut Request) -> (u16, Value) {
     let token = r.token.as_deref().map(sha256);
     if !token.as_ref().is_some_and(|t| s.tenants.values().any(|x| x.tokens.contains(t))) { return (401, denial("A valid bearer token is required")); }
-    let parsed = (|| -> R<(Value, String)> {
+    let parsed = (|| -> R<(Value, String, bool)> {
         let req: Value = serde_json::from_slice(&r.body()?)?;
-        exact(&req, &["run", "bundle"], "verification request")?;
+        exact(&req, if req.get("evidence").is_some() { &["run", "bundle", "evidence"] } else { &["run", "bundle"] }, "verification request")?;
         git::validate_run(&req["run"])?;
-        Ok((req["run"].clone(), text(&req, "bundle")?.to_string()))
+        Ok((req["run"].clone(), text(&req, "bundle")?.to_string(), req["evidence"] == true))
     })();
-    let (run, bundle) = match parsed { Ok(p) => p, Err(e) => return (400, denial(&e.0)) };
+    let (run, bundle, with_evidence) = match parsed { Ok(p) => p, Err(e) => return (400, denial(&e.0)) };
     let repo = run["repository"].as_str().unwrap_or("").to_string();
     let Some(tenant) = s.tenants.get(&repo) else { return (422, denial(&format!("This verifier does not serve {repo}"))) };
     if !token.as_ref().is_some_and(|t| tenant.tokens.contains(t)) { return (401, denial("This token may not verify that repository")); }
     let outcome = verification(s, tenant, &run, &bundle);
-    let summary = outcome.as_ref().map(|(env, task)| json!({ "status": "VERIFIED", "task": task, "repository": repo, "commit": run["commit"], "attestation_sha256": digest(env).unwrap_or_default() }));
+    let summary = outcome.as_ref().map(|(env, task, _)| json!({ "status": "VERIFIED", "task": task, "repository": repo, "commit": run["commit"], "attestation_sha256": digest(env).unwrap_or_default() }));
     if let Err(e) = crate::audit::append(&s.audit, &crate::audit::event("serve", &summary.map_err(|e| Denied(e.0.clone())))) { eprintln!("{}", json!({ "warning": format!("Audit log not written: {e}") })); }
-    match outcome { Ok((env, _)) => (200, env), Err(e) => (422, denial(&e.0)) }
+    // A client that asks for it also gets the comparison of the old and the new code; the attestation covers it by its digest.
+    match outcome { Ok((env, _, evidence)) => (200, if with_evidence { json!({ "attestation": env, "evidence": evidence }) } else { env }), Err(e) => (422, denial(&e.0)) }
 }
-fn verification(s: &Service, tenant: &Tenant, run: &Value, bundle: &str) -> R<(Value, String)> {
+fn verification(s: &Service, tenant: &Tenant, run: &Value, bundle: &str) -> R<(Value, String, Value)> {
     let op = operator(&read_json(&tenant.operator)?)?;
     let want = text(run, "contract_sha256")?;
     let mut matched = None;
@@ -159,5 +160,7 @@ fn verification(s: &Service, tenant: &Tenant, run: &Value, bundle: &str) -> R<(V
     let outcome = git::import_handoff(&handoff, &root.join("run")).and_then(|_| flow::verify(&root.join("run"), &policy, &op, &root.join("out"), &s.signer));
     let _ = std::fs::remove_dir_all(&handoff);
     let _ = std::fs::remove_dir_all(root.join("run"));
-    Ok((outcome?, policy.task))
+    let envelope = outcome?;
+    let evidence = read_json(root.join("out").join("compare.json")).unwrap_or(Value::Null);
+    Ok((envelope, policy.task, evidence))
 }

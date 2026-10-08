@@ -3,6 +3,7 @@ pub mod policy;
 pub mod git;
 pub mod capability;
 pub mod proof;
+pub mod compare;
 pub mod sandbox;
 pub mod attest;
 pub mod feedback;

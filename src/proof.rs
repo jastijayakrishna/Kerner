@@ -756,6 +756,7 @@ impl<'a> Visit<'a> for Declares {
 }
 fn declares_tests(path: &str, source: &str) -> bool { parsed(path, source, |program, _| { let mut v = Declares(false); v.visit_program(program); v.0 }).unwrap_or(false) }
 /// The files each code file imports, resolved within one tree.
+pub fn import_edges(files: &Files) -> BTreeMap<String, Vec<String>> { edges(files) }
 fn edges(files: &Files) -> BTreeMap<String, Vec<String>> {
     files.iter().filter(|(k, _)| is_code(k)).filter_map(|(k, _)| {
         let source = text_of(files, k)?;

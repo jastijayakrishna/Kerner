@@ -13,9 +13,10 @@ const ENGINE_ENV: [&str; 4] = ["PATH", "HOSTNAME", "container", "TERM"];
 
 #[derive(Clone, Debug)]
 pub struct Mount { pub source: PathBuf, pub target: String }
+/// `feedback`: Kern's verdict on the agent's previous attempt (KERN_FEEDBACK); `delta`: what the task states will change (KERN_DELTA).
 pub struct BoxSpec<'a> {
     pub image: &'a str, pub command: &'a [String], pub workspace: &'a Path, pub mounts: &'a [Mount], pub env: &'a [String],
-    pub network: bool, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64, pub feedback: Option<&'a str>,
+    pub network: bool, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64, pub feedback: Option<&'a str>, pub delta: Option<&'a str>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +135,7 @@ pub fn create_args(spec: &BoxSpec, e: &Engine, name: &str) -> R<Vec<String>> {
     for m in spec.mounts { a.push(bind(&m.source, &m.target, ",readonly")?); }
     a.extend(spec.env.iter().map(|n| format!("--env={n}")));
     if let Some(f) = spec.feedback { a.push(format!("--env=KERN_FEEDBACK={f}")); }
+    if let Some(d) = spec.delta { a.push(format!("--env=KERN_DELTA={d}")); }
     a.push(spec.image.into());
     a.extend(spec.command[1..].iter().cloned());
     Ok(a)
@@ -161,7 +163,8 @@ pub fn confirm(i: &Value, spec: &BoxSpec, e: &Engine, image_env: &[String]) -> R
     ensure!(mounts.len() == 1 + spec.mounts.len() && expected.all(|(t, rw)| mounts.iter().any(|m| m["Type"] == "bind" && m["Destination"] == t && m["RW"] == rw)),
         "{n} mounted something other than the workspace and the job's read-only mounts");
     let name = |entry: &str| entry.split('=').next().unwrap_or("").to_string();
-    let known = |var: &str| var == "HOME" || (var == "KERN_FEEDBACK" && spec.feedback.is_some()) || ENGINE_ENV.contains(&var) || spec.env.iter().any(|x| x == var) || image_env.iter().any(|x| name(x) == var);
+    let known = |var: &str| var == "HOME" || (var == "KERN_FEEDBACK" && spec.feedback.is_some()) || (var == "KERN_DELTA" && spec.delta.is_some()) || ENGINE_ENV.contains(&var)
+        || spec.env.iter().any(|x| x == var) || image_env.iter().any(|x| name(x) == var);
     let mut added: Vec<String> = listed(&i["Config"]["Env"]).iter().map(|x| name(x)).filter(|x| !known(x)).collect();
     added.dedup();
     ensure!(added.is_empty(), "{n} added environment variables the job did not list ({}). Docker copies proxy settings from ~/.docker/config.json and Podman from containers.conf; \

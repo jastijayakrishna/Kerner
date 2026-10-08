@@ -74,6 +74,13 @@ pub fn screen(base: &Files, candidate: &Files, patterns: &[String]) -> R<Value> 
     Ok(json!({ "approved": declared, "lockfile_packages_changed": packages }))
 }
 
+/// The packages whose locked version differs between two trees: what an upgrade moved, directly or through another package.
+pub fn moved(base: &Files, candidate: &Files) -> BTreeSet<String> {
+    let lock = |f: &Files| f.get(LOCKFILE).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()).map(|v| v["packages"].as_object().cloned().unwrap_or_default()).unwrap_or_default();
+    let (a, b) = (lock(base), lock(candidate));
+    a.keys().chain(b.keys()).filter(|k| !k.is_empty() && a.get(*k) != b.get(*k)).map(|k| package_of(k).to_string()).collect()
+}
+
 /// Package names a change may newly import because the task approved adding them.
 pub fn imports(changed: &Value) -> BTreeSet<String> {
     changed["dependencies"]["approved"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|n| valid_name(n)).map(|n| format!("package:{n}")).collect()

@@ -91,7 +91,9 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
     let merged = merge(&read(&fork)?, &onto, &pushed, base_ref)?;
     let commit = git::write_commit(checkout, &merged, Some(&tip), &policy.task)?;
     let reused = k["commit"] == commit.as_str() && k["base"] == tip.as_str();
-    let envelope = if reused { old } else { verified(pr.run_id, checkout, &tip, &commit, &policy, &op, &key_pem, hosted)? };
+    let (envelope, evidence) = if reused { (old, promote::extract_evidence(pr.body).unwrap_or(Value::Null)) } else { verified(pr.run_id, checkout, &tip, &commit, &policy, &op, &key_pem, hosted)? };
+    // The comparison the verifier made travels with the new proof, when the proof covers it.
+    let evidence = Some(evidence).filter(|e| crate::compare::attested(&envelope, e));
     // The same check every Kern pull request passes at the gate, at the time the proof arrived: the verifier signed it moments ago, so its
     // clock and the runner's may differ by a little.
     let at = if reused { now } else { now_ms() + CLOCK_SKEW_MS };
@@ -116,7 +118,7 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
         }
     }
     let d = Decision { repository: pr.repository.into(), branch: pr.head_ref.into(), base: tip.clone(), commit: commit.clone(), run_id: pr.run_id.into(), attestation: Value::Null };
-    if !reused { api.patch(&format!("/repos/{}/pulls/{}", pr.repository, pr.number), &json!({ "body": promote::with_attestation(pr.body, pr.task, &d, &envelope)? }))?; }
+    if !reused { api.patch(&format!("/repos/{}/pulls/{}", pr.repository, pr.number), &json!({ "body": promote::with_attestation(pr.body, pr.task, &d, &envelope, evidence.as_ref())? }))?; }
     // A push made with the workflow's own token starts no workflow, so the required check for the new commit comes from here.
     if moved {
         let name = github::env("KERN_CHECK_NAME").unwrap_or_else(|| "kern-verified".into());
@@ -125,8 +127,10 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
         api.post(&format!("/repos/{}/check-runs", pr.repository), &json!({ "name": name, "head_sha": commit, "status": "completed", "conclusion": "success",
             "output": { "title": "Kern re-verified this change", "summary": summary } }))?;
     }
-    Ok(json!({ "status": "PASS", "head": commit, "base": tip, "task": pr.task, "run_id": pr.run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)),
-        "changes": changed, "capabilities": capabilities, "reverified": { "pushed": pr.head, "commit": commit, "base": tip, "base_ref": base_ref, "attestation_sha256": digest(&envelope)? } }))
+    let mut result = json!({ "status": "PASS", "head": commit, "base": tip, "task": pr.task, "run_id": pr.run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)),
+        "changes": changed, "capabilities": capabilities, "reverified": { "pushed": pr.head, "commit": commit, "base": tip, "base_ref": base_ref, "attestation_sha256": digest(&envelope)? } });
+    if let Some(e) = &evidence { result["what_changed"] = json!(crate::compare::markdown(e)); }
+    Ok(result)
 }
 
 /// A merge-queue group for a Kern pull request passes when it lands exactly the tree Kern verified, on the base Kern verified it on. With a
@@ -177,10 +181,11 @@ pub fn check_merge_group(event: &Value, config: &str, now: u64) -> R<Value> {
                 if !signed.is_some_and(|s| s["run_id"] == run_id && s["task"] == task && s["repository"] == repository) { return Err(stale); }
                 let l = &policy.limits;
                 let commit = git::write_commit(&store, &git::read_commit(&store, head, l.file_bytes, l.total_bytes)?, Some(base), &policy.task)?;
-                let envelope = verified(run_id, &store, base, &commit, &policy, &op, &key_pem, &hosted)?;
+                let (envelope, evidence) = verified(run_id, &store, base, &commit, &policy, &op, &key_pem, &hosted)?;
                 let k = promote::verify_against(&store, &envelope, &key, &policy, &op, Claim { run_id, base, commit: &commit, now: now_ms() + CLOCK_SKEW_MS, enforce_expiry: false })?;
                 let d = Decision { repository: repository.into(), branch: head_ref.into(), base: base.into(), commit: commit.clone(), run_id: run_id.into(), attestation: Value::Null };
-                api.patch(&format!("/repos/{repository}/pulls/{number}"), &json!({ "body": promote::with_attestation(body, task, &d, &envelope)? }))?;
+                let evidence = Some(evidence).filter(|e| crate::compare::attested(&envelope, e));
+                api.patch(&format!("/repos/{repository}/pulls/{number}"), &json!({ "body": promote::with_attestation(body, task, &d, &envelope, evidence.as_ref())? }))?;
                 (k, commit, true)
             }
         };
@@ -195,11 +200,12 @@ pub fn check_merge_group(event: &Value, config: &str, now: u64) -> R<Value> {
     outcome
 }
 
-/// A new proof from the hosted verifier for `commit`, under the same run, after the handoff the executor side always prepares.
+/// A new proof from the hosted verifier for `commit`, under the same run, after the handoff the executor side always prepares, and the
+/// comparison the verifier sent with it (null when there is none; callers show it only when the proof covers it).
 #[allow(clippy::too_many_arguments)]
-fn verified(run_id: &str, checkout: &Path, tip: &str, commit: &str, policy: &crate::policy::Contract, op: &crate::policy::Operator, key_pem: &str, hosted: &Hosted) -> R<Value> {
+fn verified(run_id: &str, checkout: &Path, tip: &str, commit: &str, policy: &crate::policy::Contract, op: &crate::policy::Operator, key_pem: &str, hosted: &Hosted) -> R<(Value, Value)> {
     let work = fresh_dir(std::env::temp_dir().join(format!("kern-reverify-{}", short_id()?)))?;
-    let outcome = (|| -> R<Value> {
+    let outcome = (|| -> R<(Value, Value)> {
         // The key and the task output live apart, as preflight requires.
         let key_file = fresh_dir(work.join("key"))?.join("verifier.pub");
         create_new(&key_file, key_pem.as_bytes(), 0o600)?;
@@ -208,10 +214,11 @@ fn verified(run_id: &str, checkout: &Path, tip: &str, commit: &str, policy: &cra
         let blocked = candidate["checks"].as_array().into_iter().flatten().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str());
         ensure!(candidate["status"] == "CANDIDATE", "{}", candidate["reason"].as_str().or(blocked).unwrap_or("Kern could not prepare the change for the verifier"));
         let v = Verifier { transport: Transport::Https(hosted.url.clone(), hosted.token.clone()), public_key_pem: key_pem.into(), public_key_path: key_file, operator: op.clone() };
-        let envelope = local::invoke_transport(&v, &PathBuf::from(text(&candidate, "bundle")?).join("handoff"), &work.join("attestation.json"), commit)?;
+        let (envelope, evidence) = local::invoke_transport(&v, &PathBuf::from(text(&candidate, "bundle")?).join("handoff"), &work.join("attestation.json"), commit)?;
         local::confirm_attestation(&envelope, key_pem, commit)?;
-        Ok(envelope)
+        Ok((envelope, evidence))
     })();
     let _ = std::fs::remove_dir_all(&work);
     outcome
 }
+

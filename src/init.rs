@@ -70,13 +70,13 @@ pub fn draft(files: &git::Files, package: Option<&[u8]>, task: &str, checks: Vec
     let deps = files.contains_key("package-lock.json");
     let found = runner(package).filter(|(_, c)| deps || !c[0].starts_with("/workspace/node_modules/"));
     let proof = match (&found, tests.is_empty()) { (Some((name, cmd)), false) => json!({ "paths": tests, "kind": "feature", "runner": name, "command": cmd }), _ => Value::Null };
-    let c = contract(&json!({ "version": 4, "task": task, "behaviors": [], "tests": proof, "filesystem": { "read": read, "write": write }, "network": [], "secrets": [], "publish": false,
+    // Version 5: the verifier compares the old and the new code on every change. A task that knows what it changes states it as a delta.
+    let c = contract(&json!({ "version": 5, "task": task, "behaviors": [], "tests": proof, "filesystem": { "read": read, "write": write }, "network": [], "secrets": [], "publish": false,
         "dependencies": if deps { json!({ "manager": "npm", "lockfile": "package-lock.json" }) } else { Value::Null },
         "limits": { "files_changed": 40, "lines_changed": 4000, "file_bytes": git::MAX_FILE, "total_bytes": (inspectable * 2).clamp(git::MAX_FILE, git::MAX_TOTAL), "timeout_seconds": 900, "memory_mb": 2048, "pids": 512 },
-        "required_checks": checks }))?;
+        "required_checks": checks, "delta": null, "app": null }))?;
     Ok((c, tests.iter().map(|t| (t.clone(), json!(["node:assert", "node:test"]))).collect::<serde_json::Map<_, _>>().into()))
 }
-
 pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> {
     ensure!(task_id(task), "Invalid task ID: lowercase letters, digits, '-' and '_' only");
     let valid_action = action.split_once('@').is_some_and(|(r, v)| r.split('/').count() == 2 && !v.is_empty()) && action.bytes().all(|b| b.is_ascii_alphanumeric() || b"/@._-".contains(&b));
@@ -111,6 +111,7 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
             if c.tests.is_some() { "The task contract locks existing tests and requires every test that ran before to still run and pass; for a bug-fix task set tests.kind to bugfix, so every fix must come with a test that fails before it".to_string() }
             else { "Kern found no test runner it can read (mocha, jest, vitest or node --test); add a \"tests\" section to the task contract to require proof of honest fixes".to_string() },
             "The ruleset requires pull requests to be up to date with their base, so the merged result is the commit Kern verified".to_string(),
+            "Every change is compared with the old code in the verifier's sandbox, and refused when it crashes where the old code worked, removes a file or export nobody named, newly deletes files or opens a route; when a task knows what it changes, write that in the task's delta first, and everything else must behave exactly as before".to_string(),
             "Kern comments its verdict on agent pull requests; set agent-mention in the workflow (for example @claude) so the agent is asked to fix what it can".to_string(),
             format!("Each quarter, run kern audit-merges on a full clone of {repository} to re-verify every merged change and list any gaps"),
         ] }))

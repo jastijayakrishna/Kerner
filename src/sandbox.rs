@@ -41,9 +41,18 @@ fn docker_full(args: &[&str], timeout: Duration, max_output: usize) -> R<(std::p
 pub fn split_behavior(stdout: &[u8]) -> (&[u8], Option<std::collections::BTreeSet<String>>) {
     let mark = BEHAVIOR.as_bytes();
     match stdout.windows(mark.len()).rposition(|w| w == mark) {
-        Some(i) => (&stdout[..i], Some(String::from_utf8_lossy(&stdout[i + mark.len()..]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect())),
+        Some(i) => (&stdout[..i], Some(String::from_utf8_lossy(&stdout[i + mark.len()..]).lines().filter(|l| !l.is_empty() && !l.starts_with("count ")).map(str::to_string).collect())),
         None => (stdout, None),
     }
+}
+/// How often the run tried to reach each host (`net:host:port`), summed over every process that recorded it.
+pub fn behavior_counts(stdout: &[u8]) -> std::collections::BTreeMap<String, u64> {
+    let mark = BEHAVIOR.as_bytes();
+    let mut counts = std::collections::BTreeMap::new();
+    if let Some(i) = stdout.windows(mark.len()).rposition(|w| w == mark) {
+        for key in String::from_utf8_lossy(&stdout[i + mark.len()..]).lines().filter_map(|l| l.strip_prefix("count ")) { *counts.entry(key.to_string()).or_insert(0) += 1; }
+    }
+    counts
 }
 fn docker_json(args: &[&str]) -> R<Value> { Ok(serde_json::from_slice(&docker(args, Duration::from_secs(60), 16 * 1048576)?)?) }
 
@@ -196,6 +205,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o555))?;
     create_new(dir.join("monitor.cjs"), MONITOR.as_bytes(), 0o444)?;
     create_new(dir.join("jest-report.cjs"), JEST_REPORT.as_bytes(), 0o444)?;
+    create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
 }

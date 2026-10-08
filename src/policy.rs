@@ -7,6 +7,10 @@ use std::sync::OnceLock;
 
 pub const BUILTIN_CHECKS: [&str; 4] = ["artifact", "behavior", "capabilities", "path-and-budget"];
 pub const HONEST_FIX: &str = "honest-fix";
+/// The comparison of the old and the new code that every version 5 proof carries.
+pub const COMPARE: &str = "compare";
+/// What a delta may allow besides behaviour: slower code, more paid API calls, new code that deletes files, and routes that answer differently.
+pub const LENSES: [&str; 4] = ["access", "cost", "delete", "speed"];
 
 fn identifier(s: &str, digit_first: bool) -> bool {
     let b = s.as_bytes();
@@ -45,16 +49,129 @@ impl Runner {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tests { pub paths: Vec<String>, pub kind: Kind, pub runner: Runner, pub command: Vec<String>, pub edits: Edits }
+/// One answer a stated change gives on the new code: these arguments return `returns` (a JavaScript expression) or throw `throws` (an error
+/// name; empty: any error). Both are JavaScript, evaluated only inside the verifier's sandbox.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Example { pub args: String, pub returns: Option<String>, pub throws: Option<String> }
+/// A function whose behaviour the task changes (`path#name`, or `path#*` for every export), everywhere or only where `when` holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change { pub function: String, pub when: Option<String>, pub examples: Vec<Example> }
+/// What a task says will change, written before the code (contract version 5). Everything else must behave as the old code does: the old code
+/// is the rulebook. `removes` names files, folders and exports the task deletes; `allow` names lenses whose findings the task expects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delta { pub intent: String, pub changes: Vec<Change>, pub removes: Vec<String>, pub allow: Vec<String> }
+/// How to start the app inside the sandbox, so the access lens can ask every route as every role, on the old and on the new code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct App { pub setup: Option<Vec<String>>, pub start: Vec<String>, pub port: u64, pub ready: String, pub routes: Vec<String>, pub roles: BTreeMap<String, BTreeMap<String, String>>, pub env: BTreeMap<String, String> }
 #[derive(Clone, Debug)]
-pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub approved: Vec<String>, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String>, pub tests: Option<Tests> }
+pub struct Contract {
+    pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub approved: Vec<String>, pub limits: Limits, pub checks: Vec<String>,
+    pub behaviors: Vec<String>, pub tests: Option<Tests>,
+    /// Version 5: the verifier compares the old and the new code, against `delta` when the task states one.
+    pub compare: bool, pub delta: Option<Delta>, pub app: Option<App>,
+}
+
+fn script(v: &Value, label: &str) -> R<String> {
+    let s = v.as_str().filter(|s| !s.trim().is_empty() && s.len() <= 2000 && !s.contains('\0')).ok_or_else(|| Denied(format!("{label} must be a JavaScript expression of at most 2000 characters")))?;
+    Ok(s.to_string())
+}
+fn js_name(s: &str) -> bool {
+    let part = |p: &str| p.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    s == "*" || (s.split('.').count() <= 2 && s.split('.').all(part))
+}
+/// `path#name`: an export of a module (`default`, `default.add`, `*` for all of them).
+pub fn function_ref(s: &str, code_only: bool) -> R<()> {
+    let bad = || Denied(format!("delta functions must be path#name, such as src/money.js#add: {s}"));
+    let (path, name) = s.split_once('#').ok_or_else(bad)?;
+    file_path(path)?;
+    ensure!(s.len() <= 300 && js_name(name) && (!code_only || crate::capability::is_code(path)), "{}", bad().0);
+    Ok(())
+}
+fn delta(v: &Value) -> R<Option<Delta>> {
+    if v.is_null() { return Ok(None); }
+    // A boxed agent gets the delta in one environment variable, and a stated change is a few plain words and examples.
+    ensure!(v.to_string().len() <= 32 * 1024, "delta must be at most 32 KiB: state the change in plain words and a few examples");
+    let optional = |v: &Value, required: &[&'static str], extra: &[&'static str]| -> Vec<&'static str> { required.iter().chain(extra.iter().filter(|k| v.get(**k).is_some())).copied().collect() };
+    exact(v, &optional(v, &["intent", "changes"], &["removes", "allow"]), "delta")?;
+    let intent = v["intent"].as_str().filter(|s| !s.trim().is_empty() && s.chars().count() <= 1000 && !s.chars().any(char::is_control))
+        .ok_or_else(|| Denied("delta.intent must say in plain words, in at most 1000 characters, what the task changes".into()))?.to_string();
+    let Some(raw) = v["changes"].as_array().filter(|c| c.len() <= 32) else { deny!("delta.changes must list at most 32 changed functions") };
+    let mut changes = Vec::new();
+    for c in raw {
+        exact(c, &optional(c, &["function"], &["when", "examples"]), "delta change")?;
+        let function = text(c, "function")?.to_string();
+        function_ref(&function, true)?;
+        let when = if c.get("when").is_none_or(Value::is_null) { None } else { Some(script(&c["when"], "delta.changes.when")?) };
+        let none = Vec::new();
+        let Some(list) = c.get("examples").map_or(Some(&none), Value::as_array).filter(|l| l.len() <= 16) else { deny!("delta.changes.examples must list at most 16 examples") };
+        let mut examples = Vec::new();
+        for e in list {
+            exact(e, &optional(e, &["args"], &["returns", "throws"]), "delta example")?;
+            ensure!(e.get("returns").is_some() != e.get("throws").is_some(), "A delta example states what the new code returns or throws, one of the two");
+            let throws = match e.get("throws") {
+                None => None,
+                Some(Value::Bool(true)) => Some(String::new()),
+                Some(Value::String(n)) if n.len() <= 100 && js_name(n) && n != "*" => Some(n.clone()),
+                _ => deny!("A delta example's throws is true or an error name such as RangeError"),
+            };
+            let returns = if e.get("returns").is_some() { Some(script(&e["returns"], "delta.changes.examples.returns")?) } else { None };
+            examples.push(Example { args: script(&e["args"], "delta.changes.examples.args")?, returns, throws });
+        }
+        changes.push(Change { function, when, examples });
+    }
+    let removes = if v.get("removes").is_some() { strings(v, "removes", 256)? } else { Vec::new() };
+    for r in &removes { if r.contains('#') { function_ref(r, false)? } else { capability(r)? } }
+    let mut allow = if v.get("allow").is_some() { strings(v, "allow", 4)? } else { Vec::new() };
+    allow.sort();
+    ensure!(allow.windows(2).all(|w| w[0] != w[1]) && allow.iter().all(|a| LENSES.contains(&a.as_str())), "delta.allow may only name access, cost, delete or speed, each once");
+    Ok(Some(Delta { intent, changes, removes, allow }))
+}
+fn app(v: &Value) -> R<Option<App>> {
+    if v.is_null() { return Ok(None); }
+    exact(v, &["setup", "start", "port", "ready", "routes", "roles", "env"], "app")?;
+    let start = argv(&v["start"]).map_err(|_| Denied("app.start must start with an absolute container path, such as /usr/local/bin/node".into()))?;
+    let setup = if v["setup"].is_null() { None } else { Some(argv(&v["setup"]).map_err(|_| Denied("app.setup must be null or start with an absolute container path".into()))?) };
+    let port = v["port"].as_u64().filter(|p| (1..=65535).contains(p)).ok_or_else(|| Denied("app.port must be a port number from 1 to 65535".into()))?;
+    let plain = |s: &str| !s.is_empty() && s.len() <= 512 && s.starts_with('/') && !s.chars().any(|c| c.is_whitespace() || c.is_control());
+    let ready = v["ready"].as_str().filter(|s| plain(s)).ok_or_else(|| Denied("app.ready must be a path such as /healthz".into()))?.to_string();
+    let routes = strings(v, "routes", 200).map_err(|_| Denied("app.routes must list at most 200 routes such as GET /admin".into()))?;
+    let methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    ensure!(!routes.is_empty() && routes.iter().all(|r| r.split_once(' ').is_some_and(|(m, p)| methods.contains(&m) && plain(p))), "app.routes must list at most 200 routes such as GET /admin");
+    let bad_roles = || Denied("app.roles must name 1 to 8 roles, such as anonymous or user, each with the request headers it sends".into());
+    let Some(raw) = v["roles"].as_object().filter(|r| (1..=8).contains(&r.len())) else { return Err(bad_roles()) };
+    let token = |s: &str| !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    let mut roles = BTreeMap::new();
+    for (name, headers) in raw {
+        let Some(h) = headers.as_object().filter(|h| h.len() <= 16) else { return Err(bad_roles()) };
+        ensure!(identifier(name, false) && name.len() <= 32, "{}", bad_roles().0);
+        let mut list = BTreeMap::new();
+        for (k, value) in h {
+            let value = value.as_str().filter(|s| s.len() <= 2000 && !s.chars().any(|c| c == '\r' || c == '\n' || c == '\0')).ok_or_else(bad_roles)?;
+            ensure!(token(k), "{}", bad_roles().0);
+            list.insert(k.clone(), value.to_string());
+        }
+        roles.insert(name.clone(), list);
+    }
+    let bad_env = || Denied("app.env must map at most 32 variable names such as NODE_ENV to short values".into());
+    let Some(raw) = v["env"].as_object().filter(|e| e.len() <= 32) else { return Err(bad_env()) };
+    let mut env = BTreeMap::new();
+    for (k, value) in raw {
+        let name = k.len() <= 64 && k.bytes().next().is_some_and(|b| b.is_ascii_uppercase() || b == b'_') && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+        let value = value.as_str().filter(|s| s.len() <= 2000 && !s.contains(['\0', '\r', '\n'])).ok_or_else(bad_env)?;
+        ensure!(name, "{}", bad_env().0);
+        env.insert(k.clone(), value.to_string());
+    }
+    Ok(Some(App { setup, start, port, ready, routes, roles, env }))
+}
 
 pub fn contract(input: &Value) -> R<Contract> {
     let version = input.get("version").and_then(Value::as_u64);
-    ensure!(matches!(version, Some(1..=4)), "Unsupported contract version");
+    ensure!(matches!(version, Some(1..=5)), "Unsupported contract version");
     let mut fields = vec!["version", "task", "filesystem", "network", "secrets", "publish", "limits", "required_checks"];
     if version >= Some(2) { fields.push("dependencies"); }
     if version >= Some(3) { fields.push("behaviors"); }
     if version >= Some(4) { fields.push("tests"); }
+    if version >= Some(5) { fields.extend(["delta", "app"]); }
     exact(input, &fields, "contract")?;
     let task = text(input, "task")?.to_string();
     ensure!(task_id(&task), "Invalid task ID");
@@ -104,8 +221,8 @@ pub fn contract(input: &Value) -> R<Contract> {
     ensure!(!checks.is_empty() && checks.windows(2).all(|w| w[0] != w[1]) && checks.iter().all(|c| identifier(c, false)), "Required checks must be unique nonempty IDs");
     let mut behaviors = if version >= Some(3) { strings(input, "behaviors", 64)? } else { Vec::new() };
     behaviors.sort();
-    let known = |b: &String| b.len() <= 200 && !b.chars().any(char::is_control) && b.split_once(':').is_some_and(|(k, v)| ["net", "dns", "exec", "env"].contains(&k) && !v.is_empty());
-    ensure!(behaviors.windows(2).all(|w| w[0] != w[1]) && behaviors.iter().all(known), "behaviors must be unique net:, dns:, exec: or env: entries");
+    let known = |b: &String| b.len() <= 200 && !b.chars().any(char::is_control) && b.split_once(':').is_some_and(|(k, v)| ["net", "dns", "exec", "env", "delete", "overwrite"].contains(&k) && !v.is_empty());
+    ensure!(behaviors.windows(2).all(|w| w[0] != w[1]) && behaviors.iter().all(known), "behaviors must be unique net:, dns:, exec:, env:, delete: or overwrite: entries");
     let mut value = input.clone();
     value["filesystem"] = json!({ "read": read, "write": write });
     value["required_checks"] = json!(checks);
@@ -135,7 +252,9 @@ pub fn contract(input: &Value) -> R<Contract> {
         }
     };
     if !approved.is_empty() { value["dependencies"]["allow"] = json!(approved); }
-    Ok(Contract { value, task, read, write, dependencies, approved, limits, checks, behaviors, tests })
+    let compare = version >= Some(5);
+    let (delta, app) = if compare { (delta(&input["delta"])?, app(&input["app"])?) } else { (None, None) };
+    Ok(Contract { value, task, read, write, dependencies, approved, limits, checks, behaviors, tests, compare, delta, app })
 }
 pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     let (a, b) = (contract(original)?, contract(requested)?);
@@ -151,6 +270,9 @@ pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     ensure!(b.approved.iter().all(|x| a.approved.contains(x)), "Cannot approve new dependencies");
     ensure!(b.behaviors.iter().all(|x| a.behaviors.contains(x)), "Cannot allow new runtime behavior");
     ensure!(a.tests.is_none() || a.tests == b.tests, "Cannot change or remove the test proof");
+    ensure!(!a.compare || b.compare, "Cannot drop the comparison of the old and the new code");
+    ensure!(a.delta.is_none() || a.delta == b.delta, "Cannot change or remove the stated change");
+    ensure!(a.app.is_none() || a.app == b.app, "Cannot change or remove the app recipe");
     Ok(b)
 }
 pub fn contract_digest(c: &Contract) -> R<String> { digest(&c.value) }
@@ -186,7 +308,7 @@ pub fn operator(v: &Value) -> R<Operator> {
     for c in raw {
         exact(c, &["id", "file", "sha256"], "operator check")?;
         let (id, file, sha) = (text(c, "id")?, text(c, "file")?, text(c, "sha256")?);
-        ensure!(identifier(id, false) && !BUILTIN_CHECKS.contains(&id) && id != HONEST_FIX && !checks.iter().any(|x| x.id == id), "Duplicate or reserved check ID: {id}");
+        ensure!(identifier(id, false) && !BUILTIN_CHECKS.contains(&id) && id != HONEST_FIX && id != COMPARE && !checks.iter().any(|x| x.id == id), "Duplicate or reserved check ID: {id}");
         ensure!((file.starts_with('/') || Path::new(file).is_absolute()) && is_hex64(sha), "Check {id} needs an absolute file and SHA-256 pin");
         checks.push(CheckSpec { id: id.into(), file: file.into(), sha256: sha.into() });
     }

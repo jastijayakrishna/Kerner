@@ -60,16 +60,41 @@ pub fn promote_local(store: &Path, d: &Decision, key_pem: &str, target: &Path, l
 }
 
 pub const MARKER: &str = "<!-- kern-attestation:v1\n";
-pub fn pr_body(task: &str, d: &Decision, envelope: &Value) -> R<String> {
-    Ok(format!("Kern-verified agent change for task `{task}`.\n\nCommit: `{}`\nAttestation SHA-256: `{}`\n\nReview before merging. The `kern-verified` check re-verifies this attestation against the PR head.\n\n{MARKER}{}\n-->\n", d.commit, digest(envelope)?, b64(canonical(envelope)?.as_bytes())))
+/// The comparison of the old and the new code travels in the description too; the merge check shows it only when the proof covers it.
+pub const EVIDENCE: &str = "<!-- kern-evidence:v1\n";
+fn evidence_block(evidence: Option<&Value>) -> R<String> {
+    let Some(e) = evidence else { return Ok(String::new()) };
+    let text = canonical(e)?;
+    // A comparison too large for a description stays with the verifier's evidence; the proof still covers it by its digest. With the
+    // "What changed" text and the proof, the description stays far below GitHub's 65,536 characters, leaving room for a reviewer's words.
+    Ok(if text.len() > 16_000 { String::new() } else { format!("{EVIDENCE}{}\n-->\n", b64(text.as_bytes())) })
+}
+fn without_block(body: &str, marker: &str) -> String {
+    let Some(start) = body.find(marker) else { return body.to_string() };
+    let Some(end) = body[start..].find("\n-->").map(|e| start + e + 4) else { return body.to_string() };
+    format!("{}{}", &body[..start], body[end..].strip_prefix('\n').unwrap_or(&body[end..]))
+}
+pub fn pr_body(task: &str, d: &Decision, envelope: &Value, evidence: Option<&Value>) -> R<String> {
+    let what = evidence.map(|e| format!("### What changed\n\n{}\n", crate::compare::markdown(e))).unwrap_or_default();
+    Ok(format!("Kern-verified agent change for task `{task}`.\n\nCommit: `{}`\nAttestation SHA-256: `{}`\n\n{what}Review before merging. The `kern-verified` check re-verifies this attestation against the PR head.\n\n{MARKER}{}\n-->\n{}",
+        d.commit, digest(envelope)?, b64(canonical(envelope)?.as_bytes()), evidence_block(evidence)?))
 }
 /// The description with its Kern proof replaced: Kern's own description is written anew, any other text keeps its place around the new block.
-pub fn with_attestation(body: &str, task: &str, d: &Decision, envelope: &Value) -> R<String> {
+pub fn with_attestation(body: &str, task: &str, d: &Decision, envelope: &Value, evidence: Option<&Value>) -> R<String> {
     let body = body.replace("\r\n", "\n");
-    if body.starts_with("Kern-verified agent change for task") { return pr_body(task, d, envelope); }
+    if body.starts_with("Kern-verified agent change for task") { return pr_body(task, d, envelope, evidence); }
+    let body = without_block(&body, EVIDENCE);
     let start = body.find(MARKER).ok_or_else(|| Denied("The pull request description lost its Kern attestation block".into()))?;
     let end = body[start..].find("\n-->").map(|e| start + e + 4).ok_or_else(|| Denied("Unterminated Kern attestation block".into()))?;
-    Ok(format!("{}{MARKER}{}\n-->{}", &body[..start], b64(canonical(envelope)?.as_bytes()), &body[end..]))
+    let rest = body[end..].strip_prefix('\n').unwrap_or(&body[end..]);
+    Ok(format!("{}{MARKER}{}\n-->\n{}{rest}", &body[..start], b64(canonical(envelope)?.as_bytes()), evidence_block(evidence)?))
+}
+/// The comparison a description carries, if it carries exactly one. Nothing here says whether a proof covers it: see compare::attested.
+pub fn extract_evidence(body: &str) -> Option<Value> {
+    let body = body.replace("\r\n", "\n");
+    if body.len() > 65536 || body.matches(EVIDENCE).count() != 1 { return None; }
+    let rest = &body[body.find(EVIDENCE)? + EVIDENCE.len()..];
+    serde_json::from_slice(&unb64(rest[..rest.find("\n-->")?].trim()).ok()?).ok()
 }
 pub fn extract_attestation(body: &str) -> R<Value> {
     let body = body.replace("\r\n", "\n");
@@ -78,7 +103,8 @@ pub fn extract_attestation(body: &str) -> R<Value> {
     let end = rest.find("\n-->").ok_or_else(|| Denied("Unterminated Kern attestation block".into()))?;
     Ok(serde_json::from_slice(&unb64(rest[..end].trim())?)?)
 }
-pub struct GitHub<'a> { pub token: &'a str, pub base_branch: &'a str, pub ledger: &'a Path, pub git: Pin }
+/// `evidence`: the verifier's comparison of the old and the new code, when it wrote one (compare.json beside the attestation).
+pub struct GitHub<'a> { pub token: &'a str, pub base_branch: &'a str, pub ledger: &'a Path, pub git: Pin, pub evidence: Option<&'a Value> }
 pub fn promote_github(store: &Path, d: &Decision, policy: &Contract, envelope: &Value, key_pem: &str, gh: GitHub) -> R<Value> {
     ensure!(!gh.token.is_empty() && !gh.token.contains(['\r', '\n']), "An explicit publishing token is required");
     let b = gh.base_branch;
@@ -109,7 +135,7 @@ pub fn promote_github(store: &Path, d: &Decision, policy: &Contract, envelope: &
     run(&git_exe, &args, Run { cwd: Some(store), env, input: None, timeout: Duration::from_secs(120), max_output: 1048576 }).map_err(|_| Denied("Exact create-only push failed; no existing branch was overwritten".into()))?;
     ensure!(api("GET", &refpath(&d.branch), None)?["object"]["sha"] == d.commit.as_str(), "Remote branch does not match the verified artifact");
     ensure!(api("GET", &refpath(b), None)?["object"]["sha"] == d.base.as_str(), "PR base moved after push; reconcile the created branch manually");
-    let pr = api("POST", "/pulls", Some(json!({ "title": format!("Kern: {}", policy.task), "head": d.branch, "base": b, "draft": true, "body": pr_body(&policy.task, d, envelope)? })))?;
+    let pr = api("POST", "/pulls", Some(json!({ "title": format!("Kern: {}", policy.task), "head": d.branch, "base": b, "draft": true, "body": pr_body(&policy.task, d, envelope, gh.evidence)? })))?;
     ensure!(pr["head"]["sha"] == d.commit.as_str() && pr["base"]["sha"] == d.base.as_str() && pr["draft"] == true, "Created PR does not match the verified head/base or is not a draft; reconcile manually");
     Ok(json!({ "url": pr["html_url"], "number": pr["number"], "commit": d.commit, "branch": d.branch, "draft": true }))
 }
@@ -122,7 +148,15 @@ pub fn git_pin(file: &Path) -> R<Pin> {
 pub fn step_summary(result: &R<Value>) -> String {
     let (status, detail) = match result { Ok(r) => (r["status"].as_str().unwrap_or("UNKNOWN").to_string(), serde_json::to_string_pretty(r).unwrap_or_default()), Err(e) => ("DENIED".into(), e.0.clone()) };
     let status: String = status.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-    format!("### kern-verified: {status}\n\n{}\n", detail.lines().map(|l| format!("    {l}\n")).collect::<String>())
+    // Kern writes these sections itself; every value taken from the change sits inside code formatting.
+    let mut sections = String::new();
+    if let Ok(r) = result {
+        if let Some(what) = r["what_changed"].as_str() { sections += &format!("#### What changed\n\n{what}\n"); }
+        if let Some(list) = r["removed_code"].as_array().filter(|l| !l.is_empty()) { sections += &format!("#### Who added the code this change removes\n\n{}\n", crate::github::who_markdown(list)); }
+    }
+    // A heading ends the lists above, so the indented detail below stays a code block instead of becoming part of their last item.
+    let heading = if sections.is_empty() { "" } else { "#### Details\n\n" };
+    format!("### kern-verified: {status}\n\n{sections}{heading}{}\n", detail.lines().map(|l| format!("    {l}\n")).collect::<String>())
 }
 pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Value> {
     if event["merge_group"].is_object() { return crate::reverify::check_merge_group(event, config, now); }
@@ -167,7 +201,15 @@ fn gate(checkout: &Path, config: &str, now: u64, repository: &str, task: &str, r
     let (original, candidate) = (git::read_commit(checkout, base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, head, l.file_bytes, l.total_bytes)?);
     let changed = git::changes(&original, &candidate, &policy)?;
     let capabilities = capability::check(&original, &candidate, &changed, &op.permissions)?;
-    Ok(json!({ "status": "PASS", "head": head, "base": base, "task": task, "run_id": run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities }))
+    let mut result = json!({ "status": "PASS", "head": head, "base": base, "task": task, "run_id": run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities });
+    // What the verifier saw when it compared the old and the new code, shown only when the proof covers exactly that comparison, and who
+    // added the code the change removes, so a reviewer can ask whether it was there for a reason.
+    if let Some(e) = extract_evidence(body).filter(|e| crate::compare::attested(&envelope, e)) { result["what_changed"] = json!(crate::compare::markdown(&e)); }
+    if policy.compare {
+        let removed = crate::compare::removed_code(&original, &candidate, &result["changes"], &policy);
+        if !removed.is_empty() { result["removed_code"] = crate::github::who_added(repository, base, &removed); }
+    }
+    Ok(result)
 }
 
 pub struct Merged<'a> { pub repository: &'a str, pub branch: &'a str, pub head: &'a str, pub config: &'a str, pub auditor_key: Option<&'a str>, pub now: u64 }

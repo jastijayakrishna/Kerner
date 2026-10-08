@@ -1,13 +1,14 @@
 use crate::attest::{self, KeySource};
 use crate::capability;
+use crate::compare;
 use crate::git::{self, Files};
-use crate::policy::{BUILTIN_CHECKS, CheckSpec, Contract, HONEST_FIX, Job, Limits, Operator, contract_digest, require_role, verifier_digest};
+use crate::policy::{BUILTIN_CHECKS, COMPARE, CheckSpec, Contract, HONEST_FIX, Job, Limits, Operator, contract_digest, require_role, verifier_digest};
 use crate::proof;
 use crate::sandbox::{self, Spec, Volume};
 use crate::util::*;
 use crate::{deny, ensure};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const SETUP: Limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 900, memory_mb: 3072, pids: 512 };
@@ -242,10 +243,17 @@ pub fn task(job: &Job, source: Source) -> R<Value> {
         let store = run_dir.join("objects.git");
         let (base, commit) = (text(&run, "base")?, text(&run, "commit")?);
         let l = &job.contract.limits;
-        let changed = git::changes(&git::read_commit(&store, base, l.file_bytes, l.total_bytes)?, &git::read_commit(&store, commit, l.file_bytes, l.total_bytes)?, &job.contract)?;
+        let (before, after) = (git::read_commit(&store, base, l.file_bytes, l.total_bytes)?, git::read_commit(&store, commit, l.file_bytes, l.total_bytes)?);
+        let changed = git::changes(&before, &after, &job.contract)?;
         create_new(root.join("changes.patch"), &git::git(&store, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", base, commit, "--"], None)?, 0o600)?;
         let handoff = git::handoff(&store, &run, &root.join("handoff"))?;
-        Ok(json!({ "commit": commit, "run_id": run["run_id"], "executor": run["executor"]["kind"], "changes": changed, "handoff": handoff }))
+        let mut out = json!({ "commit": commit, "run_id": run["run_id"], "executor": run["executor"]["kind"], "changes": changed, "handoff": handoff });
+        // Who added the code this change removes, from the source repository's own history, so the reviewer can ask why it was there.
+        if job.contract.compare {
+            let removed = json!({ "removals": crate::compare::removed_code(&before, &after, &out["changes"], &job.contract) });
+            if removed["removals"].as_array().is_some_and(|r| !r.is_empty()) { out["removed_code"] = json!(crate::compare::history(&job.repo, base, &removed)); }
+        }
+        Ok(out)
     })();
     match outcome {
         Ok(v) => {
@@ -279,14 +287,17 @@ fn read_check(spec: &CheckSpec) -> R<Vec<(Vec<String>, Option<String>)>> {
         Ok((argv(&c["command"])?, stdout))
     }).collect()
 }
-/// One operator check's evidence digest and the behaviour it saw.
-type Checked = R<(String, BTreeSet<String>)>;
-fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limits: &Limits, volume: Option<&str>, judge: bool) -> R<(String, BTreeSet<String>)> {
+/// One operator check's evidence digest, the behaviour it saw, and how often it tried to reach each host.
+type Checked = R<(String, BTreeSet<String>, BTreeMap<String, u64>)>;
+/// One probe run of the comparison: the probe's report, the behaviour it saw, and how often it tried to reach each host.
+type Probed = R<(Value, BTreeSet<String>, BTreeMap<String, u64>)>;
+fn merge(into: &mut BTreeMap<String, u64>, from: BTreeMap<String, u64>) { for (k, n) in from { *into.entry(k).or_insert(0) += n; } }
+fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limits: &Limits, volume: Option<&str>, judge: bool) -> Checked {
     let cases = read_check(spec)?;
     let control = root.join(format!("check-{}", spec.id));
     if !control.exists() { sandbox::control_dir(&control, None)?; }
     let deadline = now_ms() + limits.timeout_seconds * 1000;
-    let (mut evidence, mut seen) = (Vec::new(), BTreeSet::new());
+    let (mut evidence, mut seen, mut counts) = (Vec::new(), BTreeSet::new(), BTreeMap::new());
     for (i, (command, expected)) in cases.iter().enumerate() {
         let remaining = deadline.saturating_sub(now_ms()) / 1000;
         ensure!(remaining > 0, "Behavioral verification exceeded its total deadline");
@@ -297,13 +308,14 @@ fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limit
             .map_err(|e| Denied(format!("Check {} case {} failed: {e}", spec.id, i + 1)))?;
         let (stdout, behavior) = sandbox::split_behavior(&out.stdout);
         seen.extend(behavior.ok_or_else(|| Denied(format!("Check {} case {} left no behavior record{}", spec.id, i + 1, if judge { "" } else { " on the base commit; re-run or raise limits.timeout_seconds" })))?);
+        merge(&mut counts, sandbox::behavior_counts(&out.stdout));
         if judge {
             ensure!(out.exit_code == 0, "Check {} case {} failed (exit code {})", spec.id, i + 1, out.exit_code);
             if let Some(want) = expected { ensure!(stdout == want.as_bytes(), "Check {} case {} output differs from the expected answer", spec.id, i + 1); }
         }
         evidence.push(json!({ "case": i + 1, "stdout_sha256": sha256(stdout), "builder_sha256": out.builder.0 }));
     }
-    Ok((digest(&json!(evidence))?, seen))
+    Ok((digest(&json!(evidence))?, seen, counts))
 }
 fn secret(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
@@ -353,34 +365,99 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         Some(install_dependencies(&candidate, op, &root, &op.image)?)
     } else { None };
     let volume = deps.as_ref().map(|d| d.volume.0.as_str());
+    // When the dependencies moved (an upgrade), the old code runs on the old install and the new code on the new one, so a package that now
+    // behaves differently, or newly reaches out, shows as a difference instead of hiding on both sides.
+    let moved = policy.dependencies && [crate::deps::MANIFEST, crate::deps::LOCKFILE].iter().any(|m| original.get(*m).map(|e| &e.oid) != candidate.get(*m).map(|e| &e.oid));
+    let base_deps = if moved { Some(install_dependencies(&original, op, &fresh_dir(root.join("base-dependencies"))?, &op.image)?) } else { None };
+    let base_volume = base_deps.as_ref().map(|d| d.volume.0.as_str()).or(volume);
     let specs = policy.checks.iter().map(|id| op.checks.iter().find(|c| &c.id == id).ok_or_else(|| Denied(format!("No trusted check: {id}")))).collect::<R<Vec<_>>>()?;
     let baseline_snapshot = root.join("baseline");
     git::materialize(Some(&store), &original, &baseline_snapshot, None)?;
     if policy.dependencies { std::fs::create_dir(baseline_snapshot.join("node_modules"))?; }
-    // Each check runs on the new and the old code at the same time, at most as many sandboxes at once as the gate allows.
+    // Version 5 compares the old and the new code: the plan, its own control directory, and the old code without what the change removed.
+    let probing = if policy.compare {
+        let plan = compare::plan(&original, &candidate, &changed, policy, &sha256(format!("{base}{commit}")), l.timeout_seconds)?;
+        let control = root.join("compare-control");
+        sandbox::control_dir(&control, Some(("probe.json", &plan)))?;
+        let removed = plan["removals"].as_array().is_some_and(|r| !r.is_empty()).then(|| root.join("compare-removed"));
+        if let Some(dir) = &removed {
+            git::materialize(Some(&store), &compare::without_removals(&original, &plan), dir, None)?;
+            if policy.dependencies { std::fs::create_dir(dir.join("node_modules"))?; }
+        }
+        Some((plan, control, removed))
+    } else { None };
+    // Each check runs on the new and the old code at the same time, and so do the probe runs, at most as many sandboxes at once as the gate allows.
     let gate = Gate::new(parallelism());
+    // A probe report can outgrow a small repository's output allowance (each call's answer, up to 20,000 calls); it gets at least 33 MiB.
+    let probe_limits = Limits { total_bytes: l.total_bytes.max(16 << 20), ..l.clone() };
+    let probe = |at: &Path, vol: Option<&str>, control: &Path| -> Probed {
+        gate.run(|| {
+            let volumes = vol.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
+            let entry = ["__exec", "/usr/local/bin/node", "/kern/probe.cjs", "/kern/probe.json"].map(String::from).to_vec();
+            let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control, writable: &[], limits: &probe_limits, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })?;
+            ensure!(out.exit_code == 0, "the probe run failed (exit code {})", out.exit_code);
+            let (stdout, behavior) = sandbox::split_behavior(&out.stdout);
+            let behavior = behavior.ok_or_else(|| Denied("the probe run did not finish".into()))?;
+            Ok((compare::read_probe(stdout)?, behavior, sandbox::behavior_counts(&out.stdout)))
+        })
+    };
     for spec in &specs { sandbox::control_dir(&root.join(format!("check-{}", spec.id)), None)?; }
-    let results: Vec<(Checked, Checked)> = std::thread::scope(|s| {
+    let (results, probed): (Vec<(Checked, Checked)>, Vec<Probed>) = std::thread::scope(|s| {
         let pending: Vec<_> = specs.iter().map(|spec| {
             let (root, image, snapshot, baseline_snapshot, gate) = (&root, &op.image, &snapshot, &baseline_snapshot, &gate);
-            (s.spawn(move || gate.run(|| behavioral(spec, root, image, snapshot, l, volume, true))), s.spawn(move || gate.run(|| behavioral(spec, root, image, baseline_snapshot, l, volume, false))))
+            (s.spawn(move || gate.run(|| behavioral(spec, root, image, snapshot, l, volume, true))), s.spawn(move || gate.run(|| behavioral(spec, root, image, baseline_snapshot, l, base_volume, false))))
         }).collect();
-        pending.into_iter().map(|(new, old)| (new.join().unwrap_or_else(|_| Err(Denied("A check stopped unexpectedly".into()))), old.join().unwrap_or_else(|_| Err(Denied("A check stopped unexpectedly".into()))))).collect()
+        let runs: Vec<_> = probing.iter().flat_map(|(_, control, removed)| {
+            let mut jobs: Vec<(&Path, Option<&str>)> = vec![(&baseline_snapshot, base_volume), (&baseline_snapshot, base_volume), (&snapshot, volume), (&snapshot, volume)];
+            if let Some(dir) = removed { jobs.push((dir, base_volume)); }
+            jobs.into_iter().map(|(at, vol)| { let probe = &probe; s.spawn(move || probe(at, vol, control)) }).collect::<Vec<_>>()
+        }).collect();
+        let stopped = || Denied("A check stopped unexpectedly".into());
+        (pending.into_iter().map(|(new, old)| (new.join().unwrap_or_else(|_| Err(stopped())), old.join().unwrap_or_else(|_| Err(stopped())))).collect(),
+         runs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(Denied("A probe run stopped unexpectedly".into())))).collect())
     });
-    let (mut behavior, mut baseline) = (BTreeSet::new(), BTreeSet::new());
+    let (mut behavior, mut baseline, mut counts) = (BTreeSet::new(), BTreeSet::new(), [BTreeMap::new(), BTreeMap::new()]);
     let mut olds = Vec::new();
     for (spec, (new, old)) in specs.iter().zip(results) {
-        let (evidence, seen) = new?;
+        let (evidence, seen, n) = new?;
         behavior.extend(seen);
+        merge(&mut counts[1], n);
         checks.push(json!({ "id": spec.id, "status": "PASS", "evidence_sha256": evidence }));
         olds.push(old);
     }
-    for old in olds { baseline.extend(old?.1); }
+    for old in olds { let (_, seen, n) = old?; baseline.extend(seen); merge(&mut counts[0], n); }
+    let tested = behavior.clone();
+    // What the probes saw joins the behaviour diff: a function that newly deletes a file of the repository, reaches a host or starts a
+    // program when Kern calls it is new behaviour like any other.
+    let compared = match &probing {
+        Some((plan, _, removed)) => {
+            let mut runs = probed.into_iter();
+            let mut next = || runs.next().unwrap_or_else(|| Err(Denied("A probe run returned no result".into()))).map_err(|e| Denied(format!("Kern could not compare the old and the new code: {}", e.0)));
+            let (oa, ob, na, nb) = (next()?, next()?, next()?, next()?);
+            let gone = if removed.is_some() { Some(next()?.0) } else { None };
+            baseline.extend(oa.1.iter().chain(&ob.1).cloned());
+            behavior.extend(na.1.iter().chain(&nb.1).cloned());
+            merge(&mut counts[0], oa.2);
+            merge(&mut counts[1], na.2);
+            let runs = compare::Runs { old: [oa.0, ob.0], new: [na.0, nb.0], removed: gone, counts };
+            let (evidence, block) = compare::evaluate(plan, &runs, &original, &candidate, &changed, policy);
+            // Written before anything is refused, so the comparison is there to read whatever stops the change.
+            write_json(root.join("compare.json"), &evidence)?;
+            Some((evidence, block))
+        }
+        None => None,
+    };
     let (new, blocking) = behavior_diff(&baseline, &behavior, &policy.behaviors);
     let observed = json!({ "base": baseline, "candidate": behavior, "new": new, "blocking": blocking });
     write_json(root.join("behavior.json"), &observed)?;
+    // What the checks show is the tests'; what only calling the new code shows is the code's own, and the agent is told which.
+    ensure!(blocking.iter().all(|b| tested.contains(b)), "Calling the new code shows new runtime behavior: {}. If this is intended, allow it in the task contract: \"behaviors\": {}", blocking.join(", "), serde_json::to_string(&blocking)?);
     ensure!(blocking.is_empty(), "Tests show new runtime behavior: {}. If this is intended, allow it in the task contract (version 3): \"behaviors\": {}", blocking.join(", "), serde_json::to_string(&blocking)?);
     checks.push(json!({ "id": "behavior", "status": "PASS", "evidence_sha256": digest(&observed)? }));
+    if let Some((evidence, block)) = compared {
+        if let Some(why) = block { deny!("{why}") }
+        checks.push(json!({ "id": compare::CHECK, "status": "PASS", "evidence_sha256": digest(&evidence)? }));
+    }
     if let Some(tests) = &policy.tests {
         let proof_root = root.join("honest-fix");
         std::fs::create_dir(&proof_root)?;
@@ -401,7 +478,9 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         let entry: Vec<String> = std::iter::once("__exec".to_string()).chain(proof::command(tests)).collect();
         let run_tests = |which: proof::Run, files: &[String]| -> R<proof::Output> {
             gate.run(|| {
-                let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
+                // The old code runs on the old install, the new code on the new one (they differ only when the dependencies moved).
+                let vol = if matches!(which, proof::Run::Base | proof::Run::Old) { base_volume } else { volume };
+                let volumes = vol.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
                 let at = match which { proof::Run::Base => &baseline_snapshot, proof::Run::New => &snapshot, proof::Run::Kept => &kept_snapshot, proof::Run::Old => &old_snapshot };
                 let entry = entry.iter().chain(files).cloned().collect();
                 let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control: &control, writable: &[], limits: l, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })?;
@@ -452,5 +531,5 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     Ok(envelope)
 }
 pub fn required_checks(policy: &Contract) -> Vec<String> {
-    BUILTIN_CHECKS.iter().map(|s| s.to_string()).chain(policy.tests.as_ref().map(|_| HONEST_FIX.to_string())).chain(policy.checks.iter().cloned()).collect()
+    BUILTIN_CHECKS.iter().map(|s| s.to_string()).chain(policy.tests.as_ref().map(|_| HONEST_FIX.to_string())).chain(policy.compare.then(|| COMPARE.to_string())).chain(policy.checks.iter().cloned()).collect()
 }
