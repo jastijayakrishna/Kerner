@@ -1,52 +1,128 @@
 name: ci
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux runners have Docker, so the local box tests must run there; Windows runners
-          # only offer Windows containers and macOS runners have no engine, so those skip them.
-          - os: ubuntu-24.04
-            require_container: "1"
-          - os: windows-2025
-            require_container: "0"
-          - os: macos-15
-            require_container: "0"
-    runs-on: ${{ matrix.os }}
+  # Linux carries Kern's guarantee (the verifier runs there, under gVisor), so every change gets the whole suite here.
+  linux:
+    runs-on: ubuntu-24.04
     env:
-      KERN_REQUIRE_CONTAINER: ${{ matrix.require_container }}
+      KERN_REQUIRE_CONTAINER: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ hashFiles('Cargo.lock') }}
+      - name: Toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          rustup toolchain install stable --profile minimal --component clippy --target x86_64-unknown-linux-musl && rustup default stable
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Static binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/kern | tee /dev/stderr | grep -qE 'static(ally|-pie) linked'
+          target/x86_64-unknown-linux-musl/release/kern --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kern-linux-x64
+          path: target/x86_64-unknown-linux-musl/release/kern
+          if-no-files-found: error
+  # The verifier for real: gVisor on a fresh machine, a throwaway setup made with Kern's own commands, and real changes
+  # verified or refused, including the signed proof at the deploy gate.
+  gvisor:
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kern-linux-x64
+          path: bin
+      - name: End to end on gVisor
+        run: chmod +x bin/kern && KERN_BIN="$PWD/bin/kern" sh scripts/e2e-gvisor.sh
+      - name: Installer
+        run: |
+          # The release installer, run against this build as a local release: it must install a kern that runs.
+          mkdir -p release && cp bin/kern release/kern-linux-x64 && (cd release && sha256sum kern-linux-x64 > SHA256SUMS)
+          KERN_REPO=test/kern KERN_VERSION=v0.0.0 KERN_DOWNLOAD_URL="file://$PWD/release" KERN_INSTALL_DIR="$RUNNER_TEMP/bin" sh scripts/install.sh
+          "$RUNNER_TEMP/bin/kern" --version
+  # The same code on Windows and macOS: a quick build and test run, so a difference between systems shows up before a release.
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ hashFiles('Cargo.lock') }}
       - name: Toolchain
         run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
-  static-linux:
-    runs-on: ubuntu-24.04
+      - name: Installer
+        shell: pwsh
+        run: |
+          # The release installer against this build, served over HTTP as GitHub serves a release, run as customers run it
+          # (irm | iex) in both Windows PowerShell 5.1 and PowerShell 7.
+          cargo build --locked
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item target/debug/kern.exe release/kern-windows-x64.exe
+          "$((Get-FileHash release/kern-windows-x64.exe).Hash.ToLowerInvariant())  kern-windows-x64.exe" | Out-File -Encoding ascii release/SHA256SUMS
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8731', '--bind', '127.0.0.1', '--directory', 'release' -PassThru -WindowStyle Hidden
+          $env:KERN_REPO = 'test/kern'; $env:KERN_VERSION = 'v0.0.0'; $env:KERN_DOWNLOAD_URL = 'http://127.0.0.1:8731'
+          foreach ($i in 1..30) { try { Invoke-WebRequest -UseBasicParsing "$env:KERN_DOWNLOAD_URL/SHA256SUMS" | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } }
+          foreach ($shell in 'powershell', 'pwsh') {
+            $env:KERN_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "kern-$shell"
+            & $shell -NoProfile -Command 'Get-Content scripts/install.ps1 -Raw | Invoke-Expression'
+            if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed in $shell" }
+            & (Join-Path $env:KERN_INSTALL_DIR 'kern.exe') --version
+            if ($LASTEXITCODE -ne 0) { throw "the installed kern does not run ($shell)" }
+          }
+          Stop-Process -Id $server.Id
+  macos:
+    # macOS minutes cost ten times Linux minutes: pull requests skip it, while main and every release still build and test it.
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ hashFiles('Cargo.lock') }}
       - name: Toolchain
-        run: |
-          sudo apt-get update && sudo apt-get install -y musl-tools
-          rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-musl && rustup default stable
-      - name: Build
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl
-      - name: Prove the binary is static
-        run: |
-          file target/x86_64-unknown-linux-musl/release/kern | tee /dev/stderr | grep -qE 'static(ally|-pie) linked'
-          target/x86_64-unknown-linux-musl/release/kern --version
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Test
+        run: cargo test --locked

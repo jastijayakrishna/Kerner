@@ -231,9 +231,14 @@ The report (`report.json`, `report.html`, `report.csv`) records the branch tip a
 ```sh
 cargo build --release --locked
 cargo test
+# Linux: the verifier end to end on real gVisor, with the static build it copies into its sandboxes
+cargo build --release --locked --target x86_64-unknown-linux-musl
+KERN_BIN=target/x86_64-unknown-linux-musl/release/kern sh scripts/e2e-gvisor.sh
 ```
 
 Production commands need native Linux, Docker with genuine gVisor registered as `runsc`, and memory/swap/PID/CPU limits. There is no fallback runtime.
+
+Develop and test on Linux (on Windows, inside WSL2): the verifier, and with it Kern's guarantee, runs there. `scripts/e2e-gvisor.sh` installs gVisor when Docker lacks it (Ubuntu or Debian), sets up a throwaway verifier with Kern's own commands, and checks that an honest change is verified and its proof passes the deploy gate, while a change that breaks the tests, adds authority or changes behaviour the task did not state is refused, as are a tampered proof and a proof for another commit. CI runs the whole suite, the static build, that end-to-end run and the installer on Linux for every change; Windows gets a build, lint, test and installer run (Windows PowerShell 5.1 and PowerShell 7) for every change, and macOS a build and test run on `main` and for every release.
 
 ## Set up one Linux VM (default)
 
