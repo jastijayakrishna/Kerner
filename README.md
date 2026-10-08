@@ -109,6 +109,13 @@ Measured from the same runs, shown on every comparison, and refused only when a 
 
 **On the pull request.** The verifier signs a `compare` check whose evidence is the comparison itself. The description carries it, and the merge check shows a "What changed" section only when the signed proof covers exactly that comparison; `kern run` prints it too. A boxed agent gets the stated change in `KERN_DELTA`, so it knows what to change and what to leave alone. `kern init` writes version 5 contracts with `"delta": null`; write the delta into the task before the agent starts when you know what the change should do. See [Evidence](#evidence-2026-10-08-contract-version-5-on-gvisor) for every lens run on gVisor.
 
+## Run the agent in any sandbox
+
+Kern's guarantee does not depend on where the agent ran: the verifier checks the result again from scratch in gVisor, and the merge and deploy gates check the verifier's signature. So run the agent wherever you already isolate it, and hand its commit to Kern:
+
+- **Docker Sandboxes** (`sbx`, free, a microVM per agent with its own network policy, on Windows 11, Apple silicon Macs and Linux with KVM), the agent's own sandbox (Claude Code's `/sandbox`, Codex's sandbox), a dev container or a cloud agent: commit the agent's work, then `kern ingest job.json <repo> <commit>` (see [Run](#run)).
+- **Kern's local box** (below), when you want Kern to start the agent, gate its output and promote it in one command.
+
 ## Local box (Windows, macOS, Linux)
 
 The local box is the developer on-ramp: it runs an agent in a Linux container on your own machine, then gates the result with the same contract and capability checks the server uses. Any of Docker Desktop, Podman, Rancher Desktop, or Docker Engine or Podman on Linux will do (on Windows they all run on WSL2, and you can also run the Linux `kern` inside WSL2). Kern finds `docker` or `podman` on the `PATH`; set `KERN_CONTAINER_CLI` to choose.
