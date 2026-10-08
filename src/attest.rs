@@ -98,7 +98,13 @@ pub struct Expect<'a> {
     pub run_id: &'a str, pub task: &'a str, pub repository: &'a str, pub base: &'a str, pub commit: &'a str, pub manifest_sha256: &'a str, pub contract_sha256: &'a str,
     pub verifier_sha256: &'a str, pub verifier_builder: &'a str, pub deployment: &'a str, pub image: &'a str, pub executors: &'a [String], pub executor_builder: Option<&'a str>, pub checks: Vec<String>,
 }
-pub fn verify(envelope: &Value, key: &VerifyingKey, expect: &Expect, now: u64, enforce_expiry: bool) -> R<Value> {
+/// What an envelope claims, unchecked: only for choosing which error to report, never for accepting anything.
+pub fn claimed(envelope: &Value) -> Option<Value> {
+    let bytes = unb64(envelope["payload"].as_str()?).ok()?;
+    Some(serde_json::from_slice::<Value>(&bytes).ok()?["predicate"][EXTENSION].clone())
+}
+/// The Kern summary of an envelope `key` signed, checked for its signature and canonical form only.
+pub fn signed(envelope: &Value, key: &VerifyingKey) -> R<Value> {
     exact(envelope, &["payloadType", "payload", "signatures"], "envelope")?;
     ensure!(envelope["payloadType"] == PAYLOAD_TYPE, "Attestation must be an in-toto DSSE envelope");
     let Some([signature]) = envelope["signatures"].as_array().map(Vec::as_slice) else { deny!("Exactly one signature required") };
@@ -111,6 +117,10 @@ pub fn verify(envelope: &Value, key: &VerifyingKey, expect: &Expect, now: u64, e
     let k = stmt["predicate"][EXTENSION].clone();
     exact(&k, &FIELDS, "Kern attestation")?;
     ensure!(canonical(&statement(&k)?)? == canonical(&stmt)?, "Attestation statement is not the canonical Kern verification summary");
+    Ok(k)
+}
+pub fn verify(envelope: &Value, key: &VerifyingKey, expect: &Expect, now: u64, enforce_expiry: bool) -> R<Value> {
+    let k = signed(envelope, key)?;
     for (field, want) in [("run_id", expect.run_id), ("task", expect.task), ("repository", expect.repository), ("base", expect.base), ("commit", expect.commit), ("manifest_sha256", expect.manifest_sha256), ("contract_sha256", expect.contract_sha256), ("verifier_sha256", expect.verifier_sha256), ("verifier_builder_sha256", expect.verifier_builder), ("deployment", expect.deployment), ("image", expect.image)] {
         ensure!(k[field] == want, "Attestation mismatch: {field}");
     }

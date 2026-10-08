@@ -16,3 +16,4 @@ pub mod merges;
 pub mod audit;
 pub mod init;
 pub mod serve;
+pub mod reverify;

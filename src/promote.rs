@@ -13,7 +13,7 @@ use std::time::Duration;
 pub struct Decision { pub repository: String, pub branch: String, pub base: String, pub commit: String, pub run_id: String, pub attestation: Value }
 
 pub struct Claim<'a> { pub run_id: &'a str, pub base: &'a str, pub commit: &'a str, pub now: u64, pub enforce_expiry: bool }
-fn verify_against(store: &Path, envelope: &Value, key: &VerifyingKey, policy: &Contract, op: &Operator, claim: Claim) -> R<Value> {
+pub(crate) fn verify_against(store: &Path, envelope: &Value, key: &VerifyingKey, policy: &Contract, op: &Operator, claim: Claim) -> R<Value> {
     let Claim { run_id, base, commit, now, enforce_expiry } = claim;
     let l = &policy.limits;
     let manifest = digest(&git::manifest(store, commit, l.file_bytes, l.total_bytes)?)?;
@@ -62,6 +62,14 @@ pub fn promote_local(store: &Path, d: &Decision, key_pem: &str, target: &Path, l
 pub const MARKER: &str = "<!-- kern-attestation:v1\n";
 pub fn pr_body(task: &str, d: &Decision, envelope: &Value) -> R<String> {
     Ok(format!("Kern-verified agent change for task `{task}`.\n\nCommit: `{}`\nAttestation SHA-256: `{}`\n\nReview before merging. The `kern-verified` check re-verifies this attestation against the PR head.\n\n{MARKER}{}\n-->\n", d.commit, digest(envelope)?, b64(canonical(envelope)?.as_bytes())))
+}
+/// The description with its Kern proof replaced: Kern's own description is written anew, any other text keeps its place around the new block.
+pub fn with_attestation(body: &str, task: &str, d: &Decision, envelope: &Value) -> R<String> {
+    let body = body.replace("\r\n", "\n");
+    if body.starts_with("Kern-verified agent change for task") { return pr_body(task, d, envelope); }
+    let start = body.find(MARKER).ok_or_else(|| Denied("The pull request description lost its Kern attestation block".into()))?;
+    let end = body[start..].find("\n-->").map(|e| start + e + 4).ok_or_else(|| Denied("Unterminated Kern attestation block".into()))?;
+    Ok(format!("{}{MARKER}{}\n-->{}", &body[..start], b64(canonical(envelope)?.as_bytes()), &body[end..]))
 }
 pub fn extract_attestation(body: &str) -> R<Value> {
     let body = body.replace("\r\n", "\n");
@@ -117,6 +125,7 @@ pub fn step_summary(result: &R<Value>) -> String {
     format!("### kern-verified: {status}\n\n{}\n", detail.lines().map(|l| format!("    {l}\n")).collect::<String>())
 }
 pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Value> {
+    if event["merge_group"].is_object() { return crate::reverify::check_merge_group(event, config, now); }
     let pr = &event["pull_request"];
     ensure!(pr.is_object(), "Not a pull_request event");
     let (head, base, head_ref) = (text(&pr["head"], "sha")?, text(&pr["base"], "sha")?, text(&pr["head"], "ref")?);
@@ -126,12 +135,33 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     ensure!(task_id(task) && is_uuid(run_id) && !config.contains("..") && !config.starts_with('/'), "Invalid Kern branch or configuration path");
     git::oid(head)?;
     git::oid(base)?;
+    let body = pr["body"].as_str().unwrap_or("");
+    let stale = match gate(checkout, config, now, repository, task, run_id, head, base, body) { Ok(v) => return Ok(v), Err(e) => e };
+    // A push to the branch, or a new base, leaves a proof for another commit: with a hosted verifier Kern verifies the branch again.
+    let same_repository = pr["head"]["repo"]["full_name"].as_str() == Some(repository);
+    match crate::reverify::Hosted::from_env() {
+        Some(hosted) if same_repository => {
+            let number = pr["number"].as_u64().ok_or_else(|| Denied("The event names no pull request number".into()))?;
+            let pull = crate::reverify::Pr { repository, number, head, head_ref, base_ref: text(&pr["base"], "ref")?, task, run_id, body };
+            crate::reverify::reverify(&pull, checkout, config, now, &hosted?, stale)
+        }
+        _ => Err(stale),
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn gate(checkout: &Path, config: &str, now: u64, repository: &str, task: &str, run_id: &str, head: &str, base: &str, body: &str) -> R<Value> {
+    let envelope = extract_attestation(body)?;
+    // A proof for another commit or base is stale whatever else holds. Saying so first keeps the reason clear when an agent pushed, because
+    // then the checkout does not even hold the old base. This only picks the error; acceptance below checks everything.
+    if let Some(claim) = attest::claimed(&envelope) {
+        ensure!(claim["commit"] == head, "Attestation mismatch: commit");
+        ensure!(claim["base"] == base, "Attestation mismatch: base");
+    }
     let trusted = |name: &str| -> R<Vec<u8>> { git::git(checkout, &["cat-file", "blob", &format!("{base}:{config}/{name}")], None).map_err(|_| Denied(format!("Trusted base commit lacks {config}/{name}"))) };
     let policy = contract(&serde_json::from_slice(&trusted(&format!("tasks/{task}.json"))?)?)?;
     let op = operator(&serde_json::from_slice(&trusted("operator.json")?)?)?;
     let key_pem = String::from_utf8(trusted("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))?;
     ensure!(policy.task == task && op.repository == repository, "Trusted configuration does not match this repository and task");
-    let envelope = extract_attestation(pr["body"].as_str().unwrap_or(""))?;
     let k = verify_against(checkout, &envelope, &attest::public_key(&key_pem)?, &policy, &op, Claim { run_id, base, commit: head, now, enforce_expiry: false })?;
     let l = &policy.limits;
     let (original, candidate) = (git::read_commit(checkout, base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, head, l.file_bytes, l.total_bytes)?);

@@ -2,9 +2,17 @@ name: kern-verified
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
+  # a merge queue's groups: Kern fetches what it reads itself, so nothing is checked out for them
+  merge_group:
+    types: [checks_requested]
 permissions:
-  contents: read
+  # contents and checks: Kern moves a kern/ branch to the commit it verified again after a push, and reports the check for it
+  contents: write
+  checks: write
   pull-requests: write
+concurrency:
+  group: kern-verified-${{ github.event.pull_request.number || github.event.merge_group.head_ref }}
+  cancel-in-progress: false
 jobs:
   kern-verified:
     runs-on: ubuntu-24.04
@@ -21,3 +29,6 @@ jobs:
           comment: "true"
           agent-mention: "" # for example @claude or @copilot
           max-attempts: "3"
+          # set the variable and the secret to verify pushes to kern/ branches again; leave them unset to keep pushes blocked
+          verifier-url: ${{ vars.KERN_VERIFIER_URL }}
+          verifier-token: ${{ secrets.KERN_VERIFIER_TOKEN }}

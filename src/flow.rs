@@ -135,7 +135,8 @@ fn finish_run(store: &Path, root: &Path, job: &Job, original: &Files, candidate:
     git::changes(original, candidate, policy)?;
     let commit = git::write_commit(store, candidate, Some(&job.base), &policy.task)?;
     let m = git::manifest(store, &commit, policy.limits.file_bytes, policy.limits.total_bytes)?;
-    let run = json!({ "version": 2, "run_id": uuid4()?, "repository": op.repository, "base": job.base, "commit": commit, "contract_sha256": contract_digest(policy)?, "manifest_sha256": digest(&m)?, "executor": executor, "dependencies": dependencies });
+    let run_id = match &job.run_id { Some(id) => { ensure!(is_uuid(id), "Invalid run ID"); id.clone() } None => uuid4()? };
+    let run = json!({ "version": 2, "run_id": run_id, "repository": op.repository, "base": job.base, "commit": commit, "contract_sha256": contract_digest(policy)?, "manifest_sha256": digest(&m)?, "executor": executor, "dependencies": dependencies });
     write_json(root.join("run.json"), &run)?;
     write_json(root.join("manifest.json"), &m)?;
     Ok(run)

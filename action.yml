@@ -22,6 +22,15 @@ inputs:
   install-only:
     description: Only install Kern and set KERN_BIN, for workflows that run other Kern commands such as audit-merges
     default: "false"
+  verifier-url:
+    description: Hosted verifier URL. With verifier-token, Kern verifies every push to a kern/ branch again, moves the branch to the verified commit and reports the check for it (the workflow needs contents, checks and pull-requests write). Empty keeps such pushes blocked
+    default: ""
+  verifier-token:
+    description: Bearer token for the hosted verifier; pass a secret
+    default: ""
+  check-name:
+    description: The name branch protection requires for Kern's check, used for the check Kern reports after a re-verified push
+    default: kern-verified
 outputs:
   status:
     description: PASS, SKIPPED or DENIED
@@ -58,5 +67,8 @@ runs:
         KERN_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
         KERN_FEEDBACK_PATH: ${{ runner.temp }}/kern-feedback.json
         KERN_BIN: ${{ steps.install.outputs.bin }}
+        KERN_VERIFIER_URL: ${{ inputs.verifier-url }}
+        KERN_VERIFIER_TOKEN: ${{ inputs.verifier-token }}
+        KERN_CHECK_NAME: ${{ inputs.check-name }}
         GITHUB_TOKEN: ${{ github.token }}
       run: '"$KERN_BIN" check-pr "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE" "$KERN_CONFIG"'

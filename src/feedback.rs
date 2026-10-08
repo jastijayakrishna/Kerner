@@ -195,8 +195,15 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
         return (true, vec![fix("agent", None, format!("Your previous run ended with exit code {n}. Finish the task and exit with code 0."))]);
     }
     if ["Attestation mismatch: commit", "Attestation mismatch: base", "Pull request must carry exactly one Kern attestation block", "Unterminated Kern attestation block"].contains(&r) {
-        return (true, vec![fix("proof-stale", None, "This pull request's Kern proof does not match its current commit: proofs cover one exact commit on one exact base. Do not push to a kern/ branch; run the task through Kern again (for example with kern run), which verifies the change and opens a new pull request.".into())]);
+        let mut v = fix("proof-stale", None, "This pull request's Kern proof covers another commit: something was pushed to the kern/ branch, or the base moved, after Kern verified it. A human has to turn on re-verification or run the task through Kern again.".into());
+        v.allow = Some("Give the Kern action verifier-url and verifier-token (and the workflow contents, checks and pull-requests write permission), and Kern verifies every push to a kern/ branch again on its own.".into());
+        return (false, vec![v]);
     }
+    if let Some(rest) = r.strip_prefix("The pushed change and ") && let Some((base, rest)) = rest.split_once(" both changed: ")
+        && let Some(files) = rest.strip_suffix(&format!(". Merge {base} into the branch, resolve the conflicts and push again")) {
+        return (true, vec![fix("base-conflict", None, format!("Merge {} into this branch, resolve the conflicts in {} and push again.", code(base), codes(files.split(", "))))]);
+    }
+    if r.starts_with("The pull request has nothing to merge into ") { return human("nothing-to-merge", "Everything on this branch is already on the base branch. A human can close this pull request."); }
     if r.starts_with("The agent ran out of memory") || r.starts_with("The agent did not finish within") { return human("agent-limits", "The agent ran out of memory or time. A human has to raise the limit or narrow the task."); }
     if r.starts_with("The test suite already fails before the change: ") { return human("tests-failing", "The test suite already failed before this change. A human has to fix it on the base branch first."); }
     if r.starts_with("Kern could not run the test suite on ") || r.starts_with("Kern could not read the test results of the old code: ") || r.starts_with("The test suite ran no tests on the new code")
@@ -283,6 +290,14 @@ impl Thread {
     fn post(&self, body: &str) -> R<Value> { self.api.post(&self.path, &json!({ "body": body })) }
 }
 
+/// The note on the pull request after Kern verified a push again and moved the branch to the verified commit.
+fn reverified(r: &Value, earlier: u64, head: &str) -> String {
+    let short = |k: &str| hex(r[k].as_str().unwrap_or("")).chars().take(12).collect::<String>();
+    let after = if earlier > 0 { format!(" It passed {}.", rejected(earlier)) } else { String::new() };
+    let base_ref: String = r["base_ref"].as_str().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || "._/-".contains(*c)).collect();
+    format!("### Kern verified the change again\n\nAfter the push of `{}`, Kern verified the change again on `{base_ref}` (`{}`) and moved this branch to one commit, `{}`, which the new proof covers.{after} Fetch the branch before pushing more changes.\n\n{RESOLVED}{head} -->\n",
+        short("pushed"), short("base"), short("commit"))
+}
 pub fn publish(event: &Value, result: &R<Value>) -> String {
     let status = match result { Ok(v) => v["status"].as_str().unwrap_or("UNKNOWN").to_string(), Err(_) => "DENIED".to_string() };
     let mut notes = Vec::new();
@@ -297,7 +312,7 @@ pub fn publish(event: &Value, result: &R<Value>) -> String {
         ok
     });
     let head = event["pull_request"]["head"]["sha"].as_str().map(str::to_ascii_lowercase).filter(|h| (h.len() == 40 || h.len() == 64) && h.bytes().all(|b| b.is_ascii_hexdigit()));
-    let github = (env("KERN_PR_COMMENTS").as_deref() == Some("true") && status != "SKIPPED").then(|| {
+    let github = (env("KERN_PR_COMMENTS").as_deref() == Some("true") && status != "SKIPPED" && event["pull_request"].is_object()).then(|| {
         head.as_ref().ok_or_else(|| Denied("The event names no valid head commit".into())).and_then(|_| Thread::from(event))
     });
     let history = match &github {
@@ -331,6 +346,7 @@ pub fn publish(event: &Value, result: &R<Value>) -> String {
         let body = match &feedback {
             Some(_) if h.blocked.contains(&head) => { notes.push("Kern already commented on this commit, so it added no new comment.".into()); None }
             Some(f) => Some(comment_body(f, earlier + 1, max, who.as_deref(), &head)),
+            None if status == "PASS" && !h.passed.contains(&head) && result.as_ref().is_ok_and(|r| r["reverified"].is_object()) => result.as_ref().ok().map(|r| reverified(&r["reverified"], earlier, &head)),
             None if status == "PASS" && earlier > 0 && !h.passed.contains(&head) => Some(format!("### Kern verified this change\n\nIt passed {}; the earlier attempts stay in this thread.\n\n{RESOLVED}{head} -->\n", rejected(earlier))),
             None => None,
         };

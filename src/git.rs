@@ -50,6 +50,21 @@ pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: us
     run(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input, timeout: Duration::from_secs(600), max_output })
 }
 pub fn git(repo: &Path, args: &[&str], input: Option<&[u8]>) -> R<Vec<u8>> { git_with(repo, args, input, BUNDLE_BYTES) }
+/// A git command that talks to `server` (https, or a local file URL in tests). The token travels in the environment, scoped to that server,
+/// so it never appears on a command line; every other protocol stays off.
+pub fn remote(repo: &Path, args: &[&str], server: &str, token: &str) -> R<Vec<u8>> {
+    let repo = std::path::absolute(repo)?;
+    let local = server.starts_with("file://");
+    ensure!(server.starts_with("https://") || local, "The git server must use https");
+    let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.followRedirects=false",
+        "-c", "protocol.allow=never", "-c", if local { "protocol.file.allow=always" } else { "protocol.https.allow=always" }, "-C"].map(String::from).to_vec();
+    full.push(repo.display().to_string());
+    full.extend(args.iter().map(|a| a.to_string()));
+    let mut env = safe_env(&repo);
+    env.extend([("GIT_CONFIG_COUNT".into(), "1".into()), ("GIT_CONFIG_KEY_0".into(), format!("http.{server}/.extraHeader")),
+        ("GIT_CONFIG_VALUE_0".into(), format!("Authorization: Basic {}", b64(format!("x-access-token:{token}").as_bytes())))]);
+    run(&git_exe()?, &full, Run { cwd: Some(&repo), env, input: None, timeout: Duration::from_secs(300), max_output: 1 << 20 })
+}
 pub fn trimmed(bytes: Vec<u8>) -> String { String::from_utf8_lossy(&bytes).trim().to_string() }
 pub fn oid(s: &str) -> R<&str> {
     ensure!(is_oid(s), "Expected full SHA-1 commit ID");

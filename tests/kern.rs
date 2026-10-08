@@ -535,6 +535,12 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     let workflow = std::fs::read_to_string(repo.join(".github/workflows/kern-verified.yml")).unwrap();
     assert!(workflow.contains("uses: acme/kern@0123456789abcdef0123456789abcdef01234567") && workflow.contains("pull_request_target"));
     assert!(workflow.contains("pull-requests: write") && workflow.contains("agent-mention:") && workflow.contains("max-attempts:"), "{workflow}");
+    // pushes to a kern/ branch are verified again through the hosted verifier, one run at a time per pull request
+    for want in ["contents: write", "checks: write", "verifier-url: ${{ vars.KERN_VERIFIER_URL }}", "verifier-token: ${{ secrets.KERN_VERIFIER_TOKEN }}", "group: kern-verified-${{ github.event.pull_request.number || github.event.merge_group.head_ref }}", "cancel-in-progress: false",
+        "merge_group:
+    types: [checks_requested]"] {
+        assert!(workflow.contains(want), "{want}: {workflow}");
+    }
     assert!(workflow.contains("if: startsWith(github.event.pull_request.head.ref, 'kern/') && github.event.pull_request.head.repo.full_name == github.repository"),
         "only same-repository agent branches are checked out, so ordinary and fork pull requests are skipped instead of failing: {workflow}");
     assert_eq!(read_json(repo.join(".github/kern/ruleset.json")).unwrap()["rules"][0]["parameters"]["strict_required_status_checks_policy"], true, "a pull request must be up to date with its base");
@@ -1319,10 +1325,18 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     std::fs::create_dir_all(ws.0.join("src")).unwrap();
     std::fs::write(ws.0.join("src/big.txt"), "x".repeat(70000)).unwrap();
     check(reason(kern::local::read_workspace(&ws.0, &base, 65536, 1048576)), "workspace", true, Some("src/big.txt"), &["`src/big.txt`"]);
-    // a proof that no longer matches the pull request is renewed by running Kern again, not by pushing to the branch
+    // a proof that no longer matches the pull request needs a human when no hosted verifier checks pushes again
     for r in ["Attestation mismatch: commit", "Attestation mismatch: base", "Pull request must carry exactly one Kern attestation block"] {
-        check(r.into(), "proof-stale", true, None, &["kern run"]);
+        check(r.into(), "proof-stale", false, None, &["re-verification"]);
     }
+    // when Kern does check a push again, a file the base branch changed too is the agent's to merge
+    let (from, mut onto, mut pushed) = (base.clone(), base.clone(), base.clone());
+    onto.insert("src/add.mjs".into(), file("export const add = (a, b) => a - b; // reviewed\n"));
+    pushed.insert("src/add.mjs".into(), file("export const add = (a, b) => a + b;\n"));
+    pushed.insert("README.md".into(), file("y\n"));
+    check(reason(kern::reverify::merge(&from, &onto, &pushed, "main")), "base-conflict", true, None, &["`main`", "`src/add.mjs`"]);
+    onto.insert("src/add.mjs".into(), pushed["src/add.mjs"].clone());
+    assert_eq!(kern::reverify::merge(&from, &onto, &pushed, "main").unwrap()["README.md"].bytes.as_deref(), Some(&b"y\n"[..]), "the same change on both sides is no conflict");
     // an independent verifier's verdict arrives wrapped, and is explained the same way
     check("independent verifier rejected the change: Check addition case 2 failed (exit code 1)".into(), "check-failed", true, None, &["`addition`"]);
     let transported = format!("independent verifier unreachable or rejected the change: sh failed (1): {}\n ", json!({ "status": "DENIED", "reason": "Check addition case 2 failed (exit code 1)" }));
@@ -1560,7 +1574,8 @@ fn github_required_check_reverifies_the_exact_pr_head() {
 }
 type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
 struct StubApi { url: String, seen: Seen }
-fn stub_api(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> StubApi {
+fn stub_api(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> StubApi { stub_server(move |m, p, _| route(m, p)) }
+fn stub_server(route: impl Fn(&str, &str, &str) -> (u16, String) + Send + Sync + 'static) -> StubApi {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let seen: Seen = Default::default();
@@ -1582,7 +1597,7 @@ fn stub_api(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static)
             let parts: Vec<&str> = request.split_whitespace().collect();
             let (method, path) = (parts.first().copied().unwrap_or(""), parts.get(1).copied().unwrap_or(""));
             log.lock().unwrap().push((method.to_string(), path.to_string(), String::from_utf8_lossy(&body).to_string()));
-            let (status, reply) = route(method, path);
+            let (status, reply) = route(method, path, &String::from_utf8_lossy(&body));
             let _ = std::io::Write::write_all(&mut s, format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes());
         }
     });
@@ -1643,6 +1658,254 @@ fn comments_api(page: String) -> StubApi {
     })
 }
 
+/// GitHub for re-verification: a repository the action fetches from and pushes to, the API answers derived from it, and a hosted verifier.
+struct Hub { t: Temp, server: PathBuf, url: String, base0: String, c0: String, branch: String, run_id: String, policy: Contract, op: Operator, key: SigningKey, envelope: Value }
+fn hub() -> Hub {
+    let f = fixture();
+    let server = f.t.join("server").join("acme").join("project.git");
+    std::fs::create_dir_all(&server).unwrap();
+    sh(&server, &["init", "-q"]);
+    for (k, v) in [("core.autocrlf", "false"), ("uploadpack.allowAnySHA1InWant", "true")] { sh(&server, &["config", k, v]); }
+    sh(&server, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    for (p, c) in &f.original { std::fs::create_dir_all(server.join(p).parent().unwrap()).unwrap(); std::fs::write(server.join(p), c.bytes.as_deref().unwrap()).unwrap(); }
+    std::fs::create_dir_all(server.join(".github/kern/tasks")).unwrap();
+    let op_value = operator_value(&["external"]);
+    std::fs::write(server.join(".github/kern/operator.json"), op_value.to_string()).unwrap();
+    std::fs::write(server.join(".github/kern/verifier.pub"), &f.public).unwrap();
+    std::fs::write(server.join(".github/kern/tasks/fix-addition.json"), policy_value().to_string()).unwrap();
+    sh(&server, &["add", "-A"]);
+    sh(&server, &["commit", "-qm", "base"]);
+    let base0 = sh(&server, &["rev-parse", "HEAD"]);
+    let mut fixed = git::read_commit(&server, &base0, 1048576, 16777216).unwrap();
+    fixed.insert("src/add.mjs".into(), file("export const add = (a, b) => a + b;\n"));
+    let c0 = git::write_commit(&server, &fixed, Some(&base0), "fix-addition").unwrap();
+    let (policy, op) = (contract(&policy_value()).unwrap(), operator(&op_value).unwrap());
+    let manifest = digest(&git::manifest(&server, &c0, 65536, 1048576).unwrap()).unwrap();
+    let run_id = uuid4().unwrap();
+    let envelope = attest::sign(&kern_payload(&policy, &op, &run_id, &base0, &c0, &manifest, now_ms() - 1000), &KeySource::File(f.key.clone())).unwrap();
+    let branch = format!("kern/fix-addition/{run_id}");
+    sh(&server, &["update-ref", &format!("refs/heads/{branch}"), &c0]);
+    let root = f.t.join("server").display().to_string().replace('\\', "/");
+    let url = if root.starts_with('/') { format!("file://{root}") } else { format!("file:///{root}") };
+    Hub { t: f.t, server, url, base0, c0, branch, run_id, policy, op, key: f.key, envelope }
+}
+impl Hub {
+    /// A commit on top of `parent` with `edits`, moved to `branch`.
+    fn commit(&self, parent: &str, edits: &[(&str, &str)], branch: &str) -> String {
+        let mut files = git::read_commit(&self.server, parent, 1048576, 16777216).unwrap();
+        for (p, c) in edits { files.insert(p.to_string(), file(c)); }
+        let c = git::write_commit(&self.server, &files, Some(parent), "someone").unwrap();
+        sh(&self.server, &["update-ref", &format!("refs/heads/{branch}"), &c]);
+        c
+    }
+    fn at(&self, branch: &str) -> String { sh(&self.server, &["rev-parse", &format!("refs/heads/{branch}")]) }
+    fn api(&self) -> StubApi {
+        let srv = self.server.clone();
+        stub_api(move |method, path| {
+            let q = |args: &[&str]| sh(&srv, args);
+            match (method, path.split('?').next().unwrap_or("")) {
+                ("GET", p) if p.starts_with("/repos/acme/project/git/ref/heads/") => (200, json!({ "object": { "sha": q(&["rev-parse", &format!("refs/heads/{}", &p["/repos/acme/project/git/ref/heads/".len()..])]) } }).to_string()),
+                ("GET", p) if p.starts_with("/repos/acme/project/compare/") => {
+                    let (a, b) = p["/repos/acme/project/compare/".len()..].split_once("...").unwrap();
+                    let fork = q(&["merge-base", a, b]);
+                    let status = if a == b { "identical" } else if fork == a { "ahead" } else if fork == b { "behind" } else { "diverged" };
+                    (200, json!({ "status": status, "merge_base_commit": { "sha": fork } }).to_string())
+                }
+                ("PATCH", "/repos/acme/project/pulls/7") => (200, "{}".into()),
+                ("POST", "/repos/acme/project/check-runs") => (201, json!({ "id": 1 }).to_string()),
+                ("GET", "/repos/acme/project/issues/7/comments") => (200, "[]".into()),
+                ("POST", "/repos/acme/project/issues/7/comments") => (201, "{}".into()),
+                _ => (404, "{}".into()),
+            }
+        })
+    }
+    /// The hosted verifier: signs what it is sent, or refuses with `refuse`.
+    fn verifier(&self, refuse: Option<&'static str>) -> StubApi {
+        let (policy, op, key) = (self.policy.clone(), self.op.clone(), self.key.clone());
+        stub_server(move |method, path, body| {
+            if (method, path) != ("POST", "/v1/verify") { return (404, "{}".into()); }
+            if let Some(why) = refuse { return (422, json!({ "status": "DENIED", "reason": why }).to_string()); }
+            let run = serde_json::from_str::<Value>(body).unwrap()["run"].clone();
+            let k = kern_payload(&policy, &op, run["run_id"].as_str().unwrap(), run["base"].as_str().unwrap(), run["commit"].as_str().unwrap(), run["manifest_sha256"].as_str().unwrap(), now_ms() - 1000);
+            (200, attest::sign(&k, &KeySource::File(key.clone())).unwrap().to_string())
+        })
+    }
+    /// The action's run for a push of `head`: a checkout holding only that commit and its parent, as actions/checkout leaves it.
+    fn check(&self, head: &str, event_base: &str, body: &str, api: &StubApi, verifier: Option<&StubApi>, fork: bool) -> (Checked, Value) {
+        let dir = self.t.join(&format!("check-{}", uuid4().unwrap()));
+        let checkout = dir.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        sh(&checkout, &["init", "-q"]);
+        sh(&checkout, &["fetch", "-q", "--depth=2", &format!("{}/acme/project.git", self.url), head]);
+        let event = json!({ "repository": { "full_name": "acme/project" }, "pull_request": { "number": 7, "body": body,
+            "head": { "sha": head, "ref": self.branch, "repo": { "full_name": if fork { "mallory/project" } else { "acme/project" } } },
+            "base": { "sha": event_base, "ref": "main", "repo": { "full_name": "acme/project" } } } });
+        std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
+        api.seen.lock().unwrap().clear();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kern"));
+        cmd.arg("check-pr").arg(dir.join("event.json")).arg(&checkout).env("GITHUB_STEP_SUMMARY", dir.join("summary.md")).env("GITHUB_OUTPUT", dir.join("output.txt"))
+            .env("KERN_FEEDBACK_PATH", dir.join("feedback.json")).env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k3n").env("GITHUB_SERVER_URL", &self.url).env("KERN_PR_COMMENTS", "true");
+        if let Some(v) = verifier { cmd.env("KERN_VERIFIER_URL", &v.url).env("KERN_VERIFIER_TOKEN", "v3r1f13r"); }
+        let out = cmd.output().unwrap();
+        let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap_or_default();
+        let seen = api.seen.lock().unwrap().clone();
+        let posted = seen.iter().filter(|(m, p, _)| m == "POST" && p == "/repos/acme/project/issues/7/comments").map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["body"].as_str().unwrap().to_string()).collect();
+        let of = |method: &str, path: &str| seen.iter().filter(|(m, p, _)| m == method && p == path).map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap_or(Value::Null)).collect::<Vec<_>>();
+        let calls = json!({ "patched": of("PATCH", "/repos/acme/project/pulls/7"), "checks": of("POST", "/repos/acme/project/check-runs"), "stderr": String::from_utf8_lossy(&out.stderr) });
+        (Checked { code: out.status.code(), summary: read("summary.md"), output: read("output.txt"), feedback: serde_json::from_str(&read("feedback.json")).ok(), posted }, calls)
+    }
+    fn body(&self, envelope: &Value, commit: &str) -> String {
+        let d = promote::Decision { repository: "acme/project".into(), branch: self.branch.clone(), base: self.base0.clone(), commit: commit.into(), run_id: self.run_id.clone(), attestation: Value::Null };
+        promote::pr_body("fix-addition", &d, envelope).unwrap()
+    }
+}
+
+#[test]
+fn an_agent_push_is_verified_again_and_the_branch_moves_to_the_verified_commit() {
+    let h = hub();
+    // the agent answers review by pushing a commit onto its kern/ branch; meanwhile someone changed the base branch
+    let pushed = h.commit(&h.c0, &[("src/add.mjs", "export const add = (a, b) => b + a;\n")], &h.branch);
+    let base1 = h.commit(&h.base0, &[("README.md", "A fixture, documented\n")], "main");
+    let (api, verifier) = (h.api(), h.verifier(None));
+    let (r, calls) = h.check(&pushed, &h.base0, &h.body(&h.envelope, &h.c0), &api, Some(&verifier), false);
+    assert_eq!(r.code, Some(0), "{} {calls}", r.summary);
+    // the branch now holds one Kern commit on the base branch's current tip, with the agent's change and the base's
+    let moved = h.at(&h.branch);
+    assert!(moved != pushed && git::parents(&h.server, &moved).unwrap() == vec![base1.clone()], "{moved}");
+    let tree = git::read_commit(&h.server, &moved, 65536, 1048576).unwrap();
+    assert_eq!((tree["src/add.mjs"].bytes.as_deref(), tree["README.md"].bytes.as_deref()), (Some(&b"export const add = (a, b) => b + a;\n"[..]), Some(&b"A fixture, documented\n"[..])));
+    assert!(String::from_utf8_lossy(&git::git(&h.server, &["cat-file", "commit", &moved], None).unwrap()).contains("author Kern <kern@invalid> 0 +0000"));
+    // the verifier saw the same run, the description carries the new proof, and the required check is reported for the new commit
+    let sent = verifier.seen.lock().unwrap().iter().map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["run"].clone()).collect::<Vec<_>>();
+    assert_eq!((sent.len(), sent[0]["run_id"].as_str(), sent[0]["base"].as_str(), sent[0]["commit"].as_str()), (1, Some(h.run_id.as_str()), Some(base1.as_str()), Some(moved.as_str())));
+    let body = calls["patched"][0]["body"].as_str().unwrap().to_string();
+    let proof: Value = serde_json::from_slice(&unb64(promote::extract_attestation(&body).unwrap()["payload"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(proof["predicate"][attest::EXTENSION]["commit"], moved.as_str());
+    assert_eq!(calls["checks"], json!([{ "name": "kern-verified", "head_sha": moved, "status": "completed", "conclusion": "success",
+        "output": calls["checks"][0]["output"].clone() }]), "{calls}");
+    assert!(r.output.contains("status=PASS") && r.posted.len() == 1 && r.posted[0].contains("verified the change again") && r.posted[0].contains(&moved[..12]), "{:?}", r.posted);
+    // a re-run of the same push, after the branch already moved (say the description could not be updated), finishes the job
+    let (rerun, calls_rerun) = h.check(&pushed, &h.base0, &h.body(&h.envelope, &h.c0), &api, Some(&verifier), false);
+    assert!(rerun.code == Some(0) && rerun.output.contains("status=PASS") && h.at(&h.branch) == moved && calls_rerun["patched"].as_array().unwrap().len() == 1, "{} {calls_rerun}", rerun.summary);
+    // the next run on the new commit passes as any Kern pull request does, without the verifier
+    let quiet = h.verifier(Some("must not be called"));
+    let (again, calls2) = h.check(&moved, &base1, &body, &api, Some(&quiet), false);
+    assert!(again.code == Some(0) && quiet.seen.lock().unwrap().is_empty() && calls2["checks"].as_array().unwrap().is_empty(), "{} {calls2}", again.summary);
+    // a newer push that lands while Kern verifies wins: Kern leaves the branch alone and reports nothing for the older push
+    let newer = h.commit(&moved, &[("src/add.mjs", "export const add = (a, b) => a + b + 0;\n")], &h.branch);
+    let stale = h.commit(&moved, &[("src/add.mjs", "export const add = (a, b) => 0 + a + b;\n")], "elsewhere");
+    let (lost, calls3) = h.check(&stale, &base1, &body, &api, Some(&h.verifier(None)), false);
+    assert!(lost.code == Some(0) && lost.output.contains("status=SUPERSEDED") && h.at(&h.branch) == newer && calls3["checks"].as_array().unwrap().is_empty() && calls3["patched"].as_array().unwrap().is_empty(), "{} {calls3}", lost.summary);
+}
+
+impl Hub {
+    /// A merge-queue group for pull request 7: `tree_of`'s tree on `base`, as GitHub's merge method makes it (parents: base, then `parent2`).
+    fn group(&self, base: &str, tree_of: &str, parent2: &str) -> String {
+        let tree = sh(&self.server, &["rev-parse", &format!("{tree_of}^{{tree}}")]);
+        let m = sh(&self.server, &["commit-tree", &tree, "-p", base, "-p", parent2, "-m", "Merge pull request #7"]);
+        sh(&self.server, &["update-ref", &format!("refs/heads/gh-readonly-queue/main/pr-7-{parent2}"), &m]);
+        m
+    }
+    fn queue_api(&self, pr_head: &str, body: &str) -> StubApi {
+        let (srv, branch, pr_head, body) = (self.server.clone(), self.branch.clone(), pr_head.to_string(), body.to_string());
+        stub_api(move |method, path| match (method, path.split('?').next().unwrap_or("")) {
+            ("GET", "/repos/acme/project/pulls/7") => (200, json!({ "number": 7, "body": body, "head": { "ref": branch, "sha": pr_head, "repo": { "full_name": "acme/project" } },
+                "base": { "ref": "main", "sha": sh(&srv, &["rev-parse", "refs/heads/main"]), "repo": { "full_name": "acme/project" } } }).to_string()),
+            ("PATCH", "/repos/acme/project/pulls/7") => (200, "{}".into()),
+            ("GET", "/repos/acme/project/issues/7/comments") => (200, "[]".into()),
+            _ => (404, "{}".into()),
+        })
+    }
+    /// The action's run for a merge-queue group: no checkout, Kern fetches what it needs.
+    fn queue(&self, group: &str, base: &str, pr_head: &str, api: &StubApi, verifier: Option<&StubApi>) -> (Checked, Value) {
+        let dir = self.t.join(&format!("queue-{}", uuid4().unwrap()));
+        std::fs::create_dir_all(dir.join("workspace")).unwrap();
+        let event = json!({ "repository": { "full_name": "acme/project" }, "merge_group": { "head_sha": group, "head_ref": format!("refs/heads/gh-readonly-queue/main/pr-7-{pr_head}"), "base_sha": base, "base_ref": "refs/heads/main" } });
+        std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
+        api.seen.lock().unwrap().clear();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kern"));
+        cmd.arg("check-pr").arg(dir.join("event.json")).arg(dir.join("workspace")).env("GITHUB_STEP_SUMMARY", dir.join("summary.md")).env("GITHUB_OUTPUT", dir.join("output.txt"))
+            .env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k3n").env("GITHUB_SERVER_URL", &self.url);
+        if let Some(v) = verifier { cmd.env("KERN_VERIFIER_URL", &v.url).env("KERN_VERIFIER_TOKEN", "v3r1f13r"); }
+        let out = cmd.output().unwrap();
+        let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap_or_default();
+        let patched: Vec<Value> = api.seen.lock().unwrap().iter().filter(|(m, _, _)| m == "PATCH").map(|(_, _, b)| serde_json::from_str(b).unwrap()).collect();
+        (Checked { code: out.status.code(), summary: read("summary.md"), output: read("output.txt"), feedback: None, posted: Vec::new() }, json!(patched))
+    }
+}
+
+#[test]
+fn a_merge_queue_lands_exactly_what_kern_verified() {
+    let h = hub();
+    let body = h.body(&h.envelope, &h.c0);
+    // the pull request is up to date: the queue's group is the verified tree on the verified base, so it passes without the verifier
+    let group = h.group(&h.base0, &h.c0, &h.c0);
+    let quiet = h.verifier(Some("must not be called"));
+    let (r, _) = h.queue(&group, &h.base0, &h.c0, &h.queue_api(&h.c0, &body), Some(&quiet));
+    assert!(r.code == Some(0) && r.output.contains("status=PASS") && quiet.seen.lock().unwrap().is_empty(), "{}", r.summary);
+    // the queue's base moved: without a hosted verifier the group fails, with one Kern verifies the queued result again and records the proof
+    let base1 = h.commit(&h.base0, &[("README.md", "A fixture, documented\n")], "main");
+    let mut onto = git::read_commit(&h.server, &base1, 1048576, 16777216).unwrap();
+    onto.insert("src/add.mjs".into(), file("export const add = (a, b) => a + b;\n"));
+    let merged = git::write_commit(&h.server, &onto, Some(&base1), "merged").unwrap();
+    let moved = h.group(&base1, &merged, &h.c0);
+    let (off, _) = h.queue(&moved, &base1, &h.c0, &h.queue_api(&h.c0, &body), None);
+    assert!(off.code == Some(1) && off.summary.contains("Attestation mismatch: base"), "{}", off.summary);
+    let verifier = h.verifier(None);
+    let (again, patched) = h.queue(&moved, &base1, &h.c0, &h.queue_api(&h.c0, &body), Some(&verifier));
+    assert!(again.code == Some(0) && again.output.contains("status=PASS"), "{}", again.summary);
+    let sent: Vec<Value> = verifier.seen.lock().unwrap().iter().map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["run"].clone()).collect();
+    assert_eq!((sent.len(), sent[0]["base"].as_str(), sent[0]["run_id"].as_str()), (1, Some(base1.as_str()), Some(h.run_id.as_str())));
+    let proof: Value = serde_json::from_slice(&unb64(promote::extract_attestation(patched[0]["body"].as_str().unwrap()).unwrap()["payload"].as_str().unwrap()).unwrap()).unwrap();
+    let k = &proof["predicate"][attest::EXTENSION];
+    let lands = git::write_commit(&h.server, &git::read_commit(&h.server, &moved, 1048576, 16777216).unwrap(), Some(&base1), "fix-addition").unwrap();
+    assert_eq!((k["base"].as_str(), k["commit"].as_str()), (Some(base1.as_str()), Some(lands.as_str())),
+        "the recorded proof covers exactly the tree the queue lands, on its base, so the merge audit finds it");
+    // a group that holds more than the verified change (another pull request's work, here) is refused
+    let extra = h.commit(&h.c0, &[("src/other.mjs", "export const o = 1;\n")], "extra");
+    let mixed = h.group(&h.base0, &extra, &h.c0);
+    let (refused, _) = h.queue(&mixed, &h.base0, &h.c0, &h.queue_api(&h.c0, &body), None);
+    assert_eq!(refused.code, Some(1), "{}", refused.summary);
+    // an ordinary pull request in the queue is not Kern's to gate
+    let ordinary = stub_api(|method, path| match (method, path) {
+        ("GET", "/repos/acme/project/pulls/7") => (200, json!({ "number": 7, "body": "", "head": { "ref": "feature/x", "sha": "a".repeat(40), "repo": { "full_name": "acme/project" } }, "base": { "ref": "main", "repo": { "full_name": "acme/project" } } }).to_string()),
+        _ => (404, "{}".into()),
+    });
+    let (skipped, _) = h.queue(&group, &h.base0, &"a".repeat(40), &ordinary, None);
+    assert!(skipped.code == Some(0) && skipped.output.contains("status=SKIPPED"), "{}", skipped.summary);
+}
+
+#[test]
+fn a_push_that_cannot_be_verified_again_stays_blocked_and_says_why() {
+    let h = hub();
+    let pushed = h.commit(&h.c0, &[("src/add.mjs", "export const add = (a, b) => b + a;\n")], &h.branch);
+    let body = h.body(&h.envelope, &h.c0);
+    // both sides changed the same file: the agent is asked to merge the base branch
+    let h2 = hub();
+    let pushed2 = h2.commit(&h2.c0, &[("src/add.mjs", "export const add = (a, b) => b + a;\n")], &h2.branch);
+    h2.commit(&h2.base0, &[("src/add.mjs", "export const add = (a, b) => a - b; // reviewed\n")], "main");
+    let (conflict, _) = h2.check(&pushed2, &h2.base0, &h2.body(&h2.envelope, &h2.c0), &h2.api(), Some(&h2.verifier(None)), false);
+    let f = conflict.feedback.clone().expect("feedback");
+    assert!(conflict.code == Some(1) && f["agent_fixable"] == true && f["violations"][0]["rule"] == "base-conflict" && conflict.summary.contains("src/add.mjs"), "{f} {}", conflict.summary);
+    assert_eq!(h2.at(&h2.branch), pushed2, "nothing moves");
+    // the verifier refuses: the agent hears why, and the branch and the check stay as they were
+    let api = h.api();
+    let (refused, calls) = h.check(&pushed, &h.base0, &body, &api, Some(&h.verifier(Some("Tests show new runtime behavior: net:telemetry.invalid:443. If this is intended, allow it in the task contract (version 3): \"behaviors\": [\"net:telemetry.invalid:443\"]"))), false);
+    assert!(refused.code == Some(1) && refused.summary.contains("net:telemetry.invalid:443") && h.at(&h.branch) == pushed && calls["checks"].as_array().unwrap().is_empty(), "{} {calls}", refused.summary);
+    // a description whose proof Kern's verifier never signed for this run is not a Kern pull request to re-verify
+    let forged = attest::sign(&serde_json::from_slice::<Value>(&unb64(h.envelope["payload"].as_str().unwrap()).unwrap()).unwrap()["predicate"][attest::EXTENSION], &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
+    let never = h.verifier(Some("must not be called"));
+    let (untrusted, _) = h.check(&pushed, &h.base0, &h.body(&forged, &h.c0), &api, Some(&never), false);
+    assert!(untrusted.code == Some(1) && never.seen.lock().unwrap().is_empty(), "{}", untrusted.summary);
+    // nor is a pull request from a fork
+    let (forked, _) = h.check(&pushed, &h.base0, &body, &api, Some(&never), true);
+    assert!(forked.code == Some(1) && never.seen.lock().unwrap().is_empty(), "{}", forked.summary);
+    // without a hosted verifier the proof is simply stale, and a human is told how to turn re-verification on
+    let (off, _) = h.check(&pushed, &h.base0, &body, &api, None, false);
+    let f = off.feedback.clone().expect("feedback");
+    assert!(off.code == Some(1) && f["agent_fixable"] == false && f["violations"][0]["rule"] == "proof-stale" && off.summary.contains("verifier-url"), "{f} {}", off.summary);
+}
+
 #[test]
 fn the_pr_gate_hands_its_verdict_to_the_agent_with_a_retry_cap() {
     let widened = pr_gate("import { exec } from 'node:child_process';\nexport const add = (a, b) => a + b;\n");
@@ -1666,15 +1929,16 @@ fn the_pr_gate_hands_its_verdict_to_the_agent_with_a_retry_cap() {
     // a re-run or an edited description on the same commit is not another attempt and adds no comment
     let rerun = check_pr_with(&widened, &widened.envelope, &comments_api(previous(&[(bot, &a), (bot, &widened.head)])), &on);
     assert!(rerun.code == Some(1) && rerun.posted.is_empty() && rerun.feedback.as_ref().unwrap()["attempt"] == 2, "{:?} {:?}", rerun.posted, rerun.feedback);
-    // an agent that pushes its fix to the kern/ branch is told to run Kern again, because the proof covers one exact commit
+    // an agent that pushes its fix to the kern/ branch leaves a proof for another commit: without a hosted verifier to check the push again,
+    // only a human can act, and the maintainers are told how to turn re-verification on
     let mut pushed = pr_gate("export const add = (a, b) => a + b;\n");
     let mut files = git::read_commit(&pushed.repo, &pushed.head, 1048576, 16777216).unwrap();
     files.insert("src/add.mjs".into(), file("export const add = (a, b) => b + a;\n"));
     pushed.head = git::write_commit(&pushed.repo, &files, Some(&pushed.head), "pushed").unwrap();
     let stale = check_pr_with(&pushed, &pushed.envelope, &comments_api("[]".into()), &on);
     let sf = stale.feedback.clone().unwrap();
-    assert!(stale.code == Some(1) && sf["agent_fixable"] == true && sf["violations"][0]["rule"] == "proof-stale", "{sf}");
-    assert!(stale.posted[0].contains("@claude") && stale.posted[0].contains("kern run"), "{}", stale.posted[0]);
+    assert!(stale.code == Some(1) && sf["agent_fixable"] == false && sf["violations"][0]["rule"] == "proof-stale", "{sf}");
+    assert!(!stale.posted[0].contains("@claude") && stale.summary.contains("verifier-url"), "{}", stale.summary);
     // something the agent cannot fix never pings it
     let forged = attest::sign(&serde_json::from_slice::<Value>(&unb64(widened.envelope["payload"].as_str().unwrap()).unwrap()).unwrap()["predicate"][attest::EXTENSION], &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
     let untrusted = check_pr_with(&widened, &forged, &comments_api("[]".into()), &on);

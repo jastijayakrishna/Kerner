@@ -278,7 +278,8 @@ pub fn git_exe() -> R<PathBuf> {
     }
 }
 
-pub struct Job { pub repo: PathBuf, pub base: String, pub contract: Contract, pub operator: Operator, pub command: Option<Vec<String>>, pub verification_key: PathBuf, pub output: PathBuf }
+/// `run_id` continues an earlier run (re-verifying its pull request after a push); otherwise every run gets a new one.
+pub struct Job { pub repo: PathBuf, pub base: String, pub contract: Contract, pub operator: Operator, pub command: Option<Vec<String>>, pub verification_key: PathBuf, pub output: PathBuf, pub run_id: Option<String> }
 pub fn job(path: &Path) -> R<Job> {
     let file = std::path::absolute(path)?;
     let dir = file.parent().unwrap_or(Path::new("/")).to_path_buf();
@@ -296,5 +297,5 @@ pub fn job(path: &Path) -> R<Job> {
     let operator = operator(&read_json(reference("operator")?)?)?;
     let command = if raw["command"].is_null() { None } else { Some(argv(&read_json(reference("command")?)?)?) };
     ensure!(contract.checks.iter().all(|id| operator.checks.iter().any(|c| &c.id == id)), "Operator is missing a required check");
-    Ok(Job { repo: reference("repo")?, base, contract, operator, command, verification_key: reference("verification_key")?, output: reference("output")? })
+    Ok(Job { repo: reference("repo")?, base, contract, operator, command, verification_key: reference("verification_key")?, output: reference("output")?, run_id: None })
 }

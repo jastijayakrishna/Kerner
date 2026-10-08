@@ -216,7 +216,7 @@ pub fn run_job(path: &Path) -> R<RunJob> {
         promote: flag(&raw, "promote")?, attempts: if raw.get("attempts").is_some() { int(&raw, "attempts", 1, 10)? } else { 1 }, repo, base, contract, output, verifier })
 }
 
-fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<Value> {
+pub fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<Value> {
     let _ = std::fs::remove_file(out);
     let (pin, arguments) = match &v.transport {
         Transport::Script(pin, arguments) => (pin, arguments),
@@ -360,7 +360,7 @@ fn run_attempt(job: &RunJob, dir: &Path, ws: &Path, base_files: &Files, feedback
         };
         let outcome = (|| -> R<(String, Value)> {
             let c = git::write_commit(&job.repo, candidate, Some(&job.base), &task)?;
-            let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: dir.join("ingest") };
+            let pj = Job { repo: job.repo.clone(), base: job.base.clone(), contract: job.contract.clone(), operator: v.operator.clone(), command: None, verification_key: v.public_key_path.clone(), output: dir.join("ingest"), run_id: None };
             let ingest = flow::task(&pj, Source::Ingest(&job.repo, &c))?;
             let preflight = ingest["checks"].as_array().into_iter().flatten().find(|c| c["status"] == "BLOCKED").and_then(|c| c["detail"].as_str());
             ensure!(ingest["status"] == "CANDIDATE", "{}", ingest["reason"].as_str().or(preflight).unwrap_or("the local gate rejected the change"));
