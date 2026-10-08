@@ -77,6 +77,19 @@ pub fn draft(files: &git::Files, package: Option<&[u8]>, task: &str, checks: Vec
         "required_checks": checks, "delta": null, "app": null }))?;
     Ok((c, tests.iter().map(|t| (t.clone(), json!(["node:assert", "node:test"]))).collect::<serde_json::Map<_, _>>().into()))
 }
+/// The upgrade task for a repository with a lockfile: any package it already uses may move to another version, nothing else may change,
+/// and every test that passed before must still pass, the old code on the old packages against the old code on the new ones.
+pub fn upgrade_task(agent: &Contract) -> R<Option<Contract>> {
+    if !agent.dependencies { return Ok(None); }
+    let tests = agent.value["tests"].clone();
+    let read = agent.tests.as_ref().map_or_else(Vec::new, |t| t.paths.clone());
+    let proof = if tests.is_object() { let mut t = tests; t["kind"] = json!("refactor"); t } else { Value::Null };
+    Ok(Some(contract(&json!({ "version": 5, "task": "upgrade", "behaviors": [], "tests": proof, "filesystem": { "read": read, "write": [] }, "network": [], "secrets": [], "publish": false,
+        "dependencies": { "manager": "npm", "lockfile": "package-lock.json", "allow": ["*"] },
+        "limits": { "files_changed": 2, "lines_changed": 100000, "file_bytes": git::MAX_FILE, "total_bytes": agent.limits.total_bytes, "timeout_seconds": 900, "memory_mb": 2048, "pids": 512 },
+        "required_checks": agent.checks, "delta": { "intent": "Upgrade dependencies the project already uses; the code behaves exactly as before", "changes": [] }, "app": null }))?))
+}
+
 pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> {
     ensure!(task_id(task), "Invalid task ID: lowercase letters, digits, '-' and '_' only");
     let valid_action = action.split_once('@').is_some_and(|(r, v)| r.split('/').count() == 2 && !v.is_empty()) && action.bytes().all(|b| b.is_ascii_alphanumeric() || b"/@._-".contains(&b));
@@ -94,10 +107,12 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
     let ruleset = json!({ "name": "kern-verified", "target": "branch", "enforcement": "active", "bypass_actors": [],
         "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
         "rules": [{ "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": true, "required_status_checks": [{ "context": "kern-verified", "integration_id": GITHUB_ACTIONS_APP }] } }] });
-    let workflow = format!("name: kern-verified\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened, edited]\n  merge_group:\n    types: [checks_requested]\npermissions:\n  # contents and checks: Kern moves a kern/ branch to the commit it verified again after a push, and reports the check for it\n  contents: write\n  checks: write\n  pull-requests: write\nconcurrency:\n  group: kern-verified-${{{{ github.event.pull_request.number || github.event.merge_group.head_ref }}}}\n  cancel-in-progress: false\njobs:\n  kern-verified:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        if: startsWith(github.event.pull_request.head.ref, 'kern/') && github.event.pull_request.head.repo.full_name == github.repository\n        with:\n          ref: ${{{{ github.event.pull_request.head.sha }}}}\n          fetch-depth: 2\n          persist-credentials: false\n      - uses: {action}\n        with:\n          comment: \"true\"\n          agent-mention: \"\"\n          max-attempts: \"3\"\n          # set the variable and the secret to verify pushes to kern/ branches again; leave them unset to keep pushes blocked\n          verifier-url: ${{{{ vars.KERN_VERIFIER_URL }}}}\n          verifier-token: ${{{{ secrets.KERN_VERIFIER_TOKEN }}}}\n");
+    let workflow = format!("name: kern-verified\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened, edited]\n  merge_group:\n    types: [checks_requested]\npermissions:\n  # contents and checks: Kern moves a kern/ branch to the commit it verified again after a push, and reports the check for it\n  contents: write\n  checks: write\n  pull-requests: write\nconcurrency:\n  group: kern-verified-${{{{ github.event.pull_request.number || github.event.merge_group.head_ref }}}}\n  cancel-in-progress: false\njobs:\n  kern-verified:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        if: (startsWith(github.event.pull_request.head.ref, 'kern/') || startsWith(github.event.pull_request.head.ref, 'renovate/') || startsWith(github.event.pull_request.head.ref, 'dependabot/')) && github.event.pull_request.head.repo.full_name == github.repository\n        with:\n          ref: ${{{{ github.event.pull_request.head.sha }}}}\n          fetch-depth: 2\n          persist-credentials: false\n      - uses: {action}\n        with:\n          comment: \"true\"\n          agent-mention: \"\"\n          max-attempts: \"3\"\n          # set the variable and the secret to verify pushes to kern/ branches again; leave them unset to keep pushes blocked\n          verifier-url: ${{{{ vars.KERN_VERIFIER_URL }}}}\n          verifier-token: ${{{{ secrets.KERN_VERIFIER_TOKEN }}}}\n");
     let kern = repo.join(".github").join("kern");
-    let outputs = [(kern.join("operator.json"), pretty(&op)?), (kern.join("verifier.pub"), text(profile, "public_key")?.to_string()), (kern.join("tasks").join(format!("{task}.json")), pretty(&c.value)?),
+    let mut outputs = vec![(kern.join("operator.json"), pretty(&op)?), (kern.join("verifier.pub"), text(profile, "public_key")?.to_string()), (kern.join("tasks").join(format!("{task}.json")), pretty(&c.value)?),
         (kern.join("ruleset.json"), pretty(&ruleset)?), (repo.join(".github").join("workflows").join("kern-verified.yml"), workflow)];
+    let upgrade = if task == "upgrade" { None } else { upgrade_task(&c)? };
+    if let Some(u) = &upgrade { outputs.push((kern.join("tasks").join("upgrade.json"), pretty(&u.value)?)); }
     for (p, _) in &outputs { ensure!(!p.exists(), "{} already exists; Kern is already set up here", p.display()); }
     for (p, body) in &outputs {
         std::fs::create_dir_all(p.parent().unwrap_or(repo))?;
@@ -112,6 +127,8 @@ pub fn init(repo: &Path, profile: &Value, task: &str, action: &str) -> R<Value> 
             else { "Kern found no test runner it can read (mocha, jest, vitest or node --test); add a \"tests\" section to the task contract to require proof of honest fixes".to_string() },
             "The ruleset requires pull requests to be up to date with their base, so the merged result is the commit Kern verified".to_string(),
             "Every change is compared with the old code in the verifier's sandbox, and refused when it crashes where the old code worked, removes a file or export nobody named, newly deletes files or opens a route; when a task knows what it changes, write that in the task's delta first, and everything else must behave exactly as before".to_string(),
+            if upgrade.is_some() { "Dependency upgrades from renovate/ and dependabot/ branches are verified with the upgrade task when the workflow has a hosted verifier: the packages may move, nothing else may change (GitHub gives runs Dependabot starts no secrets, so verify those with kern ingest or use Renovate)".to_string() }
+            else { "Kern found no package-lock.json, so it wrote no upgrade task".to_string() },
             "Kern comments its verdict on agent pull requests; set agent-mention in the workflow (for example @claude) so the agent is asked to fix what it can".to_string(),
             format!("Each quarter, run kern audit-merges on a full clone of {repository} to re-verify every merged change and list any gaps"),
         ] }))

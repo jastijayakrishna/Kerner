@@ -375,7 +375,9 @@ fn npm_lock(root: &[(&str, &str)], packages: &[(&str, &str, &[&str])]) -> String
     let mut map = serde_json::Map::new();
     map.insert(String::new(), json!({ "name": "app", "version": "1.0.0", "dependencies": root.iter().map(|(n, v)| (n.to_string(), json!(v))).collect::<serde_json::Map<_, _>>() }));
     for (name, version, deps) in packages {
-        map.insert(format!("node_modules/{name}"), json!({ "version": version, "resolved": format!("https://registry.npmjs.org/{name}/-/{name}-{version}.tgz"), "integrity": "sha512-abc",
+        // npm's own tarball address: a scoped package's file is named without its scope
+        let file = name.rsplit('/').next().unwrap_or(name);
+        map.insert(format!("node_modules/{name}"), json!({ "version": version, "resolved": format!("https://registry.npmjs.org/{name}/-/{file}-{version}.tgz"), "integrity": "sha512-abc",
             "dependencies": deps.iter().map(|d| (d.to_string(), json!("*"))).collect::<serde_json::Map<_, _>>() }));
     }
     serde_json::to_string_pretty(&json!({ "name": "app", "version": "1.0.0", "lockfileVersion": 3, "requires": true, "packages": map })).unwrap()
@@ -527,6 +529,10 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     assert_eq!((c.read.clone(), c.write.clone()), (vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()], vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()]));
     assert!(c.dependencies && c.checks == vec!["addition".to_string()]);
     assert!(c.compare && c.delta.is_none() && c.app.is_none(), "every change is compared with the old code; the task states its change when it has one");
+    // a repository with a lockfile gets an upgrade task: any package it uses may move, and nothing else may change
+    let up = contract(&read_json(repo.join(".github/kern/tasks/upgrade.json")).unwrap()).unwrap();
+    assert!(up.approved == ["*"] && up.write.is_empty() && up.delta.as_ref().is_some_and(|d| d.changes.is_empty()), "{:?}", up.value);
+    assert_eq!(up.tests.as_ref().map(|t| t.kind), Some(policy::Kind::Refactor), "an upgrade keeps every test passing and needs no new one");
     let tests = c.tests.clone().expect("a test runner was found, so the contract keeps the tests honest");
     assert_eq!((tests.paths, tests.kind, tests.runner, tests.command), (vec!["test/".to_string()], policy::Kind::Feature, policy::Runner::Mocha, vec!["/workspace/node_modules/.bin/mocha".to_string()]));
     assert!(required_checks(&c).contains(&"honest-fix".to_string()));
@@ -542,8 +548,8 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     types: [checks_requested]"] {
         assert!(workflow.contains(want), "{want}: {workflow}");
     }
-    assert!(workflow.contains("if: startsWith(github.event.pull_request.head.ref, 'kern/') && github.event.pull_request.head.repo.full_name == github.repository"),
-        "only same-repository agent branches are checked out, so ordinary and fork pull requests are skipped instead of failing: {workflow}");
+    assert!(workflow.contains("if: (startsWith(github.event.pull_request.head.ref, 'kern/') || startsWith(github.event.pull_request.head.ref, 'renovate/') || startsWith(github.event.pull_request.head.ref, 'dependabot/')) && github.event.pull_request.head.repo.full_name == github.repository"),
+        "only same-repository agent and upgrade branches are checked out, so ordinary and fork pull requests are skipped instead of failing: {workflow}");
     assert_eq!(read_json(repo.join(".github/kern/ruleset.json")).unwrap()["rules"][0]["parameters"]["strict_required_status_checks_policy"], true, "a pull request must be up to date with its base");
     assert!(r["next_steps"].as_array().unwrap().iter().any(|s| s.as_str().unwrap().contains("audit-merges")), "{r}");
     let ruleset = read_json(repo.join(".github/kern/ruleset.json")).unwrap();
@@ -566,6 +572,7 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     sh(&plain, &["commit", "-qm", "base"]);
     let r = kern::init::init(&plain, &profile, "agent", "acme/kern@0123456789abcdef0123456789abcdef01234567").unwrap();
     assert!(contract(&read_json(plain.join(".github/kern/tasks/agent.json")).unwrap()).unwrap().tests.is_none());
+    assert!(!plain.join(".github/kern/tasks/upgrade.json").exists(), "without a lockfile there is nothing to upgrade");
     assert!(r["next_steps"].as_array().unwrap().iter().any(|s| s.as_str().unwrap().contains("\"tests\"")), "{r}");
 }
 
@@ -1874,6 +1881,61 @@ fn a_merge_queue_lands_exactly_what_kern_verified() {
     });
     let (skipped, _) = h.queue(&group, &h.base0, &"a".repeat(40), &ordinary, None);
     assert!(skipped.code == Some(0) && skipped.output.contains("status=SKIPPED"), "{}", skipped.summary);
+}
+
+#[test]
+fn a_dependency_upgrade_from_a_bot_is_verified_through_the_hosted_verifier() {
+    let h = hub();
+    // the base branch asks for upgrades to be verified: an upgrade task beside the project's manifests
+    let up = json!({ "version": 5, "task": "upgrade", "filesystem": { "read": [], "write": [] }, "network": [], "secrets": [], "publish": false,
+        "dependencies": { "manager": "npm", "lockfile": "package-lock.json", "allow": ["*"] },
+        "limits": { "files_changed": 2, "lines_changed": 100000, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 60, "memory_mb": 256, "pids": 64 },
+        "required_checks": ["addition"], "behaviors": [], "tests": null, "delta": { "intent": "Upgrade dependencies; nothing changes", "changes": [] }, "app": null });
+    let manifest = |v: &str| npm_manifest(&[("lodash", &format!("^{v}"))], json!({ "test": "mocha" }));
+    let lockfile = |v: &str| npm_lock(&[("lodash", &format!("^{v}"))], &[("lodash", v, &[])]);
+    let base1 = h.commit(&h.base0, &[(".github/kern/tasks/upgrade.json", &up.to_string()), ("package.json", &manifest("4.17.20")), ("package-lock.json", &lockfile("4.17.20"))], "main");
+    let bump = h.commit(&base1, &[("package.json", &manifest("4.17.21")), ("package-lock.json", &lockfile("4.17.21"))], "renovate/lodash-4.x");
+    let (policy, op, key) = (contract(&up).unwrap(), h.op.clone(), h.key.clone());
+    let verifier = stub_server(move |method, path, body| {
+        if (method, path) != ("POST", "/v1/verify") { return (404, "{}".into()); }
+        let run = serde_json::from_str::<Value>(body).unwrap()["run"].clone();
+        let k = kern_payload(&policy, &op, run["run_id"].as_str().unwrap(), run["base"].as_str().unwrap(), run["commit"].as_str().unwrap(), run["manifest_sha256"].as_str().unwrap(), now_ms() - 1000);
+        (200, attest::sign(&k, &KeySource::File(key.clone())).unwrap().to_string())
+    });
+    let api = h.api();
+    let run = |head: &str, branch: &str, verifier: Option<&StubApi>| -> (Option<i32>, Value, String) {
+        let dir = h.t.join(&format!("up-{}", uuid4().unwrap()));
+        let checkout = dir.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        sh(&checkout, &["init", "-q"]);
+        sh(&checkout, &["fetch", "-q", "--depth=2", &format!("{}/acme/project.git", h.url), head]);
+        std::fs::write(dir.join("event.json"), json!({ "repository": { "full_name": "acme/project" }, "pull_request": { "number": 9, "body": "Bumps lodash",
+            "head": { "sha": head, "ref": branch, "repo": { "full_name": "acme/project" } }, "base": { "sha": base1, "ref": "main", "repo": { "full_name": "acme/project" } } } }).to_string()).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kern"));
+        cmd.arg("check-pr").arg(dir.join("event.json")).arg(&checkout).env("GITHUB_API_URL", &api.url).env("GITHUB_TOKEN", "t0k3n").env("GITHUB_SERVER_URL", &h.url).env("GITHUB_STEP_SUMMARY", dir.join("summary.md"));
+        if let Some(v) = verifier { cmd.env("KERN_VERIFIER_URL", &v.url).env("KERN_VERIFIER_TOKEN", "v3r1f13r"); }
+        let out = cmd.output().unwrap();
+        (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or(Value::Null), String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    let (code, r, err) = run(&bump, "renovate/lodash-4.x", Some(&verifier));
+    assert!(code == Some(0) && r["status"] == "PASS" && r["upgrade"] == true, "{r} {err}");
+    assert_eq!(r["changes"]["dependencies"]["upgraded"], json!(["lodash"]), "{r}");
+    let sent: Vec<Value> = verifier.seen.lock().unwrap().iter().map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["run"].clone()).collect();
+    assert!(sent.len() == 1 && sent[0]["base"] == base1.as_str(), "the verifier saw the upgrade on its base: {sent:?}");
+    // Kern's commit is the bot's tree on the same base, written deterministically: what merges is exactly what was verified
+    let expected = git::write_commit(&h.server, &git::read_commit(&h.server, &bump, 1048576, 16777216).unwrap(), Some(&base1), "upgrade").unwrap();
+    assert_eq!((sent[0]["commit"].as_str(), r["verified_commit"].as_str()), (Some(expected.as_str()), Some(expected.as_str())));
+    // without a hosted verifier nothing is verified, and the result says why instead of pretending
+    let (code, r, _) = run(&bump, "renovate/lodash-4.x", None);
+    assert!(code == Some(0) && r["status"] == "SKIPPED" && r["reason"].as_str().unwrap().contains("Dependabot"), "{r}");
+    // an upgrade branch that also changes code is refused before anything is sent
+    let sneaky = h.commit(&base1, &[("package.json", &manifest("4.17.21")), ("package-lock.json", &lockfile("4.17.21")), ("src/add.mjs", "export const add = (a, b) => a * b;\n")], "renovate/sneaky");
+    let quiet = h.verifier(Some("must not be called"));
+    let (code, _, err) = run(&sneaky, "renovate/sneaky", Some(&quiet));
+    assert!(code == Some(1) && err.contains("Write outside contract: src/add.mjs") && quiet.seen.lock().unwrap().is_empty(), "{err}");
+    // any other branch stays an ordinary pull request
+    let (code, r, _) = run(&bump, "feature/lodash", Some(&quiet));
+    assert!(code == Some(0) && r["status"] == "SKIPPED" && quiet.seen.lock().unwrap().is_empty(), "{r}");
 }
 
 #[test]

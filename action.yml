@@ -31,6 +31,9 @@ inputs:
   check-name:
     description: The name branch protection requires for Kern's check, used for the check Kern reports after a re-verified push
     default: kern-verified
+  upgrade-branches:
+    description: Branch prefixes whose pull requests are dependency upgrades, verified through the hosted verifier with the base branch's upgrade task (tasks/upgrade.json), comma-separated
+    default: "dependabot/,renovate/"
 outputs:
   status:
     description: PASS, SKIPPED or DENIED
@@ -70,5 +73,6 @@ runs:
         KERN_VERIFIER_URL: ${{ inputs.verifier-url }}
         KERN_VERIFIER_TOKEN: ${{ inputs.verifier-token }}
         KERN_CHECK_NAME: ${{ inputs.check-name }}
+        KERN_UPGRADE_BRANCHES: ${{ inputs.upgrade-branches }}
         GITHUB_TOKEN: ${{ github.token }}
       run: '"$KERN_BIN" check-pr "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE" "$KERN_CONFIG"'

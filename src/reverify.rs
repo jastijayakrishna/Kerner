@@ -222,3 +222,48 @@ fn verified(run_id: &str, checkout: &Path, tip: &str, commit: &str, policy: &cra
     outcome
 }
 
+/// A dependency upgrade from a bot (Dependabot, Renovate): when the protected base branch holds an upgrade task (`tasks/upgrade.json`, whose
+/// delta states that nothing changes) and the workflow has a hosted verifier, Kern verifies the upgrade itself, so the check passes only when
+/// the old code on the old packages and the old code on the new packages behave the same. None: not an upgrade Kern takes on.
+pub fn upgrade(event: &Value, checkout: &Path, config: &str, now: u64) -> Option<R<Value>> {
+    let pr = &event["pull_request"];
+    let head_ref = pr["head"]["ref"].as_str()?;
+    let prefixes = github::env("KERN_UPGRADE_BRANCHES").unwrap_or_else(|| "dependabot/,renovate/".into());
+    if !prefixes.split(',').map(str::trim).any(|p| !p.is_empty() && head_ref.starts_with(p)) { return None; }
+    let repository = pr["base"]["repo"]["full_name"].as_str()?;
+    if pr["head"]["repo"]["full_name"].as_str() != Some(repository) || config.contains("..") || config.starts_with('/') { return None; }
+    let (head, base, base_ref) = (pr["head"]["sha"].as_str()?, pr["base"]["sha"].as_str()?, pr["base"]["ref"].as_str().unwrap_or("the base branch"));
+    let task = github::env("KERN_UPGRADE_TASK").unwrap_or_else(|| "upgrade".into());
+    if !crate::policy::task_id(&task) || git::oid(head).is_err() || git::oid(base).is_err() { return None; }
+    git::git(checkout, &["cat-file", "-e", &format!("{base}:{config}/tasks/{task}.json")], None).ok()?;
+    let Some(hosted) = Hosted::from_env() else {
+        return Some(Ok(json!({ "status": "SKIPPED", "head": head, "reason": "Upgrade pull requests are verified through a hosted verifier, and this run has none: set verifier-url and verifier-token. GitHub gives runs that Dependabot starts no secrets, so those stay unverified; Renovate, or kern ingest, can verify them" })));
+    };
+    Some((|| -> R<Value> {
+        let hosted = hosted?;
+        ensure!(github::repository(repository), "Invalid repository");
+        ensure!(git::parents(checkout, head)? == vec![base.to_string()], "Kern verifies an upgrade as one commit on {base_ref}: rebase it on {base_ref} (for Dependabot, comment @dependabot rebase)");
+        let trusted = |name: &str| -> R<Vec<u8>> { git::git(checkout, &["cat-file", "blob", &format!("{base}:{config}/{name}")], None).map_err(|_| Denied(format!("The base branch lacks {config}/{name}"))) };
+        let policy = contract(&serde_json::from_slice(&trusted(&format!("tasks/{task}.json"))?)?)?;
+        let op = operator(&serde_json::from_slice(&trusted("operator.json")?)?)?;
+        let key_pem = String::from_utf8(trusted("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))?;
+        ensure!(policy.task == task && op.repository == repository, "Trusted configuration does not match this repository and task");
+        ensure!(policy.approved.iter().any(|p| p == crate::deps::ANY), "The upgrade task must allow any package the project uses to move (dependencies.allow [\"*\"])");
+        let key = attest::public_key(&key_pem)?;
+        let l = &policy.limits;
+        let (original, pushed) = (git::read_commit(checkout, base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, head, l.file_bytes, l.total_bytes)?);
+        let changed = git::changes(&original, &pushed, &policy)?;
+        let capabilities = capability::check(&original, &pushed, &changed, &op.permissions)?;
+        // The bot's commit becomes a Kern commit with the same tree on the same base: that is what the verifier signs and what merges.
+        let commit = git::write_commit(checkout, &pushed, Some(base), &policy.task)?;
+        let run_id = uuid4()?;
+        let (envelope, evidence) = verified(&run_id, checkout, base, &commit, &policy, &op, &key_pem, &hosted)?;
+        let k = promote::verify_against(checkout, &envelope, &key, &policy, &op, Claim { run_id: &run_id, base, commit: &commit, now: now_ms().max(now) + CLOCK_SKEW_MS, enforce_expiry: false })?;
+        let tree = |c: &str| -> R<String> { Ok(git::trimmed(git::git(checkout, &["rev-parse", &format!("{c}^{{tree}}")], None)?)) };
+        ensure!(tree(&commit)? == tree(head)?, "The upgrade's tree is not the tree Kern verified");
+        let mut result = json!({ "status": "PASS", "head": head, "base": base, "task": policy.task, "run_id": run_id, "upgrade": true, "verified_commit": commit,
+            "attestation_sha256": digest(&envelope)?, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities });
+        if crate::compare::attested(&envelope, &evidence) { result["what_changed"] = json!(crate::compare::markdown(&evidence)); }
+        Ok(result)
+    })())
+}

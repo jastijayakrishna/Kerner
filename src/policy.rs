@@ -203,7 +203,9 @@ pub fn contract(input: &Value) -> R<Contract> {
             approved.sort();
             approved.dedup();
             ensure!(approved.len() == given, "dependencies.allow must not repeat a package");
-            if d.get("allow").is_some() { crate::deps::validate(&approved)?; }
+            // ["*"] lets any package the project already uses move (an upgrade task); it is checked against the stated change below.
+            if approved.iter().any(|p| p == crate::deps::ANY) { ensure!(approved.len() == 1, "dependencies.allow is either [\"*\"] or a list of package names, not both"); }
+            else if d.get("allow").is_some() { crate::deps::validate(&approved)?; }
             (true, approved)
         }
     };
@@ -254,6 +256,10 @@ pub fn contract(input: &Value) -> R<Contract> {
     if !approved.is_empty() { value["dependencies"]["allow"] = json!(approved); }
     let compare = version >= Some(5);
     let (delta, app) = if compare { (delta(&input["delta"])?, app(&input["app"])?) } else { (None, None) };
+    if approved.iter().any(|p| p == crate::deps::ANY) {
+        ensure!(delta.as_ref().is_some_and(|d| d.changes.is_empty()),
+            "dependencies.allow [\"*\"] lets any package the project already uses move, so it needs a version 5 task whose delta states that nothing changes (no changes)");
+    }
     Ok(Contract { value, task, read, write, dependencies, approved, limits, checks, behaviors, tests, compare, delta, app })
 }
 pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {

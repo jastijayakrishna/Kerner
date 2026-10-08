@@ -164,7 +164,10 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     ensure!(pr.is_object(), "Not a pull_request event");
     let (head, base, head_ref) = (text(&pr["head"], "sha")?, text(&pr["base"], "sha")?, text(&pr["head"], "ref")?);
     let repository = text(&pr["base"]["repo"], "full_name")?;
-    let Some(rest) = head_ref.strip_prefix("kern/") else { return Ok(json!({ "status": "SKIPPED", "reason": "Not a Kern agent branch; ordinary review rules apply", "head": head })) };
+    let Some(rest) = head_ref.strip_prefix("kern/") else {
+        // A dependency upgrade from a bot is verified when the base branch asks for it; any other branch follows ordinary review rules.
+        return crate::reverify::upgrade(event, checkout, config, now).unwrap_or_else(|| Ok(json!({ "status": "SKIPPED", "reason": "Not a Kern agent branch; ordinary review rules apply", "head": head })));
+    };
     let (task, run_id) = rest.split_once('/').ok_or_else(|| Denied("Kern branches must be kern/<task>/<run_id>".into()))?;
     ensure!(task_id(task) && is_uuid(run_id) && !config.contains("..") && !config.starts_with('/'), "Invalid Kern branch or configuration path");
     git::oid(head)?;

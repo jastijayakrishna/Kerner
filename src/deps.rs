@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 
 pub const MANIFEST: &str = "package.json";
 pub const LOCKFILE: &str = "package-lock.json";
+/// `dependencies.allow: ["*"]`: an upgrade task. Any package the project already uses may move to another version, none may be added or removed.
+pub const ANY: &str = "*";
 const SECTIONS: [&str; 4] = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 
 /// An npm package name: lowercase, optionally under a scope.
@@ -16,7 +18,14 @@ pub fn valid_name(s: &str) -> bool {
 /// What a task may approve: a package name, or a whole scope as `@scope/*`.
 pub fn valid_pattern(s: &str) -> bool { s.strip_suffix("/*").map_or_else(|| valid_name(s), |scope| scope.starts_with('@') && valid_name(&format!("{scope}/x"))) }
 pub fn approved(patterns: &[String], name: &str) -> bool {
-    patterns.iter().any(|p| p == name || p.strip_suffix('*').is_some_and(|prefix| prefix.ends_with('/') && name.starts_with(prefix)))
+    patterns.iter().any(|p| p == ANY || p == name || p.strip_suffix('*').is_some_and(|prefix| prefix.ends_with('/') && name.starts_with(prefix)))
+}
+/// Names that appear in a dependency section on one side only: added or removed, not moved.
+fn added_or_removed(a: &Value, b: &Value) -> BTreeSet<String> {
+    SECTIONS.iter().flat_map(|s| {
+        let (x, y) = (a[*s].as_object().cloned().unwrap_or_default(), b[*s].as_object().cloned().unwrap_or_default());
+        x.keys().chain(y.keys()).filter(|n| x.contains_key(*n) != y.contains_key(*n)).cloned().collect::<Vec<_>>()
+    }).collect()
 }
 fn read(files: &Files, path: &str) -> R<Option<Value>> {
     let Some(e) = files.get(path) else { return Ok(None) };
@@ -24,6 +33,20 @@ fn read(files: &Files, path: &str) -> R<Option<Value>> {
     parsed.map(Some).ok_or_else(|| Denied(format!("Dependency files must be valid JSON: {path}")))
 }
 fn package_of(key: &str) -> &str { key.rsplit_once("node_modules/").map_or(key, |(_, name)| name) }
+/// The package a dependency spec installs: the target of an `npm:` alias, or the dependency's own name.
+fn target(name: &str, spec: &Value) -> String {
+    let Some(rest) = spec.as_str().and_then(|s| s.strip_prefix("npm:")) else { return name.to_string() };
+    // `npm:pkg@1`, `npm:@scope/pkg@1` or `npm:pkg`: the name ends at the first `@` after its first character.
+    rest.get(1..).and_then(|r| r.find('@')).map_or(rest, |i| &rest[..=i]).to_string()
+}
+/// Whether a registry URL is the package's own tarball of that version: `.../<name>/-/<base>-<version>.tgz`.
+fn tarball_of(url: &str, name: &str, version: &str) -> bool {
+    let Some(path) = url.split_once("://").and_then(|(_, rest)| rest.split_once('/')).map(|(_, p)| p.split(['?', '#']).next().unwrap_or("")) else { return false };
+    let plain = !version.is_empty() && version.chars().all(|c| c.is_ascii_alphanumeric() || ".+-".contains(c));
+    let base = name.rsplit('/').next().unwrap_or(name);
+    plain && valid_name(name) && [name.to_string(), name.replacen('/', "%2f", 1), name.replacen('/', "%2F", 1)].iter()
+        .any(|n| { let own = format!("{n}/-/{base}-{version}.tgz"); path == own || path.ends_with(&format!("/{own}")) })
+}
 fn fields_changed(a: &Value, b: &Value, keep: &[&str]) -> Vec<String> {
     let keys: BTreeSet<&String> = a.as_object().into_iter().chain(b.as_object()).flat_map(|o| o.keys()).collect();
     keys.into_iter().filter(|k| !keep.contains(&k.as_str()) && a.get(k.as_str()) != b.get(k.as_str())).cloned().collect()
@@ -44,16 +67,46 @@ pub fn screen(base: &Files, candidate: &Files, patterns: &[String]) -> R<Value> 
     ensure!(SECTIONS.iter().all(|s| new.get(*s).is_none_or(Value::is_object)), "package.json may only change dependency entries, but this change touches: the shape of a dependency section");
     let declared = names_changed(&old, &new);
     let list = patterns.join(", ");
+    let upgrade = patterns.iter().any(|p| p == ANY);
+    let only_moves = |a: &Value, b: &Value| -> R<()> {
+        let names: Vec<String> = added_or_removed(a, b).into_iter().collect();
+        ensure!(!upgrade || names.is_empty(), "This task only upgrades packages the project already uses, but this change adds or removes: {}", names.join(", "));
+        Ok(())
+    };
+    only_moves(&old, &new)?;
     for name in &declared { ensure!(valid_name(name) && approved(patterns, name), "Dependency change not approved: {name}. The task approves changes only to: {list}"); }
+    // A dependency keeps its identity: it may move to another version, never become an `npm:` alias of another package.
+    for s in SECTIONS {
+        for (name, spec) in new[s].as_object().into_iter().flatten() {
+            let before = old[s].get(name.as_str());
+            if before == Some(spec) { continue; }
+            let (was, now) = (before.map_or_else(|| name.clone(), |b| target(name, b)), target(name, spec));
+            ensure!(was == now, "package.json swaps {name} for another package: {was} becomes {now}");
+        }
+    }
     let (lock_old, lock_new) = (read(base, LOCKFILE)?.unwrap_or_else(|| json!({})), read(candidate, LOCKFILE)?.unwrap_or_else(|| json!({})));
     ensure!(lock_old["lockfileVersion"] == lock_new["lockfileVersion"], "The lockfile format changed: keep lockfileVersion as it was");
     let header = fields_changed(&lock_old, &lock_new, &["packages", "dependencies"]);
     ensure!(header.is_empty(), "The lockfile changes packages the task did not approve: its {}", header.join(", "));
     let (a, b) = (lock_old["packages"].as_object().cloned().unwrap_or_default(), lock_new["packages"].as_object().cloned().unwrap_or_default());
+    // So does every locked package that changes: never another package under its name (`"name": "evil"`), and what it resolves to is
+    // that package's own tarball of that version. A package an upgrade newly needs may be an alias its own dependencies declare.
+    for (key, entry) in b.iter().filter(|(k, v)| !k.is_empty() && a.get(k.as_str()) != Some(*v)) {
+        let real = entry["name"].as_str().unwrap_or_else(|| package_of(key));
+        if let Some(old) = a.get(key.as_str()) {
+            let was = old["name"].as_str().unwrap_or_else(|| package_of(key));
+            ensure!(was == real, "The lockfile swaps {key} for another package: {was} becomes {real}");
+        }
+        if let Some(url) = entry["resolved"].as_str() {
+            let version = entry["version"].as_str().unwrap_or("");
+            ensure!(tarball_of(url, real, version), "The lockfile resolves {key} to a tarball that is not {real} {version}: {url}");
+        }
+    }
     // The root entry mirrors package.json: only its dependency sections may change, and only for approved packages.
     let (root_a, root_b) = (a.get("").cloned().unwrap_or_else(|| json!({})), b.get("").cloned().unwrap_or_else(|| json!({})));
     let root_fields = fields_changed(&root_a, &root_b, &SECTIONS);
     ensure!(root_fields.is_empty(), "The lockfile changes packages the task did not approve: its root {}", root_fields.join(", "));
+    only_moves(&root_a, &root_b)?;
     for name in names_changed(&root_a, &root_b) { ensure!(approved(patterns, &name), "Dependency change not approved: {name}. The task approves changes only to: {list}"); }
     // The packages an approved package needs, followed by name through the new lockfile.
     let mut need: BTreeSet<String> = declared.iter().cloned().chain(a.keys().chain(b.keys()).map(|k| package_of(k).to_string()).filter(|n| approved(patterns, n))).collect();
@@ -71,9 +124,9 @@ pub fn screen(base: &Files, candidate: &Files, patterns: &[String]) -> R<Value> 
         .filter(|n| !need.contains(*n)).collect();
     ensure!(moved.is_empty(), "The lockfile changes packages the task did not approve: {}", moved.into_iter().collect::<Vec<_>>().join(", "));
     let packages = a.keys().chain(b.keys()).filter(|k| !k.is_empty() && a.get(*k) != b.get(*k)).collect::<BTreeSet<_>>().len();
-    Ok(json!({ "approved": declared, "lockfile_packages_changed": packages }))
+    // An upgrade names what moved, never what code may newly import (see `imports`).
+    Ok(if upgrade { json!({ "upgraded": declared, "lockfile_packages_changed": packages }) } else { json!({ "approved": declared, "lockfile_packages_changed": packages }) })
 }
-
 /// The packages whose locked version differs between two trees: what an upgrade moved, directly or through another package.
 pub fn moved(base: &Files, candidate: &Files) -> BTreeSet<String> {
     let lock = |f: &Files| f.get(LOCKFILE).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()).map(|v| v["packages"].as_object().cloned().unwrap_or_default()).unwrap_or_default();

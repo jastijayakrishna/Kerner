@@ -145,6 +145,12 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     if let Some(list) = shaped(r, "More paid API calls than the old code: ", ". The task did not allow more paid API calls") {
         return (true, vec![fix("paid-calls", None, format!("Remove the extra paid API calls: {}.", code(list)))]);
     }
+    if let Some(names) = r.strip_prefix("This task only upgrades packages the project already uses, but this change adds or removes: ").filter(|n| !n.is_empty()) {
+        return (true, vec![fix("dependency", Some("package.json"), format!("Do not add or remove packages: {}. This task only moves packages the project already uses to other versions.", codes(names.split(", "))))]);
+    }
+    if let Some(rest) = r.strip_prefix("Kern verifies an upgrade as one commit on ") && rest.contains(": rebase it on ") {
+        return (true, vec![fix("rebase", None, "Rebase the upgrade on its base branch as one commit.".into())]);
+    }
     if r.starts_with("Kern could not compare the old and the new code: ") { return human("compare", "Kern could not compare the old and the new code. A human has to check the verifier and the task's app recipe."); }
     let locked = "The test proof locks existing tests so they keep checking the old behaviour; ";
     for (start, end) in [("Existing test file changed: ", "put new tests in a new file and leave existing ones unchanged"), ("Existing test file deleted: ", "leave existing tests in place")] {

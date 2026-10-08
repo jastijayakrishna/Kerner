@@ -125,6 +125,98 @@ fn app_recipes_name_how_to_start_the_app_and_who_asks() {
     denied(attenuate(&c, &other), "app recipe");
 }
 
+fn manifest(deps: &[(&str, &str)], scripts: Value) -> String {
+    serde_json::to_string_pretty(&json!({ "name": "app", "version": "1.0.0", "scripts": scripts, "dependencies": deps.iter().map(|(n, v)| (n.to_string(), json!(v))).collect::<serde_json::Map<_, _>>() })).unwrap()
+}
+fn lock(root: &[(&str, &str)], packages: &[(&str, &str)]) -> String {
+    let mut map = serde_json::Map::new();
+    map.insert(String::new(), json!({ "name": "app", "version": "1.0.0", "dependencies": root.iter().map(|(n, v)| (n.to_string(), json!(v))).collect::<serde_json::Map<_, _>>() }));
+    for (name, version) in packages {
+        map.insert(format!("node_modules/{name}"), json!({ "version": version, "resolved": format!("https://registry.npmjs.org/{name}/-/{name}-{version}.tgz"), "integrity": "sha512-abc" }));
+    }
+    serde_json::to_string_pretty(&json!({ "name": "app", "version": "1.0.0", "lockfileVersion": 3, "requires": true, "packages": map })).unwrap()
+}
+fn upgrade_contract() -> Value {
+    let mut c = v5(json!({ "intent": "Upgrade dependencies; the code behaves exactly as before", "changes": [] }));
+    c["task"] = json!("upgrade");
+    c["filesystem"] = json!({ "read": ["test/"], "write": [] });
+    c["dependencies"] = json!({ "manager": "npm", "lockfile": "package-lock.json", "allow": ["*"] });
+    c["limits"]["files_changed"] = json!(2);
+    c
+}
+
+#[test]
+fn upgrade_tasks_may_only_move_packages_that_are_already_there() {
+    let c = contract(&upgrade_contract()).unwrap();
+    assert_eq!(c.approved, vec!["*".to_string()]);
+    // any package may move, but only under a task that states that nothing changes
+    let mut stated = upgrade_contract();
+    stated["delta"] = negatives();
+    denied(contract(&stated), "nothing changes");
+    let mut silent = upgrade_contract();
+    silent["delta"] = Value::Null;
+    denied(contract(&silent), "nothing changes");
+    let mut mixed = upgrade_contract();
+    mixed["dependencies"]["allow"] = json!(["*", "zod"]);
+    denied(contract(&mixed), "dependencies.allow");
+    let mut v4 = upgrade_contract();
+    v4["version"] = json!(4);
+    v4.as_object_mut().unwrap().remove("delta");
+    v4.as_object_mut().unwrap().remove("app");
+    denied(contract(&v4), "dependencies.allow");
+    let scripts = json!({ "test": "mocha" });
+    let base = files(&[("package.json", &manifest(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0")], scripts.clone())), ("package-lock.json", &lock(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.20"), ("left-pad", "1.3.0")])),
+        ("src/a.js", "module.exports = require('lodash');\n")]);
+    let with = |m: &str, l: &str| { let mut f = base.clone(); f.insert("package.json".into(), file(m)); f.insert("package-lock.json".into(), file(l)); f };
+    // a version bump of a package the project already uses is an upgrade
+    let bumped = with(&manifest(&[("lodash", "^4.17.21"), ("left-pad", "^1.0.0")], scripts.clone()), &lock(&[("lodash", "^4.17.21"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.21"), ("left-pad", "1.3.0")]));
+    let changed = git::changes(&base, &bumped, &c).unwrap();
+    assert_eq!(changed["dependencies"]["upgraded"], json!(["lodash"]), "{changed}");
+    assert!(kern::deps::imports(&changed).is_empty(), "an upgrade never lets code import something new");
+    // a lockfile-only move of a package (a transitive update) is an upgrade too
+    let transitive = with(&manifest(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0")], scripts.clone()), &lock(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.20"), ("left-pad", "1.3.1")]));
+    git::changes(&base, &transitive, &c).unwrap();
+    // adding or removing a package is not an upgrade
+    let added = with(&manifest(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0"), ("zod", "^3.0.0")], scripts.clone()), &lock(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0"), ("zod", "^3.0.0")], &[("lodash", "4.17.20"), ("left-pad", "1.3.0"), ("zod", "3.23.0")]));
+    denied(git::changes(&base, &added, &c), "only upgrades packages the project already uses, but this change adds or removes: zod");
+    let removed = with(&manifest(&[("lodash", "^4.17.20")], scripts.clone()), &lock(&[("lodash", "^4.17.20")], &[("lodash", "4.17.20")]));
+    denied(git::changes(&base, &removed, &c), "adds or removes: left-pad");
+    // and the rest of package.json stays as it was
+    let hook = with(&manifest(&[("lodash", "^4.17.21"), ("left-pad", "^1.0.0")], json!({ "test": "mocha", "postinstall": "node steal.js" })), &lock(&[("lodash", "^4.17.21"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.21"), ("left-pad", "1.3.0")]));
+    denied(git::changes(&base, &hook, &c), "touches: scripts");
+    // code may not change under an upgrade task: it grants no file
+    let mut code = bumped.clone();
+    code.insert("src/a.js".into(), file("module.exports = 1;\n"));
+    denied(git::changes(&base, &code, &c), "Write outside contract: src/a.js");
+    // a package keeps its identity: never another package under its name, through an npm: alias or a tarball of something else
+    let swapped = |spec: &str, entry: Value| {
+        let mut l: Value = serde_json::from_str(&lock(&[("lodash", spec), ("left-pad", "^1.0.0")], &[("left-pad", "1.3.0")])).unwrap();
+        l["packages"]["node_modules/lodash"] = entry;
+        with(&manifest(&[("lodash", spec), ("left-pad", "^1.0.0")], scripts.clone()), &l.to_string())
+    };
+    let evil = json!({ "name": "evil", "version": "1.0.0", "resolved": "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz", "integrity": "sha512-abc" });
+    denied(git::changes(&base, &swapped("npm:evil@1.0.0", evil.clone()), &c), "swaps lodash for another package: lodash becomes evil");
+    let mut lock_only = base.clone();
+    let mut l: Value = serde_json::from_str(&lock(&[("lodash", "^4.17.20"), ("left-pad", "^1.0.0")], &[("left-pad", "1.3.0")])).unwrap();
+    l["packages"]["node_modules/lodash"] = evil;
+    lock_only.insert("package-lock.json".into(), file(&l.to_string()));
+    denied(git::changes(&base, &lock_only, &c), "swaps node_modules/lodash for another package: lodash becomes evil");
+    let elsewhere = json!({ "version": "4.17.21", "resolved": "https://registry.npmjs.org/evil/-/evil-4.17.21.tgz", "integrity": "sha512-abc" });
+    denied(git::changes(&base, &swapped("^4.17.21", elsewhere), &c), "resolves node_modules/lodash to a tarball that is not lodash 4.17.21");
+    // a package an upgrade newly needs may be one that its own dependencies alias, as npm writes it, from that package's own tarball
+    let mut l: Value = serde_json::from_str(&lock(&[("lodash", "^4.17.21"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.21"), ("left-pad", "1.3.0")])).unwrap();
+    l["packages"]["node_modules/string-width-cjs"] = json!({ "name": "string-width", "version": "4.2.3", "resolved": "https://registry.npmjs.org/string-width/-/string-width-4.2.3.tgz", "integrity": "sha512-abc" });
+    l["packages"]["node_modules/@scope/pkg"] = json!({ "version": "2.0.0", "resolved": "https://registry.npmjs.org/@scope/pkg/-/pkg-2.0.0.tgz", "integrity": "sha512-abc" });
+    git::changes(&base, &with(&manifest(&[("lodash", "^4.17.21"), ("left-pad", "^1.0.0")], scripts.clone()), &l.to_string()), &c).unwrap();
+    // the same holds for a task that approves one package by name
+    let mut one = upgrade_contract();
+    one["version"] = json!(4);
+    one.as_object_mut().unwrap().remove("delta");
+    one.as_object_mut().unwrap().remove("app");
+    one["dependencies"]["allow"] = json!(["lodash"]);
+    denied(git::changes(&base, &swapped("npm:evil@1.0.0", json!({ "name": "evil", "version": "1.0.0", "resolved": "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz", "integrity": "sha512-abc" })), &contract(&one).unwrap()), "swaps lodash for another package");
+}
+
 /// Node, stopped after 90 seconds so that a probe that stalls fails its test instead of hanging it.
 fn node(args: &[&std::ffi::OsStr], dir: &Path, env: &[(&str, &Path)]) -> std::process::Output {
     use std::process::Stdio;
@@ -757,6 +849,7 @@ fn every_new_block_becomes_an_instruction_the_agent_can_follow() {
         ("Access changed outside the task's stated change: \"GET / as user: 200 before, 500 now\". Routes must answer as before", "access-changed", true, &["answer as before"][..]),
         ("Slower than the old code: \"src/sum.js#sum: 0.0 ms before, 3.1 ms now\". The task did not allow slower code", "slower", true, &["fast"][..]),
         ("More paid API calls than the old code: \"src/ai.js: chat.completions.create, 1 before, 2 now\". The task did not allow more paid API calls", "paid-calls", true, &["paid API"][..]),
+        ("This task only upgrades packages the project already uses, but this change adds or removes: zod", "dependency", true, &["`zod`"][..]),
         // what only calling the new code shows is explained as the code's, not the tests'
         ("Calling the new code shows new runtime behavior: delete:., overwrite:data/state.json. If this is intended, allow it in the task contract: \"behaviors\": [\"delete:.\",\"overwrite:data/state.json\"]",
             "behavior", true, &["`delete:.`", "`overwrite:data/state.json`", "when Kern calls"][..]),
