@@ -3,8 +3,10 @@
 set -euo pipefail
 case "${RUNNER_OS}-${RUNNER_ARCH}" in
   Linux-X64) asset=kern-linux-x64 digest=${KERN_SHA256_LINUX_X64:-} ;;
-  Windows-X64) asset=kern-windows-x64.exe digest=${KERN_SHA256_WINDOWS_X64:-} ;;
+  Linux-ARM64) asset=kern-linux-arm64 digest=${KERN_SHA256_LINUX_ARM64:-} ;;
+  Windows-X64 | Windows-ARM64) asset=kern-windows-x64.exe digest=${KERN_SHA256_WINDOWS_X64:-} ;;
   macOS-ARM64) asset=kern-macos-arm64 digest=${KERN_SHA256_MACOS_ARM64:-} ;;
+  macOS-X64) asset=kern-macos-x64 digest=${KERN_SHA256_MACOS_X64:-} ;;
   *) asset="" digest="" ;;
 esac
 if [[ "${BUILD_FROM_SOURCE:-false}" == "true" || -z "${KERN_VERSION:-}" || -z "$digest" ]]; then

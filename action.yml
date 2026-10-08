@@ -55,8 +55,10 @@ runs:
       env:
         KERN_VERSION: ""
         KERN_SHA256_LINUX_X64: ""
+        KERN_SHA256_LINUX_ARM64: ""
         KERN_SHA256_WINDOWS_X64: ""
         KERN_SHA256_MACOS_ARM64: ""
+        KERN_SHA256_MACOS_X64: ""
         BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
       run: bash "$GITHUB_ACTION_PATH/scripts/install-kern.sh"
     - name: Verify the agent change

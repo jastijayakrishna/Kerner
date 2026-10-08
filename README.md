@@ -23,6 +23,22 @@ agent (any sandbox) ──commit──▶ kern ingest ──bundle──▶ kern
 
 Kern is one static Rust binary. The same binary is the CLI, the verifier and the in-sandbox runner.
 
+## Install
+
+```sh
+# Linux or macOS
+curl -fsSL https://github.com/OWNER/kern/releases/latest/download/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://github.com/OWNER/kern/releases/latest/download/install.ps1 | iex
+```
+
+The installer picks the build for your machine (Linux x64 or ARM64, macOS Apple silicon or Intel, Windows x64, which Windows 11 on Arm runs as well), checks it against the release's `SHA256SUMS`, tries it, and only then puts it in place, so a failed install never leaves a broken `kern` behind. It installs to `~/.local/bin` (Windows: `%LOCALAPPDATA%\Programs\kern`, added to your PATH). Set `KERN_VERSION=v0.4.0` to install a particular release and `KERN_INSTALL_DIR` to choose the folder. Every release file also carries a GitHub build-provenance attestation: `gh attestation verify <file> --repo OWNER/kern`.
+
+Nothing else is needed for setup, the merge gate or audits. Running an agent in Kern's own local box needs a container engine (below), and a verifier needs Linux with gVisor.
+
 ## Quick start (about 10 minutes)
 
 ```sh
@@ -259,7 +275,7 @@ kern promote-github run out/attestation.json task.json operator.json expected.js
 1. Commit `.github/kern/operator.json`, `.github/kern/verifier.pub` and `.github/kern/tasks/<task>.json` to the default branch (`kern init` writes all of these).
 2. Add [examples/kern-verified.yml](examples/kern-verified.yml) and require the `kern-verified` check, ideally through the generated ruleset. Pin the action to the Kern release your verifier runs: the check needs the same Kern version and capability policy, while the verifier's own binary stays pinned through its builder identity.
 
-The action downloads a prebuilt Kern binary and checks it against a SHA-256 digest written into `action.yml`, so pinning the action by commit pins the binary too; it needs no extra tools and works the same on Linux, Windows and macOS runners. Until a release is pinned it builds from source. Releases (`.github/workflows/release.yml`, on a `v*` tag) build static Linux, Windows and macOS binaries, publish `SHA256SUMS`, and attach GitHub build-provenance attestations (`gh attestation verify <file> --repo OWNER/kern`); `scripts/pin-release.sh <tag>` writes a release's digests into `action.yml`. Enable immutable releases on the repository so published assets cannot change.
+The action downloads a prebuilt Kern binary and checks it against a SHA-256 digest written into `action.yml`, so pinning the action by commit pins the binary too; it needs no extra tools and works the same on Linux, Windows and macOS runners. Until a release is pinned it builds from source. Releases (`.github/workflows/release.yml`, on a `v*` tag) test and build static Linux binaries (x64 and ARM64), Windows x64 and macOS (Apple silicon and Intel) binaries, add the two installers stamped with that release, publish `SHA256SUMS`, and attach GitHub build-provenance attestations (`gh attestation verify <file> --repo OWNER/kern`); `scripts/pin-release.sh <tag>` writes a release's digests into `action.yml`. Enable immutable releases on the repository so published assets cannot change.
 
 The workflow uses `pull_request_target`, so its definition comes from the protected base branch and a PR cannot alter the check. Kern only reads git objects from the PR; it never executes PR code there, and the action builds or installs Kern in its own directory, never in the pull request's files. For `kern/*` branches the check requires exactly one valid attestation for the exact head and base, and recomputes the contract and capability diff. Other branches, including pull requests from forks, are not checked out and are reported as `SKIPPED` (`actions/checkout` v7 refuses fork code in `pull_request_target`). The generated ruleset also requires pull requests to be up to date with their base, so what merges is the commit Kern verified; with re-verification on, updating a branch from its base is verified again like any other push. From 2 November 2026 GitHub turns `pull_request_target` off in public repositories that have no event policy allowing it; allow it for this workflow.
 
