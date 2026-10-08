@@ -103,17 +103,20 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     if let Some(p) = shaped(r, "Test runner configuration cannot change under the test proof: ", ". It decides which tests run and how they check results; leave it unchanged") {
         return (true, vec![fix("test-config", Some(p), format!("Leave {} unchanged: the test runner's settings decide which tests run and how they check results.", code(p)))]);
     }
-    if let Some((p, m)) = shaped(r, "New test file skips or focuses tests: ", ". Every test must run, so remove it").and_then(|x| x.rsplit_once(" uses ")) {
+    if let Some((p, m)) = shaped(r, "A test file skips or focuses tests: ", ". Every test must run, so remove it").and_then(|x| x.rsplit_once(" uses ")) {
         return (true, vec![fix("test-marker", Some(p), format!("Remove {} from {}. Every test has to run, and the result has to come from the tests themselves.", code(m), code(p)))]);
     }
     if let Some((p, m)) = shaped(r, "Code outside the tests reaches into the test runner: ", ". Code may not change how tests run or what they check, or check whether tests are running; remove it").and_then(|x| x.rsplit_once(" uses ")) {
         return (true, vec![fix("test-tamper", Some(p), format!("Remove {} from {}. Code may not change how tests run or what they check, or behave differently while tests run.", code(m), code(p)))]);
     }
-    let missing = |paths: &str| (true, vec![fix("test-missing", None, format!("Add a new test file under {} that the test command runs, and that fails on the old code and passes with your fix.", codes(paths.split(", "))))]);
-    if let Some(paths) = r.strip_prefix("A bug fix must add a test that fails before the fix and passes after it: add a new test file under ").filter(|p| !p.is_empty()) { return missing(paths); }
+    let missing = |paths: &str| (true, vec![fix("test-missing", None, format!("Add a test under {} that the test command runs, and that fails on the old code and passes with your fix.", codes(paths.split(", "))))]);
+    if let Some(paths) = r.strip_prefix("A bug fix must add a test that fails before the fix and passes after it: add or change a test file under ").filter(|p| !p.is_empty()) { return missing(paths); }
     if let Some(paths) = shaped(r, "No new test ran in the test suite. A bug fix must add a test under ", " that the test command runs, and that fails before the fix and passes after it") { return missing(paths); }
     if let Some(list) = shaped(r, "None of the new tests fails on the old code, so they do not show the bug: ", ". Write a test that fails before the fix and passes after it; a test that never reaches the changed code (for example because it mocks it) proves nothing") {
         return (true, vec![fix("test-proof", None, format!("Rewrite your new tests so at least one fails on the old code and passes with your fix: call the real code that had the bug, without mocking it. Tests that passed on the old code: {}.", code(list)))]);
+    }
+    if shaped(r, "The new tests fail on the old code only sometimes: ", ". A test that shows the bug must fail on the old code every time and pass on the new code").is_some() {
+        return (true, vec![fix("test-proof", None, "Make your new test fail on the old code every time, not only sometimes: it must not depend on timing, order or chance.".into())]);
     }
     if shaped(r, "The test run on the old code with the new tests added gave no usable results: ", ". A bug-fix test must load on the old code and fail inside a test, so it cannot depend on files the fix adds").is_some() {
         return (true, vec![fix("test-proof", None, "Make your new test load on the old code and fail inside a test there: it may only use code that existed before your fix.".into())]);
@@ -126,6 +129,22 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     }
     if let Some(list) = shaped(r, "Tests did not run on the new code: ", ". Every test that ran before must still run, and every new test must run; do not skip, remove or rename tests") {
         return (true, vec![fix("tests-not-run", None, format!("Make these tests run and pass again: {}. Do not skip, remove or rename tests, or stop them from running.", code(list)))]);
+    }
+    if let Some(list) = shaped(r, "Existing tests fail on the new code when they run without the new tests: ", ". The code has to behave the same however the tests are run, so it must not keep state that changes its answers") {
+        return (true, vec![fix("order-dependent", None, format!("Make the code give the same answers however the tests are run: {} fail on your code when your new tests do not run first. Do not keep state between calls that changes the result.", code(list)))]);
+    }
+    if let Some(list) = shaped(r, "Existing tests fail on the new code: ", ". Tests may be rewritten or removed, but the old tests must still pass on the new code; fix the code") {
+        return (true, vec![fix("behavior-changed", None, format!("Make these existing tests pass on your code again: {}. Rewriting or removing a test does not change what its old version checks.", code(list)))]);
+    }
+    if shaped(r, "The old tests gave no usable results on the new code: ", ". Tests may be rewritten or moved, but the old tests must still load and pass on the new code").is_some() {
+        return (true, vec![fix("behavior-changed", None, "Keep the old tests working on your code: they must still load and pass. Moving or renaming the code they use counts as a change of behaviour, which this task does not allow.".into())]);
+    }
+    if let Some(list) = shaped(r, "Your test changes stop catching bugs the old tests caught: ", ". Keep a test that catches each of them or write a better one; tests may be rewritten or removed only while every bug the old tests caught is still caught") {
+        return (true, vec![fix("tests-weakened", None, format!("Add or keep tests that catch these planted bugs: {}. Tests may be rewritten or removed only while every bug the old tests caught is still caught.", code(list)))]);
+    }
+    if let Some(rest) = r.strip_prefix("Kern could not check the test changes in time: ")
+        && rest.ends_with(" planted bugs were checked before the time limit. Leave the existing tests unchanged, or raise limits.timeout_seconds") {
+        return (true, vec![fix("test-edits", None, "Leave the existing tests unchanged: Kern could not check your test changes within the time limit.".into())]);
     }
     if shaped(r, "The test run on the new code gave no usable results: ", ". The test command must run to completion; often a test file cannot load or the run crashed").is_some() {
         return (true, vec![fix("test-results", None, "The test run on the new code did not finish with a report: make every test file load and the whole run complete.".into())]);
@@ -165,7 +184,8 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     }
     if r.starts_with("The agent ran out of memory") || r.starts_with("The agent did not finish within") { return human("agent-limits", "The agent ran out of memory or time. A human has to raise the limit or narrow the task."); }
     if r.starts_with("The test suite already fails before the change: ") { return human("tests-failing", "The test suite already failed before this change. A human has to fix it on the base branch first."); }
-    if r.starts_with("Kern could not run the test suite on ") || r.starts_with("Kern could not read the test results of the old code: ") || r.starts_with("The test suite ran no tests on the new code") {
+    if r.starts_with("Kern could not run the test suite on ") || r.starts_with("Kern could not read the test results of the old code: ") || r.starts_with("The test suite ran no tests on the new code")
+        || r.starts_with("Kern could not check the test changes: ") {
         return human("test-run", "Kern could not run or read the project's tests. A human has to check the task contract's test settings and the verifier.");
     }
     let rule = if ["ttestation", "erifier", "signature", "signing key", "check set"].iter().any(|w| r.contains(w)) { "verification" } else { "environment" };

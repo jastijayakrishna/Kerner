@@ -13,6 +13,53 @@ use std::path::{Path, PathBuf};
 const SETUP: Limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 900, memory_mb: 3072, pids: 512 };
 
 pub struct Dependencies { pub volume: Volume, pub record: Value }
+/// Finished dependency installs, kept as read-only volumes and reused when the manifests, registry and image are the same. The index lives on
+/// the verifier host (KERN_CACHE_DIR, or ~/.cache/kern); KERN_DEPS_CACHE=off turns it off.
+pub struct DepsCache { dir: PathBuf, max: usize }
+/// Version of what an install volume holds besides the packages; 2 added the mount points for sandbox::CACHE_DIRS.
+const LAYOUT: u64 = 2;
+impl DepsCache {
+    pub fn at(dir: PathBuf, max: usize) -> DepsCache { DepsCache { dir, max: max.max(1) } }
+    pub fn from_env() -> Option<DepsCache> {
+        if std::env::var("KERN_DEPS_CACHE").as_deref() == Ok("off") { return None; }
+        let root = std::env::var_os("KERN_CACHE_DIR").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("kern")))?;
+        Some(DepsCache::at(root.join("deps"), 12))
+    }
+    pub fn key(files: &Files, registry: &str, image: &str) -> R<String> {
+        let hash = |name: &str| files.get(name).map(|e| e.oid.clone());
+        digest(&json!({ "kern": env!("CARGO_PKG_VERSION"), "layout": LAYOUT, "registry": registry, "image": image, "package_json": hash("package.json"), "lockfile": hash("package-lock.json") }))
+    }
+    fn entry(&self, key: &str) -> Option<PathBuf> { is_hex64(key).then(|| self.dir.join(format!("{key}.json"))) }
+    /// A well-formed entry's volume, record and whether its install has the current layout.
+    fn read(&self, key: &str) -> Option<(String, Value, bool)> {
+        let v: Value = serde_json::from_slice(&std::fs::read(self.entry(key)?).ok()?).ok()?;
+        let volume = v["volume"].as_str().filter(|n| n.strip_prefix("kern-deps-").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')))?;
+        let record = v["record"].clone();
+        (record["sha256"].as_str().is_some_and(is_hex64) && record["entries"].is_u64() && record["bytes"].is_u64()).then(|| (volume.to_string(), record, v["layout"] == LAYOUT))
+    }
+    pub fn get(&self, key: &str) -> Option<(String, Value)> { self.read(key).filter(|e| e.2).map(|(volume, record, _)| (volume, record)) }
+    /// True when this install became the cached one; an entry that already exists is never replaced.
+    pub fn put(&self, key: &str, volume: &str, record: &Value) -> R<bool> {
+        let Some(path) = self.entry(key) else { return Ok(false) };
+        std::fs::create_dir_all(&self.dir)?;
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+        Ok(create_new(&path, json!({ "volume": volume, "record": record, "created_ns": at, "layout": LAYOUT }).to_string().as_bytes(), 0o600).is_ok())
+    }
+    /// Drops entries of an older layout, then the oldest beyond the limit, and returns their volumes for the caller to remove.
+    pub fn evict(&self) -> Vec<String> {
+        let mut entries: Vec<(bool, u64, String, PathBuf, String)> = std::fs::read_dir(&self.dir).into_iter().flatten().flatten().filter_map(|e| {
+            let path = e.path();
+            let key = path.file_stem()?.to_str()?.to_string();
+            // A damaged entry is dropped, and never names a volume to remove.
+            let Some((volume, _, current)) = self.read(&key) else { let _ = std::fs::remove_file(&path); return None };
+            let created = serde_json::from_slice::<Value>(&std::fs::read(&path).ok()?).ok()?["created_ns"].as_u64().unwrap_or(0);
+            Some((current, created, key, path, volume))
+        }).collect();
+        entries.sort();
+        let excess = entries.iter().filter(|e| !e.0).count().max(entries.len().saturating_sub(self.max));
+        entries.into_iter().take(excess).filter_map(|(_, _, _, path, volume)| std::fs::remove_file(&path).ok().map(|_| volume)).collect()
+    }
+}
 pub fn validate_lockfile(files: &Files, registry: &str) -> R<Value> {
     ensure!(files.contains_key("package.json"), "Dependency installation requires a committed package.json");
     let lock = files.get("package-lock.json").ok_or_else(|| Denied("Dependency installation requires a committed package-lock.json".into()))?;
@@ -41,20 +88,31 @@ pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &s
     let manifests: Files = files.iter().filter(|(k, _)| *k == "package.json" || *k == "package-lock.json").map(|(k, v)| (k.clone(), v.clone())).collect();
     git::materialize(None, &manifests, &input, None)?;
     std::fs::create_dir(input.join("node_modules"))?;
+    let cache = DepsCache::from_env();
+    let key = DepsCache::key(files, registry, image)?;
+    if let Some((name, record)) = cache.as_ref().and_then(|c| c.get(&key)).filter(|(name, _)| sandbox::volume_exists(name)) {
+        return Ok(Dependencies { volume: Volume::cached(name), record });
+    }
     let control = root.join("dependency-control");
     sandbox::control_dir(&control, Some(("setup.json", &json!({ "registry": registry, "timeout_seconds": SETUP.timeout_seconds }))))?;
-    let volume = Volume::create()?;
-    let out = sandbox::execute(&Spec { image, snapshot: &input, control: &control, writable: &[], limits: &SETUP, entry: vec!["__setup".into()], network: "bridge", volumes: vec![(&volume.0, "/workspace/node_modules", false)], root: true, home_mb: 1024 })?;
+    let mut volume = Volume::create()?;
+    let out = sandbox::execute(&Spec { image, snapshot: &input, control: &control, writable: &[], limits: &SETUP, entry: vec!["__setup".into()], network: "bridge", volumes: vec![(&volume.0, "/workspace/node_modules", false)], root: true, home_mb: 1024, scratch: false })?;
     ensure!(out.exit_code == 0, "Dependency installation failed in the sandbox");
     let record: Value = serde_json::from_slice(&out.stdout)?;
     exact(&record, &["version", "entries", "bytes", "sha256"], "dependency record")?;
     ensure!(record["sha256"].as_str().is_some_and(is_hex64), "Invalid dependency record");
-    Ok(Dependencies { volume, record: json!({ "sha256": record["sha256"], "entries": record["entries"], "bytes": record["bytes"], "lockfile": lockfile }) })
+    let record = json!({ "sha256": record["sha256"], "entries": record["entries"], "bytes": record["bytes"], "lockfile": lockfile });
+    if let Some(c) = &cache && c.put(&key, &volume.0, &record)? {
+        volume.keep();
+        for old in c.evict() { sandbox::remove_volume(&old); }
+    }
+    Ok(Dependencies { volume, record })
 }
 
 fn candidate_files(base: &Files, wire: &Value, policy: &Contract) -> R<Files> {
     exact(wire, &["version", "files"], "candidate")?;
     let Some(items) = wire["files"].as_array().filter(|f| wire["version"] == 1 && f.len() <= 10000) else { deny!("Invalid candidate format") };
+    // The agent never saw symlinks or submodules (no snapshot holds them), so they stay as they were unless the agent wrote a file there.
     let mut result: Files = base.iter().filter(|(n, e)| e.link() || !allowed(&policy.write, n)).map(|(k, v)| (k.clone(), v.clone())).collect();
     let (mut seen, mut total) = (std::collections::HashSet::new(), 0u64);
     for item in items {
@@ -102,7 +160,7 @@ pub fn run_agent(job: &Job, output: &Path) -> R<Value> {
     let control = root.join("agent-control");
     sandbox::control_dir(&control, Some(("config.json", &json!({ "write": policy.write, "limits": policy.value["limits"], "command": command }))))?;
     let volumes = deps.as_ref().map(|d| vec![(d.volume.0.as_str(), "/workspace/node_modules", true)]).unwrap_or_default();
-    let exec = sandbox::execute(&Spec { image: &op.image, snapshot: &snapshot, control: &control, writable: &policy.write, limits: &policy.limits, entry: vec!["__runner".into()], network: "none", volumes, root: false, home_mb: 0 })?;
+    let exec = sandbox::execute(&Spec { image: &op.image, snapshot: &snapshot, control: &control, writable: &policy.write, limits: &policy.limits, entry: vec!["__runner".into()], network: "none", volumes, root: false, home_mb: 0, scratch: false })?;
     ensure!(exec.exit_code == 0, "Agent command failed or exceeded its limits in the sandbox");
     ensure!(Some(&exec.builder.0) == op.executor_builder.as_ref(), "Executor builder identity mismatch");
     let candidate = candidate_files(&original, &serde_json::from_slice(&exec.stdout)?, policy)?;
@@ -220,6 +278,8 @@ fn read_check(spec: &CheckSpec) -> R<Vec<(Vec<String>, Option<String>)>> {
         Ok((argv(&c["command"])?, stdout))
     }).collect()
 }
+/// One operator check's evidence digest and the behaviour it saw.
+type Checked = R<(String, BTreeSet<String>)>;
 fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limits: &Limits, volume: Option<&str>, judge: bool) -> R<(String, BTreeSet<String>)> {
     let cases = read_check(spec)?;
     let control = root.join(format!("check-{}", spec.id));
@@ -232,7 +292,7 @@ fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limit
         let case_limits = Limits { timeout_seconds: remaining.min(limits.timeout_seconds), ..limits.clone() };
         let entry = std::iter::once("__exec".to_string()).chain(command.iter().cloned()).collect();
         let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
-        let out = sandbox::execute(&Spec { image, snapshot, control: &control, writable: &[], limits: &case_limits, entry, network: "none", volumes, root: false, home_mb: 0 })
+        let out = sandbox::execute(&Spec { image, snapshot, control: &control, writable: &[], limits: &case_limits, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })
             .map_err(|e| Denied(format!("Check {} case {} failed: {e}", spec.id, i + 1)))?;
         let (stdout, behavior) = sandbox::split_behavior(&out.stdout);
         seen.extend(behavior.ok_or_else(|| Denied(format!("Check {} case {} left no behavior record{}", spec.id, i + 1, if judge { "" } else { " on the base commit; re-run or raise limits.timeout_seconds" })))?);
@@ -293,17 +353,28 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     } else { None };
     let volume = deps.as_ref().map(|d| d.volume.0.as_str());
     let specs = policy.checks.iter().map(|id| op.checks.iter().find(|c| &c.id == id).ok_or_else(|| Denied(format!("No trusted check: {id}")))).collect::<R<Vec<_>>>()?;
-    let mut behavior = BTreeSet::new();
-    for spec in &specs {
-        let (evidence, seen) = behavioral(spec, &root, &op.image, &snapshot, l, volume, true)?;
-        behavior.extend(seen);
-        checks.push(json!({ "id": spec.id, "status": "PASS", "evidence_sha256": evidence }));
-    }
     let baseline_snapshot = root.join("baseline");
     git::materialize(Some(&store), &original, &baseline_snapshot, None)?;
     if policy.dependencies { std::fs::create_dir(baseline_snapshot.join("node_modules"))?; }
-    let mut baseline = BTreeSet::new();
-    for spec in &specs { baseline.extend(behavioral(spec, &root, &op.image, &baseline_snapshot, l, volume, false)?.1); }
+    // Each check runs on the new and the old code at the same time, at most as many sandboxes at once as the gate allows.
+    let gate = Gate::new(parallelism());
+    for spec in &specs { sandbox::control_dir(&root.join(format!("check-{}", spec.id)), None)?; }
+    let results: Vec<(Checked, Checked)> = std::thread::scope(|s| {
+        let pending: Vec<_> = specs.iter().map(|spec| {
+            let (root, image, snapshot, baseline_snapshot, gate) = (&root, &op.image, &snapshot, &baseline_snapshot, &gate);
+            (s.spawn(move || gate.run(|| behavioral(spec, root, image, snapshot, l, volume, true))), s.spawn(move || gate.run(|| behavioral(spec, root, image, baseline_snapshot, l, volume, false))))
+        }).collect();
+        pending.into_iter().map(|(new, old)| (new.join().unwrap_or_else(|_| Err(Denied("A check stopped unexpectedly".into()))), old.join().unwrap_or_else(|_| Err(Denied("A check stopped unexpectedly".into()))))).collect()
+    });
+    let (mut behavior, mut baseline) = (BTreeSet::new(), BTreeSet::new());
+    let mut olds = Vec::new();
+    for (spec, (new, old)) in specs.iter().zip(results) {
+        let (evidence, seen) = new?;
+        behavior.extend(seen);
+        checks.push(json!({ "id": spec.id, "status": "PASS", "evidence_sha256": evidence }));
+        olds.push(old);
+    }
+    for old in olds { baseline.extend(old?.1); }
     let (new, blocking) = behavior_diff(&baseline, &behavior, &policy.behaviors);
     let observed = json!({ "base": baseline, "candidate": behavior, "new": new, "blocking": blocking });
     write_json(root.join("behavior.json"), &observed)?;
@@ -314,21 +385,54 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         std::fs::create_dir(&proof_root)?;
         let control = proof_root.join("control");
         sandbox::control_dir(&control, None)?;
-        let mut old: Files = original.clone();
-        old.extend(candidate.iter().filter(|(k, _)| allowed(&tests.paths, k) && !original.contains_key(*k)).map(|(k, v)| (k.clone(), v.clone())));
-        let old_snapshot = proof_root.join("old");
-        git::materialize(Some(&store), &old, &old_snapshot, None)?;
-        if policy.dependencies { std::fs::create_dir(old_snapshot.join("node_modules"))?; }
-        let entry: Vec<String> = std::iter::once("__exec".to_string()).chain(proof::command(tests)).collect();
-        let mut run_tests = |which: proof::Run| -> R<proof::Output> {
-            let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
-            let at = match which { proof::Run::Base => &baseline_snapshot, proof::Run::New => &snapshot, proof::Run::Old => &old_snapshot };
-            let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control: &control, writable: &[], limits: l, entry: entry.clone(), network: "none", volumes, root: false, home_mb: 0 })?;
-            let (report, behavior) = sandbox::split_behavior(&out.stdout);
-            ensure!(behavior.is_some(), "the test command did not run to completion");
-            Ok(proof::Output { stdout: report.to_vec(), exit_code: out.exit_code })
+        // The old code with the change's tests, and (when tests were rewritten or removed) the new code with the old tests.
+        let swap = |code: &Files, tests_from: &Files| -> Files {
+            code.iter().filter(|(k, _)| !allowed(&tests.paths, k)).chain(tests_from.iter().filter(|(k, _)| allowed(&tests.paths, k))).map(|(k, v)| (k.clone(), v.clone())).collect()
         };
-        let evidence = proof::prove(tests, &original, &candidate, &changed, &mut run_tests)?;
+        let alone = proof::old_tests_alone(&changed["files"], &changed["tests"], tests);
+        let old_snapshot = proof_root.join("old");
+        let kept_snapshot = proof_root.join("kept");
+        for (dir, files, needed) in [(&old_snapshot, swap(&original, &candidate), true), (&kept_snapshot, swap(&candidate, &original), alone)] {
+            if !needed { continue; }
+            git::materialize(Some(&store), &files, dir, None)?;
+            if policy.dependencies { std::fs::create_dir(dir.join("node_modules"))?; }
+        }
+        let entry: Vec<String> = std::iter::once("__exec".to_string()).chain(proof::command(tests)).collect();
+        let run_tests = |which: proof::Run, files: &[String]| -> R<proof::Output> {
+            gate.run(|| {
+                let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
+                let at = match which { proof::Run::Base => &baseline_snapshot, proof::Run::New => &snapshot, proof::Run::Kept => &kept_snapshot, proof::Run::Old => &old_snapshot };
+                let entry = entry.iter().chain(files).cloned().collect();
+                let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control: &control, writable: &[], limits: l, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })?;
+                let (report, behavior) = sandbox::split_behavior(&out.stdout);
+                ensure!(behavior.is_some(), "the test command did not run to completion");
+                Ok(proof::Output { stdout: report.to_vec(), exit_code: out.exit_code })
+            })
+        };
+        // Planting bugs runs in one sandbox: the new code is its read-only input, the old tests travel in its control directory.
+        // The planted bugs are shared out over sandboxes that run side by side, as many as the gate allows; each reports its part.
+        let mut plant = |plan: &proof::Plan| -> R<Value> {
+            let old_tests: Files = original.iter().filter(|(k, _)| allowed(&tests.paths, k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            let parts = proof::split_planting(plan, parallelism());
+            let answers: Vec<R<Value>> = std::thread::scope(|s| {
+                let running: Vec<_> = parts.iter().enumerate().map(|(i, part)| {
+                    let (old_tests, gate, proof_root, store, snapshot) = (&old_tests, &gate, &proof_root, &store, &snapshot);
+                    s.spawn(move || -> R<Value> {
+                        let planting = proof_root.join(format!("planting-{i}"));
+                        sandbox::control_dir(&planting, Some(("mutate.json", &part.json(l.timeout_seconds.saturating_sub(15).max(1)))))?;
+                        git::materialize(Some(store), old_tests, &planting.join("old"), None)?;
+                        let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
+                        let out = gate.run(|| sandbox::execute(&Spec { image: &op.image, snapshot, control: &planting, writable: &[], limits: l, entry: vec!["__mutate".into()], network: "none", volumes, root: false, home_mb: 0, scratch: true }))?;
+                        ensure!(out.exit_code == 0, "the planting run failed (exit code {})", out.exit_code);
+                        let text = String::from_utf8_lossy(&out.stdout);
+                        Ok(serde_json::from_str(text.lines().rev().find(|line| line.starts_with('{')).unwrap_or("{}"))?)
+                    })
+                }).collect();
+                running.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(Denied("A planting run stopped unexpectedly".into())))).collect()
+            });
+            proof::merge_planted(answers.into_iter().collect::<R<Vec<_>>>()?)
+        };
+        let evidence = proof::prove(tests, &original, &candidate, &changed, &run_tests, &mut plant)?;
         write_json(root.join("honest-fix.json"), &evidence)?;
         checks.push(json!({ "id": proof::CHECK, "status": "PASS", "evidence_sha256": digest(&evidence)? }));
     }

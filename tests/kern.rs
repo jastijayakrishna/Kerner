@@ -5,6 +5,7 @@ use kern::container;
 use kern::flow::{self, required_checks};
 use kern::git::{self, Entry, Files};
 use kern::policy::{self, Contract, Operator, attenuate, contract, contract_digest, operator, verifier_digest};
+use std::collections::BTreeSet;
 use kern::promote;
 use kern::sandbox::{self, Spec};
 use kern::util::*;
@@ -368,6 +369,63 @@ fn hosted_verifier_serves_profiles_and_verifies_only_authorised_known_runs() {
 }
 
 #[test]
+fn dependency_installs_are_reused_only_for_the_same_manifests_registry_and_image() {
+    use kern::flow::DepsCache;
+    let t = Temp::new();
+    let cache = DepsCache::at(t.join("cache"), 2);
+    let manifests = files(&[("package.json", "{\"name\":\"x\"}\n"), ("package-lock.json", "{\"lockfileVersion\":3}\n"), ("src/a.js", "1\n")]);
+    let key = DepsCache::key(&manifests, "registry.npmjs.org", "sha256:aa").unwrap();
+    let mut edited_code = manifests.clone();
+    edited_code.insert("src/a.js".into(), file("2\n"));
+    assert_eq!(key, DepsCache::key(&edited_code, "registry.npmjs.org", "sha256:aa").unwrap(), "only the manifests decide what gets installed");
+    let mut other_lock = manifests.clone();
+    other_lock.insert("package-lock.json".into(), file("{\"lockfileVersion\":3,\"packages\":{}}\n"));
+    let mut other_manifest = manifests.clone();
+    other_manifest.insert("package.json".into(), file("{\"name\":\"y\"}\n"));
+    for other in [DepsCache::key(&other_lock, "registry.npmjs.org", "sha256:aa"), DepsCache::key(&other_manifest, "registry.npmjs.org", "sha256:aa"),
+                  DepsCache::key(&manifests, "registry.example.com", "sha256:aa"), DepsCache::key(&manifests, "registry.npmjs.org", "sha256:bb")] {
+        assert_ne!(other.unwrap(), key);
+    }
+    let record = json!({ "sha256": "a".repeat(64), "entries": 3, "bytes": 10, "lockfile": { "packages": 1 } });
+    assert!(cache.get(&key).is_none());
+    assert!(cache.put(&key, "kern-deps-one", &record).unwrap());
+    assert_eq!(cache.get(&key), Some(("kern-deps-one".to_string(), record.clone())));
+    assert!(!cache.put(&key, "kern-deps-two", &record).unwrap(), "the first install stays the cached one");
+    // a damaged or foreign entry is ignored rather than trusted
+    std::fs::write(t.join("cache").join(format!("{}.json", "b".repeat(64))), "{\"volume\":\"/etc\",\"record\":{}}").unwrap();
+    assert!(cache.get(&"b".repeat(64)).is_none());
+    assert!(cache.get("../escape").is_none());
+    // an install made before the writable cache folders existed lacks their mount points, so it is never reused
+    std::fs::write(t.join("cache").join(format!("{}.json", "e".repeat(64))), json!({ "volume": "kern-deps-old", "record": record, "created_ns": 1 }).to_string()).unwrap();
+    assert!(cache.get(&"e".repeat(64)).is_none());
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(t.join("cache").join(format!("{key}.json"))).unwrap()).unwrap()["layout"], 2);
+    // a full cache drops outdated entries and then its oldest ones, and names the volumes to remove
+    let (k2, k3) = ("c".repeat(64), "d".repeat(64));
+    cache.put(&k2, "kern-deps-c", &record).unwrap();
+    cache.put(&k3, "kern-deps-d", &record).unwrap();
+    assert_eq!(cache.evict(), vec!["kern-deps-old".to_string(), "kern-deps-one".to_string()]);
+    assert!(cache.get(&key).is_none() && cache.get(&k3).is_some());
+}
+
+#[test]
+fn a_gate_lets_only_so_many_sandboxes_run_at_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let gate = kern::util::Gate::new(2);
+    let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| gate.run(|| {
+                let n = now.fetch_add(1, SeqCst) + 1;
+                most.fetch_max(n, SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                now.fetch_sub(1, SeqCst);
+            }));
+        }
+    });
+    assert_eq!(most.load(SeqCst), 2);
+}
+
+#[test]
 fn the_action_builds_kern_from_its_own_source_never_inside_the_pull_request() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let action = std::fs::read_to_string(root.join("action.yml")).unwrap();
@@ -562,6 +620,19 @@ fn contracts_can_require_a_proof_of_honest_fix() {
     let mut unnamed = tested("bugfix");
     unnamed["tests"].as_object_mut().unwrap().remove("runner");
     denied(contract(&unnamed), "missing or unknown fields");
+    // edits to existing tests are checked by default, can be locked instead, and the choice is part of the contract's digest
+    assert_eq!((t.edits, c.value["tests"]["edits"].as_str()), (policy::Edits::Checked, Some("checked")));
+    let mut locked_edits = tested("bugfix");
+    locked_edits["tests"]["edits"] = json!("locked");
+    assert_eq!(contract(&locked_edits).unwrap().tests.unwrap().edits, policy::Edits::Locked);
+    assert_ne!(contract_digest(&contract(&locked_edits).unwrap()).unwrap(), contract_digest(&c).unwrap());
+    let mut explicit = tested("bugfix");
+    explicit["tests"]["edits"] = json!("checked");
+    assert_eq!(contract_digest(&contract(&explicit).unwrap()).unwrap(), contract_digest(&c).unwrap());
+    locked_edits["tests"]["edits"] = json!("sometimes");
+    denied(contract(&locked_edits), "tests.edits");
+    // a task may change behaviour on purpose; Kern then lists what changed instead of refusing it
+    assert_eq!(contract(&tested("change")).unwrap().tests.unwrap().kind, policy::Kind::Change);
     // Kern adds the one reporter it reads, so the command may not pick its own, and vitest has to run once instead of watching
     let with = |runner: &str, command: Value| { let mut v = tested("bugfix"); v["tests"]["runner"] = json!(runner); v["tests"]["command"] = command; contract(&v) };
     denied(with("vitest", json!(["/workspace/node_modules/.bin/vitest"])), "vitest run");
@@ -570,10 +641,13 @@ fn contracts_can_require_a_proof_of_honest_fix() {
     }
     denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--json"])), "reporter");
     denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--outputFile=x.json"])), "reporter");
+    denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--testResultsProcessor=./mine.js"])), "reporter");
     for (runner, command, want) in [
         ("node", json!(["/usr/local/bin/node", "--test", "test/"]), vec!["/usr/local/bin/node", "--test", "--test-reporter=tap", "test/"]),
         ("mocha", json!(["/workspace/node_modules/.bin/mocha", "--recursive"]), vec!["/workspace/node_modules/.bin/mocha", "--recursive", "--reporter", "json"]),
-        ("jest", json!(["/workspace/node_modules/.bin/jest"]), vec!["/workspace/node_modules/.bin/jest", "--json"]),
+        // in CI mode jest never writes a missing snapshot, so a new snapshot test cannot pass by recording whatever the code returns; the results
+        // come from a processor, not --json, which also sends the tests' console to stderr and failed 3 of winston's tests that pass in its own CI
+        ("jest", json!(["/workspace/node_modules/.bin/jest"]), vec!["/workspace/node_modules/.bin/jest", "--ci", "--testResultsProcessor=/kern/jest-report.cjs"]),
         ("vitest", json!(["/workspace/node_modules/.bin/vitest", "run"]), vec!["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache"]),
     ] {
         assert_eq!(kern::proof::command(with(runner, command).unwrap().tests.as_ref().unwrap()), want);
@@ -619,21 +693,33 @@ fn screened(kind: &str, changes: &[(&str, Option<&str>)]) -> R<Value> { git::cha
 #[test]
 fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
     let ok = screened("bugfix", &[FIX, REGRESSION]).unwrap();
-    assert_eq!((ok["tests"]["new_test_files"].clone(), ok["tests"]["locked_test_files"].as_u64(), ok["tests"]["runner"].as_str()), (json!(["test/regression.test.mjs"]), Some(2), Some("node")));
-    denied(screened("bugfix", &[FIX, ("test/add.test.mjs", Some("// gutted\n"))]), "Existing test file changed");
-    denied(screened("bugfix", &[FIX, ("test/add.test.mjs", None)]), "Existing test file deleted");
-    denied(screened("bugfix", &[FIX, ("test/fixtures/data.json", Some("{\"x\": 1}\n"))]), "Existing test file changed");
+    assert_eq!((ok["tests"]["new_test_files"].clone(), ok["tests"]["existing_test_files"].as_u64(), ok["tests"]["runner"].as_str()), (json!(["test/regression.test.mjs"]), Some(2), Some("node")));
+    // existing tests may be rewritten or removed: the verifier then checks that the old tests still pass and that their safety net holds
+    let edited = screened("refactor", &[FIX, ("test/add.test.mjs", Some("// gutted\n")), ("test/fixtures/data.json", None)]).unwrap();
+    assert_eq!((edited["tests"]["changed_test_files"].clone(), edited["tests"]["deleted_test_files"].clone()), (json!(["test/add.test.mjs"]), json!(["test/fixtures/data.json"])));
+    // a regression test may go into an existing test file
+    let extended = format!("{ADD_TEST}test('adds 2 + 2', () => assert.equal(add(2, 2), 4));\n");
+    screened("bugfix", &[FIX, ("test/add.test.mjs", Some(&extended))]).unwrap();
+    // a contract can lock existing tests instead
+    let mut locked = tested("bugfix");
+    locked["tests"]["edits"] = json!("locked");
+    let strict = |changes: &[(&str, Option<&str>)]| git::changes(&honest_base(), &honest_change(changes), &contract(&locked).unwrap());
+    denied(strict(&[FIX, ("test/add.test.mjs", Some(&extended))]), "Existing test file changed");
+    denied(strict(&[FIX, REGRESSION, ("test/add.test.mjs", None)]), "Existing test file deleted");
+    denied(strict(&[FIX, REGRESSION, ("test/fixtures/data.json", Some("{\"x\": 1}\n"))]), "Existing test file changed");
     denied(screened("bugfix", &[FIX]), "must add a test");
     denied(screened("bugfix", &[FIX, ("test/helpers/build.mjs", Some("export const x = 1;\n"))]), "must add a test");
     screened("refactor", &[FIX]).unwrap();
+    // an edit may not slip a skip or focus marker into an existing test file
+    denied(screened("refactor", &[FIX, ("test/add.test.mjs", Some(&ADD_TEST.replace("test('adds'", "test.skip('adds'")))]), "test.skip");
     // a new test file may not skip or focus tests; the runner's own report catches the rest, however it is written
     for (code, marker) in [
         ("test.only('x', () => {});", "test.only"), ("describe.skip('x', () => {});", "describe.skip"), ("it.todo('x');", "it.todo"),
-        ("xit('x', () => {});", "xit"), ("fdescribe('x', () => {});", "fdescribe"), ("test('x', { skip: true }, () => {});", "skip option"),
-        ("test('x', { only: 1 }, () => {});", "only option"), ("const only = describe['only'];\nonly('x', () => {});", "describe.only"), ("describe[`skip`]('x', () => {});", "describe.skip"),
+        ("xit('x', () => {});", "xit"), ("fdescribe('x', () => {});", "fdescribe"), ("test('x', { skip: true }, () => {});", "the skip option"),
+        ("test('x', { only: 1 }, () => {});", "the only option"), ("const only = describe['only'];\nonly('x', () => {});", "describe.only"), ("describe[`skip`]('x', () => {});", "describe.skip"),
     ] {
         let body = format!("import {{ test, describe, it }} from 'node:test';\n{code}\n");
-        denied(screened("feature", &[FIX, ("test/new.test.mjs", Some(&body))]), marker);
+        denied(screened("feature", &[FIX, ("test/new.test.mjs", Some(&body))]), &format!("test/new.test.mjs uses {marker}"));
     }
     // what a test decides while it runs is judged from the runner's report instead, so ordinary code is not refused up front
     for code in ["test('x', (t) => { if (process.platform === 'win32') t.skip(); });", "class Store { skip() {} }\nnew Store().skip();", "process.on('exit', () => {});", "test('x', { skip: false }, () => {});"] {
@@ -652,11 +738,20 @@ fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
         ("src/patch.cjs", "const a = require('node:assert/strict');\nReflect.set(a, 'equal', () => {});\n", "a change to node:assert/strict"),
         ("src/add.mjs", "export const add = (a, b) => (process.env.JEST_WORKER_ID ? 4 : a + b);\n", "JEST_WORKER_ID"),
         ("src/add.mjs", "export const add = (a, b) => (process.env['VITEST'] ? 4 : a + b);\n", "VITEST"),
+        // code that looks at who is calling it can answer the new test one way and the old tests another
+        ("src/add.mjs", "export const add = (a, b) => (new Error().stack.includes('regression') ? 4 : a + b);\n", "new Error().stack"),
+        ("src/add.mjs", "export const add = (a, b) => (Error('x').stack.includes('regression') ? 4 : a + b);\n", "new Error().stack"),
+        ("src/patch.cjs", "function add(a, b) { return add.caller && add.caller.name === 'regression' ? 4 : a + b; }\nmodule.exports = add;\n", ".caller"),
+        ("src/patch.cjs", "function add(a, b) { return arguments.callee.length + a + b; }\nmodule.exports = add;\n", ".callee"),
+        ("src/add.mjs", "Error.prepareStackTrace = (e, frames) => frames;\nexport const add = (a, b) => a + b;\n", "Error.prepareStackTrace"),
+        ("src/add.mjs", "const here = {};\nError.captureStackTrace(here);\nexport const add = (a, b) => a + b;\n", "Error.captureStackTrace"),
     ] {
         denied(screened("feature", &[(path, Some(code))]), marker);
     }
     // a local name that happens to match is not the test runner, and code that already did this before is judged as before
     screened("feature", &[("src/add.mjs", Some("export const add = (a, b) => { for (const it of [a, b]) it.toString(); return a + b; };\n"))]).unwrap();
+    // ordinary error handling reads an error's stack; that is not looking at the caller
+    screened("feature", &[("src/add.mjs", Some("export const add = (a, b) => { try { return a + b; } catch (e) { console.error(e.stack); throw e; } };\n"))]).unwrap();
     let mut before = honest_base();
     before.insert("src/env.mjs".into(), file("export const worker = process.env.JEST_WORKER_ID;\n"));
     let mut after = before.clone();
@@ -687,6 +782,9 @@ fn runner_reports_are_read_test_by_test() {
     assert_eq!(j.tests, tests(&[("test/math.jest.test.js > math > adds", c(1, 0, 0)), ("test/math.jest.test.js > math > fails", c(0, 1, 0)),
         ("test/math.jest.test.js > math > later", c(0, 0, 1)), ("test/math.jest.test.js > math > skipped", c(0, 0, 1))]));
     assert_eq!(j.problems, vec!["test/broken.test.js".to_string()]);
+    // the same run read through Kern's results processor, which Kern uses instead of --json, gives the same results
+    let p = read_report(Runner::Jest, &report_fixture("jest-processor.out")).unwrap();
+    assert_eq!((p.tests, p.problems), (j.tests.clone(), j.problems.clone()));
     let v = read_report(Runner::Vitest, &report_fixture("vitest.json")).unwrap();
     assert_eq!(v.tests, tests(&[("test/math.vitest.test.mjs > math > adds", c(1, 0, 0)), ("test/math.vitest.test.mjs > math > fails", c(0, 1, 0)),
         ("test/math.vitest.test.mjs > math > later", c(0, 0, 1)), ("test/math.vitest.test.mjs > math > skipped", c(0, 0, 1))]));
@@ -696,10 +794,10 @@ fn runner_reports_are_read_test_by_test() {
     assert_eq!(read_report(Runner::Node, &report_fixture("node-broken.tap")).unwrap().tests.get("test/broken.test.js"), Some(&c(0, 1, 0)));
     // no report, a report cut short, or a second report is never taken as results
     let text = |name: &str| String::from_utf8(report_fixture(name)).unwrap();
-    let (mocha, jest, tap) = (text("mocha10.json"), text("jest.json"), text("node.tap"));
+    let (mocha, jest, tap, processed) = (text("mocha10.json"), text("jest.json"), text("node.tap"), text("jest-processor.out"));
     for (runner, out, why) in [
         (Runner::Mocha, String::new(), "no mocha report"), (Runner::Mocha, mocha[..mocha.len() / 2].to_string(), "no mocha report"), (Runner::Mocha, format!("{mocha}\n{mocha}"), "more than one"),
-        (Runner::Jest, format!("{jest}\n{jest}"), "more than one"), (Runner::Node, tap.replace("1..5", ""), "incomplete"), (Runner::Node, format!("{tap}\n{tap}"), "more than one"),
+        (Runner::Jest, format!("{jest}\n{jest}"), "more than one"), (Runner::Jest, format!("{processed}{processed}"), "more than one"), (Runner::Node, tap.replace("1..5", ""), "incomplete"), (Runner::Node, format!("{tap}\n{tap}"), "more than one"),
         (Runner::Node, "not ok 1 - fake\n".into(), "no TAP report"),
     ] {
         let why_not = read_report(runner, out.as_bytes()).unwrap_err();
@@ -716,28 +814,36 @@ fn tap(tests: &[(&str, &str)]) -> Vec<u8> {
     out.push_str(&format!("1..{}\n# tests {}\n", tests.len(), tests.len()));
     out.into_bytes()
 }
+fn no_edits(_: &kern::proof::Plan) -> R<Value> { panic!("no existing test changed, so no bugs are planted") }
 fn runs(r: kern::proof::Run, base: &[(&str, &str)], new: &[(&str, &str)], old: &[(&str, &str)]) -> R<kern::proof::Output> {
-    let tests = match r { kern::proof::Run::Base => base, kern::proof::Run::New => new, kern::proof::Run::Old => old };
+    // the old tests alone on the new code behave as they did on the old code: these are honest changes
+    let tests = match r { kern::proof::Run::Base | kern::proof::Run::Kept => base, kern::proof::Run::New => new, kern::proof::Run::Old => old };
     Ok(kern::proof::Output { stdout: tap(tests), exit_code: i64::from(tests.iter().any(|t| t.1 == "failed")) })
 }
 #[test]
 fn honest_fix_proof_compares_what_the_runner_says_ran() {
-    use kern::proof::{Output, Run, prove};
+    use kern::proof::{Exec, Output, Run, prove};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     let (base, candidate) = (honest_base(), honest_change(&[FIX, REGRESSION]));
-    let prove_with = |kind: &str, candidate: &Files, run: &mut dyn FnMut(Run) -> R<Output>| -> R<Value> {
+    let prove_with = |kind: &str, candidate: &Files, run: &Exec| -> R<Value> {
         let policy = contract(&tested(kind)).unwrap();
         let changed = git::changes(&base, candidate, &policy)?;
-        prove(policy.tests.as_ref().unwrap(), &base, candidate, &changed, run)
+        prove(policy.tests.as_ref().unwrap(), &base, candidate, &changed, run, &mut no_edits)
     };
     let (before, fixed, failing) = ([("adds", "passed")], [("adds", "passed"), ("adds 2 + 2", "passed")], [("adds", "passed"), ("adds 2 + 2", "failed")]);
-    let mut calls = Vec::new();
-    let evidence = prove_with("bugfix", &candidate, &mut |r| { calls.push(r); runs(r, &before, &fixed, &failing) }).unwrap();
-    assert_eq!(calls, vec![Run::Base, Run::New, Run::Old], "the existing suite on the old code, everything on the new code, then everything on the old code with the new tests added");
+    let calls = Mutex::new(Vec::new());
+    let evidence = prove_with("bugfix", &candidate, &|r, files| { calls.lock().unwrap().push((r, files.to_vec())); runs(r, &before, &fixed, &failing) }).unwrap();
+    let mut calls = calls.into_inner().unwrap();
+    calls.sort();
+    let focused = vec!["test/regression.test.mjs".to_string()];
+    assert_eq!(calls, vec![(Run::Base, vec![]), (Run::New, vec![]), (Run::Kept, vec![]), (Run::Old, focused.clone()), (Run::Old, focused)],
+        "the existing suite on the old code, everything on the new code, the old tests alone on the new code, while the old code runs only the new tests, twice: a failure that shows the bug has to repeat");
     assert_eq!(evidence["new_tests"], json!([{ "test": "adds 2 + 2", "old": "failed", "new": "passed" }]));
-    assert_eq!((evidence["fail_to_pass"].as_u64(), evidence["pass_to_pass"].as_u64(), evidence["locked_test_files"].as_u64(), evidence["runner"].as_str()), (Some(1), Some(1), Some(2), Some("node")), "{evidence}");
+    assert_eq!((evidence["fail_to_pass"].as_u64(), evidence["pass_to_pass"].as_u64(), evidence["existing_test_files"].as_u64(), evidence["runner"].as_str()), (Some(1), Some(1), Some(2), Some("node")), "{evidence}");
     assert!(evidence["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "{evidence}");
     // whatever the trick, the runner's own report shows what happened
-    let refuse = |new: &[(&str, &str)], old: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &mut |r| runs(r, &before, new, old)), why);
+    let refuse = |new: &[(&str, &str)], old: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &before, new, old)), why);
     refuse(&fixed, &fixed, "None of the new tests fails on the old code");
     refuse(&[("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
     refuse(&[("adds", "skipped"), ("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
@@ -746,25 +852,321 @@ fn honest_fix_proof_compares_what_the_runner_says_ran() {
     refuse(&[("adds", "failed"), ("adds 2 + 2", "passed")], &failing, "The test suite fails on the new code: \"adds\"");
     refuse(&before, &failing, "No new test ran");
     // a new test that cannot even load on the old code does not show which behaviour was wrong
-    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::Old { Ok(Output { stdout: b"Error: Cannot find module '../src/new.mjs'\n".to_vec(), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }),
+    denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Old { Ok(Output { stdout: b"Error: Cannot find module '../src/new.mjs'\n".to_vec(), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }),
         "The test run on the old code with the new tests added gave no usable results");
     // a run that fails although every test passed, and a run that could not happen, are never taken as a pass or as proof
-    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::New { Ok(Output { stdout: tap(&fixed), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }), "although no test failed");
-    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::Old { Err(Denied("docker timed out after 35s".into())) } else { runs(r, &before, &fixed, &failing) }),
+    denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::New { Ok(Output { stdout: tap(&fixed), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }), "although no test failed");
+    denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Old { Err(Denied("docker timed out after 35s".into())) } else { runs(r, &before, &fixed, &failing) }),
         "Kern could not run the test suite on the old code with the new tests added: docker timed out");
-    denied(prove_with("bugfix", &candidate, &mut |r| if r == Run::Base { Ok(Output { stdout: Vec::new(), exit_code: 0 }) } else { runs(r, &before, &fixed, &failing) }), "Kern could not read the test results of the old code");
+    denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Base { Ok(Output { stdout: Vec::new(), exit_code: 0 }) } else { runs(r, &before, &fixed, &failing) }), "Kern could not read the test results of the old code");
     // a suite that already failed before the change is reported as such
-    denied(prove_with("bugfix", &candidate, &mut |r| runs(r, &[("adds", "failed")], &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing)), "already fails before the change");
+    denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &[("adds", "failed")], &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing)), "already fails before the change");
     // two tests may share a title (mocha 5 does not name files): counting keeps them apart
-    prove_with("bugfix", &candidate, &mut |r| runs(r, &before, &[("adds", "passed"), ("adds", "passed")], &[("adds", "passed"), ("adds", "failed")])).unwrap();
-    // a feature's new tests need not fail first and a refactor needs no new test; neither runs the old code with the new tests
-    let mut seen = Vec::new();
-    prove_with("feature", &candidate, &mut |r| { seen.push(r); runs(r, &before, &fixed, &fixed) }).unwrap();
+    prove_with("bugfix", &candidate, &|r, _| runs(r, &before, &[("adds", "passed"), ("adds", "passed")], &[("adds", "passed"), ("adds", "failed")])).unwrap();
+    // a test that fails once and passes when run again is flaky: it is recorded, never blocked on
+    let news = AtomicUsize::new(0);
+    let flaky = prove_with("bugfix", &candidate, &|r, _| if r == Run::New && news.fetch_add(1, SeqCst) == 0 { runs(r, &before, &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing) } else { runs(r, &before, &fixed, &failing) }).unwrap();
+    assert_eq!((flaky["flaky"].clone(), news.load(SeqCst)), (json!(["adds"]), 2), "{flaky}");
+    let crashed = AtomicUsize::new(0);
+    prove_with("bugfix", &candidate, &|r, _| if r == Run::New && crashed.fetch_add(1, SeqCst) == 0 { Ok(Output { stdout: b"Segmentation fault\n".to_vec(), exit_code: 139 }) } else { runs(r, &before, &fixed, &failing) }).unwrap();
+    // ...but a failure on the old code only counts as proof when it repeats
+    let olds = AtomicUsize::new(0);
+    denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Old && olds.fetch_add(1, SeqCst) > 0 { runs(r, &before, &fixed, &fixed) } else { runs(r, &before, &fixed, &failing) }),
+        "The new tests fail on the old code only sometimes: \"adds 2 + 2\"");
+    // a runner that finds nothing for the file list gets the whole suite instead, so a focused run can only save time, never decide
+    let calls = Mutex::new(Vec::new());
+    prove_with("bugfix", &candidate, &|r, files| {
+        calls.lock().unwrap().push((r, files.len()));
+        if r == Run::Old && !files.is_empty() { Ok(Output { stdout: tap(&[]), exit_code: 0 }) } else { runs(r, &before, &fixed, &failing) }
+    }).unwrap();
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.iter().filter(|c| **c == (Run::Old, 0)).count(), 2, "the whole suite on the old code, twice: {calls:?}");
+    // a feature's new tests need not fail first and a refactor needs no new test; neither runs the old code with the new tests, and only
+    // the feature, which adds a test file, also runs the old tests alone on the new code
+    let seen = Mutex::new(Vec::new());
+    prove_with("feature", &candidate, &|r, _| { seen.lock().unwrap().push(r); runs(r, &before, &fixed, &fixed) }).unwrap();
+    let mut seen = seen.into_inner().unwrap();
+    seen.sort();
+    assert_eq!(seen, vec![Run::Base, Run::New, Run::Kept]);
+    let seen = Mutex::new(Vec::new());
+    prove_with("refactor", &honest_change(&[FIX]), &|r, _| { seen.lock().unwrap().push(r); runs(r, &before, &before, &[]) }).unwrap();
+    let mut seen = seen.into_inner().unwrap();
+    seen.sort();
     assert_eq!(seen, vec![Run::Base, Run::New]);
-    let mut seen = Vec::new();
-    prove_with("refactor", &honest_change(&[FIX]), &mut |r| { seen.push(r); runs(r, &before, &before, &[]) }).unwrap();
-    assert_eq!(seen, vec![Run::Base, Run::New]);
-    denied(prove_with("refactor", &honest_change(&[FIX]), &mut |r| runs(r, &before, &[], &[])), "Tests did not run on the new code");
+    denied(prove_with("refactor", &honest_change(&[FIX]), &|r, _| runs(r, &before, &[], &[])), "Tests did not run on the new code");
+}
+
+#[test]
+fn code_that_only_behaves_when_the_new_tests_run_first_is_caught() {
+    use kern::proof::{Exec, Output, Run, prove};
+    // The impossible-task benchmark: code that returns the new answer only on its first call passes the new test (its file runs first) and
+    // the old test (it runs later), though the two contradict each other. 5 of 55 attempts got through until the old tests also ran alone.
+    let (base, candidate) = (honest_base(), honest_change(&[FIX, REGRESSION]));
+    let policy = contract(&tested("bugfix")).unwrap();
+    let changed = git::changes(&base, &candidate, &policy).unwrap();
+    let prove_with = |run: &Exec| prove(policy.tests.as_ref().unwrap(), &base, &candidate, &changed, run, &mut no_edits);
+    let (before, fixed, failing) = ([("adds", "passed")], [("adds", "passed"), ("adds 2 + 2", "passed")], [("adds", "passed"), ("adds 2 + 2", "failed")]);
+    let alone = |kept: &'static [(&'static str, &'static str)]| move |r: Run, _: &[String]| -> R<Output> {
+        let tests: &[(&str, &str)] = match r { Run::Base => &before, Run::New => &fixed, Run::Old => &failing, Run::Kept => kept };
+        Ok(Output { stdout: tap(tests), exit_code: i64::from(tests.iter().any(|t| t.1 == "failed")) })
+    };
+    denied(prove_with(&alone(&[("adds", "failed")])), "Existing tests fail on the new code when they run without the new tests: \"adds\"");
+    denied(prove_with(&alone(&[])), "Tests did not run on the new code: \"adds\"");
+    let evidence = prove_with(&alone(&[("adds", "passed")])).unwrap();
+    assert_eq!(evidence["old_tests_alone"]["passed"], 1, "{evidence}");
+    // a change that adds no test file has nothing to run first, so it gets no extra run
+    let seen = std::sync::Mutex::new(Vec::new());
+    let refactor = contract(&tested("refactor")).unwrap();
+    let plain = honest_change(&[FIX]);
+    prove(refactor.tests.as_ref().unwrap(), &base, &plain, &git::changes(&base, &plain, &refactor).unwrap(), &|r, _| { seen.lock().unwrap().push(r); runs(r, &before, &before, &[]) }, &mut no_edits).unwrap();
+    assert!(!seen.into_inner().unwrap().contains(&Run::Kept));
+}
+
+#[test]
+fn tests_that_already_fail_before_the_change_are_set_aside_but_must_keep_running() {
+    use kern::proof::{Exec, Output, Run, prove};
+    use std::sync::Mutex;
+    // Real suites have tests that cannot pass in the offline sandbox (axios: two need the internet) or are broken upstream (axios: one on
+    // Node 22). They fail on the old code before the agent did anything, so they can neither block the change nor count as proof.
+    let (base, candidate) = (honest_base(), honest_change(&[FIX, REGRESSION]));
+    let prove_with = |kind: &str, candidate: &Files, run: &Exec| -> R<Value> {
+        let policy = contract(&tested(kind)).unwrap();
+        let changed = git::changes(&base, candidate, &policy)?;
+        prove(policy.tests.as_ref().unwrap(), &base, candidate, &changed, run, &mut no_edits)
+    };
+    let before = [("adds", "passed"), ("needs internet", "failed")];
+    let fixed = [("adds", "passed"), ("needs internet", "failed"), ("adds 2 + 2", "passed")];
+    let failing = [("adds", "passed"), ("needs internet", "failed"), ("adds 2 + 2", "failed")];
+    let calls = Mutex::new(Vec::new());
+    let evidence = prove_with("bugfix", &candidate, &|r, files| { calls.lock().unwrap().push((r, files.len())); runs(r, &before, &fixed, &failing) }).unwrap();
+    assert_eq!(evidence["already_failing"], json!({ "total": 1, "tests": ["needs internet"], "passing_now": 0 }), "{evidence}");
+    assert_eq!((evidence["pass_to_pass"].as_u64(), evidence["fail_to_pass"].as_u64()), (Some(1), Some(1)), "{evidence}");
+    let mut calls = calls.into_inner().unwrap();
+    calls.sort();
+    assert_eq!(calls, vec![(Run::Base, 0), (Run::New, 0), (Run::Kept, 0), (Run::Old, 1), (Run::Old, 1)], "a known failure is not a reason to run the new code again");
+    // a test that failed before may start passing; that is fine and recorded
+    let healed = prove_with("bugfix", &candidate, &|r, _| runs(r, &before, &[("adds", "passed"), ("needs internet", "passed"), ("adds 2 + 2", "passed")], &failing)).unwrap();
+    assert_eq!(healed["already_failing"]["passing_now"], 1, "{healed}");
+    // it must still run: dropping, skipping or renaming it is caught as before
+    let refuse = |new: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &before, new, &failing)), why);
+    refuse(&[("adds", "passed"), ("adds 2 + 2", "passed")], "Tests did not run on the new code: \"needs internet\"");
+    refuse(&[("adds", "passed"), ("needs internet", "skipped"), ("adds 2 + 2", "passed")], "Tests did not run on the new code: \"needs internet\"");
+    // everything that passed before must still pass, and every new test must pass
+    refuse(&[("adds", "failed"), ("needs internet", "failed"), ("adds 2 + 2", "passed")], "The test suite fails on the new code: \"adds\"");
+    refuse(&[("adds", "passed"), ("needs internet", "failed"), ("adds 2 + 2", "failed")], "The test suite fails on the new code: \"adds 2 + 2\"");
+    // a crash with no failing test is still a crash, known failures or not
+    denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::New { Ok(Output { stdout: tap(&[("adds", "passed"), ("adds 2 + 2", "passed")]), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }), "");
+    // a suite where nothing passes before the change proves nothing
+    denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &[("adds", "failed")], &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing)), "already fails before the change");
+    // rewritten tests are still checked by planting bugs: the suite fails anyway, so the planting runs read the report, and a planted bug
+    // counts as caught only when a test fails that did not already fail before the change
+    let rewritten = honest_change(&[FIX, ("test/add.test.mjs", Some("import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/add.mjs';\ntest('adds', () => assert.equal(add(2, 3), 5));\n"))]);
+    let policy = contract(&tested("feature")).unwrap();
+    let changed = git::changes(&base, &rewritten, &policy).unwrap();
+    let kept = |_: Run, _: &[String]| -> R<Output> { Ok(Output { stdout: tap(&before), exit_code: 1 }) };
+    let mut planted = None;
+    let evidence = prove(policy.tests.as_ref().unwrap(), &base, &rewritten, &changed, &kept, &mut |plan| {
+        planted = Some(plan.json(60));
+        Ok(json!({ "version": 1, "baseline": { "old": true, "new": true }, "milliseconds": { "old": 1, "new": 1, "total": 2 }, "mutants": plan.mutants.iter().map(|m| json!({ "id": m.id, "result": "caught" })).collect::<Vec<_>>() }))
+    }).unwrap();
+    let plan = planted.expect("bugs are planted");
+    assert_eq!((plan["known"].clone(), plan["runner"].as_str()), (json!(["needs internet"]), Some("node")), "{plan}");
+    assert!(plan["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "the planting runs print the report they are judged by: {plan}");
+    assert!(evidence["test_edits"]["safety_net"]["checked"].as_u64() > Some(0), "{evidence}");
+    // the judgement itself: only a failure beyond the known ones catches a bug, and a run that leaves no report counts by its exit code
+    use kern::proof::caught;
+    let known = BTreeSet::from(["needs internet".to_string()]);
+    assert!(!caught(policy::Runner::Node, &known, &tap(&before), false), "the known failure alone catches nothing");
+    assert!(caught(policy::Runner::Node, &known, &tap(&[("adds", "failed"), ("needs internet", "failed")]), false));
+    assert!(caught(policy::Runner::Node, &known, b"Segmentation fault\n", false));
+    assert!(!caught(policy::Runner::Node, &BTreeSet::new(), &tap(&[("adds", "passed")]), true));
+    assert!(caught(policy::Runner::Node, &BTreeSet::new(), b"", false), "without known failures a failed run is a caught bug, as before");
+}
+
+#[test]
+fn planted_bugs_are_small_edits_in_the_code_the_old_tests_reach() {
+    let source = "import { log } from './log.mjs';\nexport const add = (a, b) => {\n  if (a > 0 && b > 0) {\n    log(a);\n  }\n  console.log('adding', a > b);\n  return a + b;\n};\n";
+    let base = files(&[("src/add.mjs", source), ("src/log.mjs", "export const log = (x) => console.log('adding', x);\n"), ("src/unused.mjs", "export const twice = (a) => a * 2;\n"),
+        ("src/index.ts", "export { twice } from './unused.js';\n"), ("test/helpers/load.mjs", "export { add } from '../../src/add.mjs';\n"),
+        ("test/add.test.mjs", "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from './helpers/load.mjs';\ntest('adds', () => assert.equal(add(1, 2), 3));\n"), ("README.md", "x\n"),
+        ("test/twice.test.mjs", "import { test } from 'node:test';\nimport { twice } from '../src/unused.mjs';\ntest('twice', () => twice(1));\n"), ("test/plain.test.mjs", "import { test } from 'node:test';\ntest('plain', () => {});\n")]);
+    let mut candidate = base.clone();
+    candidate.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/add.mjs';\ntest('adds two numbers', () => assert.equal(add(1, 2), 3));\n"));
+    let policy = contract(&tested("refactor")).unwrap();
+    let changed = git::changes(&base, &candidate, &policy).unwrap();
+    let plan = kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap();
+    // only the code the old version of the changed test reaches, through its helpers, and nothing it does not import
+    assert_eq!(plan.targets, ["src/add.mjs", "src/log.mjs"]);
+    // the old side runs only the changed test file; each planted bug, only the new tests that reach its file
+    assert_eq!(plan.old_files, ["test/add.test.mjs"]);
+    assert!(!plan.mutants.is_empty() && plan.mutants.iter().all(|m| m.tests == ["test/add.test.mjs"]), "{:?}", plan.mutants);
+    // planted runs use the same CI-mode command as the proof runs: no snapshot is ever recorded, no cache written
+    for (runner, command, last) in [("jest", json!(["/workspace/node_modules/.bin/jest"]), "--ci"), ("vitest", json!(["/workspace/node_modules/.bin/vitest", "run"]), "--no-cache"), ("node", json!(["/usr/local/bin/node", "--test"]), "--test")] {
+        let mut v = tested("refactor");
+        (v["tests"]["runner"], v["tests"]["command"]) = (json!(runner), command);
+        let other = contract(&v).unwrap();
+        assert_eq!(kern::proof::plan(other.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap().command.last().map(String::as_str), Some(last), "{runner}");
+    }
+    // a changed helper reaches other tests, so the old side runs the whole suite
+    let mut helped = candidate.clone();
+    helped.insert("test/helpers/load.mjs".into(), file("export { add } from '../../src/add.mjs';
+export const unused = 1;
+"));
+    let changed_helper = git::changes(&base, &helped, &policy).unwrap();
+    assert!(kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &helped, &changed_helper["tests"]).unwrap().old_files.is_empty());
+    // one small edit per line, the strongest kind first, never inside logging
+    let planted: Vec<String> = plan.mutants.iter().map(|m| m.describe()).collect();
+    assert_eq!(planted, ["src/add.mjs:3 changes > to >=", "src/add.mjs:4 removes a call", "src/add.mjs:7 changes + to -"], "{planted:?}");
+    for m in &plan.mutants {
+        assert_eq!(&source[m.start..m.end], m.original, "{m:?}");
+        let mutated = format!("{}{}{}", &source[..m.start], m.replacement, &source[m.end..]);
+        kern::capability::footprint("src/add.mjs", &mutated).expect("every planted bug still parses");
+    }
+    assert_eq!(plan.mutants, kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap().mutants, "the same change plants the same bugs");
+    // a long file gets its bugs spread from top to bottom, not bunched at the start
+    let long: String = (1..=60).map(|i| format!("export const f{i} = (a) => a + {i};\n")).collect();
+    let mut wide = base.clone();
+    wide.insert("src/add.mjs".into(), file(&long));
+    let mut wide_candidate = candidate.clone();
+    wide_candidate.insert("src/add.mjs".into(), file(&long));
+    wide_candidate.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\nimport { f1 } from '../src/add.mjs';\ntest('f1', () => f1(1));\n"));
+    let changed = git::changes(&wide, &wide_candidate, &policy).unwrap();
+    let lines: Vec<usize> = kern::proof::plan(policy.tests.as_ref().unwrap(), &wide, &wide_candidate, &changed["tests"]).unwrap().mutants.iter().map(|m| m.line).collect();
+    assert_eq!(lines.len(), 40);
+    assert!(lines[0] == 1 && lines[39] >= 59 && lines.windows(2).all(|w| w[0] < w[1]), "{lines:?}");
+    // tests that import nothing Kern can follow fall back to the code outside the tests
+    candidate.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\ntest('nothing', () => {});\n"));
+    let mut lone = base.clone();
+    lone.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\ntest('nothing at all', () => {});\n"));
+    let changed = git::changes(&lone, &candidate, &policy).unwrap();
+    assert_eq!(kern::proof::plan(policy.tests.as_ref().unwrap(), &lone, &candidate, &changed["tests"]).unwrap().targets, ["src/add.mjs", "src/index.ts", "src/log.mjs", "src/unused.mjs"]);
+}
+
+#[test]
+fn planted_bugs_spread_over_parallel_sandboxes_and_come_back_in_order() {
+    use kern::proof::{merge_planted, split_planting};
+    // winston's 40 planted bugs took most of the 30-minute limit one after another in a single sandbox
+    let long: String = (1..=60).map(|i| format!("export const f{i} = (a) => a + {i};\n")).collect();
+    let base = files(&[("src/add.mjs", &long), ("test/add.test.mjs", "import { test } from 'node:test';\nimport { f1 } from '../src/add.mjs';\ntest('f1', () => f1(1));\n")]);
+    let mut candidate = base.clone();
+    candidate.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\nimport { f1 } from '../src/add.mjs';\ntest('f1 again', () => f1(1));\n"));
+    let policy = contract(&tested("refactor")).unwrap();
+    let changed = git::changes(&base, &candidate, &policy).unwrap();
+    let plan = kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap();
+    assert_eq!(plan.mutants.len(), 40);
+    let parts = split_planting(&plan, 3);
+    assert_eq!(parts.iter().map(|p| p.mutants.len()).collect::<Vec<_>>(), [14, 13, 13]);
+    let mut ids: Vec<usize> = parts.iter().flat_map(|p| p.mutants.iter().map(|m| m.id)).collect();
+    ids.sort();
+    assert!(ids == (1..=40).collect::<Vec<_>>() && parts.iter().all(|p| p.command == plan.command && p.old_files == plan.old_files && p.known == plan.known));
+    // a few bugs are not worth a second sandbox: each one runs its own baselines first
+    assert_eq!(split_planting(&plan, 64).len(), 10);
+    assert_eq!(split_planting(&plan, 1).len(), 1);
+    // the answers come back as one, in plan order, and a part whose baseline failed decides the whole
+    let answer = |p: &kern::proof::Plan, ok: bool, ms: u64| json!({ "version": 1, "baseline": { "old": ok, "new": true, "old_error": if ok { "" } else { "boom" }, "new_error": "" },
+        "milliseconds": { "old": ms, "new": ms, "total": ms * 10 }, "mutants": p.mutants.iter().rev().map(|m| json!({ "id": m.id, "result": "caught" })).collect::<Vec<_>>() });
+    let merged = merge_planted(parts.iter().enumerate().map(|(i, p)| answer(p, true, 100 + i as u64)).collect()).unwrap();
+    assert_eq!((merged["version"].as_u64(), merged["baseline"]["old"].as_bool(), merged["milliseconds"]["total"].as_u64()), (Some(1), Some(true), Some(1020)));
+    assert_eq!(merged["mutants"].as_array().unwrap().iter().map(|m| m["id"].as_u64().unwrap() as usize).collect::<Vec<_>>(), (1..=40).collect::<Vec<_>>());
+    let failed = merge_planted(parts.iter().enumerate().map(|(i, p)| answer(p, i != 1, 100)).collect()).unwrap();
+    assert_eq!((failed["baseline"]["old"].as_bool(), failed["baseline"]["old_error"].as_str()), (Some(false), Some("boom")));
+}
+
+#[test]
+fn a_planted_bug_counts_as_lost_only_when_both_runs_agree_twice() {
+    use kern::proof::{Suite, decide};
+    let decided = |focused: bool, answers: &[Option<bool>]| {
+        let mut calls = Vec::new();
+        let mut at = 0;
+        let result = decide(&mut |suite| { calls.push(suite); at += 1; Ok(answers[at - 1]) }, focused).unwrap();
+        (result, calls)
+    };
+    use Suite::{NewFocused, NewFull, Old};
+    assert_eq!(decided(false, &[Some(false)]), ("missed by old", vec![Old]), "the old tests never caught it, so the new tests owe nothing");
+    assert_eq!(decided(false, &[Some(true), Some(true)]), ("caught", vec![Old, NewFull]));
+    assert_eq!(decided(false, &[Some(true), Some(false), Some(true), Some(false)]), ("lost", vec![Old, NewFull, Old, NewFull]));
+    assert_eq!(decided(false, &[Some(true), Some(false), Some(false)]).0, "flaky", "the old tests caught it only once");
+    assert_eq!(decided(false, &[Some(true), Some(false), Some(true), Some(true)]).0, "flaky", "the new tests missed it only once");
+    assert_eq!(decided(false, &[None]).0, "not run");
+    assert_eq!(decided(false, &[Some(true), Some(false), None]).0, "not run");
+    // with the tests that reach the planted bug known, those run first; the whole suite has the last word before anything counts as lost
+    assert_eq!(decided(true, &[Some(true), Some(true)]), ("caught", vec![Old, NewFocused]));
+    assert_eq!(decided(true, &[Some(true), Some(false), Some(true)]), ("caught", vec![Old, NewFocused, NewFull]));
+    assert_eq!(decided(true, &[Some(true), Some(false), Some(false), Some(true), Some(false)]), ("lost", vec![Old, NewFocused, NewFull, Old, NewFull]));
+    // a baseline always runs with whatever time is left; a planted run starts only if its own limit still fits
+    use kern::proof::run_limit;
+    let s = std::time::Duration::from_secs;
+    assert_eq!(run_limit(s(100), None), Some(s(100)), "a baseline gets the whole remaining budget");
+    assert_eq!(run_limit(s(0), None), None, "nothing runs once the budget is gone");
+    assert_eq!(run_limit(s(10), Some(s(5))), Some(s(5)));
+    assert_eq!(run_limit(s(4), Some(s(5))), None, "a planted run that cannot finish in time is not started");
+}
+
+fn edited_change() -> Files { honest_change(&[FIX, ("test/add.test.mjs", Some(&ADD_TEST.replace("test('adds'", "test('adds two numbers'")))]) }
+fn mutated(results: &[&str]) -> Value {
+    json!({ "version": 1, "baseline": { "old": true, "new": true }, "milliseconds": { "old": 400, "new": 500, "total": 2100 }, "seconds": { "old": 0.4, "new": 0.5 },
+        "mutants": results.iter().enumerate().map(|(i, r)| json!({ "id": i + 1, "result": r })).collect::<Vec<_>>() })
+}
+#[test]
+fn rewritten_tests_must_keep_the_old_behaviour_and_the_safety_net() {
+    use kern::proof::{Exec, Output, Plan, Run, prove};
+    use std::sync::Mutex;
+    let base = honest_base();
+    let prove_with = |kind: &str, candidate: &Files, run: &Exec, mutate: &mut dyn FnMut(&Plan) -> R<Value>| -> R<Value> {
+        let policy = contract(&tested(kind)).unwrap();
+        let changed = git::changes(&base, candidate, &policy)?;
+        prove(policy.tests.as_ref().unwrap(), &base, candidate, &changed, run, mutate)
+    };
+    let renamed = [("adds two numbers", "passed")];
+    let honest = |r: Run| runs(r, &[("adds", "passed")], &renamed, &[]);
+    let kept = |r: Run, old: &[(&str, &str)]| if r == Run::Kept { Ok(Output { stdout: tap(old), exit_code: 0 }) } else { honest(r) };
+    // an honest rewrite: the old tests still pass on the new code, and every planted bug they caught is still caught
+    let (calls, mut plans) = (Mutex::new(Vec::new()), Vec::new());
+    let evidence = prove_with("refactor", &edited_change(), &|r, _| { calls.lock().unwrap().push(r); kept(r, &[("adds", "passed")]) }, &mut |p| { plans.push(p.mutants.len()); Ok(mutated(&["caught"])) }).unwrap();
+    let mut calls = calls.into_inner().unwrap();
+    calls.sort();
+    assert_eq!(calls, vec![Run::Base, Run::New, Run::Kept], "the old tests run on the new code as well");
+    assert_eq!(plans, vec![1], "one planted bug: the + in src/add.mjs");
+    let net = &evidence["test_edits"]["safety_net"];
+    assert_eq!((net["planted"].as_u64(), net["checked"].as_u64(), net["still_caught"].as_u64(), net["lost"].clone()), (Some(1), Some(1), Some(1), json!([])), "{evidence}");
+    assert_eq!(evidence["test_edits"]["changed_files"], json!(["test/add.test.mjs"]));
+    // the evidence is signed, so it holds only what Kern checked itself, never the planting run's raw output
+    canonical(&evidence).expect("the evidence can be signed");
+    assert_eq!((net["milliseconds"]["old"].as_u64(), net["milliseconds"]["new"].as_u64(), net.get("seconds")), (Some(400), Some(500), None), "{net}");
+    // the rewrite stops catching a bug the old test caught
+    denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["lost"]))),
+        "Your test changes stop catching bugs the old tests caught: \"src/add.mjs:1 changes + to -\"");
+    // a result seen only once is noise: it is recorded, never blocked on
+    let flaky = prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["flaky"]))).unwrap();
+    assert_eq!(flaky["test_edits"]["safety_net"]["flaky"], json!(["src/add.mjs:1 changes + to -"]));
+    // the old test fails on the new code: rewriting it does not change what it checked
+    denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "failed")]), &mut |_| Ok(mutated(&["caught"]))), "Existing tests fail on the new code: \"adds\"");
+    denied(prove_with("bugfix", &edited_change(), &|r, _| if r == Run::Kept { Ok(Output { stdout: b"Error: Cannot find module '../src/add.mjs'\n".to_vec(), exit_code: 1 }) } else { honest(r) }, &mut |_| Ok(mutated(&["caught"]))),
+        "The old tests gave no usable results on the new code");
+    // ...unless the task changes behaviour on purpose: then Kern lists every changed expectation for the reviewer
+    let changed = prove_with("change", &edited_change(), &|r, _| kept(r, &[("adds", "failed")]), &mut |_| Ok(mutated(&["caught"]))).unwrap();
+    assert_eq!(changed["test_edits"]["changed_expectations"], json!(["adds"]), "{changed}");
+    // checking that could not finish in time is not a pass
+    denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["not run"]))), "could not check the test changes in time");
+    let mut broken = mutated(&["caught"]);
+    broken["baseline"]["old"] = json!(false);
+    denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(broken.clone())), "Kern could not check the test changes");
+    // a result for a bug Kern did not plant is never trusted
+    denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["caught", "caught"]))), "Kern could not check the test changes");
+    // nothing extra runs when no existing test changed
+    let calls = Mutex::new(Vec::new());
+    prove_with("refactor", &honest_change(&[FIX]), &|r, _| { calls.lock().unwrap().push(r); runs(r, &[("adds", "passed")], &[("adds", "passed")], &[]) }, &mut |_| panic!("no planted bugs without test edits")).unwrap();
+    let mut calls = calls.into_inner().unwrap();
+    calls.sort();
+    assert_eq!(calls, vec![Run::Base, Run::New]);
+    // when only tests changed, the code is the old code, so the existing suite's run already is the old tests on the new code
+    let calls = Mutex::new(Vec::new());
+    let tests_only = honest_change(&[("test/add.test.mjs", Some(&ADD_TEST.replace("test('adds'", "test('adds two numbers'")))]);
+    let only = prove_with("refactor", &tests_only, &|r, _| { calls.lock().unwrap().push(r); runs(r, &[("adds", "passed")], &renamed, &[]) }, &mut |_| Ok(mutated(&["caught"]))).unwrap();
+    let mut calls = calls.into_inner().unwrap();
+    calls.sort();
+    assert_eq!(calls, vec![Run::Base, Run::New], "{only}");
+    assert_eq!(only["test_edits"]["old_tests_on_new_code"]["passed"], 1, "{only}");
 }
 
 fn reason<T: std::fmt::Debug>(r: R<T>) -> String { r.expect_err("expected a block").0 }
@@ -791,6 +1193,18 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     let nine: Vec<(String, String)> = (0..9).map(|i| (format!("src/f{i}.mjs"), "export const x = 1;\n".to_string())).collect();
     let nine: Vec<(&str, &str)> = nine.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
     check(reason(git::changes(&base, &with(&nine), &policy)), "budget", true, None, &["8 files", "200"]);
+    // code whose answers depend on which tests ran first is the agent's to fix; a suite that never passed is a human's
+    {
+        use kern::proof::{Output, Run, prove};
+        let (hb, hc) = (honest_base(), honest_change(&[FIX, REGRESSION]));
+        let bugfix = contract(&tested("bugfix")).unwrap();
+        let changed = git::changes(&hb, &hc, &bugfix).unwrap();
+        let tap_of = |t: &[(&str, &str)]| Ok(Output { stdout: tap(t), exit_code: i64::from(t.iter().any(|x| x.1 == "failed")) });
+        let order = |r: Run, _: &[String]| match r { Run::Kept => tap_of(&[("adds", "failed")]), Run::Base => tap_of(&[("adds", "passed")]), Run::New => tap_of(&[("adds", "passed"), ("adds 2 + 2", "passed")]), Run::Old => tap_of(&[("adds", "passed"), ("adds 2 + 2", "failed")]) };
+        check(reason(prove(bugfix.tests.as_ref().unwrap(), &hb, &hc, &changed, &order, &mut no_edits)), "order-dependent", true, None, &["`\"adds\"`", "state"]);
+        let broken = |_: Run, _: &[String]| tap_of(&[("adds", "failed")]);
+        check(reason(prove(bugfix.tests.as_ref().unwrap(), &hb, &hc, &changed, &broken, &mut no_edits)), "tests-failing", false, None, &["base branch"]);
+    }
     check(reason(git::changes(&base, &with(&[("src/blob.bin", "a\0b")]), &policy)), "unsupported-change", true, Some("src/blob.bin"), &["`src/blob.bin`"]);
     let grown = with(&[("src/add.mjs", "import { exec } from 'node:child_process';\nexport const add = (a, b) => a + b;\n"), ("src/net.mjs", "export const get = () => fetch('https://x');\n")]);
     let changed = git::changes(&base, &grown, &policy).unwrap();
@@ -803,7 +1217,9 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     check("Check addition case 2 failed (exit code 1)".into(), "check-failed", true, None, &["`addition`"]);
     check("Check addition case 1 output differs from the expected answer".into(), "check-failed", true, None, &["`addition`"]);
     // honest-fix messages come from the real proof
-    check(reason(screened("bugfix", &[FIX, ("test/add.test.mjs", Some("// gutted\n"))])), "test-locked", true, Some("test/add.test.mjs"), &["`test/add.test.mjs`"]);
+    let mut locked = tested("bugfix");
+    locked["tests"]["edits"] = json!("locked");
+    check(reason(git::changes(&honest_base(), &honest_change(&[FIX, ("test/add.test.mjs", Some("// gutted\n"))]), &contract(&locked).unwrap())), "test-locked", true, Some("test/add.test.mjs"), &["`test/add.test.mjs`"]);
     check(reason(screened("feature", &[FIX, ("test/new.test.mjs", Some("import { test } from 'node:test';\ntest.only('x', () => {});\n"))])), "test-marker", true, Some("test/new.test.mjs"), &["`test.only`"]);
     check(reason(screened("feature", &[FIX, ("test/.mocharc.json", Some("{}\n"))])), "test-config", true, Some("test/.mocharc.json"), &["`test/.mocharc.json`"]);
     check(reason(screened("feature", &[("src/add.mjs", Some("globalThis.expect = 1;\nexport const add = (a, b) => a + b;\n"))])), "test-tamper", true, Some("src/add.mjs"), &["`globalThis.expect`", "`src/add.mjs`"]);
@@ -811,14 +1227,25 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     let (b, c) = (honest_base(), honest_change(&[FIX, REGRESSION]));
     let p = contract(&tested("bugfix")).unwrap();
     let ch = git::changes(&b, &c, &p).unwrap();
-    let proved = |new: &[(&str, &str)], old: &[(&str, &str)]| reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &mut |r| runs(r, &[("adds", "passed")], new, old)));
+    let proved = |new: &[(&str, &str)], old: &[(&str, &str)]| reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &|r, _| runs(r, &[("adds", "passed")], new, old), &mut no_edits));
     let fixed = [("adds", "passed"), ("adds 2 + 2", "passed")];
     check(proved(&fixed, &fixed), "test-proof", true, None, &["`\"adds 2 + 2\"`", "fails on the old code"]);
     check(proved(&[("adds", "failed"), ("adds 2 + 2", "passed")], &[]), "tests-failing", true, None, &["`\"adds\"`"]);
     check(proved(&[("adds 2 + 2", "passed")], &[]), "tests-not-run", true, None, &["`\"adds\"`"]);
     check(proved(&[("adds", "passed")], &[]), "test-missing", true, None, &["`test/`"]);
-    check(reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &mut |r| if r == kern::proof::Run::New { Ok(kern::proof::Output { stdout: b"Segmentation fault\n".to_vec(), exit_code: 139 }) } else { runs(r, &[("adds", "passed")], &fixed, &fixed) })),
+    let olds = std::sync::atomic::AtomicUsize::new(0);
+    check(reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &|r, _| if r == kern::proof::Run::Old && olds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 { runs(r, &[("adds", "passed")], &fixed, &fixed) } else { runs(r, &[("adds", "passed")], &fixed, &[("adds", "passed"), ("adds 2 + 2", "failed")]) }, &mut no_edits)),
+        "test-proof", true, None, &["every time"]);
+    check(reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &|r, _| if r == kern::proof::Run::New { Ok(kern::proof::Output { stdout: b"Segmentation fault\n".to_vec(), exit_code: 139 }) } else { runs(r, &[("adds", "passed")], &fixed, &fixed) }, &mut no_edits)),
         "test-results", true, None, &["new code"]);
+    // rewritten tests: the old ones must still pass on the new code, and the bugs they caught must still be caught
+    let (pe, edited) = (contract(&tested("refactor")).unwrap(), edited_change());
+    let che = git::changes(&b, &edited, &pe).unwrap();
+    let edits = |kept: &[(&str, &str)], result: &str| reason(kern::proof::prove(pe.tests.as_ref().unwrap(), &b, &edited, &che,
+        &|r, _| if r == kern::proof::Run::Kept { Ok(kern::proof::Output { stdout: tap(kept), exit_code: 0 }) } else { runs(r, &[("adds", "passed")], &[("adds two numbers", "passed")], &[]) }, &mut |_| Ok(mutated(&[result]))));
+    check(edits(&[("adds", "failed")], "caught"), "behavior-changed", true, None, &["`\"adds\"`"]);
+    check(edits(&[("adds", "passed")], "lost"), "tests-weakened", true, None, &["src/add.mjs:1 changes + to -"]);
+    check(edits(&[("adds", "passed")], "not run"), "test-edits", true, None, &["unchanged"]);
     // the agent's own run
     check("The agent exited with code 3".into(), "agent", true, None, &["code 3"]);
     check(reason(kern::util::tree_paths(["src/aux.js"], true)), "file-name", true, Some("src/aux.js"), &["`src/aux.js`"]);
@@ -1501,11 +1928,28 @@ fn docker_and_container_configuration_cannot_be_widened() {
     denied(sandbox::docker_invocation(&c, &["info"], &[], Path::new("/x")), "changed");
     let limits = contract(&policy_value()).unwrap().limits;
     let write = vec!["src/".to_string()];
-    let spec = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &write, limits: &limits, entry: vec!["__runner".into()], network: "none", volumes: vec![], root: false, home_mb: 0 };
+    let spec = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &write, limits: &limits, entry: vec!["__runner".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false };
     let a = sandbox::container_args(&spec, "kern-x").unwrap().join(" ");
     for want in ["--runtime=runsc", "--network=none", "--read-only", "--user=1000:1000", "--cap-drop=ALL", "no-new-privileges", "--pull=never", "--entrypoint=/kern/kern"] { assert!(a.contains(want), "{want}"); }
     assert!(!a.contains("docker.sock") && a.matches("type=bind").count() == 3 && a.matches(",readonly").count() == 3);
+    // planting bugs needs a writable copy of the workspace: the snapshot stays a read-only input and the copy lives in memory
+    let planting = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__mutate".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: true };
+    let s = sandbox::container_args(&planting, "kern-x").unwrap().join(" ");
+    assert!(s.contains("--tmpfs /workspace:rw,nosuid,nodev") && s.matches("type=bind").count() == 2 && s.matches(",readonly").count() == 2 && !s.contains("target=/workspace,"), "{s}");
+    denied(sandbox::container_args(&Spec { writable: &write, ..planting }, "kern-x"), "scratch");
     denied(sandbox::container_args(&Spec { network: "bridge", ..spec }, "kern-x"), "Only dependency setup");
+    // tests run like in CI, on a throwaway writable copy of the repo: they may write logs and fixtures, but never into the snapshot
+    let deps = vec![("kern-deps-1", "/workspace/node_modules", true)];
+    let tests = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__exec".into(), "/usr/local/bin/node".into()], network: "none", volumes: deps.clone(), root: false, home_mb: 0, scratch: true };
+    let s = sandbox::container_args(&tests, "kern-x").unwrap().join(" ");
+    assert!(s.contains("--tmpfs /workspace:rw,nosuid,nodev") && !s.contains("target=/workspace,") && s.contains("type=volume,source=kern-deps-1,target=/workspace/node_modules,readonly"), "{s}");
+    // the shared install stays read-only; only the folders tools keep caches and temporary files in are writable, and only in memory
+    for dir in [".cache", ".vite", ".vite-temp"] { assert!(s.contains(&format!("--tmpfs /workspace/node_modules/{dir}:rw,nosuid,nodev")), "{dir}: {s}"); }
+    for entry in ["__exec", "__mutate"] {
+        denied(sandbox::container_args(&Spec { entry: vec![entry.into()], scratch: false, volumes: deps.clone(), ..tests }, "kern-x"), "copy of the workspace");
+    }
+    let setup = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__setup".into()], network: "bridge", volumes: vec![("kern-deps-1", "/workspace/node_modules", false)], root: true, home_mb: 1024, scratch: false };
+    assert!(!sandbox::container_args(&setup, "kern-x").unwrap().join(" ").contains("node_modules/."), "the install itself writes the volume directly");
 }
 
 const NODE: &str = "docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392";

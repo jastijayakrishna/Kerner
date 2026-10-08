@@ -27,18 +27,24 @@ pub struct Limits { pub files_changed: u64, pub lines_changed: u64, pub file_byt
 pub const MAX_LIMITS: Limits = Limits { files_changed: 1000, lines_changed: 100000, file_bytes: 1048576, total_bytes: 64 << 20, timeout_seconds: 3600, memory_mb: 8192, pids: 1024 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind { Bugfix, Feature, Refactor }
+pub enum Kind { Bugfix, Feature, Refactor, Change }
 impl Kind {
-    pub fn name(self) -> &'static str { match self { Kind::Bugfix => "bugfix", Kind::Feature => "feature", Kind::Refactor => "refactor" } }
+    pub fn name(self) -> &'static str { match self { Kind::Bugfix => "bugfix", Kind::Feature => "feature", Kind::Refactor => "refactor", Kind::Change => "change" } }
+}
+/// What may happen to existing tests: rewritten or removed when the verifier proves the old behaviour and the safety net intact, or not at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edits { Checked, Locked }
+impl Edits {
+    pub fn name(self) -> &'static str { match self { Edits::Checked => "checked", Edits::Locked => "locked" } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Runner { Mocha, Jest, Vitest, Node }
 impl Runner {
     pub fn name(self) -> &'static str { match self { Runner::Mocha => "mocha", Runner::Jest => "jest", Runner::Vitest => "vitest", Runner::Node => "node" } }
-    fn parse(s: &str) -> Option<Runner> { [Runner::Mocha, Runner::Jest, Runner::Vitest, Runner::Node].into_iter().find(|r| r.name() == s) }
+    pub fn parse(s: &str) -> Option<Runner> { [Runner::Mocha, Runner::Jest, Runner::Vitest, Runner::Node].into_iter().find(|r| r.name() == s) }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tests { pub paths: Vec<String>, pub kind: Kind, pub runner: Runner, pub command: Vec<String> }
+pub struct Tests { pub paths: Vec<String>, pub kind: Kind, pub runner: Runner, pub command: Vec<String>, pub edits: Edits }
 #[derive(Clone, Debug)]
 pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String>, pub tests: Option<Tests> }
 
@@ -100,23 +106,25 @@ pub fn contract(input: &Value) -> R<Contract> {
     let tests = match input.get("tests") {
         None | Some(Value::Null) => None,
         Some(t) => {
-            exact(t, &["paths", "kind", "runner", "command"], "tests")?;
+            exact(t, if t.get("edits").is_some() { &["paths", "kind", "runner", "command", "edits"] } else { &["paths", "kind", "runner", "command"] }, "tests")?;
             let mut paths = strings(t, "paths", 16)?;
             ensure!(!paths.is_empty(), "tests.paths must name at least one test directory or file");
             for p in &paths { capability(p)?; }
             ensure!(paths.iter().enumerate().all(|(i, g)| paths.iter().enumerate().all(|(j, h)| i == j || !covers(h, g))), "Overlapping or duplicate capabilities are ambiguous");
             ensure!(paths.iter().all(|p| allowed(&read, p)), "tests.paths must lie inside filesystem.read, so the agent can read the tests it has to keep passing");
             paths.sort();
-            let kind = match text(t, "kind")? { "bugfix" => Kind::Bugfix, "feature" => Kind::Feature, "refactor" => Kind::Refactor, _ => deny!("tests.kind must be bugfix, feature or refactor") };
+            let kind = match text(t, "kind")? { "bugfix" => Kind::Bugfix, "feature" => Kind::Feature, "refactor" => Kind::Refactor, "change" => Kind::Change, _ => deny!("tests.kind must be bugfix, feature, refactor or change") };
             ensure!(kind != Kind::Bugfix || paths.iter().all(|p| allowed(&write, p)), "A bug fix must be able to add a test that proves it: tests.paths must lie inside filesystem.write");
             let runner = t["runner"].as_str().and_then(Runner::parse).ok_or_else(|| Denied("tests.runner must be mocha, jest, vitest or node".into()))?;
             let command = argv(&t["command"])?;
-            let reporter = |a: &String| a == "-R" || ["--reporter", "--json", "--test-reporter", "--outputFile", "--output-file"].iter().any(|f| a.starts_with(f));
+            let reporter = |a: &String| a == "-R" || ["--reporter", "--json", "--test-reporter", "--outputFile", "--output-file", "--testResultsProcessor"].iter().any(|f| a.starts_with(f));
             ensure!(!command.iter().any(reporter), "tests.command must not choose a reporter or an output file: Kern adds the {} reporter it reads", runner.name());
             ensure!(runner != Runner::Vitest || command.iter().any(|a| a == "run"), "tests.command for vitest must use vitest run, so it runs once instead of watching for changes");
             ensure!(runner != Runner::Node || command.iter().any(|a| a == "--test"), "tests.command for node must include --test");
+            let edits = match t.get("edits").map(Value::as_str) { None | Some(Some("checked")) => Edits::Checked, Some(Some("locked")) => Edits::Locked, _ => deny!("tests.edits must be checked or locked") };
             value["tests"]["paths"] = json!(paths);
-            Some(Tests { paths, kind, runner, command })
+            value["tests"]["edits"] = json!(edits.name());
+            Some(Tests { paths, kind, runner, command, edits })
         }
     };
     Ok(Contract { value, task, read, write, dependencies, limits, checks, behaviors, tests })

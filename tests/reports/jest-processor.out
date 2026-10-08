@@ -1,0 +1,2 @@
+
+{"numTotalTests":4,"testResults":[{"name":"/workspace/test/broken.test.js","status":"failed","assertionResults":[]},{"name":"/workspace/test/math.jest.test.js","status":"failed","assertionResults":[{"ancestorTitles":["math"],"title":"adds","status":"passed"},{"ancestorTitles":["math"],"title":"fails","status":"failed"},{"ancestorTitles":["math"],"title":"skipped","status":"pending"},{"ancestorTitles":["math"],"title":"later","status":"todo"}]}]}

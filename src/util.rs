@@ -157,6 +157,24 @@ pub fn unb64(s: &str) -> R<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Lets at most `width` sandboxes run at once, however many runs are asked for in parallel.
+pub struct Gate { free: std::sync::Mutex<usize>, ready: std::sync::Condvar }
+impl Gate {
+    pub fn new(width: usize) -> Gate { Gate { free: std::sync::Mutex::new(width.max(1)), ready: std::sync::Condvar::new() } }
+    pub fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 { free = self.ready.wait(free).unwrap_or_else(|e| e.into_inner()); }
+        *free -= 1;
+        drop(free);
+        let out = f();
+        *self.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.ready.notify_one();
+        out
+    }
+}
+/// How many sandboxes one verification may run at once: KERN_VERIFY_PARALLEL (1 to 8), 2 by default.
+pub fn parallelism() -> usize { std::env::var("KERN_VERIFY_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(2) }
+
 pub fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
 pub fn iso8601(ms: u64) -> String {
     let (secs, millis) = (ms / 1000, ms % 1000);

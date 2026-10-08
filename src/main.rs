@@ -57,6 +57,7 @@ fn cli() -> R<(Option<Value>, i32)> {
         Some("__runner") => return sandbox::runner().map(|_| (None, 0)),
         Some("__setup") => return sandbox::setup().map(|_| (None, 0)),
         Some("__exec") => return sandbox::exec(&args[1..]).map(|_| (None, 0)),
+        Some("__mutate") => return sandbox::mutate().map(|_| (None, 0)),
         Some("__reap") => {
             ensure!(args.len() == 3, "Expected an engine and a container");
             return kern::container::reap(Path::new(&args[1]), &args[2]).map(|_| (None, 0));

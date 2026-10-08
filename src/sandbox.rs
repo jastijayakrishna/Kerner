@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const MONITOR: &str = include_str!("monitor.cjs");
+/// How Kern reads jest results (see proof::command).
+pub const JEST_REPORT: &str = include_str!("jest-report.cjs");
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
@@ -88,22 +90,32 @@ pub fn validate_image(reference: &str) -> R<String> {
     Ok(text(i, "Id")?.to_string())
 }
 
-pub struct Volume(pub String);
+/// A dependency volume. A fresh one is removed when dropped; one kept in the dependency cache stays for later verifications.
+pub struct Volume(pub String, bool);
 impl Volume {
     pub fn create() -> R<Volume> {
         let name = format!("kern-deps-{}", uuid4()?);
         docker(&["volume", "create", "--label", "kern=dependencies", &name], Duration::from_secs(60), 4096)?;
-        Ok(Volume(name))
+        Ok(Volume(name, false))
     }
+    pub fn cached(name: String) -> Volume { Volume(name, true) }
+    pub fn keep(&mut self) { self.1 = true; }
 }
 impl Drop for Volume {
-    fn drop(&mut self) { let _ = docker(&["volume", "rm", "--force", &self.0], Duration::from_secs(120), 4096); }
+    fn drop(&mut self) { if !self.1 { remove_volume(&self.0); } }
 }
+pub fn volume_exists(name: &str) -> bool { docker(&["volume", "inspect", name], Duration::from_secs(60), 1 << 20).is_ok() }
+pub fn remove_volume(name: &str) { let _ = docker(&["volume", "rm", "--force", name], Duration::from_secs(120), 4096); }
 
 pub struct Spec<'a> {
     pub image: &'a str, pub snapshot: &'a Path, pub control: &'a Path, pub writable: &'a [String], pub limits: &'a Limits, pub entry: Vec<String>,
     pub network: &'a str, pub volumes: Vec<(&'a str, &'a str, bool)>, pub root: bool, pub home_mb: u64,
+    /// The snapshot is only a read-only input and /workspace is an in-memory copy the entry point may change (tests and planted bugs).
+    pub scratch: bool,
 }
+/// Folders inside node_modules where tools keep caches and temporary files (Vite bundles its config into .vite-temp). The shared install is
+/// read-only; these get an empty in-memory folder for each run, on mount points the install creates.
+pub const CACHE_DIRS: [&str; 3] = [".cache", ".vite", ".vite-temp"];
 fn mount(source: &Path, target: &str) -> R<[String; 2]> {
     let s = std::path::absolute(source)?.display().to_string();
     ensure!(!s.contains([',', '\n', '"']), "Unsupported mount source");
@@ -113,6 +125,8 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
     ensure!(spec.volumes.iter().all(|(v, t, _)| v.starts_with("kern-deps-") && *t == "/workspace/node_modules"), "Unexpected volume");
     ensure!(spec.entry.first().is_some_and(|e| e.starts_with("__")), "Sandbox entry must be a Kern entry point");
+    ensure!(!spec.scratch || (spec.writable.is_empty() && !spec.root && spec.network == "none"), "A scratch workspace is only for an unprivileged run without write grants or network");
+    ensure!(spec.scratch || !matches!(spec.entry[0].as_str(), "__exec" | "__mutate"), "Tests run only on a throwaway copy of the workspace");
     let l = spec.limits;
     let user = if spec.root { "0:0" } else { "1000:1000" };
     let mut a: Vec<String> = [
@@ -121,7 +135,11 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
         "--ulimit", "nofile=1024:1024", "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
         "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777",
     ].iter().map(|s| s.to_string()).collect();
-    a.extend(mount(spec.snapshot, "/workspace")?);
+    if spec.scratch {
+        a.extend(["--tmpfs".into(), format!("/workspace:rw,nosuid,nodev,size={},uid=1000,gid=1000,mode=0700", l.total_bytes * 2 + 268435456)]);
+    } else {
+        a.extend(mount(spec.snapshot, "/workspace")?);
+    }
     a.extend(mount(spec.snapshot, "/input")?);
     a.extend(mount(spec.control, "/kern")?);
     for grant in spec.writable {
@@ -130,6 +148,9 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     if spec.home_mb > 0 { a.extend(["--tmpfs".into(), format!("/home/kern:rw,nosuid,nodev,size={}m,mode=0700", spec.home_mb)]); }
     for (volume, target, readonly) in &spec.volumes {
         a.extend(["--mount".into(), format!("type=volume,source={volume},target={target}{}", if *readonly { ",readonly" } else { "" })]);
+        for dir in CACHE_DIRS.iter().filter(|_| *readonly) {
+            a.extend(["--tmpfs".into(), format!("{target}/{dir}:rw,nosuid,nodev,size=268435456,uid=1000,gid=1000,mode=0700")]);
+        }
     }
     a.push(spec.image.into());
     Ok(a)
@@ -155,7 +176,7 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         let mounts = i["Mounts"].as_array().cloned().unwrap_or_default();
         let binds: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "bind").collect();
         let volumes: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "volume").collect();
-        ensure!(binds.len() == 3 && binds.iter().all(|m| m["RW"] == false), "Unexpected or writable host mount");
+        ensure!(binds.len() == if spec.scratch { 2 } else { 3 } && binds.iter().all(|m| m["RW"] == false), "Unexpected or writable host mount");
         ensure!(volumes.len() == spec.volumes.len() && spec.volumes.iter().all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro)), "Unexpected volume mount");
         ensure!(mounts.iter().all(|m| m["Type"] == "bind" || m["Type"] == "volume" || m["Type"] == "tmpfs"), "Unexpected mount type");
         let (_, out, _) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
@@ -174,6 +195,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     #[cfg(unix)]
     std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o555))?;
     create_new(dir.join("monitor.cjs"), MONITOR.as_bytes(), 0o444)?;
+    create_new(dir.join("jest-report.cjs"), JEST_REPORT.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
 }
@@ -185,6 +207,8 @@ mod inside {
     use std::process::{Command, Stdio};
 
     const ENV: [(&str, &str); 3] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8")];
+    /// Tests run as in CI: runners never prompt, watch or record new snapshots.
+    const TEST_ENV: [(&str, &str); 4] = [ENV[0], ENV[1], ENV[2], ("CI", "true")];
     fn config(name: &str) -> R<Value> { read_json(Path::new("/kern").join(name)) }
     fn wait(mut child: std::process::Child, timeout: Duration) -> R<bool> {
         let started = std::time::Instant::now();
@@ -297,13 +321,131 @@ mod inside {
         ensure!(wait(child, Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?))?, "npm ci failed or timed out");
         let (mut entries, mut totals) = (Vec::new(), (0u64, 0u64));
         tree_digest(Path::new("/workspace/node_modules"), "", &mut entries, &mut totals)?;
+        // Mount points for the per-run cache folders, made after the digest so the recorded install is unchanged.
+        for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         println!("{}", json!({ "version": 1, "entries": totals.0, "bytes": totals.1, "sha256": digest(&json!(entries))? }));
+        Ok(())
+    }
+    fn copy_entry(from: &Path, to: &Path) -> R<()> {
+        let meta = std::fs::symlink_metadata(from)?;
+        if meta.is_dir() { return copy_tree(from, to); }
+        ensure!(meta.is_file(), "Unsupported input file type");
+        std::fs::copy(from, to)?;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(if meta.mode() & 0o111 != 0 { 0o700 } else { 0o600 }))?;
+        Ok(())
+    }
+    fn remove(path: &Path) -> R<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => Ok(std::fs::remove_dir_all(path)?),
+            Ok(_) => Ok(std::fs::remove_file(path)?),
+            Err(_) => Ok(()),
+        }
+    }
+    /// Plants each bug of /kern/mutate.json in a fresh copy of the new code and runs the old tests (/kern/old) and the new tests against it.
+    /// The copy is rebuilt from the read-only input before every run, so nothing one run leaves behind can sway the next.
+    pub fn mutate() -> R<()> {
+        let plan = config("mutate.json")?;
+        exact(&plan, &["version", "command", "tests_paths", "budget_seconds", "old_files", "runner", "known", "mutants"], "planting plan")?;
+        ensure!(plan["version"] == 1, "Unsupported planting plan");
+        let command = argv(&plan["command"])?;
+        let runner = crate::policy::Runner::parse(text(&plan, "runner")?).ok_or_else(|| Denied("Unsupported planting plan".into()))?;
+        let known: std::collections::BTreeSet<String> = strings(&plan, "known", 100_000)?.into_iter().collect();
+        let paths = strings(&plan, "tests_paths", 16)?;
+        for p in &paths { capability(p)?; }
+        let budget = Duration::from_secs(int(&plan, "budget_seconds", 1, 3600)?);
+        let old_files = strings(&plan, "old_files", 10000)?;
+        for f in &old_files { file_path(f)?; }
+        let mutants = plan["mutants"].as_array().cloned().unwrap_or_default();
+        ensure!(mutants.len() <= 200, "Too many planted bugs");
+        let started = std::time::Instant::now();
+        let work = Path::new("/workspace");
+        let reset = |old: bool| -> R<()> {
+            for e in std::fs::read_dir(work)? { let e = e?; if e.file_name() != "node_modules" { remove(&e.path())?; } }
+            for e in std::fs::read_dir("/tmp")? { remove(&e?.path())?; }
+            for e in std::fs::read_dir("/input")? { let e = e?; if e.file_name() != "node_modules" { copy_entry(&e.path(), &work.join(e.file_name()))?; } }
+            if old {
+                for p in &paths {
+                    let rel = p.trim_end_matches('/');
+                    remove(&work.join(rel))?;
+                    let source = Path::new("/kern/old").join(rel);
+                    if source.exists() {
+                        if let Some(parent) = work.join(rel).parent() { std::fs::create_dir_all(parent)?; }
+                        copy_entry(&source, &work.join(rel))?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        // Some(true) when the tests caught the bug (they failed or ran out of time), None when the budget cannot fit the run.
+        let errors = Path::new("/tmp/.kern-baseline-errors");
+        let run = |old: bool, mutant: Option<&Value>, files: &[String], limit: Option<Duration>| -> R<Option<bool>> {
+            let Some(timeout) = crate::proof::run_limit(budget.saturating_sub(started.elapsed()), limit) else { return Ok(None) };
+            reset(old)?;
+            if let Some(m) = mutant {
+                let path = text(m, "path")?;
+                file_path(path)?;
+                let (start, end) = (int(m, "start", 0, u32::MAX.into())? as usize, int(m, "end", 0, u32::MAX.into())? as usize);
+                let target = work.join(path);
+                let mut bytes = std::fs::read(&target)?;
+                ensure!(start <= end && bytes.get(start..end) == Some(text(m, "original")?.as_bytes()), "A planted bug does not match its file");
+                bytes.splice(start..end, text(m, "replacement")?.bytes());
+                std::fs::write(&target, bytes)?;
+            }
+            // A baseline keeps its error output, so a failure explains itself; planted runs only count.
+            let stderr = if mutant.is_none() { Stdio::from(std::fs::File::create(errors)?) } else { Stdio::null() };
+            // With known failures the report decides, read straight from the runner's output rather than from a file a test could rewrite.
+            let stdout = if known.is_empty() { Stdio::null() } else { Stdio::piped() };
+            let mut child = Command::new(&command[0]).args(&command[1..]).args(files).current_dir(work).env_clear().envs(TEST_ENV).stdin(Stdio::null()).stdout(stdout).stderr(stderr).spawn()?;
+            let reader = child.stdout.take().map(|out| std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut std::io::Read::take(out, 64 << 20), &mut buf);
+                buf
+            }));
+            let passed = wait(child, timeout)?;
+            quiesce()?;
+            let report = reader.map(|r| r.join().unwrap_or_default()).unwrap_or_default();
+            Ok(Some(crate::proof::caught(runner, &known, &report, passed)))
+        };
+        let timed = |old: bool, files: &[String]| -> R<(bool, Duration, String)> {
+            let at = std::time::Instant::now();
+            let ok = run(old, None, files, None)? == Some(false);
+            let error = if ok { String::new() } else { std::fs::read(errors).map(|b| String::from_utf8_lossy(&b[b.len().saturating_sub(2000)..]).to_string()).unwrap_or_default() };
+            Ok((ok, at.elapsed(), error))
+        };
+        // The old side runs only the changed test files when the plan allows it and they pass alone; otherwise the whole old suite.
+        let (mut old_args, mut old_base) = (old_files.clone(), timed(true, &old_files)?);
+        if !old_base.0 && !old_files.is_empty() { (old_args, old_base) = (Vec::new(), timed(true, &[])?); }
+        let ((old_ok, old_time, old_error), (new_ok, new_time, new_error)) = (old_base, timed(false, &[])?);
+        let mut results = Vec::new();
+        if old_ok && new_ok {
+            let (old_limit, new_limit) = (old_time * 3 + Duration::from_secs(5), new_time * 3 + Duration::from_secs(5));
+            // A set of focused new tests is used only once it passes on the unmodified code; a set that fails there would hide nothing.
+            let usable: std::cell::RefCell<std::collections::HashMap<Vec<String>, bool>> = Default::default();
+            for m in &mutants {
+                let focus = strings(m, "tests", 10000)?;
+                for f in &focus { file_path(f)?; }
+                let result = crate::proof::decide(&mut |suite| match suite {
+                    crate::proof::Suite::Old => run(true, Some(m), &old_args, Some(old_limit)),
+                    crate::proof::Suite::NewFull => run(false, Some(m), &[], Some(new_limit)),
+                    crate::proof::Suite::NewFocused => {
+                        let known = usable.borrow().get(&focus).copied();
+                        let fine = match known { Some(fine) => fine, None => { let fine = run(false, None, &focus, Some(new_limit))? == Some(false); usable.borrow_mut().insert(focus.clone(), fine); fine } };
+                        if fine { run(false, Some(m), &focus, Some(new_limit)) } else { Ok(Some(false)) }
+                    }
+                }, !focus.is_empty())?;
+                results.push(json!({ "id": m["id"], "result": result }));
+            }
+        }
+        println!("{}", json!({ "version": 1, "baseline": { "old": old_ok, "new": new_ok, "old_error": old_error, "new_error": new_error },
+            "milliseconds": { "old": old_time.as_millis() as u64, "new": new_time.as_millis() as u64, "total": started.elapsed().as_millis() as u64 }, "mutants": results }));
         Ok(())
     }
     pub fn exec(command: &[String]) -> R<()> {
         let c = argv(&json!(command))?;
+        // The tests get their own writable copy of the read-only snapshot, as in a CI checkout; the copy is gone when the sandbox is.
+        for e in std::fs::read_dir("/input")? { let e = e?; if e.file_name() != "node_modules" { copy_entry(&e.path(), &Path::new("/workspace").join(e.file_name()))?; } }
         let log = Path::new("/tmp/.kern-behavior");
-        let status = Command::new(&c[0]).args(&c[1..]).current_dir("/workspace").env_clear().envs(ENV)
+        let status = Command::new(&c[0]).args(&c[1..]).current_dir("/workspace").env_clear().envs(TEST_ENV)
             .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", log).stdin(Stdio::null()).status()?;
         quiesce()?;
         print!("{BEHAVIOR}{}", std::fs::read_to_string(log).unwrap_or_default());
@@ -318,5 +460,6 @@ mod inside {
     pub fn runner() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn exec(_: &[String]) -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
+    pub fn mutate() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
 }
-pub use inside::{exec, runner, setup};
+pub use inside::{exec, mutate, runner, setup};
