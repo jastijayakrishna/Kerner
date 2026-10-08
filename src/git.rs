@@ -277,8 +277,10 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
         let (a, b) = (base.get(name), candidate.get(name));
         if let (Some(a), Some(b)) = (a, b) && a.mode == b.mode && a.oid == b.oid { continue; }
         ensure!(![a, b].iter().flatten().any(|e| e.link()), "Symlinks and submodules cannot change: {name}. Kern checks regular files only; make this change yourself");
-        ensure!(allowed(&policy.write, name), "Write outside contract: {name}. To allow it, add \"{name}\" to filesystem.read and filesystem.write in the task contract");
-        ensure!(!protected(name), "Protected dependency/configuration path: {name}. Agents may never change dependency, CI or secret files; make this change yourself");
+        // A task that approves packages lets package.json and the lockfile change; deps::screen then holds them to the approved packages.
+        let manifest = !policy.approved.is_empty() && (name == crate::deps::MANIFEST || name == crate::deps::LOCKFILE);
+        ensure!(manifest || allowed(&policy.write, name), "Write outside contract: {name}. To allow it, add \"{name}\" to filesystem.read and filesystem.write in the task contract");
+        ensure!(manifest || !protected(name), "Protected dependency/configuration path: {name}. Agents may never change dependency, CI or secret files; make this change yourself");
         let mut texts = Vec::new();
         for e in [a, b] {
             let Some(e) = e else { texts.push(Vec::new()); continue; };
@@ -299,6 +301,9 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     let counted = if lines > l.lines_changed { format!("more than {} line{}", l.lines_changed, if l.lines_changed == 1 { "" } else { "s" }) } else { format!("{lines} line{}", if lines == 1 { "" } else { "s" }) };
     ensure!(n <= l.files_changed && lines <= l.lines_changed, "Change budget exceeded: {n} file{} and {counted} changed; the contract allows {} files and {} lines. Raise limits.files_changed or limits.lines_changed if this is intended", if n == 1 { "" } else { "s" }, l.files_changed, l.lines_changed);
     let mut out = json!({ "files": result, "lines_changed": lines });
+    if !policy.approved.is_empty() && [crate::deps::MANIFEST, crate::deps::LOCKFILE].iter().any(|m| base.get(*m).map(|e| &e.oid) != candidate.get(*m).map(|e| &e.oid)) {
+        out["dependencies"] = crate::deps::screen(base, candidate, &policy.approved)?;
+    }
     if let Some(t) = &policy.tests { out["tests"] = crate::proof::screen(base, candidate, &out, t)?; }
     Ok(out)
 }

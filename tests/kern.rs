@@ -368,6 +368,71 @@ fn hosted_verifier_serves_profiles_and_verifies_only_authorised_known_runs() {
     }
 }
 
+fn npm_manifest(deps: &[(&str, &str)], scripts: Value) -> String {
+    serde_json::to_string_pretty(&json!({ "name": "app", "version": "1.0.0", "scripts": scripts, "dependencies": deps.iter().map(|(n, v)| (n.to_string(), json!(v))).collect::<serde_json::Map<_, _>>() })).unwrap()
+}
+fn npm_lock(root: &[(&str, &str)], packages: &[(&str, &str, &[&str])]) -> String {
+    let mut map = serde_json::Map::new();
+    map.insert(String::new(), json!({ "name": "app", "version": "1.0.0", "dependencies": root.iter().map(|(n, v)| (n.to_string(), json!(v))).collect::<serde_json::Map<_, _>>() }));
+    for (name, version, deps) in packages {
+        map.insert(format!("node_modules/{name}"), json!({ "version": version, "resolved": format!("https://registry.npmjs.org/{name}/-/{name}-{version}.tgz"), "integrity": "sha512-abc",
+            "dependencies": deps.iter().map(|d| (d.to_string(), json!("*"))).collect::<serde_json::Map<_, _>>() }));
+    }
+    serde_json::to_string_pretty(&json!({ "name": "app", "version": "1.0.0", "lockfileVersion": 3, "requires": true, "packages": map })).unwrap()
+}
+#[test]
+fn agents_change_dependencies_only_for_packages_the_task_approves() {
+    let mut v = policy_value();
+    v["dependencies"] = json!({ "manager": "npm", "lockfile": "package-lock.json", "allow": ["zod", "@types/*"] });
+    let c = contract(&v).unwrap();
+    assert_eq!(c.approved, vec!["@types/*".to_string(), "zod".to_string()]);
+    for bad in [json!(["Zod"]), json!(["../x"]), json!(["@scope"]), json!(["zod", "zod"]), json!([""]), json!(["*"])] {
+        let mut b = v.clone();
+        b["dependencies"]["allow"] = bad;
+        denied(contract(&b), "dependencies.allow");
+    }
+    let mut narrower = v.clone();
+    narrower["dependencies"]["allow"] = json!(["zod"]);
+    attenuate(&v, &narrower).unwrap();
+    denied(attenuate(&narrower, &v), "approve");
+    let scripts = json!({ "test": "mocha" });
+    let lodash = [("lodash", "4.17.20", &[][..])];
+    let base = files(&[("package.json", &npm_manifest(&[("lodash", "^4.17.0")], scripts.clone())), ("package-lock.json", &npm_lock(&[("lodash", "^4.17.0")], &lodash)), ("src/a.js", "module.exports = 1;\n")]);
+    let with = |manifest: &str, lock: &str, code: &str| { let mut f = base.clone(); f.insert("package.json".into(), file(manifest)); f.insert("package-lock.json".into(), file(lock)); f.insert("src/a.js".into(), file(code)); f };
+    let zod_manifest = npm_manifest(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], scripts.clone());
+    let zod_lock = npm_lock(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], &[("lodash", "4.17.20", &[]), ("zod", "3.23.0", &["zod-helper"]), ("zod-helper", "1.0.0", &[])]);
+    // adding an approved package, with what it needs, is accepted, and the code may then import it
+    let ok = with(&zod_manifest, &zod_lock, "const z = require('zod');\nmodule.exports = z;\n");
+    let changed = git::changes(&base, &ok, &c).unwrap();
+    assert_eq!(changed["dependencies"]["approved"], json!(["zod"]), "{changed}");
+    capability::check(&base, &ok, &changed, &std::collections::BTreeMap::new()).unwrap();
+    // without approval the same files stay out of reach
+    let mut strict = v.clone();
+    strict["dependencies"] = json!({ "manager": "npm", "lockfile": "package-lock.json" });
+    denied(git::changes(&base, &ok, &contract(&strict).unwrap()), "package-lock.json");
+    // a package the task did not approve, a change outside the dependency entries, and a quiet move of another package are refused
+    let pad = with(&npm_manifest(&[("lodash", "^4.17.0"), ("left-pad", "^1.0.0")], scripts.clone()), &npm_lock(&[("lodash", "^4.17.0"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.20", &[]), ("left-pad", "1.3.0", &[])]), "module.exports = 1;\n");
+    denied(git::changes(&base, &pad, &c), "Dependency change not approved: left-pad");
+    let told = kern::feedback::explain(&reason(git::changes(&base, &pad, &c)), Some(&c));
+    assert!(told["agent_fixable"] == true && told["violations"][0]["rule"] == "dependency" && told["violations"][0]["instruction"].as_str().unwrap().contains("`left-pad`"), "{told}");
+    let hook = with(&npm_manifest(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], json!({ "test": "mocha", "postinstall": "node steal.js" })), &zod_lock, "module.exports = 1;\n");
+    denied(git::changes(&base, &hook, &c), "package.json may only change dependency entries, but this change touches: scripts");
+    let moved = with(&zod_manifest, &npm_lock(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], &[("lodash", "4.17.21", &[]), ("zod", "3.23.0", &["zod-helper"]), ("zod-helper", "1.0.0", &[])]), "module.exports = 1;\n");
+    denied(git::changes(&base, &moved, &c), "The lockfile changes packages the task did not approve: lodash");
+    let mut reformatted: Value = serde_json::from_str(&zod_lock).unwrap();
+    reformatted["lockfileVersion"] = json!(2);
+    denied(git::changes(&base, &with(&zod_manifest, &reformatted.to_string(), "module.exports = 1;\n"), &c), "The lockfile format changed");
+    // updating an approved package in the lockfile alone is fine, and a scope approval covers the whole scope
+    let bumped = with(&zod_manifest, &npm_lock(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], &[("lodash", "4.17.20", &[]), ("zod", "3.23.8", &["zod-helper"]), ("zod-helper", "1.0.0", &[])]), "module.exports = 1;\n");
+    git::changes(&ok, &bumped, &c).unwrap();
+    let types = with(&npm_manifest(&[("lodash", "^4.17.0"), ("@types/node", "^22.0.0")], scripts.clone()), &npm_lock(&[("lodash", "^4.17.0"), ("@types/node", "^22.0.0")], &[("lodash", "4.17.20", &[]), ("@types/node", "22.0.0", &[])]), "module.exports = 1;\n");
+    assert_eq!(git::changes(&base, &types, &c).unwrap()["dependencies"]["approved"], json!(["@types/node"]));
+    // importing a package that was not approved is still new authority
+    let sneaky = with(&zod_manifest, &zod_lock, "const pad = require('left-pad');\nmodule.exports = pad;\n");
+    let changed = git::changes(&base, &sneaky, &c).unwrap();
+    denied(capability::check(&base, &sneaky, &changed, &std::collections::BTreeMap::new()), "package:left-pad");
+}
+
 #[test]
 fn dependency_installs_are_reused_only_for_the_same_manifests_registry_and_image() {
     use kern::flow::DepsCache;

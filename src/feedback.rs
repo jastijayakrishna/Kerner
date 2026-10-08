@@ -176,6 +176,21 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     if r == "Case-colliding tree path" || r == "File/directory collision" {
         return (true, vec![fix("file-name", None, "Rename files so that no two paths differ only in upper and lower case, and no file has the same path as a directory.".into())]);
     }
+    if let Some((name, list)) = r.strip_prefix("Dependency change not approved: ").and_then(|x| x.split_once(". The task approves changes only to: ")) {
+        return (true, vec![fix("dependency", Some("package.json"), format!("Do not add or change {}: this task may only add or update {}.", code(name), codes(list.split(", "))))]);
+    }
+    if let Some(fields) = r.strip_prefix("package.json may only change dependency entries, but this change touches: ") {
+        return (true, vec![fix("dependency", Some("package.json"), format!("Leave {} in package.json as it was: only the entries of approved packages may change.", code(fields)))]);
+    }
+    if let Some(names) = r.strip_prefix("The lockfile changes packages the task did not approve: ") {
+        return (true, vec![fix("dependency", Some("package-lock.json"), format!("Regenerate package-lock.json so that only the approved packages and what they need change; leave {} as it was.", code(names)))]);
+    }
+    if r == "The lockfile format changed: keep lockfileVersion as it was" {
+        return (true, vec![fix("dependency", Some("package-lock.json"), "Keep package-lock.json in its existing format (lockfileVersion), for example by using the project's npm version.".into())]);
+    }
+    if let Some(p) = r.strip_prefix("Dependency files must be valid JSON: ") {
+        return (true, vec![fix("dependency", Some(p), format!("Fix {} so it is valid JSON.", code(p)))]);
+    }
     if let Some(n) = r.strip_prefix("The agent exited with code ") && digits(n.strip_prefix('-').unwrap_or(n)).is_some() {
         return (true, vec![fix("agent", None, format!("Your previous run ended with exit code {n}. Finish the task and exit with code 0."))]);
     }

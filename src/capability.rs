@@ -252,6 +252,8 @@ fn inspectable(files: &Files, name: &str) -> Option<BTreeSet<String>> {
 pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTreeMap<String, Vec<String>>) -> R<Value> {
     let (mut report, mut siblings) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
     let (mut widened, mut grant) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
+    // Packages the task approved and the change added may be imported.
+    let approved = crate::deps::imports(changed);
     for f in changed["files"].as_array().into_iter().flatten() {
         let (name, op) = (f["path"].as_str().unwrap_or(""), f["operation"].as_str().unwrap_or(""));
         if op == "delete" { continue; }
@@ -263,7 +265,7 @@ pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTre
             siblings.entry(dir.clone()).or_insert_with(|| base.keys().filter(|f| is_code(f) && f.rsplit_once('/').map_or("", |(d, _)| d) == dir).filter_map(|f| inspectable(base, f)).flatten().collect()).clone()
         };
         let granted: BTreeSet<&String> = allowances.iter().filter(|(p, _)| covers(p, name)).flat_map(|(_, caps)| caps).collect();
-        let added: Vec<&String> = after.iter().filter(|c| !before.contains(*c) && !granted.contains(c)).collect();
+        let added: Vec<&String> = after.iter().filter(|c| !before.contains(*c) && !granted.contains(c) && !approved.contains(*c)).collect();
         if !added.is_empty() {
             widened.push(format!("{name} +[{}]", added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
             grant.entry(name.rsplit_once('/').map_or(name.to_string(), |(d, _)| format!("{d}/"))).or_default().extend(added.iter().map(|s| s.to_string()));

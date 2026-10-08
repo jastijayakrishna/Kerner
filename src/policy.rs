@@ -46,7 +46,7 @@ impl Runner {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tests { pub paths: Vec<String>, pub kind: Kind, pub runner: Runner, pub command: Vec<String>, pub edits: Edits }
 #[derive(Clone, Debug)]
-pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String>, pub tests: Option<Tests> }
+pub struct Contract { pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub approved: Vec<String>, pub limits: Limits, pub checks: Vec<String>, pub behaviors: Vec<String>, pub tests: Option<Tests> }
 
 pub fn contract(input: &Value) -> R<Contract> {
     let version = input.get("version").and_then(Value::as_u64);
@@ -75,12 +75,19 @@ pub fn contract(input: &Value) -> R<Contract> {
     ensure!(input["network"].as_array().is_some_and(Vec::is_empty), "Contracts grant no network");
     ensure!(input["secrets"].as_array().is_some_and(Vec::is_empty), "Contracts grant no secrets");
     ensure!(input["publish"] == json!(false), "Agent publication is prohibited");
-    let dependencies = match input.get("dependencies") {
-        None | Some(Value::Null) => false,
+    // A task may approve packages an agent can add or update; then package.json and the lockfile may change, but only for those packages.
+    let (dependencies, approved) = match input.get("dependencies") {
+        None | Some(Value::Null) => (false, Vec::new()),
         Some(d) => {
-            exact(d, &["manager", "lockfile"], "dependencies")?;
+            exact(d, if d.get("allow").is_some() { &["manager", "lockfile", "allow"] } else { &["manager", "lockfile"] }, "dependencies")?;
             ensure!(d["manager"] == "npm" && d["lockfile"] == "package-lock.json", "Only npm package-lock.json dependency installation is supported");
-            true
+            let mut approved = if d.get("allow").is_some() { strings(d, "allow", 64).map_err(|_| Denied("dependencies.allow must list npm package names or scopes such as @types/*".into()))? } else { Vec::new() };
+            let given = approved.len();
+            approved.sort();
+            approved.dedup();
+            ensure!(approved.len() == given, "dependencies.allow must not repeat a package");
+            if d.get("allow").is_some() { crate::deps::validate(&approved)?; }
+            (true, approved)
         }
     };
     let l = &input["limits"];
@@ -127,7 +134,8 @@ pub fn contract(input: &Value) -> R<Contract> {
             Some(Tests { paths, kind, runner, command, edits })
         }
     };
-    Ok(Contract { value, task, read, write, dependencies, limits, checks, behaviors, tests })
+    if !approved.is_empty() { value["dependencies"]["allow"] = json!(approved); }
+    Ok(Contract { value, task, read, write, dependencies, approved, limits, checks, behaviors, tests })
 }
 pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     let (a, b) = (contract(original)?, contract(requested)?);
@@ -140,6 +148,7 @@ pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
     }
     ensure!(a.checks.iter().all(|c| b.checks.contains(c)), "Cannot remove a required check");
     ensure!(!b.dependencies || a.dependencies, "Cannot add dependency installation");
+    ensure!(b.approved.iter().all(|x| a.approved.contains(x)), "Cannot approve new dependencies");
     ensure!(b.behaviors.iter().all(|x| a.behaviors.contains(x)), "Cannot allow new runtime behavior");
     ensure!(a.tests.is_none() || a.tests == b.tests, "Cannot change or remove the test proof");
     Ok(b)

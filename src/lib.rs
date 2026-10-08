@@ -10,6 +10,7 @@ pub mod flow;
 pub mod github;
 pub mod promote;
 pub mod container;
+pub mod deps;
 pub mod local;
 pub mod merges;
 pub mod audit;
