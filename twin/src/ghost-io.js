@@ -64,7 +64,8 @@ export function installGhostIO({ harnessPort }) {
   net.Socket.prototype.connect = function ghostConnect(...args) {
     const first = Array.isArray(args[0]) ? args[0][0] : args[0];
     const options = first !== null && typeof first === 'object' ? first : { port: first, host: typeof args[1] === 'string' ? args[1] : 'localhost' };
-    if (options.path === undefined && loopback(options.host ?? 'localhost') && Number(options.port) === harnessPort) return realConnect.apply(this, args);
+    // Node's HTTP client always passes `path: null` (its agent's way of saying "not a pipe"), so null counts as no path too.
+    if (options.path == null && loopback(options.host ?? 'localhost') && Number(options.port) === harnessPort) return realConnect.apply(this, args);
     note('denied', `a network connection to ${options.path ?? `${options.host ?? 'localhost'}:${options.port}`}`);
     process.nextTick(() => this.destroy(refusal('A network connection')));
     return this;
