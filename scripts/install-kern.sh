@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Installs the Kern binary for the GitHub Action: the release asset pinned in action.yml, or a source build.
+# Installs the Kern binary for a GitHub Action: the release asset pinned in its action.yml, or a source build.
+# KERN_SOURCE is the folder with Kern's Cargo.toml (default: the action's own folder). KERN_STATIC=true builds a static Linux binary, which
+# also runs inside the sandboxes' images; the pinned Linux release assets are static already.
 set -euo pipefail
+src=${KERN_SOURCE:-$GITHUB_ACTION_PATH}
 case "${RUNNER_OS}-${RUNNER_ARCH}" in
   Linux-X64) asset=kern-linux-x64 digest=${KERN_SHA256_LINUX_X64:-} ;;
   Linux-ARM64) asset=kern-linux-arm64 digest=${KERN_SHA256_LINUX_ARM64:-} ;;
@@ -10,9 +13,18 @@ case "${RUNNER_OS}-${RUNNER_ARCH}" in
   *) asset="" digest="" ;;
 esac
 if [[ "${BUILD_FROM_SOURCE:-false}" == "true" || -z "${KERN_VERSION:-}" || -z "$digest" ]]; then
-  cd "$GITHUB_ACTION_PATH"
-  cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
-  bin="$GITHUB_ACTION_PATH/target/release/kern"
+  cd "$src"
+  if [[ "${KERN_STATIC:-false}" == "true" && "$RUNNER_OS" == "Linux" ]]; then
+    target="$(uname -m)-unknown-linux-musl"
+    command -v musl-gcc >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools >/dev/null; }
+    rustup target add "$target" >/dev/null
+    export "CC_${target//-/_}=musl-gcc"
+    cargo build --release --locked --quiet --target "$target" --manifest-path "$src/Cargo.toml"
+    bin="$src/target/$target/release/kern"
+  else
+    cargo build --release --locked --quiet --manifest-path "$src/Cargo.toml"
+    bin="$src/target/release/kern"
+  fi
   echo "bin=$bin" >> "$GITHUB_OUTPUT"
   echo "KERN_BIN=$bin" >> "$GITHUB_ENV"
   exit 0

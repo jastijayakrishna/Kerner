@@ -1,0 +1,178 @@
+name: kern-drive
+description: Runs every changed line of a pull request on the old and the new code in a gVisor sandbox, and comments what behaves differently and which lines nothing ran.
+branding:
+  icon: activity
+  color: gray-dark
+inputs:
+  anthropic-api-key:
+    description: Anthropic API key for the agent that writes the driver (Claude Code in restricted mode); pass a secret. Give this or claude-code-oauth-token
+    default: ""
+  claude-code-oauth-token:
+    description: A Claude Code OAuth token (from claude setup-token) in place of an API key; pass a secret
+    default: ""
+  model:
+    description: The model that writes drivers, an alias such as sonnet or opus or a full model name
+    default: sonnet
+  rounds:
+    description: At most this many rounds of driver, run and feedback (1 to 5)
+    default: "3"
+  claude-code-version:
+    description: The Claude Code version that writes drivers
+    default: "2.1.292"
+  path:
+    description: Where actions/checkout put the repository, relative to the workspace (it needs fetch-depth 0)
+    default: "."
+  build-from-source:
+    description: Build Kern with cargo instead of downloading the release binary pinned below
+    default: "false"
+  comment:
+    description: Post Kern's comment on the pull request, or update its earlier one (the workflow needs pull-requests write)
+    default: "true"
+outputs:
+  status:
+    description: RAN, NOTHING_TO_RUN (no changed line of code Kern runs), NO_DRIVER (the agent wrote none) or NOT_CHECKED (the comment says why)
+    value: ${{ steps.drive.outputs.status }}
+  percent:
+    description: The share of changed lines that ran on both the old and the new code, over all rounds; empty when nothing ran
+    value: ${{ steps.drive.outputs.percent }}
+  comment:
+    description: Path of Kern's comment (Markdown)
+    value: ${{ steps.drive.outputs.comment }}
+runs:
+  using: composite
+  steps:
+    - name: Install Kern
+      id: install
+      shell: bash
+      # Never the pull request's directory: cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory.
+      working-directory: ${{ github.action_path }}/..
+      env:
+        KERN_VERSION: ""
+        KERN_SHA256_LINUX_X64: ""
+        KERN_SHA256_LINUX_ARM64: ""
+        KERN_SOURCE: ${{ github.action_path }}/..
+        KERN_STATIC: "true"
+        BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
+      run: |
+        [ "$RUNNER_OS" = Linux ] || { echo "::error::kern-drive needs a Linux runner: its sandbox is gVisor"; exit 1; }
+        bash "$KERN_SOURCE/scripts/install-kern.sh"
+    - name: gVisor
+      shell: bash
+      run: |
+        for tool in docker git jq curl; do command -v "$tool" > /dev/null || { echo "::error::kern-drive needs $tool on the runner"; exit 1; }; done
+        if ! docker info --format '{{json .Runtimes}}' | grep '"runsc"' > /dev/null; then
+          command -v apt-get > /dev/null || { echo "::error::Docker has no gVisor runtime (runsc) and this runner is not Ubuntu or Debian: install gVisor for Docker first"; exit 1; }
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+            | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq runsc > /dev/null
+          sudo runsc install && sudo systemctl restart docker
+        fi
+    - name: Verifier
+      shell: bash
+      env:
+        KERN_BIN: ${{ steps.install.outputs.bin }}
+      run: |
+        [ -x "$KERN_BIN" ] || { echo "::error::Kern is not installed: the Install Kern step failed"; exit 1; }
+        # A throwaway verifier for this job, set up with Kern's own commands: the tools it trusts are pinned by digest.
+        W="$RUNNER_TEMP/kern-drive" && rm -rf "$W" && mkdir -p "$W/checks" && cd "$W"
+        real() { readlink -f "$(command -v "$1")"; }
+        hash() { sha256sum "$1" | cut -d' ' -f1; }
+        runsc=$(readlink -f "$(docker info --format '{{json .Runtimes.runsc}}' | jq -r .path)")
+        printf '{"host":"github-actions","deployment":"single-vm","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
+        jq -n --arg docker "$(real docker)" --arg git "$(real git)" --arg runsc "$runsc" --arg version "$("$runsc" --version)" --arg policy "$W/host-policy.json" \
+          --arg dh "$(hash "$(real docker)")" --arg gh "$(hash "$(real git)")" --arg rh "$(hash "$runsc")" --arg ph "$(hash host-policy.json)" \
+          '{ version: 1, role: "verifier", docker: { file: $docker, sha256: $dh, endpoint: "unix:///var/run/docker.sock" }, git: { file: $git, sha256: $gh },
+             runtime: { file: $runsc, sha256: $rh, version: $version, arguments: [] }, host_policy: { file: $policy, sha256: $ph } }' > verifier.json
+        "$KERN_BIN" --control verifier.json doctor > doctor.json || { cat doctor.json; exit 1; }
+        docker pull -q node:22-bookworm-slim > /dev/null
+        printf '{"version":1,"cases":[{"command":["/usr/local/bin/npm","test"],"stdout":null}]}\n' > checks/test-suite.json
+        jq -n --arg image "$(docker image inspect --format '{{.Id}}' node:22-bookworm-slim)" --arg builder "$(jq -r .builder.sha256 doctor.json)" \
+          --argjson check "$("$KERN_BIN" pin-check test-suite checks/test-suite.json)" --arg repo "$GITHUB_REPOSITORY" \
+          '{ version: 3, repository: $repo, deployment: "single-vm", executors: ["external"], image: $image,
+             builders: { executor: null, verifier: $builder }, checks: [$check], registry: null, permissions: {} }' > operator.json
+    - name: Claude Code
+      shell: bash
+      env:
+        VERSION: ${{ inputs.claude-code-version }}
+      run: |
+        [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::claude-code-version must be a version such as 2.1.292"; exit 1; }
+        case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) echo "::error::No Claude Code build for $(uname -m)"; exit 1 ;; esac
+        # The platform package is the standalone binary: npm checks it against the registry's digest and runs no install script.
+        d="$RUNNER_TEMP/claude-code" && rm -rf "$d" && mkdir -p "$d" && cd "$d"
+        npm pack --silent "@anthropic-ai/claude-code-linux-$arch@$VERSION" > /dev/null
+        tar -xzf ./*.tgz && rm -f ./*.tgz && chmod +x package/claude
+        echo "$d/package" >> "$GITHUB_PATH"
+    - name: Drive
+      id: drive
+      shell: bash
+      env:
+        KERN_BIN: ${{ steps.install.outputs.bin }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
+        KERN_DRIVE_MODEL: ${{ inputs.model }}
+        KERN_DRIVE_ROUNDS: ${{ inputs.rounds }}
+        REPO_PATH: ${{ inputs.path }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        W="$RUNNER_TEMP/kern-drive"
+        echo "comment=$W/out/comment.md" >> "$GITHUB_OUTPUT"
+        # When Kern cannot check the change, its comment says why: silence would read as "checked". The reason may quote file names or
+        # code from the pull request, so it goes into a code block, and into the warning only escaped, where it cannot start a command.
+        stop() {
+          reason=$(printf '%s' "$1" | tr -d '`\r' | head -c 2000)
+          mkdir -p "$W/out" && printf '### Kern could not check this change\n\n```\n%s\n```\n' "$reason" > "$W/out/comment.md"
+          cat "$W/out/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "status=NOT_CHECKED" >> "$GITHUB_OUTPUT"
+          echo "::warning::$(printf '%s' "$reason" | head -c 300 | sed -e 's/%/%25/g' | awk 'BEGIN { ORS = "%0A" } { print }')"
+          exit 0
+        }
+        [ -n "$HEAD_SHA" ] || stop "kern-drive runs on pull_request events."
+        [ -n "$ANTHROPIC_API_KEY$CLAUDE_CODE_OAUTH_TOKEN" ] || stop "No key for the agent that writes the driver. Pull requests from forks get no secrets, so Kern did not run this change."
+        [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
+        [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
+        repo=$(cd "$GITHUB_WORKSPACE" && cd "$REPO_PATH" && pwd) || stop "No checkout at $REPO_PATH."
+        cd "$repo"
+        if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+          git fetch --quiet --no-tags origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+        fi
+        base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null) || stop "The checkout lacks this pull request's history: check it out with actions/checkout and fetch-depth: 0."
+        jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$W/pr.md"
+        if ! "$KERN_BIN" --control "$W/verifier.json" drive auto "$repo" "$base" "$HEAD_SHA" "$W/out" "$W/operator.json" "$W/pr.md" > "$W/auto.json" 2> "$W/auto.err"; then
+          reason=$(tail -n 1 "$W/auto.err" | jq -r '.reason // empty' 2>/dev/null) || true
+          stop "${reason:-$(tail -c 1500 "$W/auto.err")}"
+        fi
+        echo "status=$(jq -r .status "$W/auto.json")" >> "$GITHUB_OUTPUT"
+        echo "percent=$(jq -r '.percent // empty' "$W/auto.json")" >> "$GITHUB_OUTPUT"
+        cat "$W/out/comment.md" >> "$GITHUB_STEP_SUMMARY"
+    - name: Comment
+      if: ${{ !cancelled() && inputs.comment == 'true' && github.event.pull_request.number }}
+      shell: bash
+      env:
+        KERN_BIN: ${{ steps.install.outputs.bin }}
+        GITHUB_TOKEN: ${{ github.token }}
+        NUMBER: ${{ github.event.pull_request.number }}
+        STATUS: ${{ steps.drive.outputs.status }}
+      run: |
+        W="$RUNNER_TEMP/kern-drive"
+        if [ ! -s "$W/out/comment.md" ]; then
+          mkdir -p "$W/out" && printf '### Kern could not check this change\n\nKern could not set itself up on this runner; the job log says why.\n' > "$W/out/comment.md"
+        fi
+        if [ ! -x "$KERN_BIN" ]; then echo "::warning::Kern was not installed, so it posted no comment"; exit 0; fi
+        # A change with no code to run gets no new comment; an earlier one of Kern's is brought up to date.
+        mode=; [ "$STATUS" = NOTHING_TO_RUN ] && mode=update-only
+        if ! "$KERN_BIN" drive post "$W/out" "$GITHUB_REPOSITORY" "$NUMBER" $mode > "$W/post.json" 2> "$W/post.err"; then
+          why=$(tail -n 1 "$W/post.err" | jq -r '.reason // empty' 2>/dev/null | head -c 300 | tr -d '\r\n%') || true
+          echo "::warning::Kern could not post its comment (${why:-no reason given}). The workflow needs pull-requests write, and a pull request from a fork gets a read-only token. The job summary has the comment."
+        elif [ "$(jq -r .status "$W/post.json")" = STALE ]; then
+          echo "::notice::This run checked an older commit of the pull request, so it left the comment about the newer one alone."
+        fi
+    - name: Clean
+      if: ${{ always() }}
+      shell: bash
+      env:
+        KERN_BIN: ${{ steps.install.outputs.bin }}
+      run: |
+        W="$RUNNER_TEMP/kern-drive"
+        if [ -f "$W/out/setup.json" ] && [ -x "$KERN_BIN" ]; then "$KERN_BIN" --control "$W/verifier.json" drive clean "$W/out" > /dev/null || echo "::warning::Kern could not remove its sandbox volumes"; fi

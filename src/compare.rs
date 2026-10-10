@@ -216,8 +216,27 @@ pub fn plan(base: &Files, candidate: &Files, changed: &Value, policy: &Contract,
         "changes": changes, "examples": examples, "removals": removals(base, candidate, changed, policy), "app": policy.app.as_ref().map(app_json) }))
 }
 
-/// Lines a change only deletes: maximal runs of the old file's lines with nothing added in their place (Myers' diff, at most 1000 edits).
+/// Lines a change only deletes: maximal runs of the old file's lines with nothing added in their place.
 fn pure_removals(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
+    let (mut out, mut hunk) = (Vec::new(), Vec::new());
+    for s in edits(a, b)?.into_iter().chain(std::iter::once(Step::Keep)) {
+        if !matches!(s, Step::Keep) { hunk.push(s); continue; }
+        let deleted: Vec<usize> = hunk.iter().filter_map(|h| if let Step::Delete(i) = h { Some(*i) } else { None }).collect();
+        if !hunk.is_empty() && deleted.len() == hunk.len() { out.push((deleted.iter().min().copied().unwrap_or(0), deleted.len())); }
+        hunk.clear();
+    }
+    Some(out)
+}
+/// The lines a change touches: indices of the old lines it deletes or replaces and of the new lines it inserts or puts in their place.
+pub fn changed_lines(a: &[&str], b: &[&str]) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (mut old, mut new) = (Vec::new(), Vec::new());
+    for s in edits(a, b)? {
+        match s { Step::Delete(i) => old.push(i), Step::Insert(j) => new.push(j), Step::Keep => {} }
+    }
+    Some((old, new))
+}
+/// Myers' line diff (at most 1000 edits), as steps over all of both versions; indices are into `a` and `b`.
+fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
     let mut pre = 0;
     while pre < a.len() && pre < b.len() && a[pre] == b[pre] { pre += 1; }
     let mut suf = 0;
@@ -241,8 +260,8 @@ fn pure_removals(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
         }
     }
     let end = end?;
-    // Walk back through the edits, then group them into hunks: a hunk made only of deletions is code the change removed.
-    let (mut px, mut py, mut steps) = (n, m, Vec::new());
+    // Walk back through the edits; the common start and end are kept lines around them.
+    let (mut px, mut py, mut steps) = (n, m, vec![Step::Keep; suf]);
     for d in (0..=end).rev() {
         let w = &trace[d as usize];
         let at = |k: isize| w[(k + d + 1) as usize];
@@ -250,23 +269,18 @@ fn pure_removals(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
         let prev = if k == -d || (k != d && at(k - 1) < at(k + 1)) { k + 1 } else { k - 1 };
         let (qx, qy) = (at(prev), at(prev) - prev);
         while px > qx && py > qy { steps.push(Step::Keep); px -= 1; py -= 1; }
-        if d > 0 { steps.push(if px == qx { Step::Insert } else { Step::Delete((px - 1) as usize) }); }
+        if d > 0 { steps.push(if px == qx { Step::Insert(pre + (py - 1) as usize) } else { Step::Delete(pre + (px - 1) as usize) }); }
         px = qx;
         py = qy;
     }
+    steps.extend(std::iter::repeat_n(Step::Keep, pre));
     steps.reverse();
-    let (mut out, mut hunk) = (Vec::new(), Vec::new());
-    for s in steps.into_iter().chain(std::iter::once(Step::Keep)) {
-        if !matches!(s, Step::Keep) { hunk.push(s); continue; }
-        let deleted: Vec<usize> = hunk.iter().filter_map(|h| if let Step::Delete(i) = h { Some(*i) } else { None }).collect();
-        if !hunk.is_empty() && deleted.len() == hunk.len() { out.push((pre + deleted.iter().min().copied().unwrap_or(0), deleted.len())); }
-        hunk.clear();
-    }
-    Some(out)
+    Some(steps)
 }
-/// One step of a line diff: a line both versions keep, one the change deletes (its index in the old lines), or one it inserts.
+/// One step of a line diff: a line both versions keep, one the change deletes (its index in the old lines), or one it inserts (its
+/// index in the new lines).
 #[derive(Clone, Copy)]
-enum Step { Keep, Delete(usize), Insert }
+enum Step { Keep, Delete(usize), Insert(usize) }
 /// Code the change removed (`path`, `start`, `count`, `file`), for history lookups outside the verifier.
 pub fn removed_code(base: &Files, candidate: &Files, changed: &Value, policy: &Contract) -> Vec<Value> { removals(base, candidate, changed, policy) }
 /// Code the change removed: deleted modules and lines it only deleted, the ones "why was this here?" explains.

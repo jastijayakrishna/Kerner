@@ -44,7 +44,9 @@ pub fn blob_sha256(repo: &Path, oid: &str, size: u64) -> R<String> {
 
 pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: usize) -> R<Vec<u8>> {
     let repo = std::path::absolute(repo)?;
-    let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"].map(String::from).to_vec();
+    // Paths are always file names, never git's patterns: a file called `:(glob)*` from a pull request must not change what git reads.
+    let mut full: Vec<String> = ["--no-replace-objects", "--literal-pathspecs", "-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"]
+        .map(String::from).to_vec();
     full.push(repo.display().to_string());
     full.extend(args.iter().map(|a| a.to_string()));
     run(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input, timeout: Duration::from_secs(600), max_output })

@@ -39,6 +39,8 @@ impl DepsCache {
         (record["sha256"].as_str().is_some_and(is_hex64) && record["entries"].is_u64() && record["bytes"].is_u64()).then(|| (volume.to_string(), record, v["layout"] == LAYOUT))
     }
     pub fn get(&self, key: &str) -> Option<(String, Value)> { self.read(key).filter(|e| e.2).map(|(volume, record, _)| (volume, record)) }
+    /// Drops an entry, one whose volume is gone.
+    pub fn forget(&self, key: &str) { if let Some(path) = self.entry(key) { let _ = std::fs::remove_file(path); } }
     /// True when this install became the cached one; an entry that already exists is never replaced.
     pub fn put(&self, key: &str, volume: &str, record: &Value) -> R<bool> {
         let Some(path) = self.entry(key) else { return Ok(false) };
@@ -91,13 +93,15 @@ pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &s
     std::fs::create_dir(input.join("node_modules"))?;
     let cache = DepsCache::from_env();
     let key = DepsCache::key(files, registry, image)?;
-    if let Some((name, record)) = cache.as_ref().and_then(|c| c.get(&key)).filter(|(name, _)| sandbox::volume_exists(name)) {
-        return Ok(Dependencies { volume: Volume::cached(name), record });
+    if let Some(c) = &cache && let Some((name, record)) = c.get(&key) {
+        if sandbox::volume_exists(&name) { return Ok(Dependencies { volume: Volume::cached(name), record }); }
+        // Its volume was removed by hand: the entry goes too, so this install becomes the cached one.
+        c.forget(&key);
     }
     let control = root.join("dependency-control");
     sandbox::control_dir(&control, Some(("setup.json", &json!({ "registry": registry, "timeout_seconds": SETUP.timeout_seconds }))))?;
     let mut volume = Volume::create()?;
-    let out = sandbox::execute(&Spec { image, snapshot: &input, control: &control, writable: &[], limits: &SETUP, entry: vec!["__setup".into()], network: "bridge", volumes: vec![(&volume.0, "/workspace/node_modules", false)], root: true, home_mb: 1024, scratch: false })?;
+    let out = sandbox::execute(&Spec { image, snapshot: &input, control: &control, writable: &[], limits: &SETUP, entry: vec!["__setup".into()], network: "bridge", volumes: vec![(&volume.0, "/workspace/node_modules", false)], root: true, home_mb: 1024, scratch: false, workspace: None })?;
     ensure!(out.exit_code == 0, "Dependency installation failed in the sandbox");
     let record: Value = serde_json::from_slice(&out.stdout)?;
     exact(&record, &["version", "entries", "bytes", "sha256"], "dependency record")?;
@@ -162,7 +166,7 @@ pub fn run_agent(job: &Job, output: &Path) -> R<Value> {
     let control = root.join("agent-control");
     sandbox::control_dir(&control, Some(("config.json", &json!({ "write": policy.write, "limits": policy.value["limits"], "command": command }))))?;
     let volumes = deps.as_ref().map(|d| vec![(d.volume.0.as_str(), "/workspace/node_modules", true)]).unwrap_or_default();
-    let exec = sandbox::execute(&Spec { image: &op.image, snapshot: &snapshot, control: &control, writable: &policy.write, limits: &policy.limits, entry: vec!["__runner".into()], network: "none", volumes, root: false, home_mb: 0, scratch: false })?;
+    let exec = sandbox::execute(&Spec { image: &op.image, snapshot: &snapshot, control: &control, writable: &policy.write, limits: &policy.limits, entry: vec!["__runner".into()], network: "none", volumes, root: false, home_mb: 0, scratch: false, workspace: None })?;
     ensure!(exec.exit_code == 0, "Agent command failed or exceeded its limits in the sandbox");
     ensure!(Some(&exec.builder.0) == op.executor_builder.as_ref(), "Executor builder identity mismatch");
     let candidate = candidate_files(&original, &serde_json::from_slice(&exec.stdout)?, policy)?;
@@ -304,7 +308,7 @@ fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limit
         let case_limits = Limits { timeout_seconds: remaining.min(limits.timeout_seconds), ..limits.clone() };
         let entry = std::iter::once("__exec".to_string()).chain(command.iter().cloned()).collect();
         let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
-        let out = sandbox::execute(&Spec { image, snapshot, control: &control, writable: &[], limits: &case_limits, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })
+        let out = sandbox::execute(&Spec { image, snapshot, control: &control, writable: &[], limits: &case_limits, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true, workspace: None })
             .map_err(|e| Denied(format!("Check {} case {} failed: {e}", spec.id, i + 1)))?;
         let (stdout, behavior) = sandbox::split_behavior(&out.stdout);
         seen.extend(behavior.ok_or_else(|| Denied(format!("Check {} case {} left no behavior record{}", spec.id, i + 1, if judge { "" } else { " on the base commit; re-run or raise limits.timeout_seconds" })))?);
@@ -394,7 +398,7 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         gate.run(|| {
             let volumes = vol.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
             let entry = ["__exec", "/usr/local/bin/node", "/kern/probe.cjs", "/kern/probe.json"].map(String::from).to_vec();
-            let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control, writable: &[], limits: &probe_limits, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })?;
+            let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control, writable: &[], limits: &probe_limits, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true, workspace: None })?;
             ensure!(out.exit_code == 0, "the probe run failed (exit code {})", out.exit_code);
             let (stdout, behavior) = sandbox::split_behavior(&out.stdout);
             let behavior = behavior.ok_or_else(|| Denied("the probe run did not finish".into()))?;
@@ -483,7 +487,7 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
                 let volumes = vol.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
                 let at = match which { proof::Run::Base => &baseline_snapshot, proof::Run::New => &snapshot, proof::Run::Kept => &kept_snapshot, proof::Run::Old => &old_snapshot };
                 let entry = entry.iter().chain(files).cloned().collect();
-                let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control: &control, writable: &[], limits: l, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true })?;
+                let out = sandbox::execute(&Spec { image: &op.image, snapshot: at, control: &control, writable: &[], limits: l, entry, network: "none", volumes, root: false, home_mb: 0, scratch: true, workspace: None })?;
                 let (report, behavior) = sandbox::split_behavior(&out.stdout);
                 ensure!(behavior.is_some(), "the test command did not run to completion");
                 Ok(proof::Output { stdout: report.to_vec(), exit_code: out.exit_code })
@@ -502,7 +506,7 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
                         sandbox::control_dir(&planting, Some(("mutate.json", &part.json(l.timeout_seconds.saturating_sub(15).max(1)))))?;
                         git::materialize(Some(store), old_tests, &planting.join("old"), None)?;
                         let volumes = volume.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
-                        let out = gate.run(|| sandbox::execute(&Spec { image: &op.image, snapshot, control: &planting, writable: &[], limits: l, entry: vec!["__mutate".into()], network: "none", volumes, root: false, home_mb: 0, scratch: true }))?;
+                        let out = gate.run(|| sandbox::execute(&Spec { image: &op.image, snapshot, control: &planting, writable: &[], limits: l, entry: vec!["__mutate".into()], network: "none", volumes, root: false, home_mb: 0, scratch: true, workspace: None }))?;
                         ensure!(out.exit_code == 0, "the planting run failed (exit code {})", out.exit_code);
                         let text = String::from_utf8_lossy(&out.stdout);
                         Ok(serde_json::from_str(text.lines().rev().find(|line| line.starts_with('{')).unwrap_or("{}"))?)

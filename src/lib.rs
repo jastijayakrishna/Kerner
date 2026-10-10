@@ -18,3 +18,4 @@ pub mod audit;
 pub mod init;
 pub mod serve;
 pub mod reverify;
+pub mod drive;

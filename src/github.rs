@@ -11,6 +11,13 @@ pub fn repository(name: &str) -> bool {
 
 pub struct Api { agent: ureq::Agent, base: String, token: String }
 impl Api {
+    /// A client for an explicit API root and token (GitHub Enterprise, tests); `from_env` reads both from the environment.
+    pub fn new(base: &str, token: &str) -> R<Api> {
+        let base = base.trim_end_matches('/').to_string();
+        ensure!(base.starts_with("https://") || ["http://127.0.0.1:", "http://localhost:"].iter().any(|p| base.starts_with(p)), "The GitHub API URL must use https");
+        let agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into();
+        Ok(Api { agent, base, token: token.to_string() })
+    }
     pub fn from_env(purpose: &str) -> R<Api> {
         let base = env("GITHUB_API_URL").unwrap_or_else(|| "https://api.github.com".into()).trim_end_matches('/').to_string();
         ensure!(base.starts_with("https://") || ["http://127.0.0.1:", "http://localhost:"].iter().any(|p| base.starts_with(p)), "GITHUB_API_URL must use https");

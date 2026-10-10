@@ -18,6 +18,27 @@ pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Pat
     env.extend([("PATH".into(), String::new()), ("DOCKER_CONFIG".into(), dir.display().to_string()), ("XDG_CONFIG_HOME".into(), dir.display().to_string())]);
     Ok((binary, full, env))
 }
+/// Marks each part of a drive run's report: `MARK name length\n`, then exactly that many bytes. Parts are read by length, never by
+/// searching for the next mark, so nothing the code under test prints can forge one.
+pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
+/// The parts of a drive run's report, in order: what the driver printed, its error output, line coverage (c8's JSON), the calls Kern
+/// recorded into the changed modules, and what the code did (the behaviour recorder).
+pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
+pub fn drive_parts(stdout: &[u8]) -> R<std::collections::BTreeMap<String, Vec<u8>>> {
+    let (mut parts, mut at) = (std::collections::BTreeMap::new(), 0usize);
+    for name in DRIVE_PARTS {
+        let head = format!("{DRIVE_MARK}{name} ");
+        ensure!(stdout.get(at..at + head.len()) == Some(head.as_bytes()), "The drive run's report is incomplete");
+        at += head.len();
+        let nl = stdout[at..].iter().position(|b| *b == b'\n').map(|p| p + at).ok_or_else(|| Denied("The drive run's report is incomplete".into()))?;
+        let len: usize = std::str::from_utf8(&stdout[at..nl]).ok().and_then(|s| s.parse().ok()).ok_or_else(|| Denied("The drive run's report is malformed".into()))?;
+        let body = stdout.get(nl + 1..nl + 1 + len).ok_or_else(|| Denied("The drive run's report is incomplete".into()))?;
+        parts.insert(name.to_string(), body.to_vec());
+        at = nl + 1 + len;
+    }
+    ensure!(at == stdout.len(), "The drive run's report has unexpected data");
+    Ok(parts)
+}
 pub const BEHAVIOR: &str = "\n\u{1e}kern-behavior\u{1e}\n";
 fn with_docker<T>(args: &[&str], command: &[&str], f: impl FnOnce(&Path, &[String], Vec<(String, String)>, &Path) -> R<T>) -> R<T> {
     let c = control()?;
@@ -109,18 +130,57 @@ impl Volume {
     }
     pub fn cached(name: String) -> Volume { Volume(name, true) }
     pub fn keep(&mut self) { self.1 = true; }
+    /// Whether the volume outlives its owner (the dependency cache's own).
+    pub fn kept(&self) -> bool { self.1 }
 }
 impl Drop for Volume {
     fn drop(&mut self) { if !self.1 { remove_volume(&self.0); } }
 }
 pub fn volume_exists(name: &str) -> bool { docker(&["volume", "inspect", name], Duration::from_secs(60), 1 << 20).is_ok() }
+/// A Yarn 2+ settings file without the settings that run the repository's own JavaScript during an install (`yarnPath`, `plugins`); every
+/// other setting, such as the registry, stays.
+pub fn yarnrc_without_code(text: &str) -> String {
+    let (mut out, mut skipping) = (String::new(), false);
+    for line in text.lines() {
+        let top = !line.is_empty() && !line.starts_with([' ', '\t', '-', '#']);
+        if top { skipping = ["yarnPath", "plugins"].iter().any(|k| line.strip_prefix(k).is_some_and(|r| r.trim_start().starts_with(':'))); }
+        if !skipping { out.push_str(line); out.push('\n'); }
+    }
+    out
+}
+/// A Bun project's package.json as npm can install it (Kern installs Bun projects with npm; it does not read bun.lock): `workspace:`
+/// versions become `*` (npm links the project's own package from its workspaces), `catalog:` versions become the catalog's (`*` when it
+/// has none), and the object form of `workspaces` becomes the list npm reads. None when nothing needs to change.
+pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
+    let mut pkg: Value = serde_json::from_str(text).ok()?;
+    let root: Value = serde_json::from_str(root).unwrap_or(Value::Null);
+    let catalog = |group: &str, name: &str| [&root, &root["workspaces"]].iter()
+        .find_map(|at| (if group.is_empty() { &at["catalog"] } else { &at["catalogs"][group] })[name].as_str().map(str::to_string));
+    let mut changed = false;
+    if pkg["workspaces"].is_object() { pkg["workspaces"] = pkg["workspaces"]["packages"].take(); changed = true; }
+    for field in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
+        for (name, version) in pkg[field].as_object_mut().into_iter().flatten() {
+            let new = match version.as_str() {
+                Some(v) if v.starts_with("workspace:") => "*".to_string(),
+                Some(v) if v.starts_with("catalog:") => catalog(v["catalog:".len()..].trim(), name).unwrap_or_else(|| "*".into()),
+                _ => continue,
+            };
+            *version = Value::String(new);
+            changed = true;
+        }
+    }
+    changed.then(|| serde_json::to_string_pretty(&pkg).unwrap_or_default())
+}
 pub fn remove_volume(name: &str) { let _ = docker(&["volume", "rm", "--force", name], Duration::from_secs(120), 4096); }
 
+#[derive(Clone)]
 pub struct Spec<'a> {
     pub image: &'a str, pub snapshot: &'a Path, pub control: &'a Path, pub writable: &'a [String], pub limits: &'a Limits, pub entry: Vec<String>,
     pub network: &'a str, pub volumes: Vec<(&'a str, &'a str, bool)>, pub root: bool, pub home_mb: u64,
     /// The snapshot is only a read-only input and /workspace is an in-memory copy the entry point may change (tests and planted bugs).
     pub scratch: bool,
+    /// An installed tree in place of the snapshot at /workspace (volume, read-only): a drive run reads it, its setup alone writes it.
+    pub workspace: Option<(&'a str, bool)>,
 }
 /// Folders inside node_modules where tools keep caches and temporary files (Vite bundles its config into .vite-temp). The shared install is
 /// read-only; these get an empty in-memory folder for each run, on mount points the install creates.
@@ -130,24 +190,44 @@ fn mount(source: &Path, target: &str) -> R<[String; 2]> {
     ensure!(!s.contains([',', '\n', '"']), "Unsupported mount source");
     Ok(["--mount".into(), format!("type=bind,source={s},target={target},readonly")])
 }
+/// The CPUs a sandbox gets. Installing a large project's dependencies is CPU-bound under gVisor: a drive setup gets up to 4, never more
+/// than the machine has; everything else runs on one.
+fn cpus(spec: &Spec) -> usize {
+    if spec.entry.first().is_some_and(|e| e == "__drive_setup") { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4) } else { 1 }
+}
 pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
+    let (drive, drive_setup) = (spec.entry.first().is_some_and(|e| e == "__drive"), spec.entry.first().is_some_and(|e| e == "__drive_setup"));
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
-    ensure!(spec.volumes.iter().all(|(v, t, _)| v.starts_with("kern-deps-") && *t == "/workspace/node_modules"), "Unexpected volume");
+    // Kern's driver tools are mounted read-only, at /kern-tools/node_modules, and only into drive runs.
+    ensure!(spec.volumes.iter().all(|(v, t, ro)| v.starts_with("kern-deps-") && (*t == "/workspace/node_modules" || (*t == "/kern-tools/node_modules" && *ro && drive))), "Unexpected volume");
+    if drive { ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch, "A drive run reads an installed tree read-only, as an unprivileged user without a network"); }
+    if drive_setup { ensure!(matches!(spec.workspace, Some((_, false))) && spec.network == "bridge" && spec.root && spec.volumes.is_empty() && spec.writable.is_empty() && !spec.scratch, "A drive setup installs into its own tree volume as root with a network, and mounts nothing else"); }
+    ensure!(spec.workspace.is_none_or(|(v, _)| (drive || drive_setup) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive || drive_setup)), "Only drive runs and their setup mount a tree volume, and only one Kern made");
     ensure!(spec.entry.first().is_some_and(|e| e.starts_with("__")), "Sandbox entry must be a Kern entry point");
     ensure!(!spec.scratch || (spec.writable.is_empty() && !spec.root && spec.network == "none"), "A scratch workspace is only for an unprivileged run without write grants or network");
     ensure!(spec.scratch || !matches!(spec.entry[0].as_str(), "__exec" | "__mutate"), "Tests run only on a throwaway copy of the workspace");
     let l = spec.limits;
     let user = if spec.root { "0:0" } else { "1000:1000" };
+    let cpus = cpus(spec);
+    // A large project's module graph opens more than 1,024 files at once as it loads, and so does its install: drive runs and their
+    // setup may hold 65,536.
+    let files = if drive || drive_setup { "nofile=65536:65536" } else { "nofile=1024:1024" };
     let mut a: Vec<String> = [
         "create", "--name", name, "--pull=never", "--runtime=runsc", &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
-        "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), "--cpus=1",
-        "--ulimit", "nofile=1024:1024", "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
+        "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
+        "--ulimit", files, "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
         "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777",
     ].iter().map(|s| s.to_string()).collect();
-    if spec.scratch {
-        a.extend(["--tmpfs".into(), format!("/workspace:rw,nosuid,nodev,size={},uid=1000,gid=1000,mode=0700", l.total_bytes * 2 + 268435456)]);
-    } else {
-        a.extend(mount(spec.snapshot, "/workspace")?);
+    match spec.workspace {
+        Some((volume, readonly)) => {
+            a.extend(["--mount".into(), format!("type=volume,source={volume},target=/workspace{}", if readonly { ",readonly" } else { "" })]);
+            // The installed tree stays read-only; the folders tools keep caches in are writable, in memory, as for a verification's install.
+            for dir in CACHE_DIRS.iter().filter(|_| readonly) {
+                a.extend(["--tmpfs".into(), format!("/workspace/node_modules/{dir}:rw,nosuid,nodev,size=268435456,uid=1000,gid=1000,mode=0700")]);
+            }
+        }
+        None if spec.scratch => a.extend(["--tmpfs".into(), format!("/workspace:rw,nosuid,nodev,size={},uid=1000,gid=1000,mode=0700", l.total_bytes * 2 + 268435456)]),
+        None => a.extend(mount(spec.snapshot, "/workspace")?),
     }
     a.extend(mount(spec.snapshot, "/input")?);
     a.extend(mount(spec.control, "/kern")?);
@@ -157,7 +237,7 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     if spec.home_mb > 0 { a.extend(["--tmpfs".into(), format!("/home/kern:rw,nosuid,nodev,size={}m,mode=0700", spec.home_mb)]); }
     for (volume, target, readonly) in &spec.volumes {
         a.extend(["--mount".into(), format!("type=volume,source={volume},target={target}{}", if *readonly { ",readonly" } else { "" })]);
-        for dir in CACHE_DIRS.iter().filter(|_| *readonly) {
+        for dir in CACHE_DIRS.iter().filter(|_| *readonly && *target == "/workspace/node_modules") {
             a.extend(["--tmpfs".into(), format!("{target}/{dir}:rw,nosuid,nodev,size=268435456,uid=1000,gid=1000,mode=0700")]);
         }
     }
@@ -180,13 +260,14 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         let h = &i["HostConfig"];
         let memory = spec.limits.memory_mb * 1048576;
         ensure!(h["Runtime"] == "runsc" && h["NetworkMode"] == spec.network && h["ReadonlyRootfs"] == true && i["Config"]["User"] == if spec.root { "0:0" } else { "1000:1000" }, "Container configuration does not match the required boundary");
-        ensure!(h["Memory"] == memory && h["MemorySwap"] == memory && h["PidsLimit"] == spec.limits.pids && h["NanoCpus"] == 1_000_000_000u64, "Container resource limits not applied");
+        ensure!(h["Memory"] == memory && h["MemorySwap"] == memory && h["PidsLimit"] == spec.limits.pids && h["NanoCpus"] == cpus(spec) as u64 * 1_000_000_000, "Container resource limits not applied");
         ensure!(h["Privileged"] == false && h["CapDrop"].as_array().is_some_and(|c| c.iter().any(|x| x == "ALL")) && h["SecurityOpt"].as_array().is_some_and(|s| s.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("no-new-privileges")))), "Container privilege constraints not applied");
         let mounts = i["Mounts"].as_array().cloned().unwrap_or_default();
         let binds: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "bind").collect();
         let volumes: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "volume").collect();
-        ensure!(binds.len() == if spec.scratch { 2 } else { 3 } && binds.iter().all(|m| m["RW"] == false), "Unexpected or writable host mount");
-        ensure!(volumes.len() == spec.volumes.len() && spec.volumes.iter().all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro)), "Unexpected volume mount");
+        ensure!(binds.len() == if spec.scratch || spec.workspace.is_some() { 2 } else { 3 } && binds.iter().all(|m| m["RW"] == false), "Unexpected or writable host mount");
+        let tree: Vec<(&str, &str, bool)> = spec.workspace.iter().map(|(v, ro)| (*v, "/workspace", *ro)).collect();
+        ensure!(volumes.len() == spec.volumes.len() + tree.len() && spec.volumes.iter().chain(&tree).all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro)), "Unexpected volume mount");
         ensure!(mounts.iter().all(|m| m["Type"] == "bind" || m["Type"] == "volume" || m["Type"] == "tmpfs"), "Unexpected mount type");
         let (_, out, _) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
         let f = &docker_json(&["inspect", &name])?[0]["State"];
@@ -450,6 +531,192 @@ mod inside {
             "milliseconds": { "old": old_time.as_millis() as u64, "new": new_time.as_millis() as u64, "total": started.elapsed().as_millis() as u64 }, "mutants": results }));
         Ok(())
     }
+    /// A copy every user can read: folders 755, files 644 (755 when executable). Symlinks are left out; they could point anywhere.
+    fn copy_readable(from: &Path, to: &Path) -> R<()> {
+        std::fs::create_dir_all(to)?;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755))?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            let meta = std::fs::symlink_metadata(&src)?;
+            if meta.is_dir() { copy_readable(&src, &dst)?; }
+            else if meta.is_file() {
+                std::fs::copy(&src, &dst)?;
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(if meta.mode() & 0o111 != 0 { 0o755 } else { 0o644 }))?;
+            }
+        }
+        Ok(())
+    }
+    /// How one folder's dependencies are installed, by its lockfile: the exact install first, then a plain one when the lockfile is out of
+    /// step with package.json. Install scripts never run; Yarn always lays out node_modules (Plug'n'Play needs a loader Node lacks).
+    fn install_plan(dir: &Path) -> (&'static str, Vec<Vec<String>>) {
+        let node = |args: &[&str]| -> Vec<String> { ["/usr/local/bin/node"].iter().chain(args).map(|s| s.to_string()).collect() };
+        let npm = "/usr/local/lib/node_modules/npm/bin/npm-cli.js";
+        let corepack = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
+        let quiet = ["--no-audit", "--no-fund", "--no-update-notifier"];
+        if dir.join("pnpm-lock.yaml").is_file() {
+            // --ignore-pnpmfile: a .pnpmfile.cjs is the repository's own JavaScript, which pnpm would run with the network on.
+            // The store lives on the tree's volume and stays: newer pnpm links node_modules into it.
+            let store = "--store-dir=/workspace/.kern-pnpm-store";
+            return ("pnpm", vec![node(&[corepack, "pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]),
+                node(&[corepack, "pnpm", "install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store])]);
+        }
+        if dir.join("yarn.lock").is_file() {
+            if dir.join(".yarnrc.yml").is_file() { return ("yarn", vec![node(&[corepack, "yarn", "install", "--immutable", "--mode=skip-build"]), node(&[corepack, "yarn", "install", "--mode=skip-build"])]); }
+            return ("yarn", vec![node(&[corepack, "yarn", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive"]), node(&[corepack, "yarn", "install", "--ignore-scripts", "--non-interactive"])]);
+        }
+        let plain: Vec<String> = node(&[npm, "install", "--ignore-scripts", "--no-package-lock"]).into_iter().chain(quiet.iter().map(|s| s.to_string())).collect();
+        if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() {
+            return ("npm", vec![node(&[npm, "ci", "--ignore-scripts"]).into_iter().chain(quiet.iter().map(|s| s.to_string())).collect(), plain]);
+        }
+        // Bun's lockfile is Bun's own: npm installs the project from its package.json files (drive_setup rewrites what npm refuses,
+        // bun_for_npm), without failing on peer versions Bun does not enforce.
+        if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
+            return ("bun", vec![plain.into_iter().chain(["--legacy-peer-deps".to_string()]).collect()]);
+        }
+        ("npm", vec![plain])
+    }
+    /// Rewrites the package.json files of a Bun project, outside node_modules and hidden folders, for npm (bun_for_npm); returns the
+    /// originals to put back once the install is done.
+    fn bun_rewrite(dir: &Path) -> R<Vec<(PathBuf, Vec<u8>)>> {
+        let root = std::fs::read_to_string(dir.join("package.json"))?;
+        let (mut originals, mut folders) = (Vec::new(), vec![(dir.to_path_buf(), 0)]);
+        while let Some((folder, depth)) = folders.pop() {
+            for e in std::fs::read_dir(&folder)? {
+                let e = e?;
+                let (name, kind) = (e.file_name().to_string_lossy().to_string(), e.file_type()?);
+                if kind.is_dir() && depth < 6 && name != "node_modules" && !name.starts_with('.') { folders.push((e.path(), depth + 1)); }
+                else if kind.is_file() && name == "package.json" {
+                    let text = std::fs::read(e.path())?;
+                    if let Some(new) = bun_for_npm(&String::from_utf8_lossy(&text), &root) { std::fs::write(e.path(), new)?; originals.push((e.path(), text)); }
+                }
+            }
+        }
+        Ok(originals)
+    }
+    /// Fills a drive tree: the snapshot from /input, then the dependencies of each folder in /kern/drive-setup.json with its own package
+    /// manager. Prints one JSON record of what was installed where.
+    pub fn drive_setup() -> R<()> {
+        let c = config("drive-setup.json")?;
+        exact(&c, &["version", "dirs", "timeout_seconds"], "drive setup")?;
+        ensure!(c["version"] == 1, "Unsupported drive setup");
+        let dirs = strings(&c, "dirs", 64)?;
+        for d in dirs.iter().filter(|d| *d != ".") { file_path(d)?; }
+        let budget = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
+        let started = std::time::Instant::now();
+        copy_readable(Path::new("/input"), Path::new("/workspace"))?;
+        // Temporary files, package caches and the package managers corepack fetches go on the tree's own volume, never the small
+        // in-memory /tmp or home (mounted without exec, so a native pnpm could not start): a large project's install writes hundreds of
+        // megabytes of them. The folder goes once the installs are done; pnpm's store (.kern-pnpm-store) stays.
+        let scratch = Path::new("/workspace/.kern-install");
+        std::fs::create_dir_all(scratch.join("tmp"))?;
+        let mut records = Vec::new();
+        for d in &dirs {
+            let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
+            if !dir.join("package.json").is_file() { continue; }
+            // A package inside a workspace was installed with it.
+            if d != "." && dir.join("node_modules").exists() { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
+            let (manager, attempts) = install_plan(&dir);
+            // Yarn 2+ reads a copy of the project's settings without yarnPath and plugins, the repository's own JavaScript it would run.
+            let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
+            if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
+            // npm reads a Bun project's package.json files with Bun's own versions rewritten; the originals come back after the install.
+            let originals = if manager == "bun" { bun_rewrite(&dir)? } else { Vec::new() };
+            let mut result = json!("failed");
+            let log = Path::new("/home/kern/install.log");
+            for (i, argv) in attempts.iter().enumerate() {
+                let left = budget.saturating_sub(started.elapsed());
+                if left.is_zero() { result = json!("out of time"); break; }
+                let log_file = std::fs::File::create(log)?;
+                let child = Command::new(&argv[0]).args(&argv[1..]).current_dir(&dir).env_clear()
+                    .envs([("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"), ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"),
+                        ("COREPACK_HOME", "/workspace/.kern-install/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
+                        ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"),
+                        ("npm_config_cache", "/workspace/.kern-install/npm"), ("npm_config_store_dir", "/workspace/.kern-install/pnpm-store"),
+                        ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
+                        ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")])
+                    .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
+                    // Yarn 2+ prints its errors on standard output: both go to the log, so a failed install says why.
+                    .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
+                if wait(child, left)? {
+                    result = json!(if manager == "bun" { "installed from package.json (Kern does not read Bun's lockfile)" }
+                        else if i == 0 { "installed" } else { "installed from package.json (the lockfile is out of date)" });
+                    break;
+                }
+                let text = std::fs::read(log).unwrap_or_default();
+                result = json!(format!("failed: {}", String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim()));
+            }
+            for (path, text) in &originals { std::fs::write(path, text)?; }
+            records.push(json!({ "dir": d, "manager": manager, "result": result }));
+        }
+        // Mount points for the per-run cache folders of the read-only tree.
+        let _ = std::fs::remove_dir_all(scratch);
+        for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
+        println!("{}", json!({ "version": 1, "installs": records }));
+        Ok(())
+    }
+    fn part(name: &str, bytes: &[u8]) -> R<()> {
+        let mut out = std::io::stdout().lock();
+        std::io::Write::write_all(&mut out, format!("{DRIVE_MARK}{name} {}\n", bytes.len()).as_bytes())?;
+        std::io::Write::write_all(&mut out, bytes)?;
+        Ok(())
+    }
+    /// At most `max` bytes of a file: its start, or its end for error output where the last lines say most.
+    fn some_of(path: &str, max: usize, end: bool) -> Vec<u8> {
+        let b = std::fs::read(path).unwrap_or_default();
+        if b.len() <= max { b } else if end { b[b.len() - max..].to_vec() } else { b[..max].to_vec() }
+    }
+    /// Keeps only what c8 can map back to the project's files: scripts and source maps with a file: address. Kern's call wrappers
+    /// (kern-wrap:), asset stubs (data:) and Node's own modules (node:) are dropped.
+    fn files_only(dir: &Path) -> R<()> {
+        for e in std::fs::read_dir(dir)? {
+            let path = e?.path();
+            let Ok(mut v) = serde_json::from_slice::<Value>(&std::fs::read(&path)?) else { continue };
+            if let Some(result) = v["result"].as_array_mut() { result.retain(|s| s["url"].as_str().is_some_and(|u| u.starts_with("file://"))); }
+            if let Some(maps) = v["source-map-cache"].as_object_mut() { maps.retain(|k, _| k.starts_with("file://")); }
+            std::fs::write(&path, serde_json::to_vec(&v)?)?;
+        }
+        Ok(())
+    }
+    /// One drive run: the driver under Kern's loader, with V8 line coverage and the behaviour recorder, from the read-only tree; then c8
+    /// maps the coverage back to the project's lines through the source maps. The report goes to stdout as length-prefixed parts (see
+    /// DRIVE_PARTS).
+    pub fn drive() -> R<()> {
+        let c = config("drive-run.json")?;
+        exact(&c, &["version", "timeout_seconds"], "drive run")?;
+        ensure!(c["version"] == 1, "Unsupported drive run");
+        let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
+        std::fs::create_dir_all("/tmp/.kern-v8")?;
+        let child = Command::new("/usr/local/bin/node").args(["--import", "/kern/drive-loader.mjs", "/kern/drive-run.mjs"])
+            .current_dir("/workspace").env_clear().envs(TEST_ENV).env("TZ", "UTC").env("NODE_V8_COVERAGE", "/tmp/.kern-v8")
+            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_DRIVE_CALLS", "/tmp/.kern-calls").env("TSX_TSCONFIG_PATH", "/kern/tsconfig.json")
+            .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-err")?)).spawn()?;
+        let finished = wait(child, timeout)?;
+        quiesce()?;
+        let mut errors = some_of("/tmp/.kern-err", 64 << 10, true);
+        if !finished { errors.extend_from_slice(b"\nkern: the driver did not finish in time and was stopped\n"); }
+        // Line coverage: what the run left, through c8's report (its own errors join the run's). Every JavaScript and TypeScript file of the
+        // project counts, `.cts` and `.mts` too, whatever its folder: Kern alone decides which lines are measured, so c8 drops nothing but
+        // node_modules.
+        files_only(Path::new("/tmp/.kern-v8"))?;
+        let report = Command::new("/usr/local/bin/node")
+            .args(["--import", "/kern/drive-c8.mjs", "/kern-tools/node_modules/c8/bin/c8.js", "report", "--reporter=json", "--temp-directory=/tmp/.kern-v8", "--report-dir=/tmp/.kern-coverage",
+                "--exclude=**/node_modules/**", "--extension=.js", "--extension=.cjs", "--extension=.mjs", "--extension=.jsx", "--extension=.ts", "--extension=.cts",
+                "--extension=.mts", "--extension=.tsx"])
+            .current_dir("/workspace").env_clear().envs(TEST_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-c8-err")?)).spawn()?;
+        if !wait(report, Duration::from_secs(120))? {
+            errors.extend_from_slice(b"\nkern: line coverage could not be read: ");
+            errors.extend(some_of("/tmp/.kern-c8-err", 4096, true));
+        }
+        quiesce()?;
+        part("output", &some_of("/tmp/.kern-out", 4 << 20, false))?;
+        part("errors", &errors)?;
+        part("coverage", &some_of("/tmp/.kern-coverage/coverage-final.json", 64 << 20, false))?;
+        part("calls", &some_of("/tmp/.kern-calls", 8 << 20, false))?;
+        part("behavior", &some_of("/tmp/.kern-behavior", 4 << 20, false))?;
+        std::io::Write::flush(&mut std::io::stdout())?;
+        Ok(())
+    }
     pub fn exec(command: &[String]) -> R<()> {
         let c = argv(&json!(command))?;
         // The tests get their own writable copy of the read-only snapshot, as in a CI checkout; the copy is gone when the sandbox is.
@@ -471,5 +738,7 @@ mod inside {
     pub fn setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn exec(_: &[String]) -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn mutate() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
+    pub fn drive() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
+    pub fn drive_setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
 }
-pub use inside::{exec, mutate, runner, setup};
+pub use inside::{drive, drive_setup, exec, mutate, runner, setup};

@@ -37,6 +37,22 @@ Audit (set KERN_AUDIT_LOG=<file> to record every decision; kern run records to <
   audit <log> | report <log> <out.html>
   audit-merges <checkout> <branch> <2026-Q3|from..until> <out-dir> [verifier.pub]
                                   re-verify every change merged in a period (needs GITHUB_TOKEN)
+Drive (run every changed line on the old and the new code):
+  drive prepare <repo> <base> <head> <out-dir> [description.md]
+                                  the measured lines and the driver's task (out-dir/task); works anywhere
+  drive run <out-dir> <operator.json> <driver.mjs>
+                                  verifier side (--control verifier.json): one round in gVisor; writes feedback and comment.md
+  drive auto <repo> <base> <head> <out-dir> <operator.json> [description.md]
+                                  verifier side: prepare, then the agent writes the driver and Kern runs it, up to 3 rounds
+                                  (default: Claude Code in restricted mode, KERN_DRIVE_MODEL or sonnet; KERN_DRIVE_AGENT:
+                                  another agent command as a JSON array, {prompt} for the question; KERN_DRIVE_ROUNDS: 1 to 5)
+  drive sort <out-dir> [verdicts.json]
+                                  sort the best round's differences by what the pull request says: without verdicts, write
+                                  task/differences.md for an agent (auto asks its own); with its verdicts.json, sort comment.md
+  drive post <out-dir> <owner/repo> <pr-number> [update-only]
+                                  post comment.md on the pull request, or edit Kern's earlier one (GITHUB_TOKEN);
+                                  update-only: only edit an earlier one (for a change with nothing to run)
+  drive clean <out-dir>           remove the task's sandbox volumes
 Utilities:
   contract <contract> [narrower-contract] | pin-check <id> <file>";
 const AUDITED: [&str; 12] = ["box", "plan", "task", "ingest", "import", "verify", "verify-external", "authorize", "promote-local", "promote-github", "check-pr", "gate-artifact"];
@@ -58,6 +74,8 @@ fn cli() -> R<(Option<Value>, i32)> {
         Some("__setup") => return sandbox::setup().map(|_| (None, 0)),
         Some("__exec") => return sandbox::exec(&args[1..]).map(|_| (None, 0)),
         Some("__mutate") => return sandbox::mutate().map(|_| (None, 0)),
+        Some("__drive") => return sandbox::drive().map(|_| (None, 0)),
+        Some("__drive_setup") => return sandbox::drive_setup().map(|_| (None, 0)),
         Some("__reap") => {
             ensure!(args.len() == 3, "Expected an engine and a container");
             return kern::container::reap(Path::new(&args[1]), &args[2]).map(|_| (None, 0));
@@ -148,6 +166,38 @@ fn cli() -> R<(Option<Value>, i32)> {
             (Some(json!({ "status": report["summary"]["status"], "summary": report["summary"], "files": files })), code)
         }
         "report" => { count(a, 2)?; std::fs::write(&a[1], kern::audit::report(Path::new(&a[0]))?)?; (Some(json!({ "report": std::path::absolute(&a[1])? })), 0) }
+        "drive" => {
+            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected drive prepare, run, auto, sort, post or clean; see kern --help".into()))?;
+            match sub.as_str() {
+                "prepare" => {
+                    ensure!(rest.len() == 4 || rest.len() == 5, "Expected a repository, the base and the head commit, an output directory and an optional description file");
+                    let pr = rest.get(4).map(std::fs::read_to_string).transpose()?;
+                    (Some(kern::drive::prepare(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), pr.as_deref())?), 0)
+                }
+                "run" => { count(rest, 3)?; (Some(kern::drive::run(Path::new(&rest[0]), &operator(&read_json(&rest[1])?)?, Path::new(&rest[2]))?), 0) }
+                "clean" => { count(rest, 1)?; (Some(kern::drive::clean(Path::new(&rest[0]))?), 0) }
+                "sort" => {
+                    ensure!(rest.len() == 1 || rest.len() == 2, "Expected an output directory and optionally the agent's verdicts.json");
+                    (Some(kern::drive::sort(Path::new(&rest[0]), rest.get(1).map(Path::new))?), 0)
+                }
+                "auto" => {
+                    ensure!(rest.len() == 5 || rest.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
+                    let pr = rest.get(5).map(std::fs::read_to_string).transpose()?;
+                    let agent: Vec<String> = match std::env::var("KERN_DRIVE_AGENT") {
+                        Ok(v) => serde_json::from_str(&v).map_err(|_| Denied("KERN_DRIVE_AGENT must be a JSON array of strings".into()))?,
+                        Err(_) => kern::drive::default_agent(&std::env::var("KERN_DRIVE_MODEL").ok().filter(|m| !m.is_empty()).unwrap_or_else(|| "sonnet".into()))?,
+                    };
+                    let rounds = std::env::var("KERN_DRIVE_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=5).contains(n)).unwrap_or(3);
+                    (Some(kern::drive::auto(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), &operator(&read_json(&rest[4])?)?, pr.as_deref(), &agent, rounds)?), 0)
+                }
+                "post" => {
+                    ensure!(rest.len() == 3 || (rest.len() == 4 && rest[3] == "update-only"), "Expected an output directory, owner/repo, a pull request number and optionally update-only");
+                    let number = rest[2].parse::<u64>().map_err(|_| Denied("Expected a pull request number".into()))?;
+                    (Some(kern::drive::post(Path::new(&rest[0]), &rest[1], number, rest.len() == 4)?), 0)
+                }
+                _ => kern::deny!("Expected drive prepare, run, auto, sort, post or clean; see kern --help"),
+            }
+        }
         "gate-artifact" => { count(a, 4)?; (Some(promote::gate_artifact(Path::new(&a[0]), &a[1], &read_json(&a[2])?, Path::new(&a[3]), now)?), 0) }
         "check-pr" => {
             ensure!(a.len() == 2 || a.len() == 3, "Expected event JSON, checkout and optional config path");

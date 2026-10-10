@@ -472,6 +472,11 @@ fn dependency_installs_are_reused_only_for_the_same_manifests_registry_and_image
     cache.put(&k3, "kern-deps-d", &record).unwrap();
     assert_eq!(cache.evict(), vec!["kern-deps-old".to_string(), "kern-deps-one".to_string()]);
     assert!(cache.get(&key).is_none() && cache.get(&k3).is_some());
+    // An entry whose volume was removed by hand (a pruned Docker) is forgotten, and the next install takes its place: otherwise every
+    // install after it would make a volume of its own that nothing ever removes.
+    cache.forget(&k3);
+    assert!(cache.get(&k3).is_none() && cache.put(&k3, "kern-deps-e", &record).unwrap());
+    assert_eq!(cache.get(&k3).map(|e| e.0), Some("kern-deps-e".to_string()));
 }
 
 #[test]
@@ -2320,19 +2325,19 @@ fn docker_and_container_configuration_cannot_be_widened() {
     denied(sandbox::docker_invocation(&c, &["info"], &[], Path::new("/x")), "changed");
     let limits = contract(&policy_value()).unwrap().limits;
     let write = vec!["src/".to_string()];
-    let spec = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &write, limits: &limits, entry: vec!["__runner".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false };
+    let spec = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &write, limits: &limits, entry: vec!["__runner".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: None };
     let a = sandbox::container_args(&spec, "kern-x").unwrap().join(" ");
     for want in ["--runtime=runsc", "--network=none", "--read-only", "--user=1000:1000", "--cap-drop=ALL", "no-new-privileges", "--pull=never", "--entrypoint=/kern/kern"] { assert!(a.contains(want), "{want}"); }
     assert!(!a.contains("docker.sock") && a.matches("type=bind").count() == 3 && a.matches(",readonly").count() == 3);
     // planting bugs needs a writable copy of the workspace: the snapshot stays a read-only input and the copy lives in memory
-    let planting = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__mutate".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: true };
+    let planting = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__mutate".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: true, workspace: None };
     let s = sandbox::container_args(&planting, "kern-x").unwrap().join(" ");
     assert!(s.contains("--tmpfs /workspace:rw,nosuid,nodev") && s.matches("type=bind").count() == 2 && s.matches(",readonly").count() == 2 && !s.contains("target=/workspace,"), "{s}");
     denied(sandbox::container_args(&Spec { writable: &write, ..planting }, "kern-x"), "scratch");
     denied(sandbox::container_args(&Spec { network: "bridge", ..spec }, "kern-x"), "Only dependency setup");
     // tests run like in CI, on a throwaway writable copy of the repo: they may write logs and fixtures, but never into the snapshot
     let deps = vec![("kern-deps-1", "/workspace/node_modules", true)];
-    let tests = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__exec".into(), "/usr/local/bin/node".into()], network: "none", volumes: deps.clone(), root: false, home_mb: 0, scratch: true };
+    let tests = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__exec".into(), "/usr/local/bin/node".into()], network: "none", volumes: deps.clone(), root: false, home_mb: 0, scratch: true, workspace: None };
     let s = sandbox::container_args(&tests, "kern-x").unwrap().join(" ");
     assert!(s.contains("--tmpfs /workspace:rw,nosuid,nodev") && !s.contains("target=/workspace,") && s.contains("type=volume,source=kern-deps-1,target=/workspace/node_modules,readonly"), "{s}");
     // the shared install stays read-only; only the folders tools keep caches and temporary files in are writable, and only in memory
@@ -2340,12 +2345,58 @@ fn docker_and_container_configuration_cannot_be_widened() {
     for entry in ["__exec", "__mutate"] {
         denied(sandbox::container_args(&Spec { entry: vec![entry.into()], scratch: false, volumes: deps.clone(), ..tests }, "kern-x"), "copy of the workspace");
     }
-    let setup = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__setup".into()], network: "bridge", volumes: vec![("kern-deps-1", "/workspace/node_modules", false)], root: true, home_mb: 1024, scratch: false };
+    let setup = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__setup".into()], network: "bridge", volumes: vec![("kern-deps-1", "/workspace/node_modules", false)], root: true, home_mb: 1024, scratch: false, workspace: None };
     assert!(!sandbox::container_args(&setup, "kern-x").unwrap().join(" ").contains("node_modules/."), "the install itself writes the volume directly");
 }
 
 const NODE: &str = "docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392";
 const IMAGE_ENV: [&str; 2] = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.23.3"];
+#[test]
+fn drive_runs_read_an_installed_tree_with_the_network_off() {
+    let t = Temp::new();
+    let limits = contract(&policy_value()).unwrap().limits;
+    let tools = vec![("kern-deps-tools", "/kern-tools/node_modules", true)];
+    let run = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__drive".into()], network: "none", volumes: tools.clone(), root: false, home_mb: 0, scratch: false, workspace: Some(("kern-deps-tree", true)) };
+    let a = sandbox::container_args(&run, "kern-x").unwrap().join(" ");
+    for want in ["type=volume,source=kern-deps-tree,target=/workspace,readonly", "type=volume,source=kern-deps-tools,target=/kern-tools/node_modules,readonly", "--network=none", "--user=1000:1000", "--runtime=runsc", "--read-only"] {
+        assert!(a.contains(want), "{want}: {a}");
+    }
+    assert!(a.matches("type=bind").count() == 2 && a.matches("target=/input,readonly").count() == 1 && a.matches("target=/kern,readonly").count() == 1, "only /input and /kern are bound: {a}");
+    // the installed tree keeps per-run tool caches in memory, like the shared install of a verification; Kern's tools keep none
+    for dir in [".cache", ".vite", ".vite-temp"] { assert!(a.contains(&format!("--tmpfs /workspace/node_modules/{dir}:rw,nosuid,nodev")), "{dir}: {a}"); }
+    assert!(!a.contains("/kern-tools/node_modules/."), "{a}");
+    // a drive run never gets a network, root, write grants or a writable tree, and always reads an installed tree
+    let write = vec!["src/".to_string()];
+    denied(sandbox::container_args(&Spec { network: "bridge", ..run.clone() }, "kern-x"), "network");
+    for bad in [Spec { root: true, ..run.clone() }, Spec { writable: &write, ..run.clone() }, Spec { workspace: Some(("kern-deps-tree", false)), ..run.clone() }, Spec { workspace: None, ..run.clone() }, Spec { scratch: true, ..run.clone() }] {
+        denied(sandbox::container_args(&bad, "kern-x"), "drive run");
+    }
+    denied(sandbox::container_args(&Spec { workspace: Some(("my-volume", true)), ..run.clone() }, "kern-x"), "tree volume");
+    // Kern's tools are read-only, at /kern-tools/node_modules, and only for drive runs
+    denied(sandbox::container_args(&Spec { volumes: vec![("kern-deps-tools", "/kern-tools/node_modules", false)], ..run.clone() }, "kern-x"), "Unexpected volume");
+    denied(sandbox::container_args(&Spec { volumes: vec![("kern-deps-tools", "/opt/tools", true)], ..run.clone() }, "kern-x"), "Unexpected volume");
+    let tests = Spec { entry: vec!["__exec".into(), "/usr/local/bin/node".into()], scratch: true, workspace: None, ..run.clone() };
+    denied(sandbox::container_args(&tests, "kern-x"), "Unexpected volume");
+    // no other entry point mounts a tree volume
+    for entry in ["__runner", "__setup", "__mutate"] {
+        denied(sandbox::container_args(&Spec { entry: vec![entry.into()], volumes: vec![], ..run.clone() }, "kern-x"), "tree volume");
+    }
+    // the install that fills the tree is its only writer: root, with a network, the tree writable, nothing else mounted
+    let setup = Spec { entry: vec!["__drive_setup".into()], network: "bridge", root: true, home_mb: 1024, volumes: vec![], workspace: Some(("kern-deps-tree", false)), ..run.clone() };
+    let s = sandbox::container_args(&setup, "kern-x").unwrap().join(" ");
+    assert!(s.contains("type=volume,source=kern-deps-tree,target=/workspace ") && s.contains("--network=bridge") && !s.contains("/workspace/node_modules/."), "{s}");
+    // Installing a large project is CPU-bound under gVisor: the install gets up to 4 CPUs, never more than the machine has; a run gets one.
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4);
+    assert!(s.contains(&format!("--cpus={cpus}")) && a.contains("--cpus=1"), "{s}");
+    // A large project's module graph (Grafana's) opens more than 1,024 files at once as it loads, and so does its install: drive runs and
+    // their setup may hold 65,536; every other sandbox keeps 1,024.
+    assert!(s.contains("--ulimit nofile=65536:65536") && a.contains("--ulimit nofile=65536:65536"), "{a}");
+    let runner = Spec { entry: vec!["__runner".into()], volumes: vec![], workspace: None, ..run.clone() };
+    assert!(sandbox::container_args(&runner, "kern-x").unwrap().join(" ").contains("--ulimit nofile=1024:1024"));
+    for bad in [Spec { volumes: tools.clone(), ..setup.clone() }, Spec { network: "none", ..setup.clone() }, Spec { root: false, ..setup.clone() }, Spec { workspace: Some(("kern-deps-tree", true)), ..setup.clone() }, Spec { workspace: None, ..setup.clone() }] {
+        assert!(sandbox::container_args(&bad, "kern-x").is_err(), "{:?}", bad.entry);
+    }
+}
 fn docker_info() -> Value {
     json!({ "OSType": "linux", "OperatingSystem": "Docker Desktop", "ServerVersion": "29.8.1", "KernelVersion": "5.15.167.4-microsoft-standard-WSL2",
         "SecurityOptions": ["name=seccomp,profile=builtin"], "MemoryLimit": true, "SwapLimit": true, "PidsLimit": true, "Runtimes": { "runc": {} } })
