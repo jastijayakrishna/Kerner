@@ -34,6 +34,8 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Twin runtime
+        run: sh twin/scripts/test-linux.sh
       - name: Static binary
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
