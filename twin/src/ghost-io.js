@@ -123,7 +123,7 @@ export function installGhostIO({ harnessPort }) {
     throw refusal('Opening a file to write');
   };
 
-  for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'utimes']) {
+  for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'mkdtemp', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'chown', 'lchown', 'utimes', 'lutimes']) {
     const effect = (target) => wrote(`FS ${name} ${String(target)}`);
     fs[`${name}Sync`] = (target) => {
       effect(target);
