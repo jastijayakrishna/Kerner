@@ -2,11 +2,13 @@ import net from 'node:net';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
 import childProcess from 'node:child_process';
+import workerThreads from 'node:worker_threads';
 import { syncBuiltinESMExports } from 'node:module';
 import { callKey, isWrite } from './keys.js';
 
 // What a ghost may do: have its fetch calls answered from the real run's recording, and nothing else. Writes are written down and
-// never done; any other way out (sockets, UDP, programs, file writes) is refused, so a ghost can never touch anything real.
+// never done; any other way out (sockets, UDP, programs, threads, file writes, opening files to write) is refused, so a ghost
+// cannot touch anything real through Node's own APIs.
 let job = null;
 
 /** Starts a request: the real run's calls, queued by name, so each recorded answer is used once. */
@@ -37,6 +39,9 @@ function wrote(effect) {
 const NULL_BODY = new Set([101, 204, 205, 304]);
 const loopback = (host) => ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(String(host));
 const refusal = (what) => Object.assign(new Error(`${what} is refused in a Kern ghost run`), { code: 'EACCES' });
+const { O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
+// Only 'r', 'rs' and 'sr' open a file just to read it; every other flag can change it ('w' already empties it).
+const opensToWrite = (flags) => (typeof flags === 'number' ? (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) !== 0 : !/^(r|rs|sr)$/.test(String(flags ?? 'r')));
 
 /** Seals this thread. `harnessPort` is the loopback port of the ghost's own server: the one connection it may make. */
 export function installGhostIO({ harnessPort }) {
@@ -90,6 +95,33 @@ export function installGhostIO({ harnessPort }) {
       throw refusal('Starting a program');
     };
   }
+
+  // A thread the app starts would begin outside this seal, free to reach anything real.
+  workerThreads.Worker = function ghostWorker() {
+    note('denied', 'starting a worker thread');
+    throw refusal('Starting a worker thread');
+  };
+
+  // Opening a file to write can already destroy it, so a ghost may open files only to read them.
+  const { open, openSync } = fs;
+  const promisesOpen = fs.promises.open;
+  const opened = (target) => wrote(`FS open ${String(target)}`);
+  fs.openSync = function ghostOpenSync(target, flags, ...rest) {
+    if (!opensToWrite(flags)) return openSync.call(this, target, flags, ...rest);
+    opened(target);
+    throw refusal('Opening a file to write');
+  };
+  fs.open = function ghostOpen(target, flags, ...rest) {
+    if (typeof flags === 'function' || !opensToWrite(flags)) return open.call(this, target, flags, ...rest);
+    opened(target);
+    const done = rest.findLast((a) => typeof a === 'function');
+    if (done) process.nextTick(done, refusal('Opening a file to write'));
+  };
+  fs.promises.open = async function ghostPromisesOpen(target, flags, ...rest) {
+    if (!opensToWrite(flags)) return promisesOpen.call(this, target, flags, ...rest);
+    opened(target);
+    throw refusal('Opening a file to write');
+  };
 
   for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'utimes']) {
     const effect = (target) => wrote(`FS ${name} ${String(target)}`);

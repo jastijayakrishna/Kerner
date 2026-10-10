@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const source = (file) => JSON.stringify(new URL(`../src/${file}`, import.meta.url).href);
 const script = `
@@ -44,4 +47,46 @@ test('a ghost gets its calls answered from the recording and does nothing real',
   assert.equal(out.effects.filter((e) => e.startsWith('POST https://pay.example/charge')).length, 2);
   assert.equal(out.effects.filter((e) => e.startsWith('FS writeFile')).length, 2);
   assert.deepEqual(out.events.map((e) => e.type), ['unmatched-write', 'unmatched-read', 'denied', 'denied']);
+});
+
+test('a ghost may not start a thread of its own, since that thread would run outside the seal', () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
+import { Worker } from 'node:worker_threads';
+installGhostIO({ harnessPort: 1 });
+beginJob([]);
+let thread;
+try { new Worker('process.exit(0)', { eval: true }); thread = 'started'; } catch (e) { thread = e.code; }
+console.log(JSON.stringify({ thread, events: endJob().events.map((e) => e.type) }));
+`], { encoding: 'utf8' }));
+  assert.deepEqual(out, { thread: 'EACCES', events: ['denied'] });
+});
+
+test('a ghost may open a file to read it, never to write it, since opening to write can already empty it', () => {
+  const file = join(tmpdir(), `kern-ghost-open-${process.pid}.txt`);
+  writeFileSync(file, 'real data');
+  try {
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
+import fs from 'node:fs';
+installGhostIO({ harnessPort: 1 });
+beginJob([]);
+const file = ${JSON.stringify(file)};
+const out = {};
+const fd = fs.openSync(file, 'r');
+out.read = fs.readFileSync(fd, 'utf8');
+fs.closeSync(fd);
+try { fs.openSync(file, 'w'); out.openSync = 'opened'; } catch (e) { out.openSync = e.code; }
+out.open = await new Promise((resolve) => fs.open(file, 'r+', (e) => resolve(e ? e.code : 'opened')));
+out.promises = await fs.promises.open(file, 'a').then(() => 'opened', (e) => e.code);
+out.effects = endJob().effects;
+console.log(JSON.stringify(out));
+`], { encoding: 'utf8' }));
+    assert.equal(out.read, 'real data');
+    assert.deepEqual([out.openSync, out.open, out.promises], ['EACCES', 'EACCES', 'EACCES']);
+    assert.equal(out.effects.filter((e) => e.startsWith('FS open')).length, 3);
+    assert.equal(readFileSync(file, 'utf8'), 'real data');
+  } finally {
+    rmSync(file, { force: true });
+  }
 });

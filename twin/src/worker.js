@@ -16,8 +16,9 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port;
 
 installWorld();
-installGhostIO({ harnessPort: port });
+// Before the seal, which would refuse the null device muteOutput() opens to write to.
 muteOutput();
+installGhostIO({ harnessPort: port });
 const app = await import(pathToFileURL(workerData.module).href);
 const factory = app[workerData.export];
 if (typeof factory !== 'function') throw new Error(`has no function named ${workerData.export}`);
