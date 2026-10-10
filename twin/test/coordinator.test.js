@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -60,6 +60,31 @@ console.log(pair.disabled ?? 'running');
   try {
     const out = execFileSync(process.execPath, [file], { encoding: 'utf8', timeout: 15000 });
     assert.equal(out.trim(), 'running');
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
+
+test('a ghost\'s output never reaches the app\'s own logs', () => {
+  // Ghost logs mixed into production logs would repeat every sampled request's log lines, written by code that served nobody.
+  const file = join(tmpdir(), `kern-twin-quiet-${process.pid}.mjs`);
+  writeFileSync(file, `
+import { Coordinator } from ${JSON.stringify(new URL('../src/coordinator.js', import.meta.url).href)};
+const pair = new Coordinator(${JSON.stringify(options('noisy'))});
+await pair.start();
+pair.submit({
+  start: 1760000000000, seed: 7, request: { method: 'GET', url: '/', headers: {}, body: '' },
+  response: { status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"ok":true}') }, io: [], effects: [],
+});
+await pair.idle();
+console.log(JSON.stringify(pair.counts));
+await pair.close();
+`);
+  try {
+    const run = spawnSync(process.execPath, [file], { encoding: 'utf8', timeout: 15000 });
+    assert.equal(run.status, 0, run.stderr);
+    assert.doesNotMatch(run.stdout + run.stderr, /ghost output/);
+    assert.equal(JSON.parse(run.stdout).same, 1, run.stdout);
   } finally {
     rmSync(file, { force: true });
   }
