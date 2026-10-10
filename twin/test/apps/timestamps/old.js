@@ -1,0 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import { send } from '../http.js';
+
+// Every answer carries the time, a fresh id and a random number: real noise that must never count as a difference.
+export function createApp() {
+  return (req, res) => send(res, 200, { at: new Date().toISOString(), id: randomUUID(), roll: Math.random() });
+}
