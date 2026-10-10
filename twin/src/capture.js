@@ -62,6 +62,12 @@ function begin(req, res, maxBodyBytes, deliver) {
     copy('incoming', chunk, encoding);
     return push.call(this, chunk, encoding);
   };
+  // The body's data and end events come from the HTTP parser, outside the context the listener ran in, so body parsers such
+  // as express.json() would lose every call made after the body was read. Each event re-enters this request's record.
+  const emit = req.emit;
+  req.emit = function (...args) {
+    return current.run(record, () => emit.apply(this, args));
+  };
   const { writeHead, write, end } = res;
   res.writeHead = function (...args) {
     try {

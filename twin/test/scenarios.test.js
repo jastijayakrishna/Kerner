@@ -92,3 +92,30 @@ test('time and random numbers never count as differences', async () => {
   assert.deepEqual([stats.same, stats.different, stats.notCompared], [2, 0, 0], JSON.stringify(stats));
   await shop.close();
 });
+
+test('an app that reads its body the way express.json() does is still compared, and its double charge caught', async () => {
+  let charges = 0;
+  const pay = await listen((req, res) => {
+    charges++;
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  process.env.KERN_TEST_PAY_URL = pay.url;
+  try {
+    const shop = await production('body-events');
+    assert.deepEqual(await (await post(shop.url, { amount: 25 })).json(), { paid: true });
+    await shop.twin.idle();
+    assert.equal(charges, 1);
+    const stats = shop.twin.stats();
+    assert.equal(stats.notCompared, 0, JSON.stringify(stats));
+    const [found] = shop.twin.differences();
+    assert.ok(found?.kinds.includes('effects'), JSON.stringify(stats));
+    await shop.close();
+  } finally {
+    delete process.env.KERN_TEST_PAY_URL;
+    await pay.close();
+  }
+});
