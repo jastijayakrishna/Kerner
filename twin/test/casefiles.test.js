@@ -53,6 +53,26 @@ test('a difference that depends on a private value becomes a stub a person must 
   }
 });
 
+test('a scrubbed copy the app answers with another status, such as a sign-in it can no longer read, becomes a stub, not a case', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-casefiles-'));
+  process.env.KERN_TEST_TOKEN = 'token-for-the-test';
+  try {
+    const shop = await production('auth-shop', { cases: dir });
+    assert.deepEqual(await (await fetch(shop.url, { headers: { authorization: 'Bearer token-for-the-test' } })).json(), { plan: 'pro' });
+    await shop.twin.idle();
+    assert.equal(shop.twin.stats().different, 1);
+    await shop.close();
+    const [file] = readdirSync(dir);
+    const value = await readCase(join(dir, file));
+    // The scrubbed copies differ too (their refusals are worded differently), but they are refusals, not the plans that differed.
+    assert.equal(value.reproduces, false, JSON.stringify(value.verdict ?? value.why));
+    assert.match(value.why, /another status/);
+  } finally {
+    delete process.env.KERN_TEST_TOKEN;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('running both ghosts again for a case leaves no changed-line counts behind for the next request', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-casefiles-'));
   try {

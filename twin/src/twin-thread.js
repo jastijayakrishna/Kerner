@@ -95,10 +95,12 @@ const saved = (run) => ({ status: run.status, headers: run.headers, body: exactB
 
 /**
  * Turns an unexplained difference into a case: the capture is scrubbed and both ghosts run on the scrubbed copy again.
- * - If the difference shows again, the case holds that copy and both answers.
- * - If not, it depended on a private value: a stub, with no request data, tells a person to look.
+ * - If the difference shows again, with both versions answering as they did (the same statuses), the case holds that copy and both
+ *   answers.
+ * - If not, it depended on a private value: a stub, with no request data, tells a person to look. A copy answered with another status
+ *   (a sign-in the app can no longer read, say) shows another difference, even when the copies differ too.
  */
-async function recordCase(verdict, capture) {
+async function recordCase(verdict, capture, original) {
   const group = `${verdict.route} ${verdict.kinds.join(',')}`;
   if (casesWritten >= MOST_CASES || (caseCounts.get(group) ?? 0) >= CASES_PER_KIND) return;
   caseCounts.set(group, (caseCounts.get(group) ?? 0) + 1);
@@ -106,7 +108,11 @@ async function recordCase(verdict, capture) {
   const { capture: scrubbed, opaque } = scrubCapture(capture, settings.scrub ?? {});
   const runs = await coordinator.rerun(scrubbed);
   const again = runs ? compareRuns(runs.old, runs.candidate) : null;
-  const reproduces = again?.outcome === 'different' && again.kinds.some((kind) => verdict.kinds.includes(kind));
+  const sameStatuses = !original || (runs?.old.status === original.old.status && runs?.candidate.status === original.candidate.status);
+  const reproduces = sameStatuses && again?.outcome === 'different' && again.kinds.some((kind) => verdict.kinds.includes(kind));
+  const why = !sameStatuses && runs
+    ? `the scrubbed copy was answered with another status (old ${original.old.status} → ${runs.old.status}, new ${original.candidate.status} → ${runs.candidate.status}): it may depend on a private value, such as a sign-in, so a person must look`
+    : 'the difference did not show again on the scrubbed copy: it may depend on a private value, so a person must look';
   const base = {
     version: 1, candidate: candidateId, n: verdict.n, time: verdict.time, route: verdict.route, segment: verdict.segment,
     adapters: settings.adapters ?? ['fetch'], overlay: Boolean(settings.overlay), kinds: verdict.kinds, lines: verdict.lines ?? {},
@@ -114,7 +120,7 @@ async function recordCase(verdict, capture) {
   };
   const entry = reproduces
     ? { ...base, world: { start: scrubbed.start, seed: scrubbed.seed }, request: scrubbed.request, io: scrubbed.io, old: saved(runs.old), new: saved(runs.candidate), verdict: { kinds: again.kinds, details: again.details } }
-    : { ...base, why: 'the difference did not show again on the scrubbed copy: it may depend on a private value, so a person must look' };
+    : { ...base, why };
   try {
     await writeCase(settings.cases, entry);
   } catch {
@@ -176,9 +182,9 @@ async function checkKnownCases() {
   }
 }
 
-async function onVerdict(verdict, capture) {
+async function onVerdict(verdict, capture, runs) {
   evidence.add(redact(verdict));
-  if (verdict.outcome === 'different' && settings.cases && capture) await recordCase(verdict, capture);
+  if (verdict.outcome === 'different' && settings.cases && capture) await recordCase(verdict, capture, runs);
   if (crashOnVerdict) process.exit(9);
   if (verdict.outcome === 'different' && serving === 'candidate') {
     await serve('old', `switched back: an unexplained difference (${verdict.kinds.join(', ')}) on ${verdict.route}`);
