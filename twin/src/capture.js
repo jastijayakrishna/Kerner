@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomInt } from 'node:crypto';
 import { exactBytes } from './serialize.js';
+import { routeOf } from './route.js';
 
 /** The record of the sampled request being served, so the calls the app makes while serving it are written down with it. */
 export const current = new AsyncLocalStorage();
@@ -22,15 +23,28 @@ function bytesOf(chunk, encoding) {
 }
 
 /**
- * Wraps a Node request listener. A request that is not sampled goes straight to the listener. A sampled request is served exactly
- * as before while Kern keeps a copy of what came in, what went out and every outgoing call; `deliver` gets a promise of that copy
- * once the answer has gone out.
+ * Runs every event of a sampled request, and of its answer, inside the request's record. Node runs a body's 'data' and 'end' events on
+ * the connection's own context (measured on Node 22). So without this, a body parser's listeners, and all they start (the route's
+ * handler and its calls), would run outside the record, and those calls would go unrecorded.
  */
-export function wrapListener(listener, { sample, maxBodyBytes, deliver, onError }) {
+function keep(emitter, record) {
+  const emit = emitter.emit;
+  emitter.emit = function (...args) {
+    return current.run(record, () => emit.apply(this, args));
+  };
+}
+
+/**
+ * Wraps a Node request listener. A request that is not sampled goes straight to the listener. A sampled request is served exactly
+ * as before while Kern keeps a copy of what came in, what went out and every outgoing call. `deliver` gets a promise of that copy
+ * once the answer has gone out, or of a skip when the request was aborted or could not be copied. `describe(req)` may name the
+ * request's route and customer segment: { route, segment }.
+ */
+export function wrapListener(listener, { sample, maxBodyBytes, deliver, onError, describe = null }) {
   return function kernTwin(req, res) {
     let record = null;
     try {
-      if (sample()) record = begin(req, res, maxBodyBytes, deliver);
+      if (sample()) record = begin(req, res, maxBodyBytes, deliver, describe);
     } catch (error) {
       onError(error);
       record = null;
@@ -40,9 +54,9 @@ export function wrapListener(listener, { sample, maxBodyBytes, deliver, onError 
   };
 }
 
-function begin(req, res, maxBodyBytes, deliver) {
+function begin(req, res, maxBodyBytes, deliver, describe) {
   const record = {
-    start: Date.now(), seed: randomInt(2 ** 31), io: [], pending: new Set(),
+    start: Date.now(), seed: randomInt(2 ** 31), io: [], pending: new Set(), serving: 'old',
     incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false,
   };
   const copy = (side, chunk, encoding) => {
@@ -63,12 +77,6 @@ function begin(req, res, maxBodyBytes, deliver) {
     copy('incoming', chunk, encoding);
     return push.call(this, chunk, encoding);
   };
-  // The body's data and end events come from the HTTP parser, outside the context the listener ran in, so body parsers such
-  // as express.json() would lose every call made after the body was read. Each event re-enters this request's record.
-  const emit = req.emit;
-  req.emit = function (...args) {
-    return current.run(record, () => emit.apply(this, args));
-  };
   const { writeHead, write, end } = res;
   res.writeHead = function (...args) {
     try {
@@ -87,21 +95,58 @@ function begin(req, res, maxBodyBytes, deliver) {
     if (typeof chunk !== 'function') copy('outgoing', chunk, encoding);
     return end.call(this, chunk, encoding, callback);
   };
-  res.once('finish', () => deliver(finish(req, res, record)));
+  // Every sampled request is accounted for: it ends with its answer sent ('finish'), or broken off first ('close' without 'finish').
+  let ended = false;
+  res.once('finish', () => {
+    ended = true;
+    deliver(finish(req, res, record, describe));
+  });
+  res.once('close', () => {
+    if (ended) return;
+    ended = true;
+    record.done = true;
+    deliver(Promise.resolve({ skipped: 'the request was aborted before its answer finished', ...where(req, record, describe) }));
+  });
+  keep(req, record);
+  keep(res, record);
   return record;
 }
 
-async function finish(req, res, record) {
+/**
+ * Where a request belongs: when it came, its route, its customer segment and the version that served it. Without naming functions a
+ * request gets the route of its path and the segment 'all'; a naming function that throws or answers nothing leaves the route of the
+ * path and the segment 'unknown', so the request is still counted.
+ */
+function where(req, record, describe) {
+  let named = { segment: 'all' };
+  if (describe) {
+    try {
+      named = describe(req) ?? {};
+    } catch {
+      named = {};
+    }
+  }
+  const text = (value, max) => (typeof value === 'string' && value ? value.slice(0, max) : null);
+  return {
+    start: record.start,
+    route: text(named.route, 200) ?? routeOf(req.method, req.url),
+    segment: text(named.segment, 100) ?? 'unknown',
+    serving: record.serving,
+  };
+}
+
+async function finish(req, res, record, describe) {
   // Calls the app starts right after answering still belong to this request: give them, and copies still being read, a moment.
   await new Promise((resolve) => setImmediate(resolve));
   if (record.pending.size) await Promise.race([Promise.allSettled([...record.pending]), new Promise((resolve) => setTimeout(resolve, 100))]);
   record.done = true;
-  if (record.problem) return { skipped: record.problem };
-  if (record.pending.size) return { skipped: 'an outgoing call was still running' };
+  const place = where(req, record, describe);
+  if (record.problem) return { skipped: record.problem, ...place };
+  if (record.pending.size) return { skipped: 'an outgoing call was still running', ...place };
   const headers = lower(req.headers);
   for (const name of HOP) delete headers[name];
   return {
-    start: record.start,
+    ...place,
     seed: record.seed,
     request: { method: req.method, url: req.url, headers, body: exactBytes(record.incoming) },
     response: { status: res.statusCode, headers: { ...lower(res.getHeaders()), ...lower(record.head) }, body: exactBytes(record.outgoing) },
