@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // kern-twin: the twin runtime's command line. Every command prints one JSON object; a refusal goes to stderr with exit code 1.
 import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readControl, writeControl } from '../src/router.js';
@@ -8,6 +9,8 @@ import { Evidence } from '../src/evidence.js';
 import { decide, pathsOf, totals } from '../src/decide.js';
 import { acceptMatcher, loadManifest } from '../src/manifest.js';
 import { buildOld } from '../src/build.js';
+import { readCase } from '../src/cases.js';
+import { commentBody, forAgent, toFeedback } from '../src/feedback.js';
 
 const HELP = `kern-twin - the twin runtime's command line
 
@@ -20,6 +23,10 @@ const HELP = `kern-twin - the twin runtime's command line
       writes the old version beside the new one, with the packages it needs, for the twin's old.module
   kern-twin test --cases <dir> --candidate <module> [--export createApp]
       runs the candidate on every case as a node:test test; fails until it answers each as the old version did
+  kern-twin feedback --cases <dir> [--candidate <module>]
+      the cases as kern-feedback/v1 instructions for a coding agent
+  kern-twin comment --cases <dir> --head <sha> [--candidate <module>]
+      the pull request comment for those cases (printed; posting it is yours to do)
 `;
 
 function parse(args) {
@@ -100,9 +107,27 @@ function caseTests(flags) {
   process.exit(run.status ?? 1);
 }
 
+async function casesIn(dir) {
+  if (!dir) throw new Error('needs --cases <dir>');
+  const names = readdirSync(dir).filter((file) => file.endsWith('.json')).sort();
+  return Promise.all(names.map((name) => readCase(resolve(dir, name))));
+}
+
+/** The copy an agent is handed: without the hints on how a person could allow a difference. */
+async function feedback(flags) {
+  return forAgent(toFeedback(await casesIn(flags.cases), { casesDir: flags.cases, candidate: flags.candidate }));
+}
+
+async function comment(flags) {
+  if (!flags.head) throw new Error('comment needs --head <sha>');
+  process.stdout.write(commentBody(await casesIn(flags.cases), flags.head, { casesDir: flags.cases, candidate: flags.candidate }));
+  process.exit(0);
+}
+
 const flags = parse(process.argv.slice(2));
-const command = { status, serve, build, test: caseTests }[flags.words[0]];
-if (!command || (command !== build && command !== caseTests && !flags.state)) {
+const command = { status, serve, build, test: caseTests, feedback, comment }[flags.words[0]];
+const stateless = [build, caseTests, feedback, comment];
+if (!command || (!stateless.includes(command) && !flags.state)) {
   process.stdout.write(HELP);
   process.exit(flags.words.length ? 2 : 0);
 }
