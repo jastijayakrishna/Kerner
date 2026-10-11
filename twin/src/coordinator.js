@@ -1,68 +1,8 @@
-import { Worker } from 'node:worker_threads';
 import { appendFile } from 'node:fs/promises';
 import { compareRuns, faithful } from './compare.js';
+import { startGhost } from './ghost.js';
 
-const GHOST = new URL('./worker.js', import.meta.url);
 const KEEP = 1000;
-
-/** Starts one ghost and waits until its version of the app has loaded. */
-function spawn(side, { startMs, memoryMb }) {
-  return new Promise((resolve, reject) => {
-    // The ghost drops its own console output (worker.js). Reading it here instead would keep the app's process alive: Node holds a
-    // process open while a worker's output is being read.
-    const worker = new Worker(GHOST, { workerData: side, resourceLimits: { maxOldGenerationSizeMb: memoryMb } });
-    let timer = null;
-    const cleanup = () => {
-      clearTimeout(timer);
-      worker.off('message', onMessage);
-      worker.off('error', onError);
-      worker.off('exit', onExit);
-    };
-    const fail = (error) => {
-      cleanup();
-      worker.terminate();
-      reject(error);
-    };
-    const onMessage = (message) => {
-      if (message?.type === 'ready') {
-        cleanup();
-        // From here on an error (running out of memory, say) ends only this ghost. Without a listener, Node would throw the
-        // worker's 'error' event in the app's own thread and end the app: one must always be attached.
-        worker.on('error', () => {});
-        resolve(worker);
-      }
-    };
-    const onError = (error) => fail(error);
-    const onExit = (code) => fail(new Error(`stopped while loading (exit ${code})`));
-    timer = setTimeout(() => fail(new Error(`did not load within ${startMs} ms`)), startMs);
-    worker.on('message', onMessage);
-    worker.on('error', onError);
-    worker.on('exit', onExit);
-  });
-}
-
-/** Sends one request to one ghost and answers its result, or why there is none. `dirty` means the ghost must be restarted. */
-function ask(worker, id, job, timeoutMs) {
-  return new Promise((resolve) => {
-    let dirty = false;
-    let timer = null;
-    const done = (result) => {
-      clearTimeout(timer);
-      worker.off('message', onMessage);
-      worker.off('exit', onExit);
-      resolve({ ...result, dirty: dirty || Boolean(result.timedOut || result.exited) });
-    };
-    const onMessage = (message) => {
-      if (message?.type === 'dirty') dirty = true;
-      else if (message?.type === 'result' && message.id === id) done(message.result);
-    };
-    const onExit = (code) => done({ error: `the ghost stopped (exit ${code})`, exited: true });
-    timer = setTimeout(() => done({ error: `no answer within ${timeoutMs} ms`, timedOut: true }), timeoutMs);
-    worker.on('message', onMessage);
-    worker.on('exit', onExit);
-    worker.postMessage({ type: 'job', id, job });
-  });
-}
 
 /** Bytes from another thread as a Buffer, without copying them again. */
 const asBuffer = (bytes) => (bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Buffer.alloc(0));
@@ -109,8 +49,8 @@ export class Coordinator {
   }
 
   async #spawnPair() {
-    const settings = { startMs: this.#options.startMs, memoryMb: this.#options.ghostMemoryMb };
-    const named = (label, side) => spawn(side, settings).catch((error) => {
+    const settings = { startMs: this.#options.startMs, memoryMb: this.#options.ghostMemoryMb, ghostExecArgv: this.#options.ghostExecArgv, addons: this.#options.addons };
+    const named = (label, side) => startGhost(side, settings).catch((error) => {
       throw new Error(`the ${label} version (${side.module}) ${error.message}`);
     });
     const [old, candidate] = await Promise.allSettled([named('old', this.#options.old), named('new', this.#options.candidate)]);
@@ -119,17 +59,10 @@ export class Coordinator {
       throw old.status === 'rejected' ? old.reason : candidate.reason;
     }
     this.#dirty = false;
-    for (const worker of [old.value, candidate.value]) {
-      worker.on('message', (message) => {
-        if (message?.type === 'dirty') this.#dirty = true;
-      });
-      worker.on('error', () => {
+    for (const ghost of [old.value, candidate.value]) {
+      ghost.onDirty(() => {
         this.#dirty = true;
       });
-      // Ghosts never keep the app's process alive: an app that closes its server must still be able to end. While a ghost answers,
-      // the time limit in ask() keeps the process alive. This comes after the 'message' listener above, because Node refs a worker
-      // again whenever its first 'message' listener is added.
-      worker.unref();
     }
     return { old: old.value, candidate: candidate.value };
   }
@@ -200,7 +133,7 @@ export class Coordinator {
     if (!this.#pair) return;
     const id = ++this.#seq;
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io };
-    const [old, candidate] = await Promise.all([ask(this.#pair.old, id, job, this.#options.timeoutMs), ask(this.#pair.candidate, id, job, this.#options.timeoutMs)]);
+    const [old, candidate] = await Promise.all([this.#pair.old.ask(id, job, this.#options.timeoutMs), this.#pair.candidate.ask(id, job, this.#options.timeoutMs)]);
     if (this.disabled) return;
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
     const real = { status: capture.response.status, headers: capture.response.headers, body: asBuffer(capture.response.body), effects: capture.effects, events: [] };
