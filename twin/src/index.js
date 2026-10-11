@@ -1,11 +1,10 @@
 import { Worker } from 'node:worker_threads';
-import { wrapListener } from './capture.js';
+import { current, loadRecord, settleLoad, wrapListener } from './capture.js';
 import { recordFetch } from './record.js';
 import { ghostEnv } from './ghost-common.js';
 import { Router } from './router.js';
 import { acceptMatcher } from './manifest.js';
 import { createRequire } from 'node:module';
-import { current } from './capture.js';
 import { ADAPTERS, ADAPTER_NAMES } from './adapters/index.js';
 import { spawnSync } from 'node:child_process';
 
@@ -99,6 +98,7 @@ function settingsOf(options) {
     cases: options.cases == null ? null : folder(options.cases, 'cases'),
     scrub: { headers: names(options.scrub?.headers, [], 'scrub.headers'), keys: names(options.scrub?.keys, [], 'scrub.keys') },
     humans: { kinds: names(options.humans?.kinds, [], 'humans.kinds'), hosts: names(options.humans?.hosts, [], 'humans.hosts') },
+    load: oneOf(options.load, 'none', ['none', 'record'], 'load'),
   };
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
   const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
@@ -151,6 +151,7 @@ class Twin {
   #routed = null;
   #switching = Promise.resolve(true);
   #closing = null;
+  #loadSent = false;
   #adapters = {};
 
   constructor(settings) {
@@ -308,7 +309,16 @@ class Twin {
     for (const resolve of this.#waiters.splice(0)) resolve();
   }
 
+  /** With load 'record', the ghosts start once they have the record of the app's start; the first record sent is the one used. */
+  #sendLoad(load) {
+    if (this.#settings.load !== 'record' || this.#loadSent) return;
+    this.#loadSent = true;
+    this.#thread?.postMessage({ type: 'load', load: load ?? { start: Date.now(), seed: 1, io: [] } });
+  }
+
   wrap(listener) {
+    // Wrapping the app's own listener, the twin did not see the app start: its ghosts start with no record.
+    this.#sendLoad(null);
     const settings = this.#settings;
     return wrapListener(listener, {
       sample: () => this.#sample(),
@@ -322,13 +332,18 @@ class Twin {
   /** The routing listener: it loads the old version in this thread, and records around whichever version serves each request. */
   listener() {
     this.#routed ??= (async () => {
-      this.#router = await Router.open({
+      const open = () => Router.open({
         old: this.#settings.old,
         candidate: this.#settings.candidate,
         candidateId: this.#candidateId,
         stateDir: this.#disabled ? null : this.#settings.stateDir,
         onSwitch: (side, reason, hold) => this.#thread?.postMessage({ type: 'serving', side, reason, hold, router: true }),
       });
+      // With load 'record', the old version starts inside a record of its own: every call it makes while starting is written down,
+      // and the ghosts start from those answers.
+      const record = this.#settings.load === 'record' && this.#thread && !this.#disabled ? loadRecord() : null;
+      this.#router = record ? await current.run(record, open) : await open();
+      if (record) this.#sendLoad(await settleLoad(record));
       this.#thread?.postMessage({ type: 'serving', side: this.#router.serving, reason: this.#router.reason, hold: this.#router.hold, router: true });
       return this.wrap(this.#router.listener());
     })();

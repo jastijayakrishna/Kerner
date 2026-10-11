@@ -51,6 +51,9 @@ export class Coordinator {
   #dirty = false;
   #waiters = [];
   #found = [];
+  #load = null;
+  #gate;
+  #opened;
   #reads = new Map();
   disabled = null;
   counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
@@ -58,13 +61,21 @@ export class Coordinator {
 
   constructor(options) {
     this.#options = options;
+    // Requests handed in before the ghosts are up wait here; with load 'record', the ghosts start only once the app has loaded.
+    this.#gate = new Promise((resolve) => {
+      this.#opened = resolve;
+    });
   }
 
-  async start() {
+  /** Starts the ghost pair; `load` is the record of the app's start that their starts are answered from (load 'record'), or null. */
+  async start(load = null) {
+    this.#load = load;
     try {
       this.#pair = await this.#spawnPair();
     } catch (error) {
       await this.disable(`the ghosts could not start: ${error.message}`);
+    } finally {
+      this.#opened();
     }
   }
 
@@ -72,7 +83,7 @@ export class Coordinator {
     const o = this.#options;
     const settings = {
       startMs: o.startMs, memoryMb: o.ghostMemoryMb, ghostExecArgv: o.ghostExecArgv, addons: o.addons, maxBodyBytes: o.maxBodyBytes,
-      adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [],
+      adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [], load: this.#load,
       onRealRead: (message) => this.#realRead(message),
       kind: o.ghosts ?? 'thread', sandbox: o.sandbox ?? 'none',
     };
@@ -188,6 +199,7 @@ export class Coordinator {
     if (this.#busy) return;
     this.#busy = true;
     try {
+      await this.#gate;
       while (this.#queue.length && !this.disabled) {
         const capture = this.#queue.shift();
         try {
@@ -263,6 +275,7 @@ export class Coordinator {
 
   /** Switches the twin off for good, keeping the first reason. The app is never affected. */
   disable(reason) {
+    this.#opened();
     if (!this.disabled) {
       this.disabled = reason;
       this.#options.onDisabled?.(reason);

@@ -188,6 +188,12 @@ async function onVerdict(verdict, capture) {
   report();
 }
 
+/** Starts the ghosts: at once, or with load 'record' once the app's thread sends the record of the app's start. */
+async function startGhosts(load) {
+  await coordinator.start(load);
+  if (manifest && !coordinator.disabled) evidence.setLoadLines(coordinator.loadLines());
+}
+
 function receive(message) {
   try {
     if (message?.type === 'capture') {
@@ -200,6 +206,8 @@ function receive(message) {
       serving = message.side;
       hold = Boolean(message.hold);
       router ||= Boolean(message.router);
+    } else if (message?.type === 'load') {
+      startGhosts(message.load).then(() => report(true), (error) => coordinator.disable(`the ghosts could not start: ${error.message}`));
     } else if (message?.type === 'close') {
       close();
       return;
@@ -249,8 +257,8 @@ try {
       if (!closing) post({ type: 'disabled', reason });
     },
   });
-  await coordinator.start();
-  if (manifest && !coordinator.disabled) evidence.setLoadLines(coordinator.loadLines());
+  // With load 'record', the ghosts start once the app's thread sends the record of its start (the 'load' message).
+  if (settings.load !== 'record') await startGhosts(null);
   // The known cases are counted before the twin is ready, so no decision is ever taken without them.
   if (settings.cases && !coordinator.disabled) {
     knownNames = await knownCaseNames();

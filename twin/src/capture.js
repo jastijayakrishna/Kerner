@@ -154,3 +154,25 @@ async function finish(req, res, record, describe) {
     effects: record.io.filter((call) => call.write).map((call) => call.key),
   };
 }
+
+/**
+ * A record for the app's start (Phase 6): the calls the old version makes while it loads in the app's thread are written down into it
+ * exactly as a sampled request's are, by the same recorders.
+ */
+export function loadRecord() {
+  return {
+    start: Date.now(), seed: randomInt(2 ** 31), io: [], pending: new Set(), serving: 'old',
+    incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false,
+  };
+}
+
+/**
+ * Closes a start's record once the version has loaded, as a request's record is closed once it is answered. Calls still running a
+ * moment later belong to the app's background work, and are left out. Answers what the ghosts need: { start, seed, io }.
+ */
+export async function settleLoad(record) {
+  await new Promise((resolve) => setImmediate(resolve));
+  if (record.pending.size) await Promise.race([Promise.allSettled([...record.pending]), new Promise((resolve) => setTimeout(resolve, 100))]);
+  record.done = true;
+  return { start: record.start, seed: record.seed, io: [...record.io] };
+}

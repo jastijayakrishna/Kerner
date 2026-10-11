@@ -22,6 +22,7 @@ export function startGhost(side, settings) {
       workerData: {
         module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null,
         adapters: settings.adapters ?? [], overlay: Boolean(settings.overlay), realReads: settings.realReads ?? [],
+        load: settings.load ?? null,
       },
       execArgv: settings.ghostExecArgv ?? [],
       env: ghostEnv(),

@@ -17,6 +17,16 @@ async function openCoverage(plan) {
   return { session, side: plan.side, targets: targetsOf(plan), cache: new Map() };
 }
 
+/** The calls a version made while starting that no answer was recorded for: why it could not start, and what would help. */
+function unanswered(events, recorded) {
+  const calls = events.filter((event) => event.type.startsWith('unmatched')).map((event) => event.detail);
+  if (!calls.length) return '';
+  const list = calls.slice(0, 3).join('; ');
+  return recorded
+    ? ` (at its start it made calls the record of the app's own start cannot answer: ${list})`
+    : ` (at its start it made calls the twin has no answer for: ${list}; with load: 'record' the twin answers them from the app's own start)`;
+}
+
 /**
  * One ghost, whatever carries its messages: a worker thread (worker.js) or a child process (process-ghost-main.js). It works in this
  * order:
@@ -61,11 +71,20 @@ export async function runGhost(side, transport) {
   // The changed lines this version runs, per request, when the twin has a manifest (Phase 3). Coverage starts before the app loads, so
   // every function the app compiles is counted precisely.
   const coverage = side.coverage ? await openCoverage(side.coverage) : null;
-  const app = await import(pathToFileURL(side.module).href);
-  const factory = app[side.export];
-  if (typeof factory !== 'function') throw new Error(`has no function named ${side.export}`);
-  handler = await factory();
-  if (typeof handler !== 'function') throw new Error(`${side.export}() must return a request listener: (req, res) => { ... }`);
+  // The app's start: a job of its own, at the real start's clock and seed, its calls answered from the record of that start when the
+  // twin has one (load 'record'). A start that fails names the calls it could not have answered.
+  if (side.load) resetWorld(side.load.start, side.load.seed);
+  beginJob(side.load?.io ?? []);
+  try {
+    const app = await import(pathToFileURL(side.module).href);
+    const factory = app[side.export];
+    if (typeof factory !== 'function') throw new Error(`has no function named ${side.export}`);
+    handler = await factory();
+    if (typeof handler !== 'function') throw new Error(`${side.export}() must return a request listener: (req, res) => { ... }`);
+  } catch (error) {
+    throw new Error(`${error?.message ?? error}${unanswered(endJob().events, Boolean(side.load))}`);
+  }
+  endJob();
 
   let finish = null;
   function crashed(error) {
