@@ -1,0 +1,224 @@
+{
+  "app": "infisical",
+  "label": "sample-0.1",
+  "mode": "twin",
+  "sampleRate": 0.1,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 22.787,
+    "judging": 4.52
+  },
+  "latency": {
+    "count": 300,
+    "p50": 20.65,
+    "p90": 567.53,
+    "p99": 657.21,
+    "max": 682.14
+  },
+  "statuses": {
+    "200": 197,
+    "400": 52,
+    "404": 51
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 2610,
+  "peakRssMb": 2610,
+  "twin": {
+    "sampled": 37,
+    "skipped": 0,
+    "dropped": 0,
+    "same": 33,
+    "stated": 0,
+    "different": 1,
+    "notCompared": 3,
+    "restarts": 0,
+    "logErrors": 0,
+    "evidenceErrors": 0,
+    "cases": 1,
+    "caseErrors": 0,
+    "queued": 0,
+    "disabled": null,
+    "reasons": {
+      "not compared: PG select * from \"access_approval_policies_approvers\" where (\"approverUserId\" in ($1))": 3
+    },
+    "serving": "old",
+    "adapters": {
+      "fetch": "recording",
+      "pg": "recording",
+      "ioredis": "recording",
+      "http": "recording"
+    },
+    "compared": 34,
+    "judged": 37,
+    "share": 0.9189
+  },
+  "decision": {
+    "ready": false,
+    "reasons": [
+      "1 unexplained difference",
+      "all traffic: 8.1% of requests could not be compared (at most 5.0% may be)",
+      "all traffic: 33 of 300 clean comparisons",
+      "64 changed lines have not yet run in full in 3 clean comparisons: old:backend/src/keystore/keystore.ts:42, old:backend/src/services/membership-user/membership-user-dal.ts:319, old:backend/src/services/membership-user/membership-user-dal.ts:321, old:backend/src/services/membership-user/membership-user-dal.ts:332, old:backend/src/services/membership-user/membership-user-dal.ts:333, ..."
+    ],
+    "needed": 300,
+    "bound": {
+      "*": 0.09090909090909091
+    },
+    "waiting": [
+      "old:backend/src/keystore/keystore.ts:42",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:319",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:321",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:332",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:333",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:344",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:347",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:348",
+      "new:backend/src/services/membership-user/membership-user-dal.ts:336",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:22",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:24",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:28",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:29",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:30",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:33",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:34",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:35",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:37",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:38",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:40",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:45",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:46",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:48",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:23",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:24",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:26",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:32",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:34",
+      "old:backend/src/services/membership-user/membership-user-service.ts:426",
+      "old:backend/src/services/membership-user/membership-user-service.ts:427",
+      "old:backend/src/services/membership-user/membership-user-service.ts:428",
+      "old:backend/src/services/membership-user/membership-user-service.ts:430",
+      "old:backend/src/services/membership-user/membership-user-service.ts:534",
+      "old:backend/src/services/membership-user/membership-user-service.ts:535",
+      "old:backend/src/services/membership-user/membership-user-service.ts:536",
+      "old:backend/src/services/membership-user/membership-user-service.ts:537",
+      "old:backend/src/services/membership-user/membership-user-service.ts:538",
+      "old:backend/src/services/membership-user/membership-user-service.ts:539",
+      "old:backend/src/services/membership-user/membership-user-service.ts:540",
+      "new:backend/src/services/membership-user/membership-user-service.ts:426",
+      "new:backend/src/services/membership-user/membership-user-service.ts:427",
+      "old:backend/src/services/org/org-fns.ts:45",
+      "old:backend/src/services/org/org-fns.ts:46",
+      "new:backend/src/services/org/org-fns.ts:45",
+      "old:backend/src/services/org/org-service.ts:869",
+      "old:backend/src/services/org/org-service.ts:870",
+      "new:backend/src/services/org/org-service.ts:869",
+      "old:backend/src/services/project-membership/project-membership-service.ts:338",
+      "old:backend/src/services/project-membership/project-membership-service.ts:350",
+      "old:backend/src/services/project-membership/project-membership-service.ts:351",
+      "old:backend/src/services/project-membership/project-membership-service.ts:352",
+      "old:backend/src/services/project-membership/project-membership-service.ts:353",
+      "old:backend/src/services/project-membership/project-membership-service.ts:354",
+      "old:backend/src/services/project-membership/project-membership-service.ts:355",
+      "old:backend/src/services/project-membership/project-membership-service.ts:356",
+      "old:backend/src/services/project-membership/project-membership-service.ts:444",
+      "old:backend/src/services/project-membership/project-membership-service.ts:445",
+      "old:backend/src/services/project-membership/project-membership-service.ts:460",
+      "old:backend/src/services/project-membership/project-membership-service.ts:461",
+      "old:backend/src/services/project-membership/project-membership-service.ts:462",
+      "old:backend/src/services/project-membership/project-membership-service.ts:463",
+      "old:backend/src/services/project-membership/project-membership-service.ts:464",
+      "old:backend/src/services/project-membership/project-membership-service.ts:465",
+      "old:backend/src/services/project-membership/project-membership-service.ts:466"
+    ]
+  },
+  "evidence": {
+    "candidate": "sha256:7d0fc703e19fbd20c55cca5eb88a925e93d27b389522c4153bf04dc22702f86c",
+    "since": 1791709234709,
+    "note": null,
+    "totals": {
+      "*": {
+        "same": 33,
+        "stated": 0,
+        "different": 1,
+        "notCompared": 3,
+        "skipped": 0
+      },
+      "all": {
+        "same": 33,
+        "stated": 0,
+        "different": 1,
+        "notCompared": 3,
+        "skipped": 0
+      }
+    },
+    "unexplained": [
+      {
+        "n": 24,
+        "at": "2026-10-11T09:00:48.957Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/70d38e27-d8c2-4385-bc72-3cf8ba846d77/memberships/f9931850-0e3e-4fef-897a-a891311b8b78",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 1bd8b784bf31e257"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      }
+    ],
+    "known": {
+      "pending": 0,
+      "failing": [],
+      "unchecked": [],
+      "stubs": [],
+      "unreadable": []
+    }
+  },
+  "differences": [
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 1bd8b784bf31e257"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    }
+  ],
+  "lines": {
+    "at load": 4,
+    "partly run": 27,
+    "never run": 37,
+    "accepted": 52
+  }
+}

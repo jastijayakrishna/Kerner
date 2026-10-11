@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "candidate": "sha256:35882dee4dff6c5fdb7ada37b0e4c5f0f2a70ed4d7092340ed0bf35b95a08f9f",
+  "n": 69,
+  "time": 1791711454690,
+  "route": "DELETE /api/v1/projects/:id/leave",
+  "segment": "all",
+  "adapters": [
+    "fetch",
+    "pg",
+    "ioredis",
+    "http"
+  ],
+  "overlay": false,
+  "kinds": [
+    "effects"
+  ],
+  "lines": {
+    "old:backend/src/services/project-membership/project-membership-service.ts:444": "1111111111111111111111111",
+    "old:backend/src/services/project-membership/project-membership-service.ts:445": "111111111111111111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "pulls": [
+    6995
+  ],
+  "cause": 6995,
+  "human": false,
+  "scrubbed": true,
+  "opaque": [],
+  "reproduces": false,
+  "why": "the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+}

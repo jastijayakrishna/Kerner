@@ -1,0 +1,33 @@
+{
+  "app": "infisical",
+  "label": "off",
+  "mode": "off",
+  "sampleRate": 0,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 18.169,
+    "judging": 0.001
+  },
+  "latency": {
+    "count": 300,
+    "p50": 14.82,
+    "p90": 458.5,
+    "p99": 520.16,
+    "max": 615.96
+  },
+  "statuses": {
+    "200": 197,
+    "400": 52,
+    "404": 51
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 818,
+  "peakRssMb": 817,
+  "twin": null,
+  "decision": null,
+  "evidence": null,
+  "differences": [],
+  "lines": {}
+}

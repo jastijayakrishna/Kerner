@@ -1,0 +1,102 @@
+{
+  "app": "firecrawl",
+  "label": "sample-1",
+  "mode": "twin",
+  "sampleRate": 1,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 0.725,
+    "judging": 16.077
+  },
+  "latency": {
+    "count": 300,
+    "p50": 4.4,
+    "p90": 7.27,
+    "p99": 14.43,
+    "max": 66.02
+  },
+  "statuses": {
+    "200": 100,
+    "402": 200
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 824,
+  "peakRssMb": 824,
+  "twin": {
+    "sampled": 300,
+    "skipped": 0,
+    "dropped": 0,
+    "same": 133,
+    "stated": 0,
+    "different": 0,
+    "notCompared": 167,
+    "restarts": 0,
+    "logErrors": 0,
+    "evidenceErrors": 0,
+    "cases": 0,
+    "caseErrors": 0,
+    "queued": 0,
+    "disabled": null,
+    "reasons": {
+      "not compared: the old code's ghost wrote other things than the real run": 72,
+      "not compared: the old code's ghost made a call the real run did not: REDIS GET": 94,
+      "not compared: the old code's ghost made a call the real run did not: REDIS EVALSHA": 1
+    },
+    "serving": "old",
+    "adapters": {
+      "fetch": "recording",
+      "ioredis": "recording",
+      "http": "recording"
+    },
+    "compared": 133,
+    "judged": 300,
+    "share": 0.4433
+  },
+  "decision": {
+    "ready": false,
+    "reasons": [
+      "all traffic: 55.7% of requests could not be compared (at most 5.0% may be)",
+      "all traffic: 133 of 300 clean comparisons"
+    ],
+    "needed": 300,
+    "bound": {
+      "*": 0.022556390977443608
+    },
+    "waiting": []
+  },
+  "evidence": {
+    "candidate": "sha256:b93652e5d4dd65b4168c143ddb29b84b6b0808065c754522ad3b4bbabe67adeb",
+    "since": 1791715567423,
+    "note": null,
+    "totals": {
+      "*": {
+        "same": 133,
+        "stated": 0,
+        "different": 0,
+        "notCompared": 167,
+        "skipped": 0
+      },
+      "all": {
+        "same": 133,
+        "stated": 0,
+        "different": 0,
+        "notCompared": 167,
+        "skipped": 0
+      }
+    },
+    "unexplained": [],
+    "known": {
+      "pending": 0,
+      "failing": [],
+      "unchecked": [],
+      "stubs": [],
+      "unreadable": []
+    }
+  },
+  "differences": [],
+  "lines": {
+    "proven": 22
+  }
+}

@@ -1,0 +1,1363 @@
+{
+  "app": "infisical",
+  "label": "sample-1-pgreads",
+  "mode": "twin",
+  "sampleRate": 1,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 32.032,
+    "judging": 62.273
+  },
+  "latency": {
+    "count": 300,
+    "p50": 28.81,
+    "p90": 839.14,
+    "p99": 966.1,
+    "max": 1041.2
+  },
+  "statuses": {
+    "200": 197,
+    "400": 52,
+    "404": 51
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 2755,
+  "peakRssMb": 2755,
+  "twin": {
+    "sampled": 302,
+    "skipped": 0,
+    "dropped": 0,
+    "same": 274,
+    "stated": 0,
+    "different": 28,
+    "notCompared": 0,
+    "restarts": 0,
+    "logErrors": 0,
+    "evidenceErrors": 0,
+    "cases": 10,
+    "caseErrors": 0,
+    "queued": 0,
+    "disabled": null,
+    "reasons": {},
+    "serving": "old",
+    "adapters": {
+      "fetch": "recording",
+      "pg": "recording",
+      "ioredis": "recording",
+      "http": "recording"
+    },
+    "compared": 302,
+    "judged": 302,
+    "share": 1
+  },
+  "decision": {
+    "ready": false,
+    "reasons": [
+      "28 unexplained differences",
+      "all traffic: 274 of 300 clean comparisons",
+      "64 changed lines have not yet run in full in 3 clean comparisons: old:backend/src/keystore/keystore.ts:42, old:backend/src/services/membership-user/membership-user-dal.ts:319, old:backend/src/services/membership-user/membership-user-dal.ts:321, old:backend/src/services/membership-user/membership-user-dal.ts:332, old:backend/src/services/membership-user/membership-user-dal.ts:333, ..."
+    ],
+    "needed": 300,
+    "bound": {
+      "*": 0.010948905109489052
+    },
+    "waiting": [
+      "old:backend/src/keystore/keystore.ts:42",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:319",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:321",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:332",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:333",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:344",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:347",
+      "old:backend/src/services/membership-user/membership-user-dal.ts:348",
+      "new:backend/src/services/membership-user/membership-user-dal.ts:336",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:22",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:24",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:28",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:29",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:30",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:33",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:34",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:35",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:37",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:38",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:40",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:45",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:46",
+      "old:backend/src/services/membership-user/membership-user-fns.ts:48",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:23",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:24",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:26",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:32",
+      "new:backend/src/services/membership-user/membership-user-fns.ts:34",
+      "old:backend/src/services/membership-user/membership-user-service.ts:426",
+      "old:backend/src/services/membership-user/membership-user-service.ts:427",
+      "old:backend/src/services/membership-user/membership-user-service.ts:428",
+      "old:backend/src/services/membership-user/membership-user-service.ts:430",
+      "old:backend/src/services/membership-user/membership-user-service.ts:534",
+      "old:backend/src/services/membership-user/membership-user-service.ts:535",
+      "old:backend/src/services/membership-user/membership-user-service.ts:536",
+      "old:backend/src/services/membership-user/membership-user-service.ts:537",
+      "old:backend/src/services/membership-user/membership-user-service.ts:538",
+      "old:backend/src/services/membership-user/membership-user-service.ts:539",
+      "old:backend/src/services/membership-user/membership-user-service.ts:540",
+      "new:backend/src/services/membership-user/membership-user-service.ts:426",
+      "new:backend/src/services/membership-user/membership-user-service.ts:427",
+      "old:backend/src/services/org/org-fns.ts:45",
+      "old:backend/src/services/org/org-fns.ts:46",
+      "new:backend/src/services/org/org-fns.ts:45",
+      "old:backend/src/services/org/org-service.ts:869",
+      "old:backend/src/services/org/org-service.ts:870",
+      "new:backend/src/services/org/org-service.ts:869",
+      "old:backend/src/services/project-membership/project-membership-service.ts:338",
+      "old:backend/src/services/project-membership/project-membership-service.ts:350",
+      "old:backend/src/services/project-membership/project-membership-service.ts:351",
+      "old:backend/src/services/project-membership/project-membership-service.ts:352",
+      "old:backend/src/services/project-membership/project-membership-service.ts:353",
+      "old:backend/src/services/project-membership/project-membership-service.ts:354",
+      "old:backend/src/services/project-membership/project-membership-service.ts:355",
+      "old:backend/src/services/project-membership/project-membership-service.ts:356",
+      "old:backend/src/services/project-membership/project-membership-service.ts:444",
+      "old:backend/src/services/project-membership/project-membership-service.ts:445",
+      "old:backend/src/services/project-membership/project-membership-service.ts:460",
+      "old:backend/src/services/project-membership/project-membership-service.ts:461",
+      "old:backend/src/services/project-membership/project-membership-service.ts:462",
+      "old:backend/src/services/project-membership/project-membership-service.ts:463",
+      "old:backend/src/services/project-membership/project-membership-service.ts:464",
+      "old:backend/src/services/project-membership/project-membership-service.ts:465",
+      "old:backend/src/services/project-membership/project-membership-service.ts:466"
+    ]
+  },
+  "evidence": {
+    "candidate": "sha256:35882dee4dff6c5fdb7ada37b0e4c5f0f2a70ed4d7092340ed0bf35b95a08f9f",
+    "since": 1791711447580,
+    "note": null,
+    "totals": {
+      "*": {
+        "same": 274,
+        "stated": 0,
+        "different": 28,
+        "notCompared": 0,
+        "skipped": 0
+      },
+      "all": {
+        "same": 274,
+        "stated": 0,
+        "different": 28,
+        "notCompared": 0,
+        "skipped": 0
+      }
+    },
+    "unexplained": [
+      {
+        "n": 14,
+        "at": "2026-10-11T09:37:28.261Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/4b20c46c-6b4c-4b58-b2cc-e27e064b0170/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 28,
+        "at": "2026-10-11T09:37:30.532Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/b58cf05e-4e51-4ae1-b5fa-baf700a678b9/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 43,
+        "at": "2026-10-11T09:37:32.060Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/c822036f-46fe-4725-b665-d5e4e6ce6770/memberships/f71b91b0-1627-4562-b847-a3d59f6c2d49",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 53,
+        "at": "2026-10-11T09:37:32.892Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/068db7f0-9762-43be-b6ed-7e715be93068/memberships/b6221d4f-d5a4-4ee0-b89d-f0778e3895c9",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 69,
+        "at": "2026-10-11T09:37:34.690Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/6c881261-0544-4b30-ba3d-ff4d5befea76/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 88,
+        "at": "2026-10-11T09:37:37.578Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/c709de34-968e-430d-bf00-e37784e3e92b/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 91,
+        "at": "2026-10-11T09:37:37.612Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/04d94e11-d0c8-4e8d-b352-b256a2665734/memberships/9260876e-c5bc-4be1-b561-2c93dc69833e",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 94,
+        "at": "2026-10-11T09:37:37.652Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/d28bb9a4-77ef-4274-b0c5-5a70ba489158/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 131,
+        "at": "2026-10-11T09:37:40.371Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/a5cd4649-8731-4657-b36c-d821ea851c10/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 134,
+        "at": "2026-10-11T09:37:40.922Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/eca0d6a5-44dd-4c85-b141-7d38ecd4bda0/memberships/95d8990b-1ed8-4795-b392-c599ef943a66",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 141,
+        "at": "2026-10-11T09:37:41.053Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/b5a24999-5dab-4859-b438-7f3410ca71b6/memberships/5dac97fe-3aab-4aa3-bf22-dd690103f2fe",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 144,
+        "at": "2026-10-11T09:37:41.085Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/5055c365-271f-4833-b63c-697eb002b55f/memberships/c112956f-a9c3-4cca-b8cb-32603f02ea6f",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 171,
+        "at": "2026-10-11T09:37:44.493Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/45779aeb-c129-435b-b255-f95ea65873ba/memberships/ac36210b-fd5f-4c9b-b1a6-aa059c543bd8",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 172,
+        "at": "2026-10-11T09:37:44.518Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/eca06e03-336c-41f2-b5e3-f96078d7cca5/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 178,
+        "at": "2026-10-11T09:37:44.920Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/ad553a7b-74b5-4a2b-b063-0225e67de6cb/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 188,
+        "at": "2026-10-11T09:37:46.208Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/a5dd085d-26f2-424f-b8f4-9f4bf30ecf01/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 214,
+        "at": "2026-10-11T09:37:49.621Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/43928be4-1791-4146-be97-e17e87388b38/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 218,
+        "at": "2026-10-11T09:37:50.486Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/b68b1b0e-852e-4166-bce4-d5f693fdf97a/memberships/20ae2ea6-4498-4665-b5ad-57ad142c1907",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 222,
+        "at": "2026-10-11T09:37:50.572Z",
+        "route": "DELETE /api/v1/projects/:id/leave",
+        "segment": "all",
+        "serving": "old",
+        "method": "DELETE",
+        "url": "/api/v1/projects/9a2015fe-bc56-46c8-b16a-61cee416331a/leave",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      },
+      {
+        "n": 223,
+        "at": "2026-10-11T09:37:50.585Z",
+        "route": "PATCH /api/v1/projects/:id/memberships/:id",
+        "segment": "all",
+        "serving": "old",
+        "method": "PATCH",
+        "url": "/api/v1/projects/458d91c4-305b-4232-bb06-801813506acd/memberships/1d44b0bc-cc31-4bea-b864-4a8d24cbcefc",
+        "kinds": [
+          "effects"
+        ],
+        "details": [
+          {
+            "kind": "effects",
+            "path": "writes",
+            "old": "none",
+            "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+          },
+          {
+            "kind": "effects",
+            "path": "answer",
+            "old": "compared",
+            "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+          }
+        ]
+      }
+    ],
+    "known": {
+      "pending": 0,
+      "failing": [],
+      "unchecked": [],
+      "stubs": [],
+      "unreadable": []
+    }
+  },
+  "differences": [
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": [
+        "effects"
+      ],
+      "cause": 6995,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"additional_privileges\" where (\"projectId\" = $1  fc7a227c76274e2d 6f2a05eb048bad13"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"additional_privileges\" where (\"projectId\" = $1 and \"actorUserId\" = $2) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    },
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": [
+        "effects"
+      ],
+      "cause": null,
+      "pulls": [
+        6995
+      ],
+      "details": [
+        {
+          "kind": "effects",
+          "path": "writes",
+          "old": "none",
+          "new": "PG delete from \"membership_roles\" where (\"membershipId\" = $1) r 2fcac66522d11328 b439e64fdb6d0444"
+        },
+        {
+          "kind": "effects",
+          "path": "answer",
+          "old": "compared",
+          "new": "unknown: the recording cannot answer PG delete from \"membership_roles\" where (\"membershipId\" = $1) returning *, so what the ghost did after it is not compared"
+        }
+      ]
+    }
+  ],
+  "lines": {
+    "at load": 4,
+    "partly run": 27,
+    "never run": 37,
+    "accepted": 52
+  }
+}

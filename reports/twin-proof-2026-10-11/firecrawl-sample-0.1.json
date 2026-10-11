@@ -1,0 +1,101 @@
+{
+  "app": "firecrawl",
+  "label": "sample-0.1",
+  "mode": "twin",
+  "sampleRate": 0.1,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 0.742,
+    "judging": 4.019
+  },
+  "latency": {
+    "count": 300,
+    "p50": 4.62,
+    "p90": 7.23,
+    "p99": 12.8,
+    "max": 69.52
+  },
+  "statuses": {
+    "200": 100,
+    "402": 200
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 812,
+  "peakRssMb": 818,
+  "twin": {
+    "sampled": 22,
+    "skipped": 0,
+    "dropped": 0,
+    "same": 12,
+    "stated": 0,
+    "different": 0,
+    "notCompared": 10,
+    "restarts": 0,
+    "logErrors": 0,
+    "evidenceErrors": 0,
+    "cases": 0,
+    "caseErrors": 0,
+    "queued": 0,
+    "disabled": null,
+    "reasons": {
+      "not compared: the old code's ghost made a call the real run did not: REDIS GET": 8,
+      "not compared: the old code's ghost wrote other things than the real run": 2
+    },
+    "serving": "old",
+    "adapters": {
+      "fetch": "recording",
+      "ioredis": "recording",
+      "http": "recording"
+    },
+    "compared": 12,
+    "judged": 22,
+    "share": 0.5455
+  },
+  "decision": {
+    "ready": false,
+    "reasons": [
+      "all traffic: 45.5% of requests could not be compared (at most 5.0% may be)",
+      "all traffic: 12 of 300 clean comparisons"
+    ],
+    "needed": 300,
+    "bound": {
+      "*": 0.25
+    },
+    "waiting": []
+  },
+  "evidence": {
+    "candidate": "sha256:b93652e5d4dd65b4168c143ddb29b84b6b0808065c754522ad3b4bbabe67adeb",
+    "since": 1791715539086,
+    "note": null,
+    "totals": {
+      "*": {
+        "same": 12,
+        "stated": 0,
+        "different": 0,
+        "notCompared": 10,
+        "skipped": 0
+      },
+      "all": {
+        "same": 12,
+        "stated": 0,
+        "different": 0,
+        "notCompared": 10,
+        "skipped": 0
+      }
+    },
+    "unexplained": [],
+    "known": {
+      "pending": 0,
+      "failing": [],
+      "unchecked": [],
+      "stubs": [],
+      "unreadable": []
+    }
+  },
+  "differences": [],
+  "lines": {
+    "proven": 22
+  }
+}

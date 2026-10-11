@@ -1,0 +1,40 @@
+{
+  "infisical": {
+    "files": [
+      "twin/proof/infisical/twin-entry.mjs",
+      "twin/proof/infisical/ghost-pino.mjs",
+      "twin/proof/infisical/config.json"
+    ],
+    "options": {
+      "load": "record",
+      "adapters": ["pg", "ioredis", "http"],
+      "addons": "10 native modules (pkcs11js, re2, bcrypt, argon2, odbc, oracledb, ssh2, cpu-features, @infisical/quic-linux-x64, @msgpackr-extract/msgpackr-extract-linux-x64)",
+      "ghostExecArgv": ["--import", "ghost-pino.mjs"],
+      "pgReads": "a read-only role (second, labeled run only): postgres://kern_reader@db/infisical"
+    },
+    "notes": [
+      "The entry is Infisical's own src/main.ts without telemetry, migrations, signal handlers and listen(): createApp() builds the Fastify app and returns its request listener.",
+      "The database is migrated and seeded before each run, as Infisical's e2e tests do (prepare.cjs, from the TypeScript sources under Infisical's own tsx); that is deployment, not adoption.",
+      "Queue workers stay on, as in Infisical's e2e tests: at this commit main() exits with QUEUE_WORKERS_ENABLED=false. The background work they start is what the twin's turns keep out of each request's comparison.",
+      "ghost-pino.mjs points pino at a worker-safe transport so a ghost (itself a worker thread) can start Infisical's logger.",
+      "The second, labeled run turns on opt-in Postgres real reads against a read-only role prepare.cjs creates (SELECT on all tables, nothing more); the twin also wraps every real read in a READ ONLY transaction, so a write is refused twice over."
+    ]
+  },
+  "firecrawl": {
+    "files": [
+      "twin/proof/firecrawl/twin-entry.mjs",
+      "twin/proof/firecrawl/standin.mjs",
+      "twin/proof/firecrawl/config.json"
+    ],
+    "options": {
+      "load": "record",
+      "adapters": ["ioredis", "http"],
+      "addons": "7 native modules (firecrawl-rs, koffi, bufferutil, utf-8-validate, @msgpackr-extract/msgpackr-extract-linux-x64, keccak, bigint-buffer)"
+    },
+    "notes": [
+      "firecrawl exports no app: the entry takes the request listener from the last http.createServer call made while its index.ts loads, and runs startServer's two set-up steps (initializeBlocklist, initializeEngineForcing).",
+      "Its paid path ran against a stand-in for two Supabase reads (standin.mjs); without them the changed lines (the credit check) cannot run at all.",
+      "The change is log-only (a logger.warn on the 402 credit-check path), so the twin should find no difference: the log goes to standard output, which is not observable I/O."
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "app": "shop",
+  "label": "off",
+  "mode": "off",
+  "sampleRate": 0,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 0.467,
+    "judging": 0.001
+  },
+  "latency": {
+    "count": 300,
+    "p50": 1.75,
+    "p90": 6.04,
+    "p99": 8.09,
+    "max": 46.71
+  },
+  "statuses": {
+    "200": 195,
+    "201": 83,
+    "404": 22
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 84,
+  "peakRssMb": 83,
+  "twin": null,
+  "decision": null,
+  "evidence": null,
+  "differences": [],
+  "lines": {}
+}

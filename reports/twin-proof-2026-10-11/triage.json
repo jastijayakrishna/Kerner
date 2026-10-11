@@ -1,0 +1,27 @@
+{
+  "infisical": [
+    {
+      "route": "PATCH /api/v1/projects/:id/memberships/:id",
+      "kinds": ["effects"],
+      "count": 14,
+      "verdict": "meant",
+      "why": "#6995 removes the last-admin check. The old version refuses (400, 'this action would leave the project with no admin') to demote a project's only admin; the new version demotes it and writes `delete from \"membership_roles\"`. The twin shows this as effects with the answer unknown, because the write it reaches has no recorded answer (the old version never made it). It removes a safety check, so a person must approve it."
+    },
+    {
+      "route": "DELETE /api/v1/projects/:id/leave",
+      "kinds": ["effects"],
+      "count": 14,
+      "verdict": "meant",
+      "why": "The same #6995 change on the leave path. The old version refuses (400, 'you cannot leave the project as you are the only member') to let a project's only admin leave; the new version removes the membership. The twin shows this as effects with the answer unknown (the delete has no recorded answer). This group appears in the opt-in pgReads run: by default these 14 are 'not compared', because the new leave path reads a table (access_approval_policies_approvers) the old version never read; pgReads answers that read for real, read-only, so the path runs on to the delete and the difference shows."
+    }
+  ],
+  "shop": [
+    {
+      "route": "POST /orders",
+      "kinds": ["body"],
+      "count": 17,
+      "verdict": "bug",
+      "why": "The proof kit's own example, a control (not a real app): its new version rounds large order totals ($95.76 -> $96) in the answer body. A planted behaviour change, the kind that would overcharge a customer. The twin found all 17 and nothing else, with zero false alarms."
+    }
+  ]
+}

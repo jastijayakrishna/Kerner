@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "candidate": "sha256:35882dee4dff6c5fdb7ada37b0e4c5f0f2a70ed4d7092340ed0bf35b95a08f9f",
+  "n": 43,
+  "time": 1791711452060,
+  "route": "PATCH /api/v1/projects/:id/memberships/:id",
+  "segment": "all",
+  "adapters": [
+    "fetch",
+    "pg",
+    "ioredis",
+    "http"
+  ],
+  "overlay": false,
+  "kinds": [
+    "effects"
+  ],
+  "lines": {
+    "old:backend/src/keystore/keystore.ts:41": "0000000000000000000000000000000000111111111111110000000000000000",
+    "old:backend/src/keystore/keystore.ts:42": "11111111111111111111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-dal.ts:319": "11111",
+    "old:backend/src/services/membership-user/membership-user-dal.ts:321": "11111111111111",
+    "old:backend/src/services/membership-user/membership-user-dal.ts:332": "1111111111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-dal.ts:344": "1111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-dal.ts:347": "11111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-dal.ts:348": "1111111111111111111111111111111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-service.ts:426": "11111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-service.ts:427": "11111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-service.ts:428": "111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-service.ts:430": "111111111111111111111111111111111111111111111111111111111111111111111111000000",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:21": "000000000000000000000000000000000000000000001111100000000000000000000000",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:22": "11111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:24": "11111111111111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:28": "11",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:29": "1111111111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:33": "1111111111111111111111111111111111111111111111111111000000",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:34": "11111111111111111111111111111111111111111111111111111100000000000",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:35": "11111111111111111111111111111111111111111111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:37": "11111111111111111111111111111111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:38": "11111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:40": "11111111111111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:45": "1111111111111111111",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:46": "1111111111111111111111111111111111111111111111111000000000000000",
+    "old:backend/src/services/membership-user/membership-user-fns.ts:48": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+    "new:backend/src/services/membership-user/membership-user-service.ts:426": "1111111111111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "pulls": [
+    6995
+  ],
+  "cause": null,
+  "human": false,
+  "scrubbed": true,
+  "opaque": [],
+  "reproduces": false,
+  "why": "the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+}

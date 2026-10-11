@@ -1,0 +1,32 @@
+{
+  "app": "firecrawl",
+  "label": "off",
+  "mode": "off",
+  "sampleRate": 0,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 0.546,
+    "judging": 0.001
+  },
+  "latency": {
+    "count": 300,
+    "p50": 3.44,
+    "p90": 5.45,
+    "p99": 8.99,
+    "max": 54.9
+  },
+  "statuses": {
+    "200": 100,
+    "402": 200
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 274,
+  "peakRssMb": 278,
+  "twin": null,
+  "decision": null,
+  "evidence": null,
+  "differences": [],
+  "lines": {}
+}

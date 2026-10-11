@@ -1,0 +1,133 @@
+{
+  "app": "shop",
+  "label": "sample-0.1",
+  "mode": "twin",
+  "sampleRate": 0.1,
+  "requests": 300,
+  "concurrency": 2,
+  "seconds": {
+    "traffic": 0.681,
+    "judging": 0.002
+  },
+  "latency": {
+    "count": 300,
+    "p50": 3.16,
+    "p90": 7.39,
+    "p99": 12.52,
+    "max": 65.41
+  },
+  "statuses": {
+    "200": 195,
+    "201": 83,
+    "404": 22
+  },
+  "failed": 0,
+  "failures": [],
+  "rssMb": 143,
+  "peakRssMb": 142,
+  "twin": {
+    "sampled": 31,
+    "skipped": 0,
+    "dropped": 0,
+    "same": 30,
+    "stated": 0,
+    "different": 1,
+    "notCompared": 0,
+    "restarts": 0,
+    "logErrors": 0,
+    "evidenceErrors": 0,
+    "cases": 0,
+    "caseErrors": 0,
+    "queued": 0,
+    "disabled": null,
+    "reasons": {},
+    "serving": "old",
+    "adapters": {
+      "fetch": "recording",
+      "pg": "recording"
+    },
+    "compared": 31,
+    "judged": 31,
+    "share": 1
+  },
+  "decision": {
+    "ready": false,
+    "reasons": [
+      "1 unexplained difference",
+      "all traffic: 30 of 60 clean comparisons"
+    ],
+    "needed": 60,
+    "bound": {
+      "*": 0.1
+    }
+  },
+  "evidence": {
+    "candidate": "sha256:353abc112ae0e01ad3553cd2afaee8cb9e50d7659876a484796b41004a473f71",
+    "since": 1791699555830,
+    "note": null,
+    "totals": {
+      "*": {
+        "same": 30,
+        "stated": 0,
+        "different": 1,
+        "notCompared": 0,
+        "skipped": 0
+      },
+      "all": {
+        "same": 30,
+        "stated": 0,
+        "different": 1,
+        "notCompared": 0,
+        "skipped": 0
+      }
+    },
+    "unexplained": [
+      {
+        "n": 19,
+        "at": "2026-10-11T06:19:16.223Z",
+        "route": "POST /orders",
+        "segment": "all",
+        "serving": "old",
+        "method": "POST",
+        "url": "/orders",
+        "kinds": [
+          "body"
+        ],
+        "details": [
+          {
+            "kind": "body",
+            "path": "$.total",
+            "old": "27.48",
+            "new": "27"
+          }
+        ]
+      }
+    ],
+    "known": {
+      "pending": 0,
+      "failing": [],
+      "unchecked": [],
+      "stubs": [],
+      "unreadable": []
+    }
+  },
+  "differences": [
+    {
+      "route": "POST /orders",
+      "kinds": [
+        "body"
+      ],
+      "cause": null,
+      "pulls": [],
+      "details": [
+        {
+          "kind": "body",
+          "path": "$.total",
+          "old": "27.48",
+          "new": "27"
+        }
+      ]
+    }
+  ],
+  "lines": {}
+}

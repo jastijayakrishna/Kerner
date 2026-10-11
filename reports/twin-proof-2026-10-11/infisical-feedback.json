@@ -1,0 +1,37 @@
+﻿{
+  "schema": "kern-feedback/v1",
+  "status": "BLOCKED",
+  "agent_fixable": false,
+  "violations": [
+    {
+      "rule": "twin-difference",
+      "path": "backend/src/services/membership-user/membership-user-service.ts",
+      "detail": "PATCH /api/v1/projects/:id/memberships/:id: effects, from one of #6995",
+      "instruction": "A person must look: the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+    },
+    {
+      "rule": "twin-difference",
+      "path": "backend/src/services/membership-user/membership-user-service.ts",
+      "detail": "PATCH /api/v1/projects/:id/memberships/:id: effects, from one of #6995",
+      "instruction": "A person must look: the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+    },
+    {
+      "rule": "twin-difference",
+      "path": "backend/src/services/membership-user/membership-user-service.ts",
+      "detail": "PATCH /api/v1/projects/:id/memberships/:id: effects, from one of #6995",
+      "instruction": "A person must look: the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+    },
+    {
+      "rule": "twin-difference",
+      "path": "backend/src/services/membership-user/membership-user-service.ts",
+      "detail": "PATCH /api/v1/projects/:id/memberships/:id: effects, from one of #6995",
+      "instruction": "A person must look: the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+    },
+    {
+      "rule": "twin-difference",
+      "path": "backend/src/services/membership-user/membership-user-service.ts",
+      "detail": "PATCH /api/v1/projects/:id/memberships/:id: effects, from one of #6995",
+      "instruction": "A person must look: the scrubbed copy was answered with another status (old 400 → 403, new 500 → 403): it may depend on a private value, such as a sign-in, so a person must look"
+    }
+  ]
+}
