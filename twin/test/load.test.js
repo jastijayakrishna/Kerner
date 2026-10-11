@@ -69,6 +69,18 @@ test('a start that ends its own process says so, with the calls the ghost could 
   }
 });
 
+test('a failed start names each call it could not answer once, with a count, so a repeated poll cannot hide the one that mattered', async () => {
+  const config = await configService();
+  try {
+    const shop = await routed('polling-start');
+    await until(() => shop.twin.stats().disabled);
+    assert.match(shop.twin.stats().disabled, /no answer for: GET http:\/\/127\.0\.0\.1:\d+\/poll \(4 times\); GET http:\/\/127\.0\.0\.1:\d+\/settings;/);
+    await shop.close();
+  } finally {
+    await config.close();
+  }
+});
+
 test('a new version that asks at its start for what the old one never did cannot start, and the twin names the call', async () => {
   const config = await configService();
   try {

@@ -20,6 +20,14 @@ async function openCoverage(plan) {
   return { session, side: plan.side, targets: targetsOf(plan), cache: new Map() };
 }
 
+/** Each distinct detail once, in the order first seen, with how often it came (a queue's poll repeats), at most 8 of them. */
+function listed(details) {
+  const counts = new Map();
+  for (const detail of details) counts.set(detail, (counts.get(detail) ?? 0) + 1);
+  const shown = [...counts].slice(0, 8).map(([detail, n]) => (n > 1 ? `${detail} (${n} times)` : detail));
+  return `${shown.join('; ')}${counts.size > 8 ? `; and ${counts.size - 8} more` : ''}`;
+}
+
 /**
  * Why a version could not start in a ghost, and what would help: what the seal refused it (a native add-on that only computes can be
  * allowed by its package), and the calls it made that no answer was recorded for.
@@ -31,10 +39,10 @@ function startProblems(events, recorded) {
   if (refused.length) {
     const addons = [...new Set(refused.map((detail) => /^loading the native add-on (.+)$/.exec(detail)?.[1]).filter(Boolean).map(packageOf).filter(Boolean))];
     const allow = addons.length ? `; a native add-on that only computes can be allowed with addons: ${JSON.stringify(addons)}` : '';
-    text += ` (at its start the ghost refused it: ${refused.slice(0, 3).join('; ')}${allow})`;
+    text += ` (at its start the ghost refused it: ${listed(refused)}${allow})`;
   }
   if (calls.length) {
-    const list = calls.slice(0, 3).join('; ');
+    const list = listed(calls);
     text += recorded
       ? ` (at its start it made calls the record of the app's own start cannot answer: ${list})`
       : ` (at its start it made calls the twin has no answer for: ${list}; with load: 'record' the twin answers them from the app's own start)`;
