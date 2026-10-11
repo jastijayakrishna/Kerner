@@ -45,6 +45,11 @@ async function runsIn(dir) {
   return runs;
 }
 
+/** The headline run's differences (all copied, without pgReads): one object per line of its log. */
+async function headlineDiffs(dir, app) {
+  return (await readText(join(dir, `${app}-sample-1-differences.jsonl`))).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
 /** Differences grouped by route and kinds, with how many there were and the pull requests behind them. */
 function groups(differences) {
   const out = new Map();
@@ -72,7 +77,11 @@ export async function report(dir) {
   for (const app of apps) {
     const t = runs[app]['sample-1']?.twin;
     const verdicts = triage[app] ?? [];
-    const count = (verdict) => verdicts.filter((g) => g.verdict === verdict).reduce((sum, g) => sum + (g.count ?? 0), 0);
+    // Only groups the headline run (no pgReads) actually found are counted here, so "Meant" lines up with "Unexplained differences". A
+    // group a pgReads run surfaces (triaged but not in the headline) is shown in the real-reads section instead.
+    const headline = groups(await headlineDiffs(dir, app));
+    const found = (g) => headline.some((h) => h.route === g.route && [...g.kinds].sort().join(',') === h.kinds.join(','));
+    const count = (verdict) => verdicts.filter((g) => g.verdict === verdict && found(g)).reduce((sum, g) => sum + (g.count ?? 0), 0);
     const lines = runs[app]['sample-1']?.lines ?? {};
     // Lines a person accepted (code this process does not serve, say) are shown apart: they are not proven.
     const accepted = lines.accepted ?? 0;

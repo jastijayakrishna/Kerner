@@ -75,7 +75,12 @@ test('the report sums each app up from its runs, its differences and the hand-wr
     writeFileSync(join(dir, 'demo-off.json'), JSON.stringify(run('off', 1, 2, null)));
     writeFileSync(join(dir, 'demo-sample-1.json'), JSON.stringify(run('sample-1', 1.5, 4, stats)));
     writeFileSync(join(dir, 'demo-sample-1-differences.jsonl'), `${JSON.stringify({ route: 'POST /x', kinds: ['status', 'body'], pulls: [7] })}\n${JSON.stringify({ route: 'POST /x', kinds: ['body', 'status'], pulls: [7] })}\n`);
-    writeFileSync(join(dir, 'triage.json'), JSON.stringify({ demo: [{ route: 'POST /x', kinds: ['status', 'body'], count: 2, verdict: 'meant', why: 'the pull request says so' }] }));
+    // The second entry is a group that appears only in a pgReads run, not in the headline differences: it must not be counted in the
+    // headline's "Meant", which stays 2.
+    writeFileSync(join(dir, 'triage.json'), JSON.stringify({ demo: [
+      { route: 'POST /x', kinds: ['status', 'body'], count: 2, verdict: 'meant', why: 'the pull request says so' },
+      { route: 'DELETE /y', kinds: ['effects'], count: 5, verdict: 'meant', why: 'only with pgReads' },
+    ] }));
     writeFileSync(join(dir, 'gaps.md'), '- demo: nothing to fix.\n');
     const glue = join(dir, 'entry.mjs');
     writeFileSync(glue, '// a comment\nexport const x = 1;\n\nexport const y = 2;\n');
