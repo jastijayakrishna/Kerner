@@ -19,7 +19,7 @@ let job = null;
 /** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once. */
 export function beginJob(io) {
   resetOverlay();
-  job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], events: [] };
+  job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], events: [], weighty: 0 };
 }
 
 /** Ends a request: what the ghost tried to write, and what it was refused or could not find. */
@@ -43,10 +43,17 @@ export function take(key) {
   return found.call;
 }
 
+// The notes a verdict depends on: something refused, a call the recording could not answer. Up to 200 of them are kept; notes that only
+// inform (a loose match, a real read) up to 50, so a busy request's loose matches can never crowd out the ones that decide its verdict.
+const WEIGHTY = new Set(['denied', 'unmatched-read', 'unmatched-write']);
+
 /** Something the ghost was refused ('denied'), or a call the recording could not answer ('unmatched-read', 'unmatched-write'). */
 export function note(type, detail) {
-  if (!mine()) return;
-  if (job && job.events.length < 50) job.events.push({ type, detail: String(detail).slice(0, 300) });
+  if (!mine() || !job) return;
+  const weighty = WEIGHTY.has(type);
+  if (weighty ? job.weighty >= 200 : job.events.length - job.weighty >= 50) return;
+  if (weighty) job.weighty++;
+  job.events.push({ type, detail: String(detail).slice(0, 300) });
 }
 
 /** A write the ghost made: written down, never done. */

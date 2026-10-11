@@ -49,6 +49,23 @@ test('a ghost gets its calls answered from the recording and does nothing real',
   assert.deepEqual(out.events.map((e) => e.type), ['unmatched-write', 'unmatched-read', 'denied', 'denied']);
 });
 
+test('notes about loose matches never crowd out the calls a verdict depends on', () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
+import { callKey } from ${source('keys.js')};
+installGhostIO({ harnessPort: 1 });
+const recorded = Buffer.from('recorded');
+beginJob(Array.from({ length: 60 }, () => ({ key: callKey('POST', 'https://queue.example/poll', recorded), status: 200, headers: {}, body: null })));
+for (let i = 0; i < 60; i++) await fetch('https://queue.example/poll', { method: 'POST', body: 'live ' + i });
+const missed = await fetch('https://elsewhere.example/').then(() => 'answered', (e) => e.message);
+const events = endJob().events;
+console.log(JSON.stringify({ missed, loose: events.filter((e) => e.type === 'loose').length, unmatched: events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail) }));
+`], { encoding: 'utf8' }));
+  assert.equal(out.missed, 'fetch failed');
+  assert.deepEqual(out.unmatched, ['GET https://elsewhere.example/'], 'the call the recording could not answer is always written down');
+  assert.ok(out.loose > 0 && out.loose <= 50, `${out.loose} loose notes, at most 50 kept`);
+});
+
 test('a ghost may not start a thread of its own, since that thread would run outside the seal', () => {
   const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
 import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
