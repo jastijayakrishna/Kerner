@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // kern-twin: the twin runtime's command line. Every command prints one JSON object; a refusal goes to stderr with exit code 1.
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readControl, writeControl } from '../src/router.js';
 import { Evidence } from '../src/evidence.js';
 import { decide, pathsOf, totals } from '../src/decide.js';
@@ -16,6 +18,8 @@ const HELP = `kern-twin - the twin runtime's command line
       switches serving by hand; a running twin follows within a second
   kern-twin build --repo <dir> --base <commit> --out <new folder> [--install auto|always|never] [--build "<command>"]
       writes the old version beside the new one, with the packages it needs, for the twin's old.module
+  kern-twin test --cases <dir> --candidate <module> [--export createApp]
+      runs the candidate on every case as a node:test test; fails until it answers each as the old version did
 `;
 
 function parse(args) {
@@ -85,9 +89,20 @@ async function build(flags) {
   return buildOld({ repo: flags.repo, base: flags.base, out: flags.out, install, build: flags.build ?? null });
 }
 
+function caseTests(flags) {
+  if (!flags.cases || !flags.candidate) throw new Error('test needs --cases <dir> --candidate <module>');
+  const file = fileURLToPath(new URL('../src/case-test.js', import.meta.url));
+  const env = { ...process.env, KERN_TWIN_CASES: resolve(flags.cases), KERN_TWIN_CANDIDATE: resolve(flags.candidate), KERN_TWIN_EXPORT: flags.export ?? 'createApp' };
+  // Node's test runner marks the processes it starts with NODE_TEST_CONTEXT, and a node --test that inherits the mark skips every file
+  // and passes. Called from inside another test suite, the cases would never run.
+  delete env.NODE_TEST_CONTEXT;
+  const run = spawnSync(process.execPath, ['--test', '--test-concurrency=1', file], { stdio: 'inherit', env });
+  process.exit(run.status ?? 1);
+}
+
 const flags = parse(process.argv.slice(2));
-const command = { status, serve, build }[flags.words[0]];
-if (!command || (command !== build && !flags.state)) {
+const command = { status, serve, build, test: caseTests }[flags.words[0]];
+if (!command || (command !== build && command !== caseTests && !flags.state)) {
   process.stdout.write(HELP);
   process.exit(flags.words.length ? 2 : 0);
 }
