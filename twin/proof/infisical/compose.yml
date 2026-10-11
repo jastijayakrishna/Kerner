@@ -1,0 +1,63 @@
+# Infisical #6995 under the twin. No port is opened on the host. The app container readies the database, then starts.
+name: kern-twin-proof-infisical
+x-infisical-env: &infisical-env
+  NODE_ENV: test
+  DB_CONNECTION_URI: postgres://infisical:infisical@db:5432/infisical
+  REDIS_URL: redis://redis:6379
+  AUTH_SECRET: 4bnfe4e407b8921c104518903515b218
+  ENCRYPTION_KEY: 4bnfe4e407b8921c104518903515b218
+  TELEMETRY_ENABLED: "false"
+  # Queue workers stay on, as in Infisical's e2e tests: with QUEUE_WORKERS_ENABLED=false its main() exits at this commit (see gaps.md).
+  KERN_PROOF_PINO: /proof/repo/backend/package.json
+x-build: &build
+  context: ../..
+  dockerfile: proof/infisical/Dockerfile
+services:
+  db:
+    image: docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    environment:
+      POSTGRES_USER: infisical
+      POSTGRES_PASSWORD: infisical
+      POSTGRES_DB: infisical
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infisical -d infisical"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  redis:
+    image: docker.io/library/redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  app:
+    build: *build
+    environment:
+      <<: *infisical-env
+      KERN_PROOF_CONFIG: /twin/proof/infisical/config.json
+      KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
+      KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+    volumes:
+      - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  traffic:
+    build: *build
+    command: ["node", "/twin/proof/kit/traffic.mjs"]
+    environment:
+      KERN_PROOF_APP: infisical
+      KERN_PROOF_URL: http://app:8080
+      KERN_PROOF_SCENARIO: /twin/proof/infisical/scenario.mjs
+      KERN_PROOF_AUTH_SECRET: 4bnfe4e407b8921c104518903515b218
+      KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
+      KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+      KERN_PROOF_REQUESTS: "300"
+      KERN_PROOF_CONCURRENCY: "2"
+    volumes:
+      - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
+    depends_on:
+      - app

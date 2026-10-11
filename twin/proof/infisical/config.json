@@ -1,0 +1,23 @@
+{
+  "name": "infisical",
+  "twin": "/twin/src/index.js",
+  "old": { "module": "/proof/old/backend/twin-entry.mjs", "export": "createApp", "root": "/proof/old" },
+  "candidate": { "module": "/proof/repo/backend/twin-entry.mjs", "export": "createApp", "root": "/proof/repo" },
+  "options": {
+    "load": "record",
+    "adapters": ["pg", "ioredis", "http"],
+    "addons": ["pkcs11js", "re2", "bcrypt", "argon2", "odbc", "oracledb", "ssh2", "cpu-features", "@infisical/quic-linux-x64", "@msgpackr-extract/msgpackr-extract-linux-x64"],
+    "ghostExecArgv": ["--import", "/twin/proof/infisical/ghost-pino.mjs"],
+    "manifest": "/proof/manifest.json",
+    "accept": ["old:frontend/src/pages/project/SettingsPage/components/DeleteProjectSection/DeleteProjectSection.tsx:29-159", "new:frontend/src/pages/project/SettingsPage/components/DeleteProjectSection/DeleteProjectSection.tsx:58-101"],
+    "cases": "/out/infisical-{label}-cases",
+    "log": "/out/infisical-{label}-differences.jsonl",
+    "epsilon": 0.01,
+    "minHours": 0,
+    "queueLimit": 2000,
+    "timeoutMs": 20000,
+    "startMs": 120000,
+    "ghostMemoryMb": 2048,
+    "maxRestarts": 50
+  }
+}
