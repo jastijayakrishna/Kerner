@@ -280,7 +280,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 | `maxUncovered` | `0.05` | 2 |
 | `switchOn`: `'manual'` or `'auto'` | `'manual'` | 2 |
 | `ghostExecArgv` | `[]` (for example `['--import', 'tsx']`; trusted, runs before the seal) | 2 |
-| `addons` | `[]` (native add-ons a ghost may load, by package name; pure computation only, such as `bcrypt`) | 2 |
+| `addons` | `[]` (native add-ons a ghost may load, by node_modules package name, or by the file's stem when it loads from a path outside node_modules; pure computation only, such as `bcrypt`) | 2; file-name match in 6 |
 | `manifest` | `null` (the file `kern twin plan` writes). With it, `old.root` and `candidate.root` are required | 3 |
 | `minLineRuns` | `3` (1 to 9) | 3 |
 | `accept` | `[]` (for example `['old:src/x.js:12', 'new:src/x.js:20-24']`) | 3 |
@@ -293,6 +293,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 | `scrub`: `{ headers, keys }` | `DEFAULT_SCRUB`, plus these: more private header names, and more value names (JSON properties, form and query names) whose values are private. Emails, card numbers, UUIDs and long tokens are scrubbed anywhere | 5 |
 | `humans`: `{ kinds, hosts }` | `{ kinds: ['door-opened'], hosts: [] }`: these kinds, and writes to these hosts, need a person | 5 |
 | `load`: `'none'` or `'record'` | `'none'`. With `'record'`, the old version starts in the app's thread inside a record of its own, and the ghosts start from its answers. For apps that read their database or cache while they start | 6 |
+| `pgReads` | `null` (a Postgres connection string). A read the new code makes that the old never did is made for real by the twin's thread, read-only, inside `BEGIN TRANSACTION READ ONLY`, once for both ghosts. Off by default; needs the `'pg'` adapter | 6 |
 
 ## 8. The twin object
 

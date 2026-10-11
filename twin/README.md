@@ -8,7 +8,7 @@ It runs the old and the new version as ghosts:
 - Once the new version has enough clean comparisons to bound its risk, it may serve.
 - The first unexplained difference while it serves switches serving back to the old version, before the next request.
 
-Phases 1 to 5 of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built: shadow comparisons, evidence and switch-on, changed lines and named causes, real stacks, and the fix loop.
+Phases 1 to 6 of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built: shadow comparisons, evidence and switch-on, changed lines and named causes, real stacks, the fix loop, and the proof on real apps.
 
 ## Use
 
@@ -175,6 +175,14 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
   - `twin.idle()` also waits until the known cases are checked.
 - **A fix earns its evidence again.** It is a new candidate, and nothing carries over from the one it fixes. Code that did not change can still behave differently after a fix, through state the fixed code leaves behind for later requests.
 
+## Real apps
+
+- **An app that reads while it starts** (its database, its cache, its key store) needs `load: 'record'`. The old version then starts in the app's process inside a record of its own, and the ghosts start from those answers. A new version that asks at its start for something the old one never did is named, call by call.
+- **Background work stays out of the comparison.** Inside a ghost, only the request being answered gets time and the outside world. Work an app leaves running (a cron tick, a queue's polling loop, a retry) waits forever there, so it never mixes into another request.
+- **An app that does not export a listener** needs a small entry module that builds it without listening. See `twin/proof/infisical/twin-entry.mjs` and `twin/proof/firecrawl/twin-entry.mjs`.
+- **A read the new code makes that the old never did** can be answered for real, read-only, with `pgReads: '<connection string>'` (Postgres; off by default; best pointed at a read replica or a read-only role). Every such read runs inside `BEGIN TRANSACTION READ ONLY`, so a write is refused by the database itself.
+- **What it took, and what it found, on two real apps:** `reports/twin-proof-<date>.md`.
+
 ## Reading the results
 
 `twin.stats()` counts, for this run:
@@ -224,7 +232,9 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 | `minLineRuns` | `3` | Clean runs every code character of a changed line needs (1 to 9) |
 | `accept` | `[]` | Changed lines a person accepts without runs, such as `'old:src/x.js:12'` |
 | `adapters` | `['fetch']` | Client libraries recorded and replayed: `'http'`, `'pg'`, `'ioredis'` |
+| `load` | `'none'` | `'record'`: the ghosts start from the record of the app's own start (for apps that read while they start) |
 | `realReads` | `[]` | Reads the twin may make for real for the ghosts, such as `'GET https://rates.example/*'` |
+| `pgReads` | none | A Postgres connection string; a read the new code makes that the old never did is answered for real, read-only (needs the `'pg'` adapter) |
 | `overlay` | `false` | Ghost file writes land in memory for the request |
 | `ghosts` | `'thread'` | `'process'`: each ghost in its own Node process, under the permission model |
 | `sandbox` | `'none'` | `'bwrap'` (Linux, process ghosts): no network and a read-only file system |

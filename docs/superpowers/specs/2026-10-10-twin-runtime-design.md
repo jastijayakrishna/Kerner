@@ -4,7 +4,7 @@ Date: 2026-10-10.
 
 Status:
 - Direction agreed with the user in the brainstorm of 2026-10-10.
-- Phases 1 to 5 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md`, `-phase-3.md`, `-phase-4.md` and `-phase-5.md`.
+- Phases 1 to 6 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md`, `-phase-3.md`, `-phase-4.md`, `-phase-5.md` and `-phase-6.md`.
 - Phases 3 to 6 each have their own plan in the same folder.
 - `docs/superpowers/specs/2026-10-10-twin-runtime-interfaces.md` pins the contracts between phases: files, messages, shapes, options and formats.
 
@@ -89,7 +89,8 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/ghost-common.js` | What thread and process ghosts share: their environment, asking a request, answering a real read | — |
 | `src/process-ghost.js` | A ghost in its own Node process, under the permission model or in `bwrap` | `node:child_process` |
 | `src/adapters/*.js` | Record a client library in the app's thread, replay it in the ghosts: `http`, `pg`, `ioredis` | `keys.js`, `capture.js` |
-| `src/real-reads.js` | Allow-listed reads made by the twin's thread, once per request, for both ghosts | `record.js` |
+| `src/real-reads.js` | Allow-listed reads made by the twin's thread, once per request, for both ghosts: HTTP (`realReads`) and read-only Postgres (`pgReads`) | `record.js`, `adapters/pg.js` |
+| `src/turn.js` | Whose turn it is inside a ghost: only the current request's (or the start's) timers and calls run; others wait forever | `node:async_hooks` |
 | `src/overlay.js` | The in-memory file overlay | `node:fs` |
 | `src/build.js` | `kern-twin build`: the old version beside the new one, with its packages | git, the package manager |
 | `src/scrub.js` | Stand-ins for private values, of the same shape, consistent within a case | `node:crypto`, `keys.js` |
@@ -97,6 +98,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/replay.js` | One version on one case, in a fresh sealed ghost | `ghost.js` |
 | `src/case-test.js` | The cases as `node:test` tests, for `kern-twin test` | `cases.js`, `replay.js`, `compare.js` |
 | `src/feedback.js` | Who fixes a difference; `kern-feedback/v1`, the agent's copy of it, and the pull request comment | — |
+| `proof/kit/*` | The proof kit: the twin around a real app in Docker, scripted traffic, the numbers, and the report | — |
 
 ## 5. Decisions and why
 
@@ -149,6 +151,11 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
     - clean comparisons of requests a fix did not touch say nothing about the requests it did touch, which is where it most likely fails;
     - a request that ran none of the fixed code can still behave differently, through state that code left behind.
 23. **What an agent reads never says how to allow a difference.** As in Kern's `for_agent`, the agent's copy of the verdict (the comment, `kern-twin feedback`) leaves out the allow hints, so an agent fixes its change instead of allowing it. A person adds allow rules.
+24. **An app's start is recorded, not stubbed (Phase 6).** Real apps read while they start, and a ghost has no network. The old version's start in the app's own process is recorded like a request, and the ghosts start from it. A start that asks for something the record cannot answer is named, call by call.
+25. **In a ghost, only the current turn gets time (Phase 6).** Timers and calls that an earlier turn left running wait forever. Background work (a queue's polling loop, a cron tick, a retry) can then neither mix into another request nor fail loudly.
+26. **Transaction control is a session call (Phase 6).** `BEGIN`, `COMMIT` and `ROLLBACK` carry no data, so a new code path may open a transaction the recording never began; they are answered from any recorded one and never used up, while the writes inside stay used-once and compared. Likewise the calls a client library makes about the connection or the server (a version check, `SET`, `SHOW`).
+27. **A read the new code makes that the old never did can be answered for real, read-only (Phase 6, opt-in).** With `pgReads`, the twin's own thread (never a sealed ghost) makes such a Postgres read inside `BEGIN TRANSACTION READ ONLY`, once for both ghosts, so a request on a changed path can be compared instead of left uncompared. It is off by default; a write is refused by the query text and by the database itself.
+28. **The proof counts what adopting the twin took (Phase 6).** Every line of glue an app needed is in the report, beside what the twin found and what it could not compare.
 
 ## 6. The maths
 
@@ -268,7 +275,7 @@ Each phase ends with working, tested software.
      - scrubbing of private values;
      - a known difference is never forgotten: every later candidate runs every case before it may switch on, and a fix earns its evidence again (carrying evidence over was rejected as unsound; see the Phase 5 plan, decision 6).
    - Accepted when a seeded bug becomes a case, a scripted fix makes the case pass, and the candidate switches on.
-6. **Proof on real apps.**
+6. **Proof on real apps** (built). Its report is `reports/twin-proof-<date>.md`; the proof kit is `twin/proof/`. Built on Infisical #6995 (the twin caught the change, zero false alarms) and firecrawl #2638 (a log-only change: the twin stayed silent, every changed line proven).
    - Builds: runs on 2–3 open-source Node apps with real pull-request pairs from the 23-PR set (`C:\ke`), driven by their end-to-end tests or recorded traffic.
    - Publishes: the cost, the share compared, the differences found and the false alarms.
 
