@@ -10,3 +10,9 @@ test('a route is the method and the path, with what looks like an id replaced', 
   assert.equal(routeOf('GET', '/'), 'GET /');
   assert.equal(routeOf('GET', '/#top'), 'GET /');
 });
+
+test('a path segment with an @ inside (an email, say) is an id, so it never reaches the disk in a route name', () => {
+  assert.equal(routeOf('GET', '/users/ada@corp.com/orders'), 'GET /users/:id/orders');
+  assert.equal(routeOf('GET', '/users/ada%40corp.com'), 'GET /users/:id', 'written encoded too');
+  assert.equal(routeOf('GET', '/@babel/core'), 'GET /@babel/core', 'a package scope stays');
+});

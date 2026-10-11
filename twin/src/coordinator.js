@@ -40,7 +40,7 @@ function placeOf(capture) {
  * always restart together, so their histories stay identical and a difference can only come from the code. Every request handed in
  * ends as one verdict (same, stated, different, not compared or skipped), handed to `onVerdict`.
  * Options: old, candidate, timeoutMs, startMs, queueLimit, ghostMemoryMb, maxRestarts, log, allow, ghostExecArgv, addons, and the
- * hooks onVerdict(verdict, capture, runs), onIdle() and onDisabled(reason).
+ * hooks onVerdict(verdict, capture, runs), onIdle(), onDisabled(reason) and redact(verdict), which scrubs what the log writes.
  */
 export class Coordinator {
   #options;
@@ -141,6 +141,20 @@ export class Coordinator {
     return this.#pair ? [...this.#pair.old.loadLines, ...this.#pair.candidate.loadLines] : [];
   }
 
+  /** Both ghosts on one more copy of a request (a scrubbed case being checked). Answers { old, candidate } runs, or null when the pair is gone. */
+  async rerun(capture) {
+    if (!this.#pair) return null;
+    const n = ++this.#seq;
+    // A ghost counts the changed lines it ran since its last take: this run takes its own counts, and drops them, so the next real
+    // request is not credited with lines only this copy ran.
+    const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
+    const timeout = this.#options.timeoutMs;
+    const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
+    this.#reads.clear();
+    if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
+    return { old: toRun(old), candidate: toRun(candidate) };
+  }
+
   /** A real read for the ghosts of one request: made once, and both ghosts get the same answer, so their worlds stay the same. */
   #realRead(message) {
     const key = `${message.job} ${message.method} ${message.url}`;
@@ -206,7 +220,8 @@ export class Coordinator {
     if (this.#found.length < KEEP) this.#found.push(verdict);
     if (!this.#options.log) return;
     try {
-      await appendFile(this.#options.log, `${JSON.stringify(verdict)}\n`);
+      // What the twin writes to disk is scrubbed (redact); the list in memory keeps the real values for the operator.
+      await appendFile(this.#options.log, `${JSON.stringify(this.#options.redact ? this.#options.redact(verdict) : verdict)}\n`);
     } catch {
       this.counts.logErrors++;
     }

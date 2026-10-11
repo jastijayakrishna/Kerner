@@ -5,6 +5,11 @@ import { Evidence } from './evidence.js';
 import { decide, pathsOf, totals } from './decide.js';
 import { versionId } from './identity.js';
 import { acceptMatcher, checkRoots, coveragePlan, loadManifest } from './manifest.js';
+import { compareRuns } from './compare.js';
+import { writeCase } from './cases.js';
+import { needsHuman } from './feedback.js';
+import { scrubCapture, scrubber } from './scrub.js';
+import { exactBytes } from './serialize.js';
 
 // The twin's own thread. Comparing, counting, remembering and deciding all happen here, so none of it can slow or stop the app's
 // thread. The app's thread hands over copies of sampled requests; this thread answers with snapshots, and with 'serve' when the
@@ -27,13 +32,18 @@ let manifest = null;
 let policy = null;
 let evidence = null;
 let coordinator = null;
+const CASES_PER_KIND = 5;
+const MOST_CASES = 200;
+const caseCounts = new Map();
+let casesWritten = 0;
+let caseErrors = 0;
 
 const post = (message) => parentPort.postMessage(message);
 
 function snapshot() {
   const data = evidence.data;
   return {
-    counts: { ...coordinator.counts, evidenceErrors: evidence.errors },
+    counts: { ...coordinator.counts, evidenceErrors: evidence.errors, cases: casesWritten, caseErrors },
     queued: coordinator.pending(),
     disabled: coordinator.disabled,
     reasons: { ...coordinator.reasons },
@@ -67,8 +77,46 @@ async function serve(side, reason) {
   post({ type: 'serve', side, reason });
 }
 
-async function onVerdict(verdict) {
-  evidence.add(verdict);
+/** A verdict whose shown values are scrubbed: what goes to disk (the evidence's examples, the differences log). */
+function redact(verdict) {
+  const s = scrubber(settings.scrub ?? {});
+  return { ...verdict, url: verdict.url && s.url(verdict.url), details: verdict.details.map((d) => ({ ...d, old: s.text(d.old), new: s.text(d.new) })) };
+}
+
+const saved = (run) => ({ status: run.status, headers: run.headers, body: exactBytes([run.body]), effects: run.effects, events: run.events, error: run.error, timedOut: run.timedOut });
+
+/**
+ * Turns an unexplained difference into a case: the capture is scrubbed and both ghosts run on the scrubbed copy again.
+ * - If the difference shows again, the case holds that copy and both answers.
+ * - If not, it depended on a private value: a stub, with no request data, tells a person to look.
+ */
+async function recordCase(verdict, capture) {
+  const group = `${verdict.route} ${verdict.kinds.join(',')}`;
+  if (casesWritten >= MOST_CASES || (caseCounts.get(group) ?? 0) >= CASES_PER_KIND) return;
+  caseCounts.set(group, (caseCounts.get(group) ?? 0) + 1);
+  casesWritten++;
+  const { capture: scrubbed, opaque } = scrubCapture(capture, settings.scrub ?? {});
+  const runs = await coordinator.rerun(scrubbed);
+  const again = runs ? compareRuns(runs.old, runs.candidate) : null;
+  const reproduces = again?.outcome === 'different' && again.kinds.some((kind) => verdict.kinds.includes(kind));
+  const base = {
+    version: 1, candidate: candidateId, n: verdict.n, time: verdict.time, route: verdict.route, segment: verdict.segment,
+    adapters: settings.adapters ?? ['fetch'], overlay: Boolean(settings.overlay), kinds: verdict.kinds, lines: verdict.lines ?? {},
+    pulls: verdict.pulls ?? [], cause: verdict.cause ?? null, human: needsHuman(verdict, settings.humans), scrubbed: true, opaque, reproduces,
+  };
+  const entry = reproduces
+    ? { ...base, world: { start: scrubbed.start, seed: scrubbed.seed }, request: scrubbed.request, io: scrubbed.io, old: saved(runs.old), new: saved(runs.candidate), verdict: { kinds: again.kinds, details: again.details } }
+    : { ...base, why: 'the difference did not show again on the scrubbed copy: it may depend on a private value, so a person must look' };
+  try {
+    await writeCase(settings.cases, entry);
+  } catch {
+    caseErrors++;
+  }
+}
+
+async function onVerdict(verdict, capture) {
+  evidence.add(redact(verdict));
+  if (verdict.outcome === 'different' && settings.cases && capture) await recordCase(verdict, capture);
   if (crashOnVerdict) process.exit(9);
   if (verdict.outcome === 'different' && serving === 'candidate') {
     await serve('old', `switched back: an unexplained difference (${verdict.kinds.join(', ')}) on ${verdict.route}`);
@@ -131,6 +179,7 @@ try {
   coordinator = new Coordinator({
     ...settings,
     manifest,
+    redact,
     coverage: manifest ? { old: coveragePlan(manifest, 'old', settings.old.root), new: coveragePlan(manifest, 'new', settings.candidate.root) } : null,
     onVerdict,
     onIdle: () => report(true),

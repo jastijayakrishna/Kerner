@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
-const NO_COUNTS = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0, evidenceErrors: 0 };
+const NO_COUNTS = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0, evidenceErrors: 0, cases: 0, caseErrors: 0 };
 
 function version(value, name) {
   if (!value || typeof value.module !== 'string' || typeof value.export !== 'string') throw new TypeError(`${name} must be { module: '/absolute/path/to/app.js', export: 'createApp' }`);
@@ -41,6 +41,11 @@ function names(value, fallback, name) {
 function fn(value, name) {
   if (value != null && typeof value !== 'function') throw new TypeError(`${name} must be a function of the request`);
   return value ?? null;
+}
+
+function folder(value, name) {
+  if (typeof value !== 'string' || !value) throw new TypeError(`${name} must be a folder path`);
+  return value;
 }
 
 function allowRules(value) {
@@ -91,6 +96,9 @@ function settingsOf(options) {
     overlay: options.overlay === true,
     ghosts: oneOf(options.ghosts, 'thread', ['thread', 'process'], 'ghosts'),
     sandbox: oneOf(options.sandbox, 'none', ['none', 'bwrap'], 'sandbox'),
+    cases: options.cases == null ? null : folder(options.cases, 'cases'),
+    scrub: { headers: names(options.scrub?.headers, [], 'scrub.headers'), keys: names(options.scrub?.keys, [], 'scrub.keys') },
+    humans: { kinds: names(options.humans?.kinds, [], 'humans.kinds'), hosts: names(options.humans?.hosts, [], 'humans.hosts') },
   };
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
   const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
