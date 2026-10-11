@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "base": "base",
+  "head": "head",
+  "files": [
+    {
+      "path": "src/app.js",
+      "status": "modified",
+      "changed": { "old": [9, 13, 17], "new": [9, 13, 17] },
+      "old": {
+        "9": { "text": "  return items.reduce((sum, item) => sum + item.price * item.count, 0);", "commit": "c101" },
+        "13": { "text": "  return { user_name: user.name, plan: user.plan };", "commit": "c102" },
+        "17": { "text": "  return policy.limits ? policy.limits.max : 100;", "commit": "c103" }
+      },
+      "new": {
+        "9": { "text": "  return Math.round(items.reduce((sum, item) => sum + item.price * item.count, 0) * 100) / 100;", "commit": "c101" },
+        "13": { "text": "  return { username: user.name, plan: user.plan };", "commit": "c102" },
+        "17": { "text": "  return policy.limits.max;", "commit": "c103" }
+      }
+    }
+  ],
+  "commits": {
+    "c101": { "summary": "Round totals to cents (#101)", "pull": 101 },
+    "c102": { "summary": "Rename the user field (#102)", "pull": 102 },
+    "c103": { "summary": "Tidy the limit check (#103)", "pull": 103 }
+  },
+  "skipped": []
+}
