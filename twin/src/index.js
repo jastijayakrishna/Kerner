@@ -4,6 +4,9 @@ import { recordFetch } from './record.js';
 import { ghostEnv } from './ghost.js';
 import { Router } from './router.js';
 import { acceptMatcher } from './manifest.js';
+import { createRequire } from 'node:module';
+import { current } from './capture.js';
+import { ADAPTERS, ADAPTER_NAMES } from './adapters/index.js';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
@@ -81,8 +84,12 @@ function settingsOf(options) {
     manifest: options.manifest ?? null,
     minLineRuns: number(options.minLineRuns, 3, 1, 9, 'minLineRuns'),
     accept: acceptList(options.accept),
+    // fetch is always recorded: every ghost replays it.
+    adapters: [...new Set(['fetch', ...names(options.adapters, ['fetch'], 'adapters')])],
   };
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
+  const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
+  if (unknown.length) throw new TypeError(`adapters are ${ADAPTER_NAMES.map((n) => `'${n}'`).join(', ')}; not ${unknown.join(', ')}`);
   return settings;
 }
 
@@ -119,6 +126,7 @@ class Twin {
   #routed = null;
   #switching = Promise.resolve(true);
   #closing = null;
+  #adapters = {};
 
   constructor(settings) {
     this.#settings = settings;
@@ -164,7 +172,29 @@ class Twin {
     thread.on('message', (message) => this.#receive(message));
     // The twin never keeps the app's process alive. This comes after the 'message' listener: adding the first one refs a worker again.
     thread.unref();
-    recordFetch(this.#settings.maxBodyBytes);
+    this.#adapters = this.#record();
+  }
+
+  /** Records each listed client library, for both versions' copy of it (one patch when they share a copy). Answers how each went. */
+  #record() {
+    const report = {};
+    for (const name of this.#settings.adapters) {
+      if (name === 'fetch') {
+        recordFetch(this.#settings.maxBodyBytes);
+        report.fetch = 'recording';
+        continue;
+      }
+      const problems = [];
+      for (const version of [this.#settings.old, this.#settings.candidate]) {
+        try {
+          ADAPTERS[name].record({ current, maxBodyBytes: this.#settings.maxBodyBytes, appRequire: createRequire(version.module) });
+        } catch (error) {
+          problems.push(`${version.module}: ${error.message}`);
+        }
+      }
+      report[name] = problems.length ? `not recorded for ${problems.join('; ')}` : 'recording';
+    }
+    return report;
   }
 
   #receive(message) {
@@ -285,6 +315,7 @@ class Twin {
       disabled: this.#disabled,
       reasons: { ...(latest?.reasons ?? {}) },
       serving: this.#router?.serving ?? 'old',
+      adapters: { ...this.#adapters },
     };
   }
 
