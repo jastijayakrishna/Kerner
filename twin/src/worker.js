@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { installWorld, resetWorld } from './world.js';
 import { installGhostIO, beginJob, endJob } from './ghost-io.js';
 import { exactBytes } from './serialize.js';
+import { startCoverage, takeLines, targetsOf } from './coverage.js';
 
 // A ghost: one version of the app in its own thread, answering copies of real requests in a sealed world. Its own server listens on
 // loopback before the seal goes on; after that, the app can reach nothing but that server.
@@ -20,11 +21,22 @@ installWorld();
 // Before the seal, which would refuse the null device muteOutput() opens to write to.
 muteOutput();
 installGhostIO({ harnessPort: port, addons: workerData.addons ?? [] });
+// The changed lines this version runs, per request, when the twin has a manifest (Phase 3). Coverage starts before the app loads, so
+// every function the app compiles is counted precisely.
+const coverage = workerData.coverage ? await openCoverage(workerData.coverage) : null;
 const app = await import(pathToFileURL(workerData.module).href);
 const factory = app[workerData.export];
 if (typeof factory !== 'function') throw new Error(`has no function named ${workerData.export}`);
 handler = await factory();
 if (typeof handler !== 'function') throw new Error(`${workerData.export}() must return a request listener: (req, res) => { ... }`);
+
+async function openCoverage(plan) {
+  const { Session } = await import('node:inspector/promises');
+  const session = new Session();
+  session.connect();
+  await startCoverage(session);
+  return { session, side: plan.side, targets: targetsOf(plan), cache: new Map() };
+}
 
 /** A ghost's output is not the app's: it is dropped here, never mixed into production logs. */
 function muteOutput() {
@@ -65,6 +77,8 @@ process.on('unhandledRejection', crashed);
 parentPort.on('message', (message) => {
   if (message?.type === 'job') run(message.id, message.job);
 });
+// The changed lines that ran while the app loaded (top-level code): they ran before every request.
+if (coverage) parentPort.postMessage({ type: 'load-lines', lines: Object.keys(await takeLines(coverage)) });
 parentPort.postMessage({ type: 'ready' });
 
 async function run(id, job) {
@@ -86,8 +100,9 @@ async function run(id, job) {
   });
   finish = null;
   const io = endJob();
+  const lines = job.coverage && coverage ? await takeLines(coverage) : undefined;
   parentPort.postMessage({
     type: 'result', id,
-    result: { status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, effects: io.effects, events: io.events },
+    result: { status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, effects: io.effects, events: io.events, lines },
   });
 }

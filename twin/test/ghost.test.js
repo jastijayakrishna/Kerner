@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app } from './helpers.js';
+import { loadManifest, coveragePlan } from '../src/manifest.js';
+import { startGhost } from '../src/ghost.js';
 
 const preload = fileURLToPath(new URL('./apps/preloaded/preload.cjs', import.meta.url));
 
@@ -30,5 +32,24 @@ await ghost.terminate();
     }
   } finally {
     rmSync(file, { force: true });
+  }
+});
+
+test('a ghost reports, per request, which characters of each changed line ran', async () => {
+  const root = fileURLToPath(new URL('./apps/three-prs/base/', import.meta.url));
+  const manifest = await loadManifest(fileURLToPath(new URL('./apps/three-prs/manifest.json', import.meta.url)));
+  const ghost = await startGhost({ module: join(root, 'src', 'app.js'), export: 'createApp' }, { startMs: 20000, memoryMb: 256, coverage: coveragePlan(manifest, 'old', root) });
+  try {
+    assert.deepEqual(ghost.loadLines, [], 'no changed line runs while the app loads');
+    const ask = (n, value) => ghost.ask(n, {
+      start: 1760000000000, seed: 1, io: [], coverage: true,
+      request: { method: 'POST', url: '/limit', headers: { 'content-type': 'application/json' }, body: new Uint8Array(Buffer.from(JSON.stringify(value))) },
+    }, 5000);
+    const given = await ask(1, { limits: { max: 7 } });
+    assert.deepEqual(given.lines, { 'old:src/app.js:17': `${'1'.repeat(37)}0000` }, 'the ": 100" branch did not run');
+    const blank = await ask(2, { limits: null });
+    assert.deepEqual(blank.lines, { 'old:src/app.js:17': `${'1'.repeat(19)}${'0'.repeat(18)}1111` }, 'now only that branch ran');
+  } finally {
+    await ghost.terminate();
   }
 });

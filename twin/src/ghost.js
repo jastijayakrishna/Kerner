@@ -34,8 +34,8 @@ function ask(worker, id, job, timeoutMs) {
 
 /**
  * Starts one ghost: one version of the app in its own thread, sealed, waiting for requests. Resolves once that version has loaded,
- * with { kind: 'thread', ask(id, job, timeoutMs), terminate(), onDirty(listener) }.
- * `side` is { module, export }; `settings` is { startMs, memoryMb, ghostExecArgv, addons }.
+ * with { kind: 'thread', loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener) }.
+ * `side` is { module, export }; `settings` is { startMs, memoryMb, ghostExecArgv, addons, coverage }.
  */
 export function startGhost(side, settings) {
   return new Promise((resolve, reject) => {
@@ -43,7 +43,7 @@ export function startGhost(side, settings) {
     // No Node flags and no NODE_OPTIONS from the app: a module they preload would run in the ghost before the seal goes on (measured:
     // execArgv [] alone still runs a NODE_OPTIONS preload). Flags a ghost needs, a TypeScript loader say, are given as ghostExecArgv.
     const worker = new Worker(THREAD, {
-      workerData: { module: side.module, export: side.export, addons: settings.addons ?? [] },
+      workerData: { module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null },
       execArgv: settings.ghostExecArgv ?? [],
       env: ghostEnv(),
       resourceLimits: { maxOldGenerationSizeMb: settings.memoryMb },
@@ -60,7 +60,9 @@ export function startGhost(side, settings) {
       worker.terminate();
       reject(error);
     };
+    let loadLines = [];
     const onMessage = (message) => {
+      if (message?.type === 'load-lines') loadLines = message.lines;
       if (message?.type !== 'ready') return;
       cleanup();
       const dirty = [];
@@ -75,6 +77,7 @@ export function startGhost(side, settings) {
       worker.unref();
       resolve({
         kind: 'thread',
+        loadLines,
         ask: (id, job, timeoutMs) => ask(worker, id, job, timeoutMs),
         terminate: () => worker.terminate(),
         onDirty: (listener) => dirty.push(listener),

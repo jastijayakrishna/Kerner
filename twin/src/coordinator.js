@@ -2,6 +2,7 @@ import { appendFile } from 'node:fs/promises';
 import { compareRuns, explain, faithful } from './compare.js';
 import { startGhost } from './ghost.js';
 import { routeOf } from './route.js';
+import { attribute } from './manifest.js';
 
 const KEEP = 1000;
 const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared' };
@@ -67,10 +68,12 @@ export class Coordinator {
 
   async #spawnPair() {
     const settings = { startMs: this.#options.startMs, memoryMb: this.#options.ghostMemoryMb, ghostExecArgv: this.#options.ghostExecArgv, addons: this.#options.addons };
-    const named = (label, side) => startGhost(side, settings).catch((error) => {
+    // With a manifest, each ghost measures its own side's changed lines: { old: plan, new: plan }.
+    const plans = this.#options.coverage ?? null;
+    const named = (label, side, plan) => startGhost(side, { ...settings, coverage: plan }).catch((error) => {
       throw new Error(`the ${label} version (${side.module}) ${error.message}`);
     });
-    const [old, candidate] = await Promise.allSettled([named('old', this.#options.old), named('new', this.#options.candidate)]);
+    const [old, candidate] = await Promise.allSettled([named('old', this.#options.old, plans?.old ?? null), named('new', this.#options.candidate, plans?.new ?? null)]);
     if (old.status === 'rejected' || candidate.status === 'rejected') {
       await Promise.allSettled([old, candidate].filter((s) => s.status === 'fulfilled').map((s) => s.value.terminate()));
       throw old.status === 'rejected' ? old.reason : candidate.reason;
@@ -125,6 +128,11 @@ export class Coordinator {
     return this.#queue.length + (this.#busy ? 1 : 0);
   }
 
+  /** The changed lines that ran while each version loaded. */
+  loadLines() {
+    return this.#pair ? [...this.#pair.old.loadLines, ...this.#pair.candidate.loadLines] : [];
+  }
+
   async #pump() {
     if (this.#busy) return;
     this.#busy = true;
@@ -146,7 +154,7 @@ export class Coordinator {
   async #compare(capture) {
     if (!this.#pair) return;
     const n = ++this.#seq;
-    const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io };
+    const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
     const timeout = this.#options.timeoutMs;
     const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
     if (this.disabled) return;
@@ -159,7 +167,10 @@ export class Coordinator {
     const judged = unfaithful
       ? { outcome: 'not-compared', kinds: ['unfaithful'], details: [{ kind: 'unfaithful', path: 'ghost', old: '', new: unfaithful }] }
       : explain(compareRuns(runs.old, runs.candidate), place.route, this.#options.allow ?? []);
-    await this.#judge({ n, ...place, method: capture.request.method, url: capture.request.url, ...judged }, capture, runs);
+    // The changed lines each ghost ran (keys carry their side), and the pull requests behind them.
+    const lines = this.#options.coverage ? { ...(old.lines ?? {}), ...(candidate.lines ?? {}) } : null;
+    const named = lines && this.#options.manifest ? attribute(Object.keys(lines), this.#options.manifest) : {};
+    await this.#judge({ n, ...place, method: capture.request.method, url: capture.request.url, ...judged, ...(lines ? { lines } : {}), ...named }, capture, runs);
   }
 
   async #judge(verdict, capture = null, runs = null) {
