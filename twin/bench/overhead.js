@@ -1,4 +1,6 @@
-// Measures what the twin adds to request latency: no twin, a twin that samples nothing, and one that samples 10% of requests.
+// Measures what the twin adds to request latency: no twin, then the twin's routing listener sampling 0%, 10% and 100% of requests.
+// Run it a second time with --experimental-async-context-frame: on Node 22 that flag makes AsyncLocalStorage, which the twin uses for
+// sampled requests, much cheaper.
 import http from 'node:http';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -33,10 +35,11 @@ async function measure(label, listener, { total = 4000, lanes = 16, report = tru
 // The first round pays for compiling and for opening connections; without this unreported round, "no twin" looks slowest.
 await measure('warm-up', createApp(), { report: false });
 await measure('no twin', createApp());
-for (const sampleRate of [0, 0.1]) {
-  const twin = await createTwin({ old: app('old'), candidate: app('new'), sampleRate, queueLimit: 1000 });
-  await measure(`twin sampling ${sampleRate * 100}%`, twin.wrap(createApp()));
+for (const sampleRate of [0, 0.1, 1]) {
+  const twin = await createTwin({ old: app('old'), candidate: app('new'), sampleRate, queueLimit: 10000 });
+  await measure(`twin sampling ${sampleRate * 100}%`, await twin.listener());
   await twin.idle();
-  console.log(`  ${JSON.stringify(twin.stats())}`);
+  const s = twin.stats();
+  console.log(`  compared ${s.same + s.stated + s.different} (same ${s.same}), not compared ${s.notCompared}, skipped ${s.skipped}, dropped ${s.dropped}`);
   await twin.close();
 }
