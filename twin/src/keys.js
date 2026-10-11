@@ -93,7 +93,10 @@ export function redisIsWrite(command) {
 // Calls about the connection or the server, not the data: a version check, SET, SHOW or RESET, the current schema; Redis HELLO, AUTH,
 // SELECT, CLIENT, INFO and PING. Their answer is the same however often they are asked, and how often they are asked depends on how many
 // connections a pool happened to open, not on the code. (Keploy's "session" mocks: a short, explicit list, for the same reason.)
-const PG_SESSION = /^PG (select version\(\)|select current_schema\(\)|show |set |reset |discard |deallocate )/i;
+// Session server calls (never used up when replayed): the connection and server ones, and transaction control (BEGIN/COMMIT/ROLLBACK),
+// which carries no data, so a new code path may open a transaction the recording never began. 'rollback to [savepoint]' is excluded: a
+// savepoint rollback is normalized and matched like data. 'end' and 'abort' are Postgres's words for commit and rollback.
+const PG_SESSION = /^PG (select version\(\)|select current_schema\(\)|show |set |reset |discard |deallocate |begin\b|start transaction\b|commit\b|end\b|abort\b|rollback(?! to)\b)/i;
 const REDIS_SESSION = /^REDIS (HELLO|AUTH|SELECT|CLIENT|INFO|PING) /;
 
 /** Whether a call (by its key) is about the connection or the server: never used up when it is replayed. */

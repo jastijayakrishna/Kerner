@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { callKey, pgIsWrite, pgKey, readAllowed, redisIsWrite, redisKey, shapeOf, stable } from '../src/keys.js';
+import { callKey, isSession, pgIsWrite, pgKey, readAllowed, redisIsWrite, redisKey, shapeOf, stable } from '../src/keys.js';
 
 test('every call is named <shape> <payload>; the shape is all but the last word', () => {
   assert.equal(shapeOf(callKey('post', 'https://pay.example/charge', Buffer.from('{"a":1}'))), 'POST https://pay.example/charge');
@@ -21,6 +21,19 @@ test("a savepoint's name is a label the client library numbers itself: it does n
   assert.equal(shape('ROLLBACK TO SAVEPOINT trx9;'), shape('ROLLBACK TO trx153;'));
   assert.notEqual(shape('SAVEPOINT trx9;'), shape('RELEASE SAVEPOINT trx9;'), 'setting, releasing and rolling back stay apart');
   assert.notEqual(shape('SELECT 1'), shape('SELECT 2'), 'other queries keep their text');
+});
+
+test('transaction control is a session call: a new code path may open a transaction the recording never began', () => {
+  // BEGIN/COMMIT/ROLLBACK carry no data; when the new code runs a transaction the old (recorded) code never did, the twin answers
+  // these from any recorded one instead of calling the request not comparable. The writes inside are still used once and compared.
+  for (const query of ['BEGIN', 'begin;', 'BEGIN TRANSACTION', 'BEGIN ISOLATION LEVEL SERIALIZABLE', 'START TRANSACTION', 'COMMIT', 'commit;', 'END', 'ROLLBACK', 'ABORT']) {
+    assert.ok(isSession(pgKey(query, [])), query);
+  }
+  // Session server calls stay session; data reads and writes, and savepoint rollbacks, are still used once.
+  assert.ok(isSession(pgKey('select version()', [])) && isSession(pgKey('SET search_path = x', [])));
+  for (const query of ['SELECT * FROM users WHERE id = $1', 'INSERT INTO t VALUES (1)', 'ROLLBACK TO SAVEPOINT trx9']) {
+    assert.ok(!isSession(pgKey(query, [1])), query);
+  }
 });
 
 test('which queries and commands write', () => {
