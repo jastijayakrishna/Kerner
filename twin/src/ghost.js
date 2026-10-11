@@ -1,56 +1,23 @@
 import { Worker } from 'node:worker_threads';
+import { answer, ask, ghostEnv } from './ghost-common.js';
+import { startProcessGhost } from './process-ghost.js';
+
+export { ghostEnv };
 
 const THREAD = new URL('./worker.js', import.meta.url);
 
-/** The app's environment for a ghost, without NODE_OPTIONS: a module preloaded there would run in the ghost before its seal (measured). */
-export function ghostEnv() {
-  const env = { ...process.env };
-  delete env.NODE_OPTIONS;
-  return env;
-}
-
-/** Sends one request to one ghost and answers its result, or why there is none. `dirty` means the ghost must be restarted. */
-function ask(worker, id, job, timeoutMs) {
-  return new Promise((resolve) => {
-    let dirty = false;
-    let timer = null;
-    const done = (result) => {
-      clearTimeout(timer);
-      worker.off('message', onMessage);
-      worker.off('exit', onExit);
-      resolve({ ...result, dirty: dirty || Boolean(result.timedOut || result.exited) });
-    };
-    const onMessage = (message) => {
-      if (message?.type === 'dirty') dirty = true;
-      else if (message?.type === 'result' && message.id === id) done(message.result);
-    };
-    const onExit = (code) => done({ error: `the ghost stopped (exit ${code})`, exited: true });
-    timer = setTimeout(() => done({ error: `no answer within ${timeoutMs} ms`, timedOut: true }), timeoutMs);
-    worker.on('message', onMessage);
-    worker.on('exit', onExit);
-    worker.postMessage({ type: 'job', id, job });
-  });
-}
-
-/** Answers a ghost's question about a real read through the twin's own thread (settings.onRealRead); a failure is an answer too. */
-function answer(post, message, settings) {
-  const reply = settings.onRealRead ? Promise.resolve().then(() => settings.onRealRead(message)) : Promise.resolve({ error: 'no real reads here' });
-  reply.then(
-    (value) => post({ type: 'answer', id: message.id, answer: value }),
-    (error) => post({ type: 'answer', id: message.id, answer: { error: String(error?.message ?? error) } }),
-  );
-}
-
 /**
- * Starts one ghost: one version of the app in its own thread, sealed, waiting for requests. Resolves once that version has loaded,
- * with { kind: 'thread', loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener) }.
- * `side` is { module, export }; `settings` is { startMs, memoryMb, ghostExecArgv, addons, coverage }.
+ * Starts one ghost (one version of the app, sealed, waiting for requests) and resolves once that version has loaded. It answers
+ * { kind, loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener) }.
+ * `settings.kind` picks a thread ('thread', the default) or a process of its own ('process'). The other settings are
+ * { startMs, memoryMb, ghostExecArgv, addons, coverage, adapters, overlay, realReads, sandbox, onRealRead }.
  */
 export function startGhost(side, settings) {
+  if (settings.kind === 'process') return startProcessGhost(side, settings);
   return new Promise((resolve, reject) => {
-    // The ghost drops its own console output (worker.js). Reading it here instead would keep the process alive.
-    // No Node flags and no NODE_OPTIONS from the app: a module they preload would run in the ghost before the seal goes on (measured:
-    // execArgv [] alone still runs a NODE_OPTIONS preload). Flags a ghost needs, a TypeScript loader say, are given as ghostExecArgv.
+    // The ghost drops its own console output (worker.js); reading it here instead would keep the process alive. No Node flags and no
+    // NODE_OPTIONS from the app: a module they preload would run in the ghost before the seal goes on. Flags a ghost needs are given
+    // as ghostExecArgv.
     const worker = new Worker(THREAD, {
       workerData: {
         module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null,
@@ -61,6 +28,7 @@ export function startGhost(side, settings) {
       resourceLimits: { maxOldGenerationSizeMb: settings.memoryMb },
     });
     let timer = null;
+    let loadLines = [];
     const cleanup = () => {
       clearTimeout(timer);
       worker.off('message', onMessage);
@@ -72,7 +40,6 @@ export function startGhost(side, settings) {
       worker.terminate();
       reject(error);
     };
-    let loadLines = [];
     const onMessage = (message) => {
       if (message?.type === 'load-lines') loadLines = message.lines;
       if (message?.type !== 'ready') return;
@@ -91,7 +58,7 @@ export function startGhost(side, settings) {
       resolve({
         kind: 'thread',
         loadLines,
-        ask: (id, job, timeoutMs) => ask(worker, id, job, timeoutMs),
+        ask: (id, job, timeoutMs) => ask(worker, (m) => worker.postMessage(m), id, job, timeoutMs),
         terminate: () => worker.terminate(),
         onDirty: (listener) => dirty.push(listener),
       });

@@ -74,6 +74,7 @@ export class Coordinator {
       startMs: o.startMs, memoryMb: o.ghostMemoryMb, ghostExecArgv: o.ghostExecArgv, addons: o.addons, maxBodyBytes: o.maxBodyBytes,
       adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [],
       onRealRead: (message) => this.#realRead(message),
+      kind: o.ghosts ?? 'thread', sandbox: o.sandbox ?? 'none',
     };
     // With a manifest, each ghost measures its own side's changed lines: { old: plan, new: plan }.
     const plans = this.#options.coverage ?? null;

@@ -1,12 +1,13 @@
 import { Worker } from 'node:worker_threads';
 import { wrapListener } from './capture.js';
 import { recordFetch } from './record.js';
-import { ghostEnv } from './ghost.js';
+import { ghostEnv } from './ghost-common.js';
 import { Router } from './router.js';
 import { acceptMatcher } from './manifest.js';
 import { createRequire } from 'node:module';
 import { current } from './capture.js';
 import { ADAPTERS, ADAPTER_NAMES } from './adapters/index.js';
+import { spawnSync } from 'node:child_process';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
@@ -88,10 +89,17 @@ function settingsOf(options) {
     adapters: [...new Set(['fetch', ...names(options.adapters, ['fetch'], 'adapters')])],
     realReads: readPatterns(options.realReads),
     overlay: options.overlay === true,
+    ghosts: oneOf(options.ghosts, 'thread', ['thread', 'process'], 'ghosts'),
+    sandbox: oneOf(options.sandbox, 'none', ['none', 'bwrap'], 'sandbox'),
   };
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
   const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
   if (unknown.length) throw new TypeError(`adapters are ${ADAPTER_NAMES.map((n) => `'${n}'`).join(', ')}; not ${unknown.join(', ')}`);
+  if (settings.sandbox === 'bwrap' && settings.ghosts !== 'process') throw new TypeError("the bwrap sandbox holds process ghosts: set ghosts: 'process'");
+  if (settings.sandbox === 'bwrap' && process.platform !== 'linux') throw new TypeError('the bwrap sandbox runs on Linux only');
+  if (settings.manifest && settings.ghosts === 'process' && settings.sandbox !== 'bwrap') {
+    throw new TypeError("measuring changed lines needs the inspector, which Node's permission model refuses: use thread ghosts, or process ghosts in the bwrap sandbox");
+  }
   return settings;
 }
 
@@ -145,6 +153,14 @@ class Twin {
     if (process.env.KERN_TWIN === 'off') {
       this.#disabled = 'switched off with KERN_TWIN=off';
       return;
+    }
+    // A sandbox that was asked for and does not work is never quietly dropped: the twin stays off and says why.
+    if (this.#settings.sandbox === 'bwrap') {
+      const probe = spawnSync('bwrap', ['--unshare-user', '--unshare-net', '--ro-bind', '/', '/', 'true'], { encoding: 'utf8', timeout: 10000 });
+      if (probe.status !== 0) {
+        this.#disabled = `the bwrap sandbox does not work here: ${String(probe.error?.message ?? probe.stderr ?? '').trim().slice(0, 200)}`;
+        return;
+      }
     }
     // No Node flags and no NODE_OPTIONS from the app: its preloads have no business in the twin's thread or in the ghosts it starts.
     const thread = new Worker(THREAD, { workerData: forThread(this.#settings), execArgv: [], env: ghostEnv(), resourceLimits: { maxOldGenerationSizeMb: 512 } });
