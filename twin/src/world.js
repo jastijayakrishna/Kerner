@@ -71,6 +71,19 @@ export function installWorld() {
   });
   put(crypto, 'randomUUID', uuid);
   put(crypto, 'getRandomValues', fill);
+  // Id generators (nanoid, say) fill bytes in place: an ArrayBuffer, a typed array or a DataView, all of it or offset and size.
+  const fillRange = (target, offset = 0, size = undefined) => {
+    const view = target instanceof ArrayBuffer ? new Uint8Array(target) : new Uint8Array(target.buffer, target.byteOffset, target.byteLength);
+    view.set(bytes(size ?? view.length - offset), offset);
+    return target;
+  };
+  put(crypto, 'randomFillSync', (target, offset, size) => fillRange(target, offset, size));
+  put(crypto, 'randomFill', (target, ...rest) => {
+    const done = rest.findLast((arg) => typeof arg === 'function');
+    const [offset, size] = rest.filter((arg) => typeof arg === 'number');
+    fillRange(target, offset, size);
+    process.nextTick(done, null, target);
+  });
   put(crypto, 'randomInt', (a, b, callback) => {
     const [low, high] = b === undefined || typeof b === 'function' ? [0, a] : [a, b];
     const value = low + Math.floor(random() * (high - low));
