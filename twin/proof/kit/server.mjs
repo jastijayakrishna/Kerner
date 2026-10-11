@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 // One app under the proof, on KERN_PROOF_PORT (8080 by default; 0 picks a free port).
@@ -21,6 +21,8 @@ if (mode === 'off') {
 } else {
   const { createTwin } = await import(pathToFileURL(config.twin).href);
   const options = { ...config.options, log: named(config.options.log), cases: named(config.options.cases) };
+  // Each run starts from nothing: the twin appends to its log, and would check an earlier run's cases as known ones.
+  for (const path of [options.log, options.cases]) if (path) await rm(path, { recursive: true, force: true });
   twin = await createTwin({ ...options, old: config.old, candidate: config.candidate, sampleRate });
   listener = await twin.listener();
 }

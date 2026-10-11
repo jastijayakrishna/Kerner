@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,9 +105,13 @@ test('the proof server and its traffic runner measure an app without the twin an
     twin: fileURLToPath(new URL('../src/index.js', import.meta.url)),
     old: shopVersion('base'),
     candidate: shopVersion('head'),
-    options: { manifest: shopManifest, epsilon: 0.5, minHours: 0, timeoutMs: 3000 },
+    options: { manifest: shopManifest, epsilon: 0.5, minHours: 0, timeoutMs: 3000, log: join(dir, 'three-prs-{label}-differences.jsonl'), cases: join(dir, 'three-prs-{label}-cases') },
   }));
   const kit = (name) => fileURLToPath(new URL(`../proof/kit/${name}`, import.meta.url));
+  // What an earlier run with the same label left behind: each run starts from nothing.
+  writeFileSync(join(dir, 'three-prs-sample-1-differences.jsonl'), '{"route":"STALE"}\n');
+  mkdirSync(join(dir, 'three-prs-sample-1-cases'));
+  writeFileSync(join(dir, 'three-prs-sample-1-cases', '1-1-stale.json'), '{}');
   try {
     for (const mode of ['off', 'twin']) {
       const env = { ...process.env, KERN_PROOF_CONFIG: config, KERN_PROOF_MODE: mode, KERN_PROOF_SAMPLE: '1', KERN_PROOF_PORT: '0' };
@@ -141,6 +145,8 @@ test('the proof server and its traffic runner measure an app without the twin an
     assert.deepEqual([full.latency.count, full.twin.judged, full.twin.compared], [20, 20, 20], JSON.stringify(full.twin));
     assert.ok(full.differences.some((d) => d.route === 'POST /profile' && d.cause === 102), JSON.stringify(full.differences));
     assert.ok(full.rssMb > 0 && full.lines.proven >= 1, JSON.stringify(full.lines));
+    assert.doesNotMatch(readFileSync(join(dir, 'three-prs-sample-1-differences.jsonl'), 'utf8'), /STALE/, "an earlier run's differences are not this run's");
+    assert.ok(!readdirSync(join(dir, 'three-prs-sample-1-cases')).includes('1-1-stale.json'), "nor are its cases");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
