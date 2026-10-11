@@ -1,0 +1,10 @@
+{
+  "name": "kern-twin-stacks",
+  "private": true,
+  "type": "module",
+  "description": "Client libraries the twin's adapters are tested against; installed only in the stack test image",
+  "dependencies": {
+    "ioredis": "6.0.0",
+    "pg": "8.23.1"
+  }
+}

@@ -80,3 +80,16 @@ export function exactBytes(parts) {
   }
   return out;
 }
+
+/** A value that crossed between threads, where every Buffer became a Uint8Array, with its Buffers back (in place, deeply). */
+export function revive(value) {
+  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) value[i] = revive(value[i]);
+    return value;
+  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    for (const key of Object.keys(value)) value[key] = revive(value[key]);
+  }
+  return value;
+}
