@@ -8,7 +8,7 @@ It runs the old and the new version as ghosts:
 - Once the new version has enough clean comparisons to bound its risk, it may serve.
 - The first unexplained difference while it serves switches serving back to the old version, before the next request.
 
-Phases 1 (shadow comparisons), 2 (evidence and switch-on) and 3 (changed lines and named causes) of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built.
+Phases 1 to 4 of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built: shadow comparisons, evidence and switch-on, changed lines and named causes, and real stacks.
 
 ## Use
 
@@ -43,9 +43,9 @@ http.createServer(await twin.listener()).listen(3000);
   - cannot open a network connection, send UDP or look up a name;
   - cannot start a program or a thread, signal a process, or change a process's priority;
   - cannot load a native add-on (except packages listed in `addons`), use Node's internal bindings, or start WASI;
-  - cannot write a file, open one to write, or write to a file descriptor it did not open.
+  - cannot write a file (with `overlay: true` its writes land in memory instead), open one to write, or write to a file descriptor it did not open.
 
-  Its `fetch` calls get the real run's answers. Its writes are written down, never done. Its output is dropped, and it starts without the app's preloads (`--require`, `--import`, `NODE_OPTIONS`).
+  Its `fetch` calls, and with `adapters` its `node:http`, Postgres and Redis calls, get the real run's answers. Its writes are written down, never done. Its output is dropped, and it starts without the app's preloads (`--require`, `--import`, `NODE_OPTIONS`).
 - **It never breaks the app.** If anything goes wrong inside the twin, it switches itself off and says why in `twin.stats().disabled`, and the old version serves. The twin's thread and the ghosts never keep the app's process alive by themselves; only `await twin.idle()` does, until the twin has judged what it was handed. `KERN_TWIN=off` keeps the twin from starting at all; the old version then serves.
 - **It never slows the app's thread with judging.** Comparing, counting and deciding happen in the twin's own thread. The app's thread only copies sampled requests, and hands each over as exact bytes: never a slice of Node's shared buffer pool, which would carry other requests' data along.
 
@@ -107,6 +107,42 @@ measuring changed lines       228 requests judged per second (600 same, 0 differ
 
 Over the three runs: 1,094–1,347 without, 224–230 with, so the ghosts judge about 5 times fewer requests per second. The cost is reading the counts after each request, not running with coverage on. A loopback request like the ghosts' own took 0.79 ms with coverage off, 0.82 ms with it on, and 4.13 ms with the counts read after each request: each read reports every function that ran since the last one, Node's own HTTP code included. When the ghosts fall behind, the twin compares fewer requests (`dropped` counts the rest), and the evidence takes longer to gather.
 
+## Real stacks
+
+Each ghost replays these client libraries from the real run's recording:
+
+| Name | What it covers |
+|---|---|
+| `fetch` | always on |
+| `http` | `node:http` and `node:https` clients, so axios, got, node-fetch and other libraries built on them |
+| `pg` | node-postgres: `Client`, `Pool`, transactions |
+| `ioredis` | commands, pipelines and transactions; not Redis Cluster or subscriber mode |
+
+```js
+const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis'] });
+```
+
+- **Matching by shape.** Every call is named by its shape and its payload. A ghost whose payload carries the clock or a fresh id (an `INSERT ... created_at`) gets the recorded call of the same shape. Writes are checked against the real run by shape. The two ghosts are still compared exactly, since they share one world.
+- **Real reads.** `realReads: ['GET https://rates.example/*']` lets the twin's own thread make those reads for real, once per request, when a cold ghost needs one the warm real app did not. Both ghosts get the same answer. Only GET and HEAD, at most 5 s.
+- **File overlay.** With `overlay: true`, a ghost's file writes land in memory for the request. They are written down, read back by the ghost, and never touch the disk.
+- **Process ghosts.**
+  - With `ghosts: 'process'`, each ghost is a Node process under the permission model: Node itself refuses file writes, programs, threads, native add-ons and the inspector. This stops even code that runs before the JavaScript seal, such as a module given in `ghostExecArgv`.
+  - On Linux, `sandbox: 'bwrap'` puts each process ghost in a namespace with no network and a read-only file system. Changed lines are still measured there.
+  - Without `bwrap`, a twin with a manifest needs thread ghosts.
+- **The old version beside the new one.**
+
+  ```bash
+  node twin/bin/kern-twin.js build --repo . --base "$BASE_SHA" --out .kern-twin/old
+  ```
+
+  It shares the new version's `node_modules` when no package file changed, and otherwise installs the old version's own.
+- **The acceptance run** (`twin/examples/shop/run.sh`): an Express and Postgres shop under the twin. Measured on 2026-10-11:
+
+  ```text
+  sampled 200: same 190, different 10 (large orders' rounded totals), not compared 0, skipped 0, dropped 0, restarts 0
+  PASSED: the twin compared 100.0% of 200 sampled requests
+  ```
+
 ## Reading the results
 
 `twin.stats()` counts, for this run:
@@ -117,7 +153,7 @@ Over the three runs: 1,094–1,347 without, 224–230 with, so the ghosts judge 
   - the serving version's ghost did not reproduce the real run.
 - **`skipped`:** too large to copy, or aborted by the client.
 - **`dropped`:** the twin was busy.
-- **The rest:** `restarts`, `logErrors`, `evidenceErrors`, `queued`, `disabled` and `serving`.
+- **The rest:** `restarts`, `logErrors`, `evidenceErrors`, `queued`, `disabled`, `serving`, and `adapters` (whether each client library is being recorded).
 
 `twin.differences()` holds the first 100 unexplained differences of this run. The `log` file holds all of them, one JSON line each:
 - `n`, `at`, `route`, `segment`, `serving`, `method` and `url`;
@@ -155,16 +191,20 @@ Over the three runs: 1,094–1,347 without, 224–230 with, so the ghosts judge 
 | `old.root`, `candidate.root` | required with `manifest` | Each version's checkout |
 | `minLineRuns` | `3` | Clean runs every code character of a changed line needs (1 to 9) |
 | `accept` | `[]` | Changed lines a person accepts without runs, such as `'old:src/x.js:12'` |
+| `adapters` | `['fetch']` | Client libraries recorded and replayed: `'http'`, `'pg'`, `'ioredis'` |
+| `realReads` | `[]` | Reads the twin may make for real for the ghosts, such as `'GET https://rates.example/*'` |
+| `overlay` | `false` | Ghost file writes land in memory for the request |
+| `ghosts` | `'thread'` | `'process'`: each ghost in its own Node process, under the permission model |
+| `sandbox` | `'none'` | `'bwrap'` (Linux, process ghosts): no network and a read-only file system |
 
 ## Not yet
 
 - **Server types.** Only `node:http` servers, without HTTP/2. Answers streamed longer than `maxBodyBytes` are skipped.
-- **Outgoing calls.** `fetch` is the only call the ghosts replay. An app that talks to a database or another server any other way gets "not compared"; adapters come in Phase 4.
+- **Outgoing calls.** `fetch`, `node:http`/`https` clients, `pg` and `ioredis` are replayed. Other clients (MySQL, MongoDB, Redis Cluster, undici's own client) are refused in a ghost, so a request that uses one is not compared.
 - **In-memory state.** Caches and counters inside the app differ between the real app and the ghosts, so such requests may be "not compared".
-- **Below Node's APIs.** The seal is built from Node's own APIs. A native add-on allowed with `addons` acts below it. Separate ghost processes with Node's permission model and an OS sandbox come in Phase 4.
+- **Below Node's APIs.** Thread ghosts are sealed in JavaScript only. Process ghosts add Node's permission model, and `bwrap` adds the kernel's network and file isolation.
 - **Two versions in one process.** Once the new version serves, both versions are loaded in the app's process. An app whose `createApp` starts background work, or registers process-wide singletons, should use `wrap()` and switch with its deploy system, reading `kern-twin status`.
 - **Not yet built:**
-  - real stacks (Phase 4);
   - fixing (Phase 5).
 
 ## Cost (measured)

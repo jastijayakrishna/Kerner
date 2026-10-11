@@ -36,6 +36,19 @@ jobs:
         run: cargo test --locked
       - name: Twin runtime
         run: sh twin/scripts/test-linux.sh
+      # A failing test can leave a server open, and the run would then wait for the job's six-hour limit.
+      - name: Twin real stacks
+        timeout-minutes: 15
+        run: sh twin/scripts/test-stacks.sh
+      - name: Twin sandbox
+        timeout-minutes: 15
+        run: |
+          # Ubuntu 24.04 keeps unprivileged user namespaces from processes AppArmor does not confine; bwrap needs one.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sh twin/scripts/test-sandbox.sh
+      - name: Twin shop (Phase 4 acceptance)
+        timeout-minutes: 15
+        run: sh twin/examples/shop/run.sh
       - name: Static binary
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc

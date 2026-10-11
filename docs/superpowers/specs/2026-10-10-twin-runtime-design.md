@@ -4,7 +4,7 @@ Date: 2026-10-10.
 
 Status:
 - Direction agreed with the user in the brainstorm of 2026-10-10.
-- Phases 1 to 3 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md` and `-phase-3.md`.
+- Phases 1 to 4 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md`, `-phase-3.md` and `-phase-4.md`.
 - Phases 3 to 6 each have their own plan in the same folder.
 - `docs/superpowers/specs/2026-10-10-twin-runtime-interfaces.md` pins the contracts between phases: files, messages, shapes, options and formats.
 
@@ -85,6 +85,13 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/manifest.js` | Reads `kern twin plan`'s manifest, checks it against the code, attributes differences, matches `accept` | `node:crypto` |
 | `src/coverage.js` | In a ghost: which characters of each changed line ran, directly or through a source map | `node:inspector/promises` |
 | `src/twin.rs` (Rust) | `kern twin plan`: changed lines of code with their commit and pull request | `drive.rs`, git |
+| `src/ghost-core.js` | The ghost body shared by threads and processes | `world.js`, `ghost-io.js`, `coverage.js`, `adapters/` |
+| `src/ghost-common.js` | What thread and process ghosts share: their environment, asking a request, answering a real read | — |
+| `src/process-ghost.js` | A ghost in its own Node process, under the permission model or in `bwrap` | `node:child_process` |
+| `src/adapters/*.js` | Record a client library in the app's thread, replay it in the ghosts: `http`, `pg`, `ioredis` | `keys.js`, `capture.js` |
+| `src/real-reads.js` | Allow-listed reads made by the twin's thread, once per request, for both ghosts | `record.js` |
+| `src/overlay.js` | The in-memory file overlay | `node:fs` |
+| `src/build.js` | `kern-twin build`: the old version beside the new one, with its packages | git, the package manager |
 
 ## 5. Decisions and why
 
@@ -124,6 +131,13 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 13. **A switch back holds switching on by itself.** A person, or the twin itself, decided the old version should serve; the twin does not overrule that until a person switches the new version on again.
 14. **Changed lines are judged per character, across requests (Phase 3).** One request takes one branch, so a line with a ternary never runs in full in one request. Per code character the evidence counts the clean comparisons that ran it, and a line is proven when every character has run often enough. This keeps kern drive's rule (nothing left out) while adding runs up the way a ghost sees them.
 15. **The old side counts.** The lines a change removed or replaced must have run too: a branch only the old code had (the blank-field case) holds switch-on until real traffic has taken it.
+16. **Calls are matched by shape when their payload carries the clock (Phase 4).** A ghost's clock is frozen at the request's arrival, so an insert stamped with the time can never match the real run's exactly. The shape (method and address, query text, command and key) still does. Writes are checked against reality by shape and between the ghosts exactly.
+17. **`node:http` is replayed through a real local server,** so every client library built on it works unchanged.
+18. **Isolation in layers.**
+    - Thread ghosts are sealed in JavaScript: cheap, and enough for ordinary app code.
+    - Process ghosts add Node's permission model, which stops code that ran before the seal.
+    - `bwrap` adds the kernel's: no network, and a read-only file system.
+19. **Real reads are made by the twin's thread, never by a ghost,** once per request, so both ghosts see one world.
 
 ## 6. The maths
 
@@ -186,10 +200,10 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 ## 10. What it does not do yet
 
 - **Server types.** Only `node:http` servers. No HTTP/2. Streamed answers longer than the cap (server-sent events, downloads) are skipped.
-- **Outgoing calls.** Phase 1 replays `fetch` only. Apps that talk to Postgres, MySQL, Redis or `node:http` clients directly are "not compared" until Phase 4.
-- **In-memory state.** Caches and counters inside the app differ between the real app and the ghosts. The old ghost is then unfaithful and the request is not compared. Phase 4 adds allow-listed real reads, so ghost caches can warm.
-- **File writes.** Only the common `fs` write functions are written down and refused. Lower-level writes (`open` then `write`) are not seen in Phase 1.
-- **Native add-ons.** A ghost may not load them, except packages listed in `addons` (pure computation, such as `bcrypt`), which act below these controls. Process ghosts with Node's permission model come in Phase 4.
+- **Outgoing calls.** `fetch`, `node:http`/`https` clients, `pg` and `ioredis` are replayed. Other clients (MySQL, MongoDB, Redis Cluster, undici's own client) are refused in a ghost, so a request that uses one is not compared.
+- **In-memory state.** Caches and counters inside the app differ between the real app and the ghosts, so such requests may be "not compared". Allow-listed real reads (`realReads`) let a cold ghost make the reads a warm real app skipped.
+- **File writes.** A ghost may not write files; with `overlay: true` its writes land in memory for the request, are written down, and are read back by the ghost. Writes the overlay does not cover (symlinks, permissions, opening a file to write) are still refused.
+- **Native add-ons.** A thread ghost may not load them, except packages listed in `addons` (pure computation, such as `bcrypt`), which act below these controls. Process ghosts add Node's permission model, and `bwrap` the kernel's isolation.
 - **Frozen time.** Code that waits for time to pass in a busy loop never finishes in a ghost. That ends as a timeout, never as a wrong "same".
 - **Coverage.** It compares the requests that happen. A path no request takes needs Phase 3's path list and Level 1's generated inputs (`kern drive`).
 
@@ -231,8 +245,8 @@ Each phase ends with working, tested software.
    - Accepted when:
      - the blank-field path is listed as never run before switch-on;
      - a candidate with three pull requests names the right one for each difference.
-4. **Real stacks.**
-   - Builds: `kern-twin build --base <sha>` (builds the old version with its own `node_modules` when dependencies changed), adapters for `pg`, `node:http`/`https` clients and `ioredis`, allow-listed real reads, and an in-memory file overlay.
+4. **Real stacks** (built). Its acceptance run is `twin/examples/shop/run.sh`; the adapters are tested against real servers by `twin/scripts/test-stacks.sh`.
+   - Builds: `kern-twin build --repo <dir> --base <sha> --out <folder>` (builds the old version with its own `node_modules` when dependencies changed), adapters for `pg`, `node:http`/`https` clients and `ioredis`, allow-listed real reads, and an in-memory file overlay.
    - Accepted when an Express and Postgres sample app (docker compose) compares at least 95% of sampled requests.
 5. **Fix loop.**
    - Builds:
