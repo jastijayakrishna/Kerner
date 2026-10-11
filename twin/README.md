@@ -8,7 +8,7 @@ It runs the old and the new version as ghosts:
 - Once the new version has enough clean comparisons to bound its risk, it may serve.
 - The first unexplained difference while it serves switches serving back to the old version, before the next request.
 
-Phases 1 to 4 of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built: shadow comparisons, evidence and switch-on, changed lines and named causes, and real stacks.
+Phases 1 to 5 of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built: shadow comparisons, evidence and switch-on, changed lines and named causes, real stacks, and the fix loop.
 
 ## Use
 
@@ -143,6 +143,38 @@ const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis']
   PASSED: the twin compared 100.0% of 200 sampled requests
   ```
 
+## From a difference to a fix
+
+With `cases: '.kern-twin/cases'`, every unexplained difference becomes a case:
+- **Scrubbed first.** Private values become stand-ins of the same shape, and within a case the same value always gets the same stand-in. The stand-ins are keyed by a secret that is thrown away, so nothing links two cases. This covers:
+  - emails, card numbers (a valid test number for a valid one), UUIDs (a valid UUID) and tokens, anywhere;
+  - values under names such as `password` or `card`, in JSON, forms and query strings;
+  - private headers.
+- **Checked again.** Both versions run again on the scrubbed copy. The case is written only if the difference shows again. If it does not, the difference depended on a private value, and a stub tells a person to look.
+- **Everything else on disk is scrubbed too:** the differences log and the evidence's examples. Only `twin.differences()`, in memory, keeps the real values. A path segment with an `@` inside counts as an id, so no email reaches the disk in a route name.
+- **Limits.**
+  - A body the scrubber cannot read (binary, a file upload) is kept as it was and named in the case's `opaque` list, so a person looks before the case is shared.
+  - In other text (XML, say) only the patterns apply, not the private names.
+  - A value the app adds from its own configuration (a secret from the environment in an error message, say) is not a request value, and is not scrubbed.
+
+Then:
+
+```bash
+npx kern-twin test --cases .kern-twin/cases --candidate src/app.js          # fails until the new code answers as the old one did
+npx kern-twin feedback --cases .kern-twin/cases --candidate src/app.js      # kern-feedback/v1 instructions for a coding agent
+npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # the pull request comment (printed, never posted)
+```
+
+- **What the agent reads.** `feedback` and the comment give the agent's copy of the verdict. As in Kern, it leaves out the hints on how a person could allow a difference, so an agent fixes its change instead of allowing it. The comment carries its own marker, `<!-- kern-twin:v1 head=… -->`, so Kern's count of rejected attempts is unchanged.
+- **A person decides** about an opened door, about writes to `humans.hosts` (a payment provider, say), and about stubs. These make `agent_fixable` false.
+- **A known difference is never forgotten.** Before any later candidate may switch on, the twin runs every case on both versions, one at a time and in turn with real requests.
+  - A case that still shows a difference holds it.
+  - So does a stub, until a person has looked and removed its file.
+  - So does a case file that cannot be read.
+  - A case the twin can no longer run is only listed in `twin.evidence().known`. Live traffic must then prove that path.
+  - `twin.idle()` also waits until the known cases are checked.
+- **A fix earns its evidence again.** It is a new candidate, and nothing carries over from the one it fixes. Code that did not change can still behave differently after a fix, through state the fixed code leaves behind for later requests.
+
 ## Reading the results
 
 `twin.stats()` counts, for this run:
@@ -153,9 +185,9 @@ const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis']
   - the serving version's ghost did not reproduce the real run.
 - **`skipped`:** too large to copy, or aborted by the client.
 - **`dropped`:** the twin was busy.
-- **The rest:** `restarts`, `logErrors`, `evidenceErrors`, `queued`, `disabled`, `serving`, and `adapters` (whether each client library is being recorded).
+- **The rest:** `restarts`, `logErrors`, `evidenceErrors`, `cases` and `caseErrors` (cases written, and cases that could not be written), `queued`, `disabled`, `serving`, and `adapters` (whether each client library is being recorded).
 
-`twin.differences()` holds the first 100 unexplained differences of this run. The `log` file holds all of them, one JSON line each:
+`twin.differences()` holds the first 100 unexplained differences of this run, with their real values. The `log` file holds all of them, scrubbed, one JSON line each:
 - `n`, `at`, `route`, `segment`, `serving`, `method` and `url`;
 - `kinds`: `crash`, `hang`, `door-opened`, `status`, `headers`, `body`, `effects`, `fixed` or `changed-error`;
 - `details`: `{ kind, path, old, new }`.
@@ -196,6 +228,9 @@ const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis']
 | `overlay` | `false` | Ghost file writes land in memory for the request |
 | `ghosts` | `'thread'` | `'process'`: each ghost in its own Node process, under the permission model |
 | `sandbox` | `'none'` | `'bwrap'` (Linux, process ghosts): no network and a read-only file system |
+| `cases` | none | Folder for scrubbed, re-checked cases; every later candidate must pass them |
+| `scrub` | defaults | More private `headers`, and `keys` (value names in JSON, forms and query strings), to scrub: `{ headers: [...], keys: [...] }` |
+| `humans` | `{ kinds: ['door-opened'] }` | Kinds and write hosts a person decides about: `{ kinds, hosts }` |
 
 ## Not yet
 
@@ -204,8 +239,6 @@ const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis']
 - **In-memory state.** Caches and counters inside the app differ between the real app and the ghosts, so such requests may be "not compared".
 - **Below Node's APIs.** Thread ghosts are sealed in JavaScript only. Process ghosts add Node's permission model, and `bwrap` adds the kernel's network and file isolation.
 - **Two versions in one process.** Once the new version serves, both versions are loaded in the app's process. An app whose `createApp` starts background work, or registers process-wide singletons, should use `wrap()` and switch with its deploy system, reading `kern-twin status`.
-- **Not yet built:**
-  - fixing (Phase 5).
 
 ## Cost (measured)
 

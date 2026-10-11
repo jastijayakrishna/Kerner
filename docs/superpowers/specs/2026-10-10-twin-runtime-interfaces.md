@@ -63,7 +63,8 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 - `{ type: 'snapshot', snapshot, judged }`:
   - sent after the queue drains, and at most every 250 ms while it is busy;
   - `judged` counts every capture and skip handled so far;
-  - main keeps the latest snapshot for `stats()`, `differences()`, `decision()` and `evidence()`.
+  - main keeps the latest snapshot for `stats()`, `differences()`, `decision()` and `evidence()`;
+  - from Phase 5, `snapshot.checking` is true until the known cases are checked and the switch the last check may allow has been asked for. Main's `idle()` waits for it, because a snapshot sent while a check ran could otherwise end `idle()` before that switch.
 - `{ type: 'serve', side, reason }`: the twin switches serving itself. It does this for an earned switch-on, or to switch back after an unexplained difference.
 - `{ type: 'closed', snapshot }`: the answer to `close`, after the evidence is written.
 
@@ -136,7 +137,7 @@ Notes on the verdict:
 - **`stated`:** the versions differ only where an `allow` rule says they may (Phase 2).
 - **The kinds of `crash`, `hang`, `door-opened` and `effects`:** only a rule that names that kind can state them. A path rule never does.
 - **A read the recording cannot answer:** when only one ghost makes it, the outcome is `not-compared` with kind `unanswered`, not "different". Its answer is unknown, so nothing after it can be compared. A write one version makes and the other does not is still "different".
-- **What goes to disk is scrubbed (Phase 5):** the evidence's examples and the differences log get the verdict with its URL and shown values scrubbed. Only `differences()`, in memory, keeps the real values.
+- **What goes to disk is scrubbed (Phase 5):** the evidence's examples and the differences log get the verdict with its URL and shown values scrubbed. Only `differences()`, in memory, keeps the real values. `routeOf` treats a path segment with an `@` inside as an id, so no email reaches the disk in a route name.
 
 ## 4. Files and their exports
 
@@ -158,11 +159,11 @@ Notes on the verdict:
 | `src/overlay.js` | `installOverlay({ wrote })`, `resetOverlay()` | 4 |
 | `src/build.js` | `buildOld({ repo, base, out, install, build })` | 4 |
 | `src/identity.js` | `packageRoot(file)`, `versionId(file, exportName)` | 2 |
-| `src/coordinator.js` | `class Coordinator`, which runs inside the twin thread (and directly in tests); `toRun(result)` | 1, reshaped in 2; Phase 5 exports `toRun` and adds `rerun(capture)` and `check(capture)` |
-| `src/route.js` | `routeOf(method, url)` | 2 |
+| `src/coordinator.js` | `class Coordinator`, which runs inside the twin thread (and directly in tests); `toRun(result)` | 1, reshaped in 2; Phase 5 exports `toRun` and adds `rerun(capture)` and `check(capture)`. A rerun takes its own changed-line counts and drops them, so the next real request is not credited with them |
+| `src/route.js` | `routeOf(method, url)` | 2; Phase 5 makes a segment with an `@` inside an id |
 | `src/evidence.js` | `canonical(value)`, `class Evidence` (section 6) | 2; Phase 3 adds lines |
 | `src/decide.js` | `needed(epsilon)`, `totals(snapshot, segment)`, `decide(snapshot, policy, now)` | 2; Phase 3 adds `lineStatus`, `pathsOf` and the line rule; Phase 5 adds the known-case rule |
-| `src/twin-thread.js` | The twin thread's entry | 2 |
+| `src/twin-thread.js` | The twin thread's entry | 2; Phase 5 writes cases, checks the known cases and reports `checking` |
 | `src/router.js` | `readControl(file)`, `writeControl(file, value)`, `class Router` (section 5) | 2 |
 | `src/capture.js` | `current`, `wrapListener(listener, hooks)` | 1, extended in 2; Phase 6 adds `loadRecord()` and `settleLoad(record)` |
 | `src/turn.js` | `begin(id)`, `end()`, `within(id, fn)`, `owner()`, `isCurrent(id)`, `mine()`, `never()`, `keepTurn(emitter, id)`, `turnText(id)`, `turnOf(text)` | 6 |
@@ -173,7 +174,7 @@ Notes on the verdict:
 | `src/cases.js` | `caseName(entry)`, `writeCase(dir, entry)`, `readCase(file)`, `runOf(saved)` | 5 |
 | `src/replay.js` | `replayCase(caseValue, version, settings)`: one version on one case, in a fresh sealed ghost | 5 |
 | `src/case-test.js` | The `node:test` file `kern-twin test` runs | 5 |
-| `src/feedback.js` | `DEFAULT_HUMANS`, `needsHuman(verdict, humans)`, `SCHEMA`, `toFeedback(cases, options)`, `commentBody(cases, head, options)` | 5 |
+| `src/feedback.js` | `DEFAULT_HUMANS`, `needsHuman(verdict, humans)`, `SCHEMA`, `toFeedback(cases, options)`, `forAgent(feedback)`, `commentBody(cases, head, options)` | 5 |
 | `bin/kern-twin.js` | The CLI: `status` and `serve` (2), `build` (4), `test`, `feedback` and `comment` (5) | 2–5 |
 
 ## 5. The router and the control file
@@ -289,7 +290,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 | `realReads`: `['GET https://api.example.com/*']` | `[]` (GET and HEAD only; a trailing `*` matches by prefix) | 4 |
 | `overlay` | `false` (when true, ghost file writes land in an in-memory overlay, are recorded, and are never done) | 4 |
 | `cases` | `null` (a folder for scrubbed, re-checked cases; every later candidate must pass them) | 5 |
-| `scrub`: `{ headers, keys }` | `DEFAULT_SCRUB`, plus these: more private header names, and more JSON property names whose values are private. Emails, card numbers and long tokens are scrubbed anywhere | 5 |
+| `scrub`: `{ headers, keys }` | `DEFAULT_SCRUB`, plus these: more private header names, and more value names (JSON properties, form and query names) whose values are private. Emails, card numbers, UUIDs and long tokens are scrubbed anywhere | 5 |
 | `humans`: `{ kinds, hosts }` | `{ kinds: ['door-opened'], hosts: [] }`: these kinds, and writes to these hosts, need a person | 5 |
 | `load`: `'none'` or `'record'` | `'none'`. With `'record'`, the old version starts in the app's thread inside a record of its own, and the ghosts start from its answers. For apps that read their database or cache while they start | 6 |
 
@@ -307,7 +308,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 | `evidence()` | The candidate's evidence across restarts: `{ candidate, since, note, totals: { [segment or '*']: counts }, unexplained }`, and `known` (Phase 5). Synchronous |
 | `paths()` | Phase 3: every changed line of the manifest, as `{ key, side, path, line, text, pull, touched, runs, clean, status }`, at most 2,000. Synchronous |
 | `serve(side, reason)` | Switches serving by hand. Answers whether it switched |
-| `idle()` | Resolves once every capture handed over so far has been judged and every switch it caused has been applied. While it waits, it keeps the process alive |
+| `idle()` | Resolves once every capture handed over so far has been judged, the known cases have been checked (Phase 5), and every switch that caused has been applied. While it waits, it keeps the process alive |
 | `close()` | Writes the evidence, then stops the twin's thread and the ghosts |
 
 ## 9. File formats from later phases
@@ -361,3 +362,20 @@ The fields:
 - **`reproduces`** says whether the difference was seen again on the scrubbed copy.
 - **A stub** is a case with `reproduces: false`. It has no `world`, `request`, `io`, `old`, `new` or `verdict`, only the route, the kinds and `why`. A person must look, and removes the file once done.
 - **`human`** is true when a person must decide (section 7, `humans`).
+
+**The agent's instructions** (Phase 5). `toFeedback(cases, options)` makes `kern-feedback/v1`, the shape of Kern's own `src/feedback.rs`:
+
+```json
+{
+  "schema": "kern-feedback/v1", "status": "BLOCKED", "reason": "the twin found 1 unexplained difference on real requests",
+  "agent_fixable": true,
+  "violations": [
+    { "rule": "twin-difference", "path": "src/app.js", "detail": "POST /limit: crash at result: status 200 → uncaught TypeError: ..., from #103",
+      "instruction": "Run `npx kern-twin test --cases <dir> --candidate <module>`: ...", "allow": "allow: [{ route: 'POST /limit', kinds: [\"crash\"] }]" }
+  ]
+}
+```
+
+- **`agent_fixable`** is true only when every case reproduces and none needs a person.
+- **The agent's copy,** `forAgent(feedback)` (Kern's `for_agent`), leaves out `reason` and every `allow`. `kern-twin feedback` prints it, and the comment carries it. An agent is never told how to allow its own difference.
+- **The comment** (`kern-twin comment`) ends with `<!-- kern-twin:v1 head=<sha> -->`, never with Kern's `<!-- kern-feedback:v1 head=… -->`, so Kern's count of rejected attempts is unchanged. The twin prints it; posting it is a person's decision.

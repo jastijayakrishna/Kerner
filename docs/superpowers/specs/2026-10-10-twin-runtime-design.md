@@ -4,7 +4,7 @@ Date: 2026-10-10.
 
 Status:
 - Direction agreed with the user in the brainstorm of 2026-10-10.
-- Phases 1 to 4 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md`, `-phase-3.md` and `-phase-4.md`.
+- Phases 1 to 5 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md`, `-phase-3.md`, `-phase-4.md` and `-phase-5.md`.
 - Phases 3 to 6 each have their own plan in the same folder.
 - `docs/superpowers/specs/2026-10-10-twin-runtime-interfaces.md` pins the contracts between phases: files, messages, shapes, options and formats.
 
@@ -56,7 +56,7 @@ Later phases add three things:
 | R5. Nothing is called "same" without being compared | Every request ends as same, stated, different, not compared or skipped, and aborted requests are skipped too. A read the recording cannot answer makes a request not compared. Not compared and skipped requests are counted with reasons, never folded into "same", and too many of them hold switch-on back (`maxUncovered`) | The compare tests (`unsupported`, `unanswered`); `capture.test.js` (aborted); the fail-safe tests (`skipped`, `dropped`); `decide.test.js` |
 | R6. Every difference names its request | Recorded with method, URL, kinds and the exact paths | Scenario tests check paths such as `$.total` |
 | R7. The cost is bounded | Sampling; a queue limit that sheds load; a body cap; a memory cap per ghost and for the twin's thread; one request at a time per ghost pair; judging in the twin's own thread, never on the app's | The queue-limit test; `bench/overhead.js` measures the cost |
-| R8. Recordings stay in the process | Ghosts have no network. Bytes cross threads as exact copies, never as slices of Node's shared buffer pool. The differences log and the state folder are local files. Scrubbing private values comes in Phase 5 | `ghost-io.test.js` (no network); `bytes.test.js` |
+| R8. Recordings stay in the process | Ghosts have no network. Bytes cross threads as exact copies, never as slices of Node's shared buffer pool. The differences log and the state folder are local files. Cases, the differences log and the evidence's examples are scrubbed; only `differences()` in memory keeps real values | `ghost-io.test.js` (no network); `bytes.test.js`; `scrub.test.js`; `casefiles.test.js` (nothing private reaches the disk) |
 
 ## 4. The pieces
 
@@ -81,7 +81,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/decide.js` | The switch-on decision: rule of three, segments, `maxUncovered`, `minHours` | — |
 | `src/twin-thread.js` | The twin's own thread: coordinator, evidence, decision, switch requests | `coordinator.js`, `evidence.js`, `decide.js` |
 | `src/router.js` | Sends each request to the version serving; the control file | `capture.js` |
-| `bin/kern-twin.js` | `status` and `serve` | `router.js`, `evidence.js`, `decide.js` |
+| `bin/kern-twin.js` | `status`, `serve`, `build`, `test`, `feedback` and `comment` | `router.js`, `evidence.js`, `decide.js`, `build.js`, `cases.js`, `feedback.js` |
 | `src/manifest.js` | Reads `kern twin plan`'s manifest, checks it against the code, attributes differences, matches `accept` | `node:crypto` |
 | `src/coverage.js` | In a ghost: which characters of each changed line ran, directly or through a source map | `node:inspector/promises` |
 | `src/twin.rs` (Rust) | `kern twin plan`: changed lines of code with their commit and pull request | `drive.rs`, git |
@@ -92,6 +92,11 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/real-reads.js` | Allow-listed reads made by the twin's thread, once per request, for both ghosts | `record.js` |
 | `src/overlay.js` | The in-memory file overlay | `node:fs` |
 | `src/build.js` | `kern-twin build`: the old version beside the new one, with its packages | git, the package manager |
+| `src/scrub.js` | Stand-ins for private values, of the same shape, consistent within a case | `node:crypto`, `keys.js` |
+| `src/cases.js` | Cases on disk, written whole, read back exactly | `node:fs` |
+| `src/replay.js` | One version on one case, in a fresh sealed ghost | `ghost.js` |
+| `src/case-test.js` | The cases as `node:test` tests, for `kern-twin test` | `cases.js`, `replay.js`, `compare.js` |
+| `src/feedback.js` | Who fixes a difference; `kern-feedback/v1`, the agent's copy of it, and the pull request comment | — |
 
 ## 5. Decisions and why
 
@@ -138,6 +143,12 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
     - Process ghosts add Node's permission model, which stops code that ran before the seal.
     - `bwrap` adds the kernel's: no network, and a read-only file system.
 19. **Real reads are made by the twin's thread, never by a ghost,** once per request, so both ghosts see one world.
+20. **A case is written only if it still shows the difference after scrubbing (Phase 5).** Otherwise the difference depends on a private value, and a person, not an agent, must look.
+21. **Stand-ins are keyed per case by a secret that is thrown away:** consistent inside a case, unlinkable across cases, and shaped like the value so the app's own checks still pass. A UUID stays a valid UUID, a hex value stays hex, and an address or a form is scrubbed piece by piece, every piece that did not change kept exactly as written. Every search takes time in proportion to the text.
+22. **A known difference is never forgotten, and a fix earns its evidence again.** Every later candidate runs every case before it may switch on. Evidence never carries over from one candidate to another:
+    - clean comparisons of requests a fix did not touch say nothing about the requests it did touch, which is where it most likely fails;
+    - a request that ran none of the fixed code can still behave differently, through state that code left behind.
+23. **What an agent reads never says how to allow a difference.** As in Kern's `for_agent`, the agent's copy of the verdict (the comment, `kern-twin feedback`) leaves out the allow hints, so an agent fixes its change instead of allowing it. A person adds allow rules.
 
 ## 6. The maths
 
@@ -206,6 +217,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 - **Native add-ons.** A thread ghost may not load them, except packages listed in `addons` (pure computation, such as `bcrypt`), which act below these controls. Process ghosts add Node's permission model, and `bwrap` the kernel's isolation.
 - **Frozen time.** Code that waits for time to pass in a busy loop never finishes in a ghost. That ends as a timeout, never as a wrong "same".
 - **Coverage.** It compares the requests that happen. A path no request takes needs Phase 3's path list and Level 1's generated inputs (`kern drive`).
+- **Scrubbing.** A body the scrubber cannot read (binary, a file upload) is kept and named in the case's `opaque` list. In other text (XML, say) only the patterns apply, not the private names. A value the app adds from its own configuration is not a request value, and is not scrubbed.
 
 ## 11. Reused from Kern
 
@@ -248,7 +260,7 @@ Each phase ends with working, tested software.
 4. **Real stacks** (built). Its acceptance run is `twin/examples/shop/run.sh`; the adapters are tested against real servers by `twin/scripts/test-stacks.sh`.
    - Builds: `kern-twin build --repo <dir> --base <sha> --out <folder>` (builds the old version with its own `node_modules` when dependencies changed), adapters for `pg`, `node:http`/`https` clients and `ioredis`, allow-listed real reads, and an in-memory file overlay.
    - Accepted when an Express and Postgres sample app (docker compose) compares at least 95% of sampled requests.
-5. **Fix loop.**
+5. **Fix loop** (built). Its acceptance test is `twin/test/fixloop.test.js`.
    - Builds:
      - each difference becomes a replayable case (the request, the recording and the old answer) that runs as a `node:test` file;
      - `kern-feedback/v1` instructions;
