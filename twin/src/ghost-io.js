@@ -7,6 +7,7 @@ import childProcess from 'node:child_process';
 import workerThreads from 'node:worker_threads';
 import { syncBuiltinESMExports } from 'node:module';
 import { callKey, isWrite, readAllowed, shapeOf } from './keys.js';
+import { installOverlay, resetOverlay } from './overlay.js';
 
 // What a ghost may do: have its calls answered from the real run's recording, and nothing else. Writes are written down and never
 // done. Every other way out is refused, so a ghost cannot touch anything real through Node's own APIs: network connections, UDP,
@@ -16,6 +17,7 @@ let job = null;
 
 /** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once. */
 export function beginJob(io) {
+  resetOverlay();
   job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], events: [] };
 }
 
@@ -70,7 +72,7 @@ const LOOKUPS = ['lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', '
  * connections it may make. `harnessPort` alone still works. `addons` names the packages whose native add-ons may load: pure computation
  * only (bcrypt, say), since an add-on acts below every control here.
  */
-export function installGhostIO({ harnessPort, ports = [harnessPort], addons = [], realReads = [], ask = null }) {
+export function installGhostIO({ harnessPort, ports = [harnessPort], addons = [], realReads = [], ask = null, overlay = false }) {
   const allowed = new Set(ports.filter((port) => Number.isInteger(port)));
   const realFetch = globalThis.fetch;
   globalThis.fetch = async function ghostFetch(input, init) {
@@ -205,7 +207,9 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     throw refusal('Opening a file to write');
   };
 
-  for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'mkdtemp', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'chown', 'lchown', 'utimes', 'lutimes']) {
+  // With the overlay, these writes go to memory for the request (overlay.js); every other write is still refused.
+  const OVERLAID = new Set(['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'copyFile', 'truncate']);
+  for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'mkdtemp', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'chown', 'lchown', 'utimes', 'lutimes'].filter((n) => !(overlay && OVERLAID.has(n)))) {
     const effect = (target) => wrote(`FS ${name} ${String(target)} -`);
     fs[`${name}Sync`] = (target) => {
       effect(target);
@@ -220,10 +224,13 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
       throw refusal(`fs.${name}`);
     };
   }
-  fs.createWriteStream = (target) => {
-    wrote(`FS createWriteStream ${String(target)} -`);
-    throw refusal('fs.createWriteStream');
-  };
+  if (overlay) installOverlay({ wrote });
+  else {
+    fs.createWriteStream = (target) => {
+      wrote(`FS createWriteStream ${String(target)} -`);
+      throw refusal('fs.createWriteStream');
+    };
+  }
 
   // A ghost opens files only to read them, so any other file descriptor it writes to belongs to the app's process. Only the ghost's own
   // output (1 and 2, which worker.js sends to the null device) is written.

@@ -87,6 +87,7 @@ function settingsOf(options) {
     // fetch is always recorded: every ghost replays it.
     adapters: [...new Set(['fetch', ...names(options.adapters, ['fetch'], 'adapters')])],
     realReads: readPatterns(options.realReads),
+    overlay: options.overlay === true,
   };
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
   const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
