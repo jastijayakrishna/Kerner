@@ -3,11 +3,13 @@
 import { join } from 'node:path';
 import { readControl, writeControl } from '../src/router.js';
 import { Evidence } from '../src/evidence.js';
-import { decide, totals } from '../src/decide.js';
+import { decide, pathsOf, totals } from '../src/decide.js';
+import { acceptMatcher, loadManifest } from '../src/manifest.js';
 
 const HELP = `kern-twin - the twin runtime's command line
 
   kern-twin status --state <dir> [--epsilon 0.001] [--min-hours 24] [--segments '*'] [--max-uncovered 0.05]
+                   [--manifest <file> [--min-line-runs 3] [--accept old:src/x.js:12,new:src/x.js:20-24]]
       what the twin has seen of the current candidate, and whether it has earned serving customers
   kern-twin serve old|candidate --state <dir> [--reason <text>]
       switches serving by hand; a running twin follows within a second
@@ -36,13 +38,18 @@ async function control(state) {
 
 async function status(flags) {
   const now = await control(flags.state);
-  const evidence = await Evidence.open({ file: join(flags.state, 'evidence.json'), candidate: now.candidate });
+  const manifest = flags.manifest ? await loadManifest(flags.manifest) : null;
+  const hashes = new Map(manifest ? [...manifest.lines].map(([key, line]) => [key, line.hash]) : []);
+  const evidence = await Evidence.open({ file: join(flags.state, 'evidence.json'), candidate: now.candidate, hashes });
   const data = evidence.data;
   const policy = {
     epsilon: number(flags.epsilon, 0.001, 'epsilon'),
     minHours: number(flags['min-hours'], 24, 'min-hours'),
     segments: String(flags.segments ?? '*').split(','),
     maxUncovered: number(flags['max-uncovered'], 0.05, 'max-uncovered'),
+    minLineRuns: number(flags['min-line-runs'], 3, 'min-line-runs'),
+    accepted: acceptMatcher(flags.accept ? String(flags.accept).split(',') : []),
+    lineKeys: manifest ? [...manifest.lines.keys()] : [],
   };
   return {
     candidate: now.candidate,
@@ -55,6 +62,7 @@ async function status(flags) {
     totals: Object.fromEntries(['*', ...Object.keys(data.segments)].map((segment) => [segment, totals(data, segment)])),
     unexplained: data.unexplained,
     decision: decide(data, policy, Date.now()),
+    ...(manifest ? { paths: pathsOf(data, manifest.lines, policy) } : {}),
   };
 }
 
