@@ -67,7 +67,11 @@ export class Coordinator {
   }
 
   async #spawnPair() {
-    const settings = { startMs: this.#options.startMs, memoryMb: this.#options.ghostMemoryMb, ghostExecArgv: this.#options.ghostExecArgv, addons: this.#options.addons };
+    const o = this.#options;
+    const settings = {
+      startMs: o.startMs, memoryMb: o.ghostMemoryMb, ghostExecArgv: o.ghostExecArgv, addons: o.addons, maxBodyBytes: o.maxBodyBytes,
+      adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [],
+    };
     // With a manifest, each ghost measures its own side's changed lines: { old: plan, new: plan }.
     const plans = this.#options.coverage ?? null;
     const named = (label, side, plan) => startGhost(side, { ...settings, coverage: plan }).catch((error) => {

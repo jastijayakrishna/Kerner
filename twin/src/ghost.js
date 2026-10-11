@@ -43,7 +43,10 @@ export function startGhost(side, settings) {
     // No Node flags and no NODE_OPTIONS from the app: a module they preload would run in the ghost before the seal goes on (measured:
     // execArgv [] alone still runs a NODE_OPTIONS preload). Flags a ghost needs, a TypeScript loader say, are given as ghostExecArgv.
     const worker = new Worker(THREAD, {
-      workerData: { module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null },
+      workerData: {
+        module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null,
+        adapters: settings.adapters ?? [], overlay: Boolean(settings.overlay), realReads: settings.realReads ?? [],
+      },
       execArgv: settings.ghostExecArgv ?? [],
       env: ghostEnv(),
       resourceLimits: { maxOldGenerationSizeMb: settings.memoryMb },
