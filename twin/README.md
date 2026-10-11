@@ -8,7 +8,7 @@ It runs the old and the new version as ghosts:
 - Once the new version has enough clean comparisons to bound its risk, it may serve.
 - The first unexplained difference while it serves switches serving back to the old version, before the next request.
 
-Phases 1 (shadow comparisons) and 2 (evidence and switch-on) of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built.
+Phases 1 (shadow comparisons), 2 (evidence and switch-on) and 3 (changed lines and named causes) of `docs/superpowers/specs/2026-10-10-twin-runtime-design.md` are built.
 
 ## Use
 
@@ -75,6 +75,38 @@ A candidate is named by its code: the sha256 of its package's code files, or `ca
 
 To print the evidence and the decision: `node twin/bin/kern-twin.js status --state <dir>`.
 
+## Changed lines and the pull request behind a difference
+
+With a manifest from `kern twin plan`, the twin knows which changed lines of code each request ran:
+
+```bash
+kern twin plan . "$BASE_SHA" "$HEAD_SHA" .kern-twin/manifest.json
+```
+
+```js
+const twin = await createTwin({
+  old: { module: '/srv/shop/current/src/app.js', export: 'createApp', root: '/srv/shop/current' },
+  candidate: { module: '/srv/shop/next/src/app.js', export: 'createApp', root: '/srv/shop/next' },
+  manifest: '/srv/shop/next/.kern-twin/manifest.json',
+  minLineRuns: 3,
+});
+```
+
+- **Each version's `root` is its checkout,** the folder the manifest's paths start from. At start the twin checks that every changed line's text is at its line under both roots. If it is not, the twin switches off and names the line, so a manifest for other code is never applied.
+- **Both ghosts measure their side of the change** with V8's precise coverage: the old ghost the lines the change removed or replaced, the new ghost the lines it added. Code built from other files (TypeScript, bundles) is read through its source map.
+- **A line is proven** when every code character on it has run in at least `minLineRuns` clean comparisons. So both branches of `a ? b : c` must run before the line counts. With a manifest, switching on also waits for every changed line, old and new, to be proven, to have run while the app loaded, or to be listed in `accept` (for example `'old:src/app.js:17'` or `'new:src/app.js:20-24'`).
+- **`twin.paths()`** lists every changed line as `never run`, `partly run`, `run`, `proven`, `at load` or `accepted`, with its pull request. `kern-twin status --manifest <file>` prints the same.
+- **Each difference lists `pulls`,** the pull requests whose changed lines the request ran, and names a `cause` when exactly one did.
+
+Measuring lines needs the inspector, so it runs in thread ghosts. Its cost falls on the ghosts, never on the customers' requests. Measured with `node bench/ghosts.js` in `node:22-bookworm-slim` (Node 22.23.3) on 2026-10-11, 20 cores; the middle of three runs:
+
+```text
+without measuring lines      1149 requests judged per second (600 same, 0 different)
+measuring changed lines       228 requests judged per second (600 same, 0 different)
+```
+
+Over the three runs: 1,094–1,347 without, 224–230 with, so the ghosts judge about 5 times fewer requests per second. The cost is reading the counts after each request, not running with coverage on. A loopback request like the ghosts' own took 0.79 ms with coverage off, 0.82 ms with it on, and 4.13 ms with the counts read after each request: each read reports every function that ran since the last one, Node's own HTTP code included. When the ghosts fall behind, the twin compares fewer requests (`dropped` counts the rest), and the evidence takes longer to gather.
+
 ## Reading the results
 
 `twin.stats()` counts, for this run:
@@ -119,6 +151,10 @@ To print the evidence and the decision: `node twin/bin/kern-twin.js status --sta
 | `switchOn` | `'manual'` | `'auto'`: switch on as soon as the decision is ready |
 | `ghostExecArgv` | `[]` | Node flags for the ghosts, such as a TypeScript loader; they run before the seal |
 | `addons` | `[]` | Packages whose native add-ons a ghost may load (pure computation only, such as `bcrypt`) |
+| `manifest` | none | The file `kern twin plan` wrote |
+| `old.root`, `candidate.root` | required with `manifest` | Each version's checkout |
+| `minLineRuns` | `3` | Clean runs every code character of a changed line needs (1 to 9) |
+| `accept` | `[]` | Changed lines a person accepts without runs, such as `'old:src/x.js:12'` |
 
 ## Not yet
 
@@ -128,7 +164,6 @@ To print the evidence and the decision: `node twin/bin/kern-twin.js status --sta
 - **Below Node's APIs.** The seal is built from Node's own APIs. A native add-on allowed with `addons` acts below it. Separate ghost processes with Node's permission model and an OS sandbox come in Phase 4.
 - **Two versions in one process.** Once the new version serves, both versions are loaded in the app's process. An app whose `createApp` starts background work, or registers process-wide singletons, should use `wrap()` and switch with its deploy system, reading `kern-twin status`.
 - **Not yet built:**
-  - naming the changed code and the pull request behind a difference (Phase 3);
   - real stacks (Phase 4);
   - fixing (Phase 5).
 

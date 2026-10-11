@@ -4,7 +4,7 @@ Date: 2026-10-10.
 
 Status:
 - Direction agreed with the user in the brainstorm of 2026-10-10.
-- Phases 1 and 2 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md` and `-phase-2.md`.
+- Phases 1 to 3 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`, `-phase-2.md` and `-phase-3.md`.
 - Phases 3 to 6 each have their own plan in the same folder.
 - `docs/superpowers/specs/2026-10-10-twin-runtime-interfaces.md` pins the contracts between phases: files, messages, shapes, options and formats.
 
@@ -82,6 +82,9 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/twin-thread.js` | The twin's own thread: coordinator, evidence, decision, switch requests | `coordinator.js`, `evidence.js`, `decide.js` |
 | `src/router.js` | Sends each request to the version serving; the control file | `capture.js` |
 | `bin/kern-twin.js` | `status` and `serve` | `router.js`, `evidence.js`, `decide.js` |
+| `src/manifest.js` | Reads `kern twin plan`'s manifest, checks it against the code, attributes differences, matches `accept` | `node:crypto` |
+| `src/coverage.js` | In a ghost: which characters of each changed line ran, directly or through a source map | `node:inspector/promises` |
+| `src/twin.rs` (Rust) | `kern twin plan`: changed lines of code with their commit and pull request | `drive.rs`, git |
 
 ## 5. Decisions and why
 
@@ -119,6 +122,8 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
     - The cost: once the new version serves, two copies of the app live in one process. So `createApp` must start no background work and must load twice safely.
     - Apps that cannot do that use `wrap()` and switch with their deploy system, reading `kern-twin status`.
 13. **A switch back holds switching on by itself.** A person, or the twin itself, decided the old version should serve; the twin does not overrule that until a person switches the new version on again.
+14. **Changed lines are judged per character, across requests (Phase 3).** One request takes one branch, so a line with a ternary never runs in full in one request. Per code character the evidence counts the clean comparisons that ran it, and a line is proven when every character has run often enough. This keeps kern drive's rule (nothing left out) while adding runs up the way a ghost sees them.
+15. **The old side counts.** The lines a change removed or replaced must have run too: a branch only the old code had (the blank-field case) holds switch-on until real traffic has taken it.
 
 ## 6. The maths
 
@@ -216,10 +221,10 @@ Each phase ends with working, tested software.
      - simulated traffic switches on exactly when n ≥ 3/ε;
      - a seeded regression in active mode is switched back within one request;
      - counters survive a restart.
-3. **Changed paths and named causes.**
+3. **Changed paths and named causes** (built). Its acceptance tests are in `twin/test/paths.test.js`; the Rust half is in `tests/twin.rs` and `twin/scripts/e2e-plan.mjs`.
    - Builds:
-     - `kern twin plan --base <sha> --head <sha>` (Rust, reusing `drive.rs` and git blame), which writes a manifest of changed lines with their pull requests;
-     - per-run V8 precise coverage in the new ghost (`Profiler.takePreciseCoverage`), mapped through source maps to changed lines;
+     - `kern twin plan <repo> <base> <head> <out.json>` (Rust, reusing `drive.rs` and git blame), which writes a manifest of changed lines with their pull requests;
+     - per-request V8 precise coverage in both ghosts (`Profiler.takePreciseCoverage`), mapped through source maps to changed lines;
      - evidence per path, keyed by a hash of the code;
      - a list of changed paths no request has run;
      - each difference attributed to a pull request.
