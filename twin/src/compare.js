@@ -1,4 +1,5 @@
 import { diffValues, readBody } from './serialize.js';
+import { shapeOf } from './keys.js';
 
 /** Headers that change on every answer and say nothing about behaviour. */
 export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing', 'set-cookie']);
@@ -10,6 +11,9 @@ const KEPT = 20;
 const refused = (status) => status === 401 || status === 403 || status === 404 || status === 405 || (status >= 300 && status < 400);
 const succeeded = (status) => status >= 200 && status < 300;
 const writes = (list) => [...(list ?? [])].sort().join('\n');
+// The real run records calls (fetch, http, Postgres, Redis), not file writes, and its payloads carry the real clock: what it wrote is
+// compared with the serving ghost by shape, and file writes are compared between the two ghosts only.
+const recordedShapes = (list) => [...(list ?? [])].filter((effect) => !effect.startsWith('FS ')).map(shapeOf).sort().join('\n');
 const strayCalls = (run) => run.events.filter((e) => e.type === 'unmatched-read' || e.type === 'unmatched-write');
 const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail));
 
@@ -102,6 +106,6 @@ export function faithful(real, ghost, who = 'old') {
   const stray = strayCalls(ghost);
   if (stray.length) return `the ${code} code's ghost made a call the real run did not: ${stray[0].detail}`;
   if (real.status !== ghost.status) return `the ${code} code's ghost answered ${ghost.status}, the real run ${real.status}`;
-  if (writes(real.effects) !== writes(ghost.effects)) return `the ${code} code's ghost wrote other things than the real run`;
+  if (recordedShapes(real.effects) !== recordedShapes(ghost.effects)) return `the ${code} code's ghost wrote other things than the real run`;
   return null;
 }

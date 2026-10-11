@@ -156,3 +156,20 @@ console.log(JSON.stringify(out));
     rmSync(file, { force: true });
   }
 });
+
+test('a call whose payload carried the clock gets the recorded call of the same shape, once', () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
+import { callKey } from ${source('keys.js')};
+installGhostIO({ ports: [1] });
+beginJob([{ key: callKey('POST', 'https://api.example/events', Buffer.from('{"at":1}')), status: 201, headers: {}, body: null }]);
+const out = {};
+out.first = (await fetch('https://api.example/events', { method: 'POST', body: '{"at":2}' })).status;
+out.second = await fetch('https://api.example/events', { method: 'POST', body: '{"at":3}' }).then(() => 'answered', (e) => e.message);
+const io = endJob();
+out.events = io.events.map((e) => e.type);
+out.effects = io.effects.length;
+console.log(JSON.stringify(out));
+`], { encoding: 'utf8' }));
+  assert.deepEqual(out, { first: 201, second: 'fetch failed', events: ['loose', 'unmatched-write'], effects: 2 });
+});

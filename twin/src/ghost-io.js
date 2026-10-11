@@ -6,7 +6,7 @@ import os from 'node:os';
 import childProcess from 'node:child_process';
 import workerThreads from 'node:worker_threads';
 import { syncBuiltinESMExports } from 'node:module';
-import { callKey, isWrite } from './keys.js';
+import { callKey, isWrite, shapeOf } from './keys.js';
 
 // What a ghost may do: have its calls answered from the real run's recording, and nothing else. Writes are written down and never
 // done. Every other way out is refused, so a ghost cannot touch anything real through Node's own APIs: network connections, UDP,
@@ -14,14 +14,9 @@ import { callKey, isWrite } from './keys.js';
 // file writes, opening files to write, and writing to file descriptors it did not open.
 let job = null;
 
-/** Starts a request: the real run's calls, queued by name, so each recorded answer is used once. */
+/** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once. */
 export function beginJob(io) {
-  const queues = new Map();
-  for (const call of io ?? []) {
-    if (!queues.has(call.key)) queues.set(call.key, []);
-    queues.get(call.key).push(call);
-  }
-  job = { queues, effects: [], events: [] };
+  job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], events: [] };
 }
 
 /** Ends a request: what the ghost tried to write, and what it was refused or could not find. */
@@ -31,9 +26,18 @@ export function endJob() {
   return out;
 }
 
-/** The next recorded answer to a call, or undefined when the real run made no such call (or its answers are used up). */
+/**
+ * The recorded answer to a call: the unused one with exactly this key, else the next unused one with the same shape (its payload carried
+ * the clock or a random id, which a ghost cannot reproduce exactly; such a match is noted as 'loose'). Undefined when there is none.
+ */
 export function take(key) {
-  return job?.queues.get(key)?.shift();
+  if (!job) return undefined;
+  const shape = shapeOf(key);
+  const found = job.calls.find((entry) => !entry.used && entry.call.key === key) ?? job.calls.find((entry) => !entry.used && entry.shape === shape);
+  if (!found) return undefined;
+  found.used = true;
+  if (found.call.key !== key) note('loose', found.call.key);
+  return found.call;
 }
 
 /** Something the ghost was refused ('denied'), or a call the recording could not answer ('unmatched-read', 'unmatched-write'). */
@@ -62,15 +66,17 @@ const packageOf = (file) => String(file).replaceAll('\\', '/').match(/.*node_mod
 const LOOKUPS = ['lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'];
 
 /**
- * Seals this thread. `harnessPort` is the loopback port of the ghost's own server: the one connection it may make. `addons` names the
- * packages whose native add-ons may load: pure computation only (bcrypt, say), since an add-on acts below every control here.
+ * Seals this thread. `ports` are the loopback ports of the ghost's own servers (the harness, and the http replay of Phase 4): the only
+ * connections it may make. `harnessPort` alone still works. `addons` names the packages whose native add-ons may load: pure computation
+ * only (bcrypt, say), since an add-on acts below every control here.
  */
-export function installGhostIO({ harnessPort, addons = [] }) {
+export function installGhostIO({ harnessPort, ports = [harnessPort], addons = [] }) {
+  const allowed = new Set(ports.filter((port) => Number.isInteger(port)));
   const realFetch = globalThis.fetch;
   globalThis.fetch = async function ghostFetch(input, init) {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    if (loopback(url.hostname) && Number(url.port) === harnessPort) return realFetch(request);
+    if (loopback(url.hostname) && allowed.has(Number(url.port))) return realFetch(request);
     const body = request.body ? Buffer.from(await request.arrayBuffer()) : Buffer.alloc(0);
     const key = callKey(request.method, request.url, body);
     const write = isWrite(request.method);
@@ -91,7 +97,7 @@ export function installGhostIO({ harnessPort, addons = [] }) {
     const first = Array.isArray(args[0]) ? args[0][0] : args[0];
     const options = first !== null && typeof first === 'object' ? first : { port: first, host: typeof args[1] === 'string' ? args[1] : 'localhost' };
     // Node's HTTP client always passes `path: null` (its agent's way of saying "not a pipe"), so null counts as no path too.
-    if (options.path == null && loopback(options.host ?? 'localhost') && Number(options.port) === harnessPort) return realConnect.apply(this, args);
+    if (options.path == null && loopback(options.host ?? 'localhost') && allowed.has(Number(options.port))) return realConnect.apply(this, args);
     note('denied', `a network connection to ${options.path ?? `${options.host ?? 'localhost'}:${options.port}`}`);
     process.nextTick(() => this.destroy(refusal('A network connection')));
     return this;
@@ -174,7 +180,7 @@ export function installGhostIO({ harnessPort, addons = [] }) {
   // Opening a file to write can already destroy it, so a ghost may open files only to read them.
   const { open, openSync } = fs;
   const promisesOpen = fs.promises.open;
-  const opened = (target) => wrote(`FS open ${String(target)}`);
+  const opened = (target) => wrote(`FS open ${String(target)} -`);
   fs.openSync = function ghostOpenSync(target, flags, ...rest) {
     if (!opensToWrite(flags)) return openSync.call(this, target, flags, ...rest);
     opened(target);
@@ -192,7 +198,7 @@ export function installGhostIO({ harnessPort, addons = [] }) {
   };
 
   for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'mkdtemp', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'chown', 'lchown', 'utimes', 'lutimes']) {
-    const effect = (target) => wrote(`FS ${name} ${String(target)}`);
+    const effect = (target) => wrote(`FS ${name} ${String(target)} -`);
     fs[`${name}Sync`] = (target) => {
       effect(target);
       throw refusal(`fs.${name}`);
@@ -207,7 +213,7 @@ export function installGhostIO({ harnessPort, addons = [] }) {
     };
   }
   fs.createWriteStream = (target) => {
-    wrote(`FS createWriteStream ${String(target)}`);
+    wrote(`FS createWriteStream ${String(target)} -`);
     throw refusal('fs.createWriteStream');
   };
 
@@ -224,7 +230,7 @@ export function installGhostIO({ harnessPort, addons = [] }) {
     };
   }
   for (const name of ['ftruncate', 'fchmod', 'fchown', 'futimes']) {
-    const effect = (fd) => wrote(`FS ${name} fd ${fd}`);
+    const effect = (fd) => wrote(`FS ${name} fd:${fd} -`);
     fs[`${name}Sync`] = (fd) => {
       effect(fd);
       throw refusal(`fs.${name}`);

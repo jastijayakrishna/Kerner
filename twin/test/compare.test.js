@@ -84,3 +84,9 @@ test('the version that served is the one checked against what really happened', 
   assert.match(faithful(run(200, {}), run(503, {}), 'candidate'), /new code's ghost answered 503, the real run 200/);
   assert.match(faithful(run(200, {}), run(503, {})), /old code's ghost answered 503/);
 });
+
+test('the serving ghost must make writes of the same shapes as the real run; file writes are compared between the ghosts only', () => {
+  const real = run(200, {}, { effects: ['POST https://x.example/events aaaa'] });
+  assert.equal(faithful(real, run(200, {}, { effects: ['POST https://x.example/events bbbb', 'FS writeFile /tmp/x -'] })), null);
+  assert.match(faithful(real, run(200, {}, { effects: ['DELETE https://x.example/events bbbb'] })), /wrote other things/);
+});
