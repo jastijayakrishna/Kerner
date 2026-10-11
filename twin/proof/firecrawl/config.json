@@ -1,0 +1,21 @@
+{
+  "name": "firecrawl",
+  "twin": "/twin/src/index.js",
+  "old": { "module": "/proof/old/apps/api/twin-entry.mjs", "export": "createApp", "root": "/proof/old" },
+  "candidate": { "module": "/proof/repo/apps/api/twin-entry.mjs", "export": "createApp", "root": "/proof/repo" },
+  "options": {
+    "load": "record",
+    "adapters": ["ioredis", "http"],
+    "addons": ["firecrawl-rs", "koffi", "bufferutil", "utf-8-validate", "@msgpackr-extract/msgpackr-extract-linux-x64", "keccak", "bigint-buffer"],
+    "manifest": "/proof/manifest.json",
+    "cases": "/out/firecrawl-{label}-cases",
+    "log": "/out/firecrawl-{label}-differences.jsonl",
+    "epsilon": 0.01,
+    "minHours": 0,
+    "queueLimit": 2000,
+    "timeoutMs": 20000,
+    "startMs": 120000,
+    "ghostMemoryMb": 2048,
+    "maxRestarts": 50
+  }
+}

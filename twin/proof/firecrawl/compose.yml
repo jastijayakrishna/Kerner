@@ -1,0 +1,60 @@
+# firecrawl #2638 under the twin, with database authentication against a stand-in for its two Supabase reads. No port is opened on the
+# host. The queue services firecrawl needs to crawl are not started: the traffic never gets that far.
+name: kern-twin-proof-firecrawl
+x-firecrawl-env: &firecrawl-env
+  USE_DB_AUTHENTICATION: "true"
+  SUPABASE_URL: http://standin:54321
+  SUPABASE_REPLICA_URL: http://standin:54321
+  SUPABASE_SERVICE_TOKEN: proof-service-token
+  SUPABASE_ANON_TOKEN: proof-anon-token
+  REDIS_URL: redis://redis:6379
+  REDIS_RATE_LIMIT_URL: redis://redis:6379
+  DISABLE_BLOCKLIST: "true"
+  NUQ_RABBITMQ_URL: amqp://guest:guest@nowhere:5672
+  NUQ_DATABASE_URL: postgres://unused:unused@nowhere:5432/unused
+  BULL_AUTH_KEY: proof
+  HOST: 0.0.0.0
+  PORT: "3002"
+x-build: &build
+  context: ../..
+  dockerfile: proof/firecrawl/Dockerfile
+services:
+  redis:
+    image: docker.io/library/redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  standin:
+    build: *build
+    command: ["node", "/twin/proof/firecrawl/standin.mjs"]
+  app:
+    build: *build
+    environment:
+      <<: *firecrawl-env
+      KERN_PROOF_CONFIG: /twin/proof/firecrawl/config.json
+      KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
+      KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+    volumes:
+      - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
+    depends_on:
+      redis:
+        condition: service_healthy
+      standin:
+        condition: service_started
+  traffic:
+    build: *build
+    command: ["node", "/twin/proof/kit/traffic.mjs"]
+    environment:
+      KERN_PROOF_APP: firecrawl
+      KERN_PROOF_URL: http://app:8080
+      KERN_PROOF_SCENARIO: /twin/proof/firecrawl/scenario.mjs
+      KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
+      KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+      KERN_PROOF_REQUESTS: "300"
+      KERN_PROOF_CONCURRENCY: "2"
+    volumes:
+      - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
+    depends_on:
+      - app
