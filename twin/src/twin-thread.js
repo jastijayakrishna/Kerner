@@ -1,4 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Coordinator } from './coordinator.js';
 import { Evidence } from './evidence.js';
@@ -6,7 +7,7 @@ import { decide, pathsOf, totals } from './decide.js';
 import { versionId } from './identity.js';
 import { acceptMatcher, checkRoots, coveragePlan, loadManifest } from './manifest.js';
 import { compareRuns } from './compare.js';
-import { writeCase } from './cases.js';
+import { readCase, writeCase } from './cases.js';
 import { needsHuman } from './feedback.js';
 import { scrubCapture, scrubber } from './scrub.js';
 import { exactBytes } from './serialize.js';
@@ -37,6 +38,11 @@ const MOST_CASES = 200;
 const caseCounts = new Map();
 let casesWritten = 0;
 let caseErrors = 0;
+// Known cases: every one runs on both ghosts before the candidate may switch on.
+const known = { pending: 0, failing: [], unchecked: [], stubs: [], unreadable: [] };
+let knownNames = [];
+// The twin is not idle until the known cases are checked and the switch the last check may allow is made (snapshot.checking).
+let checking = false;
 
 const post = (message) => parentPort.postMessage(message);
 
@@ -55,8 +61,10 @@ function snapshot() {
       note: evidence.note,
       totals: Object.fromEntries(['*', ...Object.keys(data.segments)].map((segment) => [segment, totals(data, segment)])),
       unexplained: data.unexplained,
+      known,
     },
     paths: manifest ? pathsOf(data, manifest.lines, policy) : [],
+    checking,
   };
 }
 
@@ -114,15 +122,68 @@ async function recordCase(verdict, capture) {
   }
 }
 
+/** Switches the candidate on when switchOn is 'auto', the router serves, nothing holds it, and decide says it has earned it. */
+async function maybeSwitchOn() {
+  if (settings.switchOn !== 'auto' || !router || serving !== 'old' || hold) return;
+  const decision = decide(evidence.data, policy, Date.now());
+  if (decision.ready) await serve('candidate', `switched on: ${decision.needed} clean comparisons in ${policy.segments.join(', ')}, every changed line proven, and no unexplained difference`);
+}
+
+/** The known cases' file names, newest first (a case's name starts with its time). */
+async function knownCaseNames() {
+  try {
+    return (await readdir(settings.cases)).filter((name) => name.endsWith('.json')).sort().reverse();
+  } catch (error) {
+    if (error.code !== 'ENOENT') known.unreadable.push(settings.cases);
+    return [];
+  }
+}
+
+/**
+ * Runs every known case on both ghosts, newest first, one at a time and in turn with real requests: a known difference is never
+ * forgotten.
+ * - A case that still shows a difference holds the candidate.
+ * - So do a stub, which only a person can judge, and a file that cannot be read.
+ * - A case the ghosts can no longer compare (its recording cannot answer a read the candidate now makes, say) is only listed: live
+ *   traffic must prove that path.
+ */
+async function checkKnownCases() {
+  try {
+    for (const name of knownNames) {
+      if (closing || coordinator.disabled) return;
+      let value = null;
+      try {
+        value = await readCase(join(settings.cases, name));
+      } catch {
+        known.unreadable.push(name);
+      }
+      if (value && !value.reproduces) known.stubs.push(name);
+      if (value?.reproduces) {
+        const judged = await coordinator.check({ route: value.route, start: value.world.start, seed: value.world.seed, request: value.request, io: value.io });
+        if (judged?.outcome === 'different') known.failing.push(name);
+        else if (!judged || judged.outcome === 'not-compared') known.unchecked.push(name);
+      }
+      known.pending--;
+      report();
+    }
+    if (closing || coordinator.disabled) return;
+    // The last check may be all the candidate was waiting for.
+    await maybeSwitchOn();
+  } finally {
+    // Only now is the twin idle. A snapshot saying so before the switch was asked for could let twin.idle() end before it.
+    checking = false;
+    report(true);
+  }
+}
+
 async function onVerdict(verdict, capture) {
   evidence.add(redact(verdict));
   if (verdict.outcome === 'different' && settings.cases && capture) await recordCase(verdict, capture);
   if (crashOnVerdict) process.exit(9);
   if (verdict.outcome === 'different' && serving === 'candidate') {
     await serve('old', `switched back: an unexplained difference (${verdict.kinds.join(', ')}) on ${verdict.route}`);
-  } else if (settings.switchOn === 'auto' && router && serving === 'old' && !hold && verdict.outcome !== 'skipped') {
-    const decision = decide(evidence.data, policy, Date.now());
-    if (decision.ready) await serve('candidate', `switched on: ${decision.needed} clean comparisons in ${policy.segments.join(', ')}, every changed line proven, and no unexplained difference`);
+  } else if (verdict.outcome !== 'skipped') {
+    await maybeSwitchOn();
   }
   report();
 }
@@ -173,6 +234,7 @@ try {
     minLineRuns: settings.minLineRuns,
     accepted: acceptMatcher(settings.accept ?? []),
     lineKeys: manifest ? [...manifest.lines.keys()] : [],
+    known,
   };
   const hashes = new Map(manifest ? [...manifest.lines].map(([key, line]) => [key, line.hash]) : []);
   evidence = await Evidence.open({ file: settings.stateDir ? join(settings.stateDir, 'evidence.json') : null, candidate: candidateId, hashes });
@@ -189,6 +251,12 @@ try {
   });
   await coordinator.start();
   if (manifest && !coordinator.disabled) evidence.setLoadLines(coordinator.loadLines());
+  // The known cases are counted before the twin is ready, so no decision is ever taken without them.
+  if (settings.cases && !coordinator.disabled) {
+    knownNames = await knownCaseNames();
+    known.pending = knownNames.length;
+    checking = knownNames.length > 0;
+  }
 } catch (error) {
   post({ type: 'disabled', reason: `the twin could not start: ${error.message}` });
   coordinator = null;
@@ -197,4 +265,5 @@ if (coordinator && !coordinator.disabled) {
   parentPort.on('message', receive);
   flusher = setInterval(() => evidence.flush(), FLUSH_MS);
   post({ type: 'ready', candidateId, snapshot: snapshot() });
+  if (knownNames.length) checkKnownCases().catch((error) => coordinator.disable(`the twin failed inside: ${error.message}`));
 }

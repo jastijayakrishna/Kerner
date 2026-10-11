@@ -298,8 +298,13 @@ class Twin {
     this.#sent++;
   }
 
+  /** Work the twin's thread still has: copies not yet judged, or known cases it is still checking. */
+  #busy() {
+    return !this.#disabled && (this.#judged < this.#sent || Boolean(this.#latest?.checking));
+  }
+
   #settle() {
-    if (this.#inflight.size || (!this.#disabled && this.#judged < this.#sent)) return;
+    if (this.#inflight.size || this.#busy()) return;
     for (const resolve of this.#waiters.splice(0)) resolve();
   }
 
@@ -369,10 +374,13 @@ class Twin {
     return [...(this.#latest?.paths ?? [])];
   }
 
-  /** Resolves once every copy handed over so far has been judged, and every switch that caused has been applied. */
+  /**
+   * Resolves once every copy handed over so far has been judged, the known cases have been checked, and every switch that caused has
+   * been applied.
+   */
   async idle() {
     while (this.#inflight.size) await Promise.allSettled([...this.#inflight]);
-    if (!this.#disabled && this.#judged < this.#sent) {
+    if (this.#busy()) {
       // The twin's thread never keeps the process alive by itself, but someone is waiting for it now: an app that has closed its
       // server and awaits idle() would otherwise end before the twin answers, with the work half done.
       const thread = this.#thread;

@@ -155,6 +155,28 @@ export class Coordinator {
     return { old: toRun(old), candidate: toRun(candidate) };
   }
 
+  /**
+   * Runs a known case on both ghosts, in turn with real requests, and answers how the two compare now: { outcome, kinds, details }
+   * with the allow rules applied, or null if the twin stopped first. A check is never counted as traffic.
+   */
+  check(capture) {
+    if (this.disabled) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      this.#queue.push({ ...capture, check: resolve });
+      this.#pump();
+    });
+  }
+
+  async #recheck(capture) {
+    let judged = null;
+    try {
+      const runs = await this.rerun(capture);
+      if (runs && !this.disabled) judged = explain(compareRuns(runs.old, runs.candidate), capture.route, this.#options.allow ?? []);
+    } finally {
+      capture.check(judged);
+    }
+  }
+
   /** A real read for the ghosts of one request: made once, and both ghosts get the same answer, so their worlds stay the same. */
   #realRead(message) {
     const key = `${message.job} ${message.method} ${message.url}`;
@@ -169,7 +191,7 @@ export class Coordinator {
       while (this.#queue.length && !this.disabled) {
         const capture = this.#queue.shift();
         try {
-          await this.#compare(capture);
+          await (capture.check ? this.#recheck(capture) : this.#compare(capture));
         } catch (error) {
           await this.disable(`the twin failed inside: ${error.message}`);
         }
@@ -245,7 +267,8 @@ export class Coordinator {
       this.disabled = reason;
       this.#options.onDisabled?.(reason);
     }
-    this.#queue.length = 0;
+    // A known case still waiting is answered too: the twin stopped first.
+    for (const item of this.#queue.splice(0)) item.check?.(null);
     const pair = this.#pair;
     this.#pair = null;
     this.#settle();

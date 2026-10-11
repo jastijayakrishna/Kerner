@@ -59,13 +59,14 @@ export function pathsOf(snapshot, lines, policy) {
 /**
  * Whether the candidate has earned serving customers, with every reason it has not.
  *
- * The policy is { epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lineKeys? }. Ready needs all of:
+ * The policy is { epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lineKeys?, known? }. Ready needs all of:
  * - no unexplained difference;
  * - in every listed segment, at least ceil(3/ε) clean comparisons (same or stated);
  * - in every listed segment, at most maxUncovered of its requests left uncompared, since the bound says nothing about requests it
  *   never saw;
  * - minHours since the first comparison;
  * - with lineKeys, every changed line 'proven', 'at load' or 'accepted'. The others are listed in `waiting`.
+ * - with known cases (Phase 5), every case checked: none still showing a difference, none waiting for a person, every file read.
  */
 export function decide(snapshot, policy, now) {
   const reasons = [];
@@ -82,6 +83,15 @@ export function decide(snapshot, policy, now) {
     const uncovered = t.notCompared + t.skipped;
     if (seen && uncovered / seen > policy.maxUncovered) reasons.push(`${label}: ${percent(uncovered / seen)} of requests could not be compared (at most ${percent(policy.maxUncovered)} may be)`);
     if (clean < need) reasons.push(`${label}: ${clean} of ${need} clean comparisons`);
+  }
+  const known = policy.known;
+  if (known) {
+    const names = (list) => `${list.slice(0, 5).join(', ')}${list.length > 5 ? ', ...' : ''}`;
+    const one = (list) => list.length === 1;
+    if (known.pending) reasons.push(`${known.pending} known case${known.pending === 1 ? '' : 's'} not yet checked`);
+    if (known.failing.length) reasons.push(`${known.failing.length} known case${one(known.failing) ? ' still shows' : 's still show'} a difference: ${names(known.failing)}`);
+    if (known.stubs.length) reasons.push(`${known.stubs.length} known difference${one(known.stubs) ? ' needs a person, who removes its file' : 's need a person, who removes their files'} once done: ${names(known.stubs)}`);
+    if (known.unreadable.length) reasons.push(`${known.unreadable.length} known case file${one(known.unreadable) ? '' : 's'} could not be read: ${names(known.unreadable)}`);
   }
   const hours = snapshot.since ? Math.max(0, now - snapshot.since) / 3600000 : 0;
   if (hours < policy.minHours) reasons.push(`${hours.toFixed(1)} of ${policy.minHours} hours watched`);
