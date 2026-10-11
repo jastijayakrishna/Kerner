@@ -6,7 +6,7 @@ import os from 'node:os';
 import childProcess from 'node:child_process';
 import workerThreads from 'node:worker_threads';
 import { syncBuiltinESMExports } from 'node:module';
-import { callKey, isWrite, shapeOf } from './keys.js';
+import { callKey, isWrite, readAllowed, shapeOf } from './keys.js';
 
 // What a ghost may do: have its calls answered from the real run's recording, and nothing else. Writes are written down and never
 // done. Every other way out is refused, so a ghost cannot touch anything real through Node's own APIs: network connections, UDP,
@@ -70,7 +70,7 @@ const LOOKUPS = ['lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', '
  * connections it may make. `harnessPort` alone still works. `addons` names the packages whose native add-ons may load: pure computation
  * only (bcrypt, say), since an add-on acts below every control here.
  */
-export function installGhostIO({ harnessPort, ports = [harnessPort], addons = [] }) {
+export function installGhostIO({ harnessPort, ports = [harnessPort], addons = [], realReads = [], ask = null }) {
   const allowed = new Set(ports.filter((port) => Number.isInteger(port)));
   const realFetch = globalThis.fetch;
   globalThis.fetch = async function ghostFetch(input, init) {
@@ -81,7 +81,15 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     const key = callKey(request.method, request.url, body);
     const write = isWrite(request.method);
     if (write) wrote(key);
-    const recorded = take(key);
+    let recorded = take(key);
+    if (!recorded && !write && ask && readAllowed(realReads, request.method, request.url)) {
+      // An allow-listed read the recording cannot answer: the twin's thread makes it for real, once for both ghosts of this request.
+      const answer = await ask({ type: 'real-read', method: request.method.toUpperCase(), url: request.url, headers: Object.fromEntries(request.headers) });
+      if (!answer.error) {
+        note('real-read', `${request.method.toUpperCase()} ${request.url}`);
+        recorded = answer;
+      }
+    }
     if (!recorded) {
       note(write ? 'unmatched-write' : 'unmatched-read', `${request.method.toUpperCase()} ${request.url}`);
       throw new TypeError('fetch failed');

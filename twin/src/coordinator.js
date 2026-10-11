@@ -3,6 +3,7 @@ import { compareRuns, explain, faithful } from './compare.js';
 import { startGhost } from './ghost.js';
 import { routeOf } from './route.js';
 import { attribute } from './manifest.js';
+import { realRead } from './real-reads.js';
 
 const KEEP = 1000;
 const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared' };
@@ -50,6 +51,7 @@ export class Coordinator {
   #dirty = false;
   #waiters = [];
   #found = [];
+  #reads = new Map();
   disabled = null;
   counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
   reasons = {};
@@ -71,6 +73,7 @@ export class Coordinator {
     const settings = {
       startMs: o.startMs, memoryMb: o.ghostMemoryMb, ghostExecArgv: o.ghostExecArgv, addons: o.addons, maxBodyBytes: o.maxBodyBytes,
       adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [],
+      onRealRead: (message) => this.#realRead(message),
     };
     // With a manifest, each ghost measures its own side's changed lines: { old: plan, new: plan }.
     const plans = this.#options.coverage ?? null;
@@ -137,6 +140,13 @@ export class Coordinator {
     return this.#pair ? [...this.#pair.old.loadLines, ...this.#pair.candidate.loadLines] : [];
   }
 
+  /** A real read for the ghosts of one request: made once, and both ghosts get the same answer, so their worlds stay the same. */
+  #realRead(message) {
+    const key = `${message.job} ${message.method} ${message.url}`;
+    if (!this.#reads.has(key)) this.#reads.set(key, realRead(message, this.#options.realReads ?? [], this.#options.maxBodyBytes));
+    return this.#reads.get(key);
+  }
+
   async #pump() {
     if (this.#busy) return;
     this.#busy = true;
@@ -161,6 +171,7 @@ export class Coordinator {
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
     const timeout = this.#options.timeoutMs;
     const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
+    this.#reads.clear();
     if (this.disabled) return;
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
     const runs = { old: toRun(old), candidate: toRun(candidate) };

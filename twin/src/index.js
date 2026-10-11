@@ -86,6 +86,7 @@ function settingsOf(options) {
     accept: acceptList(options.accept),
     // fetch is always recorded: every ghost replays it.
     adapters: [...new Set(['fetch', ...names(options.adapters, ['fetch'], 'adapters')])],
+    realReads: readPatterns(options.realReads),
   };
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
   const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
@@ -97,6 +98,13 @@ function settingsOf(options) {
 function acceptList(value) {
   const list = names(value, [], 'accept');
   acceptMatcher(list);
+  return list;
+}
+
+/** Allow-listed real reads, checked here: 'GET https://rates.example/*' or 'HEAD https://status.example/ping'. */
+function readPatterns(value) {
+  const list = names(value, [], 'realReads');
+  for (const pattern of list) if (!/^(GET|HEAD) \S+$/.test(pattern)) throw new TypeError(`realReads entries look like 'GET https://rates.example/*', not '${pattern}'`);
   return list;
 }
 

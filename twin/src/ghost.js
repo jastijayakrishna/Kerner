@@ -32,6 +32,15 @@ function ask(worker, id, job, timeoutMs) {
   });
 }
 
+/** Answers a ghost's question about a real read through the twin's own thread (settings.onRealRead); a failure is an answer too. */
+function answer(post, message, settings) {
+  const reply = settings.onRealRead ? Promise.resolve().then(() => settings.onRealRead(message)) : Promise.resolve({ error: 'no real reads here' });
+  reply.then(
+    (value) => post({ type: 'answer', id: message.id, answer: value }),
+    (error) => post({ type: 'answer', id: message.id, answer: { error: String(error?.message ?? error) } }),
+  );
+}
+
 /**
  * Starts one ghost: one version of the app in its own thread, sealed, waiting for requests. Resolves once that version has loaded,
  * with { kind: 'thread', loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener) }.
@@ -74,6 +83,7 @@ export function startGhost(side, settings) {
       worker.on('error', () => dirty.forEach((listener) => listener()));
       worker.on('message', (m) => {
         if (m?.type === 'dirty') dirty.forEach((listener) => listener());
+        else if (m?.type === 'real-read') answer((reply) => worker.postMessage(reply), m, settings);
       });
       // A ghost never keeps a process alive; while it answers, ask()'s time limit does. This comes after the 'message' listener above:
       // Node refs a worker again whenever its first 'message' listener is added.
