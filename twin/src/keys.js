@@ -77,6 +77,15 @@ export function redisIsWrite(command) {
   return !REDIS_READS.has(String(command).toUpperCase());
 }
 
+// Calls about the connection or the server, not the data: a version check, SET, SHOW or RESET, the current schema; Redis HELLO, AUTH,
+// SELECT, CLIENT, INFO and PING. Their answer is the same however often they are asked, and how often they are asked depends on how many
+// connections a pool happened to open, not on the code. (Keploy's "session" mocks: a short, explicit list, for the same reason.)
+const PG_SESSION = /^PG (select version\(\)|select current_schema\(\)|show |set |reset |discard |deallocate )/i;
+const REDIS_SESSION = /^REDIS (HELLO|AUTH|SELECT|CLIENT|INFO|PING) /;
+
+/** Whether a call (by its key) is about the connection or the server: never used up when it is replayed. */
+export const isSession = (key) => PG_SESSION.test(String(key)) || REDIS_SESSION.test(String(key));
+
 /** Whether an allow-listed real read covers a call: 'GET https://rates.example/*' (a trailing * matches by prefix). GET and HEAD only. */
 export function readAllowed(patterns, method, url) {
   const verb = String(method).toUpperCase();

@@ -6,7 +6,7 @@ import os from 'node:os';
 import childProcess from 'node:child_process';
 import workerThreads from 'node:worker_threads';
 import { syncBuiltinESMExports } from 'node:module';
-import { callKey, isWrite, readAllowed, shapeOf } from './keys.js';
+import { callKey, isSession, isWrite, readAllowed, shapeOf } from './keys.js';
 import { installOverlay, resetOverlay } from './overlay.js';
 import { mine, never } from './turn.js';
 
@@ -15,10 +15,21 @@ import { mine, never } from './turn.js';
 // DNS, programs, threads, signals, native add-ons (but those allowed by name), Node's internal bindings, WASI, process priorities,
 // file writes, opening files to write, and writing to file descriptors it did not open.
 let job = null;
+// The answers to calls about the connection or the server (keys.js isSession) seen in every recording so far, the newest kept: such a
+// call is never used up, and a job whose own recording lacks one (a pool opened a connection the real run did not need) is answered from
+// these. Data never carries over from one job to another.
+const session = new Map();
+const MOST_SESSION = 1000;
 
-/** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once. */
+/** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once, but session calls. */
 export function beginJob(io) {
   resetOverlay();
+  for (const call of io ?? []) {
+    if (!isSession(call.key)) continue;
+    session.delete(call.key);
+    session.set(call.key, call);
+    if (session.size > MOST_SESSION) session.delete(session.keys().next().value);
+  }
   job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], events: [], weighty: 0 };
 }
 
@@ -36,6 +47,11 @@ export function endJob() {
 export function take(key) {
   if (!job || !mine()) return undefined;
   const shape = shapeOf(key);
+  if (isSession(key)) {
+    const here = job.calls.find((entry) => entry.call.key === key) ?? job.calls.find((entry) => entry.shape === shape);
+    if (here) return here.call;
+    return session.get(key) ?? [...session.values()].findLast((call) => shapeOf(call.key) === shape);
+  }
   const found = job.calls.find((entry) => !entry.used && entry.call.key === key) ?? job.calls.find((entry) => !entry.used && entry.shape === shape);
   if (!found) return undefined;
   found.used = true;

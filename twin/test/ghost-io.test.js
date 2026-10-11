@@ -66,6 +66,27 @@ console.log(JSON.stringify({ missed, loose: events.filter((e) => e.type === 'loo
   assert.ok(out.loose > 0 && out.loose <= 50, `${out.loose} loose notes, at most 50 kept`);
 });
 
+test("a call about the connection or the server is answered as often as it is asked, even from an earlier job's recording; a data read only once", () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { beginJob, endJob, take } from ${source('ghost-io.js')};
+import { pgKey, redisKey } from ${source('keys.js')};
+const version = { key: pgKey('select version();', []), result: { rows: [{ version: 'PostgreSQL 17.6' }] } };
+const named = { key: redisKey('CLIENT', ['SETNAME', 'bull:1']), reply: 'OK' };
+const row = { key: pgKey('select * from users where id = $1', [1]), result: { rows: [{ id: 1 }] } };
+const answered = (call) => (call ? call.key.split(' ')[0] : null);
+beginJob([version, named, row]);
+const first = [take(version.key), take(version.key), take(redisKey('CLIENT', ['SETNAME', 'bull:2'])), take(redisKey('CLIENT', ['SETNAME', 'bull:3'])), take(row.key), take(row.key)].map(answered);
+endJob();
+// A later job whose own recording lacks them: a pool opened a connection the real run did not need.
+beginJob([]);
+const later = [take(pgKey('select version();', [])), take(redisKey('CLIENT', ['SETNAME', 'bull:4'])), take(row.key)].map(answered);
+endJob();
+console.log(JSON.stringify({ first, later }));
+`], { encoding: 'utf8' }));
+  assert.deepEqual(out.first, ['PG', 'PG', 'REDIS', 'REDIS', 'PG', null], 'the version check and the connection name repeat; the data read is used once');
+  assert.deepEqual(out.later, ['PG', 'REDIS', null], 'session answers seen before serve a later job; data never carries over');
+});
+
 test('a ghost may not start a thread of its own, since that thread would run outside the seal', () => {
   const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
 import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
