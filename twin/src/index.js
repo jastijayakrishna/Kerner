@@ -288,7 +288,17 @@ class Twin {
   /** Resolves once every copy handed over so far has been judged, and every switch that caused has been applied. */
   async idle() {
     while (this.#inflight.size) await Promise.allSettled([...this.#inflight]);
-    if (!this.#disabled && this.#judged < this.#sent) await new Promise((resolve) => this.#waiters.push(resolve));
+    if (!this.#disabled && this.#judged < this.#sent) {
+      // The twin's thread never keeps the process alive by itself, but someone is waiting for it now: an app that has closed its
+      // server and awaits idle() would otherwise end before the twin answers, with the work half done.
+      const thread = this.#thread;
+      thread?.ref();
+      try {
+        await new Promise((resolve) => this.#waiters.push(resolve));
+      } finally {
+        thread?.unref();
+      }
+    }
     await this.#switching;
   }
 

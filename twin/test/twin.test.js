@@ -58,3 +58,29 @@ test('when the twin\'s thread fails, customers are served as always and the twin
     delete process.env.KERN_TWIN_FAULT;
   }
 });
+
+test('waiting for the twin keeps the process alive until everything handed over is judged', () => {
+  // An app that closes its server and then awaits idle() must get its answer, not a process that ends with the work half done.
+  // The new version answers 300 ms late, so the twin is still judging after the server has closed.
+  const file = join(tmpdir(), `kern-twin-idle-${process.pid}.mjs`);
+  writeFileSync(file, `
+import http from 'node:http';
+import { createTwin } from ${JSON.stringify(new URL('../src/index.js', import.meta.url).href)};
+import { createApp } from ${JSON.stringify(new URL('./apps/slow/old.js', import.meta.url).href)};
+const twin = await createTwin(${JSON.stringify({ old: app('slow', 'old'), candidate: app('slow', 'new') })});
+const server = http.createServer(twin.wrap(createApp()));
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+for (let n = 1; n <= 3; n++) await (await fetch('http://127.0.0.1:' + server.address().port + '/?n=' + n)).arrayBuffer();
+server.closeAllConnections();
+server.close();
+await twin.idle();
+console.log(JSON.stringify(twin.stats()));
+await twin.close();
+`);
+  try {
+    const out = execFileSync(process.execPath, [file], { encoding: 'utf8', timeout: 20000 });
+    assert.equal(JSON.parse(out).same, 3, out);
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
