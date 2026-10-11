@@ -316,7 +316,7 @@ pub fn blobs(repo: &Path, items: &[&Item], mut each: impl FnMut(&Item, &[u8]) ->
     }
     Ok(())
 }
-fn commit_check(repo: &Path, c: &str) -> R<()> {
+pub(crate) fn commit_check(repo: &Path, c: &str) -> R<()> {
     crate::git::oid(c)?;
     ensure!(git(repo, &["cat-file", "-t", c], None).map(trimmed).ok().as_deref() == Some("commit"), "Not a commit in this repository: {c}");
     Ok(())

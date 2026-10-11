@@ -53,6 +53,9 @@ Drive (run every changed line on the old and the new code):
                                   post comment.md on the pull request, or edit Kern's earlier one (GITHUB_TOKEN);
                                   update-only: only edit an earlier one (for a change with nothing to run)
   drive clean <out-dir>           remove the task's sandbox volumes
+Twin runtime (twin/: a new version proves itself on real requests before it serves):
+  twin plan <repo> <base> <head> <out.json>
+                                  the changed lines of code, each with the commit and pull request that changed it
 Utilities:
   contract <contract> [narrower-contract] | pin-check <id> <file>";
 const AUDITED: [&str; 12] = ["box", "plan", "task", "ingest", "import", "verify", "verify-external", "authorize", "promote-local", "promote-github", "check-pr", "gate-artifact"];
@@ -196,6 +199,13 @@ fn cli() -> R<(Option<Value>, i32)> {
                     (Some(kern::drive::post(Path::new(&rest[0]), &rest[1], number, rest.len() == 4)?), 0)
                 }
                 _ => kern::deny!("Expected drive prepare, run, auto, sort, post or clean; see kern --help"),
+            }
+        }
+        "twin" => {
+            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected twin plan; see kern --help".into()))?;
+            match sub.as_str() {
+                "plan" => { count(rest, 4)?; (Some(kern::twin::plan(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]))?), 0) }
+                _ => kern::deny!("Expected twin plan; see kern --help"),
             }
         }
         "gate-artifact" => { count(a, 4)?; (Some(promote::gate_artifact(Path::new(&a[0]), &a[1], &read_json(&a[2])?, Path::new(&a[3]), now)?), 0) }
