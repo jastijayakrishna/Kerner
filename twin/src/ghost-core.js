@@ -97,6 +97,12 @@ export async function runGhost(side, transport) {
   if (side.load) resetWorld(side.load.start, side.load.seed);
   beginJob(side.load?.io ?? []);
   begin('start');
+  // An app may end its own process when its start fails (it logs why, then calls process.exit). In a ghost that ends the thread without
+  // a word, and with it what the ghost could not give the app: while it starts, the exit becomes an error, so all of it is reported.
+  const exit = process.exit;
+  process.exit = function ghostStartExit(code) {
+    throw new Error(`the app ended itself with process.exit(${code ?? ''}) while starting`);
+  };
   try {
     await within('start', async () => {
       const app = await import(pathToFileURL(side.module).href);
@@ -108,6 +114,7 @@ export async function runGhost(side, transport) {
   } catch (error) {
     throw new Error(`${error?.message ?? error}${startProblems(endJob().events, Boolean(side.load))}`);
   } finally {
+    process.exit = exit;
     end();
   }
   endJob();

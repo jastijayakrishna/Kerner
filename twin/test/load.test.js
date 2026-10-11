@@ -56,6 +56,19 @@ test('a start the seal refuses names what it refused, and how to allow a native 
   await shop.close();
 });
 
+test('a start that ends its own process says so, with the calls the ghost could not answer, and leaves the app running', async () => {
+  const config = await configService();
+  try {
+    const shop = await routed('strict-start');
+    await until(() => shop.twin.stats().disabled);
+    assert.match(shop.twin.stats().disabled, /could not start: the old version .*ended itself with process\.exit\(1\) while starting \(at its start it made calls the twin has no answer for: GET http:\/\/127\.0\.0\.1:\d+\/settings/);
+    assert.deepEqual(await (await fetch(shop.url)).json(), { greeting: 'hello' }, 'customers are served as always');
+    await shop.close();
+  } finally {
+    await config.close();
+  }
+});
+
 test('a new version that asks at its start for what the old one never did cannot start, and the twin names the call', async () => {
   const config = await configService();
   try {
