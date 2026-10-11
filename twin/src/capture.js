@@ -56,6 +56,9 @@ export function wrapListener(listener, { sample, maxBodyBytes, deliver, onError,
 
 function begin(req, res, maxBodyBytes, deliver, describe) {
   const record = {
+    // The method and url as the request arrived: an app that mounts sub-routers (Express app.use('/v1', router)) rewrites req.url while
+    // routing and may not restore it, so these are read now, before the app runs, not when the answer is recorded.
+    method: req.method, url: req.url,
     start: Date.now(), seed: randomInt(2 ** 31), io: [], pending: new Set(), serving: 'old',
     incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false,
   };
@@ -129,7 +132,7 @@ function where(req, record, describe) {
   const text = (value, max) => (typeof value === 'string' && value ? value.slice(0, max) : null);
   return {
     start: record.start,
-    route: text(named.route, 200) ?? routeOf(req.method, req.url),
+    route: text(named.route, 200) ?? routeOf(record.method, record.url),
     segment: text(named.segment, 100) ?? 'unknown',
     serving: record.serving,
   };
@@ -148,7 +151,7 @@ async function finish(req, res, record, describe) {
   return {
     ...place,
     seed: record.seed,
-    request: { method: req.method, url: req.url, headers, body: exactBytes(record.incoming) },
+    request: { method: record.method, url: record.url, headers, body: exactBytes(record.incoming) },
     response: { status: res.statusCode, headers: { ...lower(res.getHeaders()), ...lower(record.head) }, body: exactBytes(record.outgoing) },
     io: record.io,
     effects: record.io.filter((call) => call.write).map((call) => call.key),

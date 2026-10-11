@@ -29,6 +29,25 @@ test('a capture names its route, its customer segment and the version that serve
   assert.equal(typeof capture.start, 'number');
 });
 
+test('a capture records the url and method as the request arrived, even when the app rewrites req.url while routing', async () => {
+  // Express strips a mount prefix from req.url while a sub-router handles the request (app.use('/v1', router) leaves req.url as '/crawl')
+  // and does not restore it when the router sends the response. The capture must record the url the request arrived with, or a ghost
+  // replays the wrong path and the route no longer matches.
+  let copy;
+  const listener = wrapListener((req, res) => {
+    req.url = '/crawl';
+    req.method = 'GET';
+    res.end('ok');
+  }, { sample: () => true, maxBodyBytes: 1024, onError: (error) => { throw error; }, deliver: (promise) => { copy = promise; } });
+  const server = await listen(listener);
+  await (await fetch(`${server.url}/v1/crawl`, { method: 'POST' })).text();
+  const capture = await copy;
+  await server.close();
+  assert.equal(capture.request.url, '/v1/crawl', JSON.stringify(capture.request));
+  assert.equal(capture.request.method, 'POST', JSON.stringify(capture.request));
+  assert.equal(capture.route, 'POST /v1/crawl');
+});
+
 test('without naming functions a request gets the route of its path; a naming function that throws puts it under "unknown"', async () => {
   const plain = await captureOne(null, '/items/123');
   assert.deepEqual([plain.route, plain.segment], ['GET /items/:id', 'all']);
