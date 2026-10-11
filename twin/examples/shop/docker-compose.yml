@@ -1,0 +1,33 @@
+# The Phase 4 acceptance run. No port is opened on the host: the services talk on the project's own network.
+name: kern-twin-shop
+services:
+  db:
+    image: docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    environment:
+      POSTGRES_PASSWORD: kern
+      POSTGRES_DB: shop
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shop"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  app:
+    build:
+      context: ../..
+      dockerfile: examples/shop/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:kern@db:5432/shop
+    depends_on:
+      db:
+        condition: service_healthy
+  traffic:
+    build:
+      context: ../..
+      dockerfile: examples/shop/Dockerfile
+    command: ["node", "/shop/traffic.js"]
+    environment:
+      SHOP_URL: http://app:3000
+    depends_on:
+      - app

@@ -1,0 +1,10 @@
+{
+  "name": "kern-twin-shop",
+  "private": true,
+  "type": "module",
+  "description": "An Express and Postgres shop under the Kern twin: the Phase 4 acceptance run",
+  "dependencies": {
+    "express": "5.3.0",
+    "pg": "8.23.1"
+  }
+}
