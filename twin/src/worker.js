@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { installWorld, resetWorld } from './world.js';
 import { installGhostIO, beginJob, endJob } from './ghost-io.js';
+import { exactBytes } from './serialize.js';
 
 // A ghost: one version of the app in its own thread, answering copies of real requests in a sealed world. Its own server listens on
 // loopback before the seal goes on; after that, the app can reach nothing but that server.
@@ -71,12 +72,13 @@ async function run(id, job) {
   beginJob(job.io);
   const result = await new Promise((resolve) => {
     finish = resolve;
-    const body = Buffer.from(job.request.body ?? '', 'base64');
+    const sent = job.request.body ?? new Uint8Array();
+    const body = Buffer.from(sent.buffer, sent.byteOffset, sent.byteLength);
     const headers = { ...job.request.headers, 'content-length': String(body.length) };
     const req = realRequest({ host: '127.0.0.1', port, method: job.request.method, path: job.request.url, headers, agent: false }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: exactBytes(chunks) }));
       res.on('error', (error) => resolve({ error: `the answer broke off: ${error.message}` }));
     });
     req.on('error', (error) => resolve({ error: `no answer: ${error.message}` }));
@@ -86,6 +88,6 @@ async function run(id, job) {
   const io = endJob();
   parentPort.postMessage({
     type: 'result', id,
-    result: { status: result.status, headers: result.headers, error: result.error, body: result.body ? result.body.toString('base64') : null, effects: io.effects, events: io.events },
+    result: { status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, effects: io.effects, events: io.events },
   });
 }

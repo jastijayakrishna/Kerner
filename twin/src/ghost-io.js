@@ -61,7 +61,7 @@ export function installGhostIO({ harnessPort }) {
     }
     if (recorded.error) throw new TypeError('fetch failed');
     const headers = Object.entries(recorded.headers ?? {}).filter(([name]) => !['content-encoding', 'content-length', 'transfer-encoding'].includes(name));
-    const answer = NULL_BODY.has(recorded.status) || recorded.body == null ? null : Buffer.from(recorded.body, 'base64');
+    const answer = NULL_BODY.has(recorded.status) || recorded.body == null ? null : recorded.body;
     return new Response(answer, { status: recorded.status, headers });
   };
 

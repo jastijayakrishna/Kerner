@@ -64,11 +64,14 @@ function ask(worker, id, job, timeoutMs) {
   });
 }
 
+/** Bytes from another thread as a Buffer, without copying them again. */
+const asBuffer = (bytes) => (bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Buffer.alloc(0));
+
 function toRun(result) {
   return {
     status: result.status,
     headers: result.headers ?? {},
-    body: result.body ? Buffer.from(result.body, 'base64') : Buffer.alloc(0),
+    body: asBuffer(result.body),
     effects: result.effects ?? [],
     events: result.events ?? [],
     error: result.error,
@@ -200,7 +203,7 @@ export class Coordinator {
     const [old, candidate] = await Promise.all([ask(this.#pair.old, id, job, this.#options.timeoutMs), ask(this.#pair.candidate, id, job, this.#options.timeoutMs)]);
     if (this.disabled) return;
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
-    const real = { status: capture.response.status, headers: capture.response.headers, body: capture.response.body, effects: capture.effects, events: [] };
+    const real = { status: capture.response.status, headers: capture.response.headers, body: asBuffer(capture.response.body), effects: capture.effects, events: [] };
     const oldRun = toRun(old);
     const unfaithful = faithful(real, oldRun);
     const verdict = unfaithful

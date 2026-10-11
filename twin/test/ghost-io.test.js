@@ -16,7 +16,7 @@ installGhostIO({ harnessPort: 1 });
 const body = Buffer.from(JSON.stringify({ amount: 5 }));
 const file = '/tmp/kern-ghost-' + process.pid;
 beginJob([
-  { key: callKey('GET', 'https://api.example/rate', null), status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"rate":2}').toString('base64') },
+  { key: callKey('GET', 'https://api.example/rate', null), status: 200, headers: { 'content-type': 'application/json' }, body: new Uint8Array(Buffer.from('{"rate":2}')) },
   { key: callKey('POST', 'https://pay.example/charge', body), status: 200, headers: {}, body: null },
 ]);
 const out = {};

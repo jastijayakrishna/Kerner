@@ -14,7 +14,7 @@ function served(url, answer) {
   return {
     start: 1760000000000,
     seed: 7,
-    request: { method: 'GET', url, headers: { host: 'shop.example' }, body: '' },
+    request: { method: 'GET', url, headers: { host: 'shop.example' }, body: new Uint8Array() },
     response: { status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(JSON.stringify(answer)) },
     io: [],
     effects: [],
@@ -73,7 +73,7 @@ import { Coordinator } from ${JSON.stringify(new URL('../src/coordinator.js', im
 const pair = new Coordinator(${JSON.stringify(options('noisy'))});
 await pair.start();
 pair.submit({
-  start: 1760000000000, seed: 7, request: { method: 'GET', url: '/', headers: {}, body: '' },
+  start: 1760000000000, seed: 7, request: { method: 'GET', url: '/', headers: {}, body: new Uint8Array() },
   response: { status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"ok":true}') }, io: [], effects: [],
 });
 await pair.idle();

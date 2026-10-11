@@ -64,3 +64,19 @@ export function diffValues(a, b, path = '$', out = [], limit = 20) {
   }
   return out;
 }
+
+/**
+ * The parts as one Uint8Array of exactly their size. A Buffer may be a slice of Node's shared 8 KiB pool, and posting it to another
+ * thread would carry the whole pool along, other requests' data included (measured); this copy carries only its own bytes.
+ */
+export function exactBytes(parts) {
+  let size = 0;
+  for (const part of parts) size += part.byteLength;
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.byteLength;
+  }
+  return out;
+}

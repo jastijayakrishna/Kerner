@@ -1,5 +1,6 @@
 import { current } from './capture.js';
 import { callKey, isWrite } from './keys.js';
+import { exactBytes } from './serialize.js';
 
 let installed = false;
 
@@ -60,7 +61,8 @@ async function recorded(record, realFetch, input, init, maxBodyBytes) {
     return realFetch(request);
   }
   const method = request.method.toUpperCase();
-  const call = { key: callKey(method, request.url, body), method, url: request.url, write: isWrite(method), status: 0, headers: {}, body: null, error: null };
+  // `sent` is what the app sent: Phase 5 scrubs it and names the call again from the scrubbed copy.
+  const call = { kind: 'fetch', key: callKey(method, request.url, body), method, url: request.url, write: isWrite(method), sent: exactBytes([body]), status: 0, headers: {}, body: null, error: null };
   record.io.push(call);
   let response;
   try {
@@ -76,7 +78,7 @@ async function recorded(record, realFetch, input, init, maxBodyBytes) {
   readCapped(response.clone().body, maxBodyBytes).then(
     (copy) => {
       if (copy === null) record.problem ??= 'an outgoing call answered with a body over the limit';
-      else call.body = copy.toString('base64');
+      else call.body = exactBytes([copy]);
     },
     () => {
       record.problem ??= 'an outgoing call\'s answer could not be copied';

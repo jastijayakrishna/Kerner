@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomInt } from 'node:crypto';
+import { exactBytes } from './serialize.js';
 
 /** The record of the sampled request being served, so the calls the app makes while serving it are written down with it. */
 export const current = new AsyncLocalStorage();
@@ -102,8 +103,8 @@ async function finish(req, res, record) {
   return {
     start: record.start,
     seed: record.seed,
-    request: { method: req.method, url: req.url, headers, body: Buffer.concat(record.incoming).toString('base64') },
-    response: { status: res.statusCode, headers: { ...lower(res.getHeaders()), ...lower(record.head) }, body: Buffer.concat(record.outgoing) },
+    request: { method: req.method, url: req.url, headers, body: exactBytes(record.incoming) },
+    response: { status: res.statusCode, headers: { ...lower(res.getHeaders()), ...lower(record.head) }, body: exactBytes(record.outgoing) },
     io: record.io,
     effects: record.io.filter((call) => call.write).map((call) => call.key),
   };
