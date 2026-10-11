@@ -2,7 +2,7 @@
   "name": "kern-twin",
   "version": "0.1.0",
   "private": true,
-  "description": "Runs a new version of a service as a harmless ghost beside the old one on copies of real requests, and reports every difference",
+  "description": "Runs a new version of a service as a harmless ghost beside the old one on copies of real requests, reports every difference, and switches it on once it has earned it",
   "type": "module",
   "exports": { ".": "./src/index.js" },
   "bin": { "kern-twin": "./bin/kern-twin.js" },

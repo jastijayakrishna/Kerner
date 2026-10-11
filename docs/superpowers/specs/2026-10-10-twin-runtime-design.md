@@ -4,8 +4,9 @@ Date: 2026-10-10.
 
 Status:
 - Direction agreed with the user in the brainstorm of 2026-10-10.
-- Phase 1 is planned in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md`.
-- Phases 2 to 6 each get their own plan, written from this spec when the phase starts.
+- Phases 1 and 2 are built (branch `twin`). Their plans are in `docs/superpowers/plans/2026-10-10-twin-runtime-phase-1.md` and `-phase-2.md`.
+- Phases 3 to 6 each have their own plan in the same folder.
+- `docs/superpowers/specs/2026-10-10-twin-runtime-interfaces.md` pins the contracts between phases: files, messages, shapes, options and formats.
 
 ## 1. The promise
 
@@ -48,14 +49,14 @@ Later phases add three things:
 
 | Rule | How it is kept | The test that tries to break it |
 |---|---|---|
-| R1. Customers get exactly the answers of the code that serves them today | The wrapper only observes: it copies bytes and calls the original functions unchanged | Every scenario test checks the customer's answer |
+| R1. Customers get exactly the answers of the version serving them: the old version, until the new one has earned it or a person switched it on | The wrapper only observes; the router sends each request whole to one version; the twin's thread asks to switch on only when `decide()` is ready, and switches back at the first unexplained difference | Every scenario test checks the customer's answer; `switch.test.js` |
 | R2. A ghost never touches anything real | `ghost-io.js` denies by default: fetch is answered from the recording; sockets, UDP, programs and file writes are refused | `ghost-io.test.js`; the double-charge scenario counts real charges |
 | R3. The twin failing never reaches a customer | Every hook sits in try/catch, and any internal error switches the twin off. Ghosts are separate threads with memory limits; a hung ghost is terminated | `failsafe.test.js` covers a broken version, a hang, an exiting ghost, an oversized body, a full queue and the off switch |
 | R4. Both ghosts live in the same world | `world.js` resets clock and seed per request; both get the same recording; they process the same requests in the same order and always restart together | The timestamps scenario: time and random values never show up as differences |
-| R5. Nothing is called "same" without being compared | Every request ends as same, different or not compared; not compared and skipped requests are counted with reasons, never folded into "same" | The compare tests (`unsupported`); the failsafe tests (`skipped`, `dropped`) |
+| R5. Nothing is called "same" without being compared | Every request ends as same, stated, different, not compared or skipped, and aborted requests are skipped too. A read the recording cannot answer makes a request not compared. Not compared and skipped requests are counted with reasons, never folded into "same", and too many of them hold switch-on back (`maxUncovered`) | The compare tests (`unsupported`, `unanswered`); `capture.test.js` (aborted); the fail-safe tests (`skipped`, `dropped`); `decide.test.js` |
 | R6. Every difference names its request | Recorded with method, URL, kinds and the exact paths | Scenario tests check paths such as `$.total` |
-| R7. The cost is bounded | Sampling; a queue limit that sheds load; a body cap; a memory cap per ghost; one request at a time per ghost pair; nothing on the request's path after the answer | The queue-limit test; `bench/overhead.js` measures the cost |
-| R8. Recordings stay in the process | Ghosts have no network. The differences log is a local file. Scrubbing private values comes in Phase 5 | `ghost-io.test.js` (no network); code review |
+| R7. The cost is bounded | Sampling; a queue limit that sheds load; a body cap; a memory cap per ghost and for the twin's thread; one request at a time per ghost pair; judging in the twin's own thread, never on the app's | The queue-limit test; `bench/overhead.js` measures the cost |
+| R8. Recordings stay in the process | Ghosts have no network. Bytes cross threads as exact copies, never as slices of Node's shared buffer pool. The differences log and the state folder are local files. Scrubbing private values comes in Phase 5 | `ghost-io.test.js` (no network); `bytes.test.js` |
 
 ## 4. The pieces
 
@@ -73,6 +74,14 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/capture.js` | Wraps the real request listener, copies what goes in and out, holds the per-request record | `node:async_hooks` |
 | `src/record.js` | Records the real app's `fetch` calls for the current sampled request | `capture.js`, `keys.js` |
 | `src/index.js` | The public API: `createTwin()` returns `wrap`, `stats`, `differences`, `idle` and `close` | all of the above |
+| `src/ghost.js` | Starts one ghost thread with no app preloads; asks it, stops it | `worker.js` |
+| `src/route.js` | Names a request's route: the path with ids replaced | — |
+| `src/identity.js` | Names a version by its code: sha256 over its package's code files | `node:crypto` |
+| `src/evidence.js` | Counts per segment and route for one candidate, in a checksummed file written whole | `node:fs` |
+| `src/decide.js` | The switch-on decision: rule of three, segments, `maxUncovered`, `minHours` | — |
+| `src/twin-thread.js` | The twin's own thread: coordinator, evidence, decision, switch requests | `coordinator.js`, `evidence.js`, `decide.js` |
+| `src/router.js` | Sends each request to the version serving; the control file | `capture.js` |
+| `bin/kern-twin.js` | `status` and `serve` | `router.js`, `evidence.js`, `decide.js` |
 
 ## 5. Decisions and why
 
@@ -97,6 +106,19 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 7. **One request at a time per ghost pair; restart both together.** Both ghosts then always have identical histories, so a difference can only come from the code. Throughput is managed by sampling and, later, by more pairs.
 8. **Fail open for customers, fail closed for comparisons.** Any doubt about a comparison means "not compared". Any internal error switches the twin off and the app carries on.
 9. **The Rust `kern` tool stays the build-time analyser.** It already knows changed lines, measured lines and git history (`drive.rs`), and it is the PR-level product (`kern drive`). The runtime is JavaScript because it runs inside customers' Node processes.
+10. **Judging in the twin's own thread (Phase 2).**
+    - Comparing two large JSON bodies can take tens of milliseconds. On the app's thread, every customer would wait for it.
+    - The app's thread copies and hands over; one worker judges, counts and decides.
+    - Bytes cross as exact copies. A pooled Buffer posted to a thread carries Node's whole 8 KiB pool along, other requests' data included (measured).
+11. **Evidence is one small file, written whole with a checksum.**
+    - Append-only lines would grow without bound and need compaction.
+    - A whole file written through a temporary file and a rename is never half-written. Its sha256 makes a hand edit or a damaged file start again, never count.
+    - The evidence belongs to one candidate, named by its code, so trust never carries over to code it was not earned on.
+12. **Both versions in the app's process (Phase 2).**
+    - Switching inside the process is instant: the next request goes to the other version, and switching back needs no deploy.
+    - The cost: once the new version serves, two copies of the app live in one process. So `createApp` must start no background work and must load twice safely.
+    - Apps that cannot do that use `wrap()` and switch with their deploy system, reading `kern-twin status`.
+13. **A switch back holds switching on by itself.** A person, or the twin itself, decided the old version should serve; the twin does not overrule that until a person switches the new version on again.
 
 ## 6. The maths
 
@@ -110,11 +132,18 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 - **Traffic changes over the day.** The bound assumes typical requests. High-stakes switch-on also requires a minimum time that covers a full daily cycle (Phase 2 option `minHours`).
 - **Per customer group.** The bound is kept per segment (for example a tenant or a plan). Switch-on can require it for each listed segment.
 
-## 7. Modes (Phase 2)
+## 7. Modes (built in Phase 2)
 
 - **Shadow.** The old version serves, and the twin compares.
-- **Active.** The new version serves. The same two ghosts keep running, and faithfulness is now checked against the new version, because it served the real request. The machinery is the same, with roles swapped.
-- **Switch back.** An unexplained difference in active mode switches serving back to the old version at once, through a router that reads a small control state. If the state cannot be read, the router uses the last known value; if there is none, the old version.
+- **Active.** The new version serves.
+  - The same two ghosts keep running.
+  - Faithfulness is now checked against the new version's ghost, because the new version served the real request.
+  - The machinery is the same, with roles swapped.
+- **Switching on.** The twin's thread asks for it when `switchOn` is `'auto'` and `decide()` is ready, unless switching on is held. A person can switch with `twin.serve()`, `kern-twin serve` or the control file.
+- **Switching back.**
+  - An unexplained difference while the new version serves switches serving back to the old version before the next request, and holds switching on by itself.
+  - The control file keeps the state across restarts. If it cannot be read, the router keeps its last known value; if there is none, the old version serves.
+  - If the twin's thread fails, the old version serves.
 
 ## 8. Failure modes
 
@@ -130,6 +159,12 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | Restarts | Too many | None | `restarts > maxRestarts` | Twin off |
 | Log file | Cannot be written | None | `logErrors` | Differences kept in memory |
 | Whole twin | Must stop now | None | `KERN_TWIN=off` | Never starts |
+| Capture | The client aborts the request | None | `close` without `finish` | Counted as skipped |
+| Twin thread | Crashes, or stops | None | Worker `error` or `exit` | Twin off with the reason; if the new version was serving, the old one serves |
+| Evidence | Cannot be written | None | `evidenceErrors` | Kept in memory and written at the next try |
+| Evidence | Damaged, or for other code | None | Checksum or candidate mismatch | Starts again; `evidence().note` says why |
+| Control file | Cannot be read | None | `readControl` answers null | The last known value stays |
+| Router | The new version cannot load in the app's thread | None | `switchTo` answers false | The old version keeps serving; `reason` says why |
 
 ## 9. Budgets
 
@@ -137,7 +172,8 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 - **Main thread, sampled requests:**
   - copying the bodies, at most `maxBodyBytes` each way;
   - copying fetch answers, also capped;
-  - after the answer: one `setImmediate` and handing the copy over.
+  - after the answer: one `setImmediate`, then one `postMessage` of exact bytes to the twin's thread.
+- **The twin's thread:** at most 512 MiB of heap; all comparing, counting and deciding.
 - **Ghosts:** two threads, each capped at `ghostMemoryMb`, one request at a time.
 - **Memory held:** at most `queueLimit` × (two bodies plus recordings).
 - **Measured cost:** recorded by Phase 1 Task 9 in `twin/README.md`, measured, not guessed.
@@ -148,7 +184,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 - **Outgoing calls.** Phase 1 replays `fetch` only. Apps that talk to Postgres, MySQL, Redis or `node:http` clients directly are "not compared" until Phase 4.
 - **In-memory state.** Caches and counters inside the app differ between the real app and the ghosts. The old ghost is then unfaithful and the request is not compared. Phase 4 adds allow-listed real reads, so ghost caches can warm.
 - **File writes.** Only the common `fs` write functions are written down and refused. Lower-level writes (`open` then `write`) are not seen in Phase 1.
-- **Native add-ons.** They can act below these controls. Phase 3 lists native modules loaded in ghosts, and such apps are marked not supported.
+- **Native add-ons.** A ghost may not load them, except packages listed in `addons` (pure computation, such as `bcrypt`), which act below these controls. Process ghosts with Node's permission model come in Phase 4.
 - **Frozen time.** Code that waits for time to pass in a busy loop never finishes in a ghost. That ends as a timeout, never as a wrong "same".
 - **Coverage.** It compares the requests that happen. A path no request takes needs Phase 3's path list and Level 1's generated inputs (`kern drive`).
 
@@ -174,7 +210,7 @@ Each phase ends with working, tested software.
    - time and randomness never show up as differences;
    - every fail-safe test passes;
    - the cost is measured and written in `twin/README.md`.
-2. **Evidence and switch-on.**
+2. **Evidence and switch-on** (built). Its acceptance tests are in `twin/test/switch.test.js`, `evidence.test.js` and `decide.test.js`.
    - Builds: counters per route and segment, the rule-of-three bound, `minHours`, the control state and router, active mode with roles swapped, instant switch-back, and counters kept on disk in append-only JSON lines with a checksum.
    - Accepted when:
      - simulated traffic switches on exactly when n ≥ 3/ε;
@@ -199,7 +235,7 @@ Each phase ends with working, tested software.
      - `kern-feedback/v1` instructions;
      - a pull-request comment;
      - scrubbing of private values;
-     - a fix only re-earns the paths it touches.
+     - a known difference is never forgotten: every later candidate runs every case before it may switch on, and a fix earns its evidence again (carrying evidence over was rejected as unsound; see the Phase 5 plan, decision 6).
    - Accepted when a seeded bug becomes a case, a scripted fix makes the case pass, and the candidate switches on.
 6. **Proof on real apps.**
    - Builds: runs on 2–3 open-source Node apps with real pull-request pairs from the 23-PR set (`C:\ke`), driven by their end-to-end tests or recorded traffic.
