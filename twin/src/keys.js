@@ -41,9 +41,22 @@ export function isWrite(method) {
   return !READS.has(String(method).toUpperCase());
 }
 
+const SAVEPOINT = /^(savepoint|release(?:\s+savepoint)?|rollback\s+to(?:\s+savepoint)?)\s+("[^"]*"|[^\s;]+)\s*;?$/i;
+
+/**
+ * A query without its savepoint's name. The name is a label the client library numbers itself (knex: trx1, trx2, ... over the life of
+ * the process), so a long-running app and a fresh ghost name the same savepoint differently: savepoints are matched in order instead.
+ */
+function savepointless(query) {
+  const m = SAVEPOINT.exec(query);
+  if (!m) return query;
+  const verb = m[1].toLowerCase();
+  return verb.startsWith('savepoint') ? 'SAVEPOINT ?' : verb.startsWith('release') ? 'RELEASE SAVEPOINT ?' : 'ROLLBACK TO SAVEPOINT ?';
+}
+
 /** One Postgres query: its shape is the query (spaces folded; the first 60 characters to read, a hash for all of it), its payload the values. */
 export function pgKey(text, values) {
-  const query = String(text).replace(/\s+/g, ' ').trim();
+  const query = savepointless(String(text).replace(/\s+/g, ' ').trim());
   return `PG ${query.slice(0, 60)} ${short(query)} ${values?.length ? short(stable(values)) : '-'}`;
 }
 

@@ -14,6 +14,15 @@ test('every call is named <shape> <payload>; the shape is all but the last word'
   assert.notEqual(shapeOf(redisKey('set', ['session:1', 'a'])), shapeOf(redisKey('set', ['session:2', 'a'])), 'another Redis key is another shape');
 });
 
+test("a savepoint's name is a label the client library numbers itself: it does not change the call's shape", () => {
+  const shape = (text) => shapeOf(pgKey(text, []));
+  assert.equal(shape('SAVEPOINT trx9;'), shape('SAVEPOINT trx153;'));
+  assert.equal(shape('RELEASE SAVEPOINT trx9;'), shape('release savepoint "trx153"'));
+  assert.equal(shape('ROLLBACK TO SAVEPOINT trx9;'), shape('ROLLBACK TO trx153;'));
+  assert.notEqual(shape('SAVEPOINT trx9;'), shape('RELEASE SAVEPOINT trx9;'), 'setting, releasing and rolling back stay apart');
+  assert.notEqual(shape('SELECT 1'), shape('SELECT 2'), 'other queries keep their text');
+});
+
 test('which queries and commands write', () => {
   for (const query of ['INSERT INTO t VALUES (1)', '  update t set a = 1', 'WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x', "SELECT nextval('s')", '/* note */ TRUNCATE t']) assert.equal(pgIsWrite(query), true, query);
   for (const query of ['SELECT * FROM t', 'BEGIN', 'COMMIT', 'WITH x AS (SELECT 1) SELECT * FROM x', 'SHOW search_path']) assert.equal(pgIsWrite(query), false, query);
