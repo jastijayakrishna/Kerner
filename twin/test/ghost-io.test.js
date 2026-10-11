@@ -90,3 +90,69 @@ console.log(JSON.stringify(out));
     rmSync(file, { force: true });
   }
 });
+
+test('a ghost may not signal a process, load a native add-on, reach Node\'s internals, change a priority, look up a name or start WASI', () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};
+import dns from 'node:dns';
+import os from 'node:os';
+installGhostIO({ harnessPort: 1 });
+beginJob([]);
+const code = (f) => { try { f(); return 'allowed'; } catch (e) { return e.code; } };
+const out = {};
+out.kill = code(() => process.kill(process.pid, 0));
+out.addon = code(() => process.dlopen({ exports: {} }, '/app/node_modules/sharp/build/Release/sharp.node'));
+out.binding = code(() => process.binding('tcp_wrap'));
+out.priority = code(() => os.setPriority(0, 0));
+out.lookup = await new Promise((resolve) => dns.lookup('example.com', (e) => resolve(e ? e.code : 'allowed')));
+out.resolve = await dns.promises.resolve4('example.com').then(() => 'allowed', (e) => e.code);
+const { WASI } = await import('node:wasi');
+out.wasi = code(() => new WASI({ version: 'preview1' }));
+out.events = endJob().events.map((e) => e.type);
+console.log(JSON.stringify(out));
+`], { encoding: 'utf8' }));
+  assert.deepEqual([out.kill, out.addon, out.binding, out.priority, out.lookup, out.resolve, out.wasi], Array(7).fill('EACCES'));
+  assert.deepEqual(out.events, Array(7).fill('denied'));
+});
+
+test('a ghost may load the native add-ons of the packages it was allowed, and no others', () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob } from ${source('ghost-io.js')};
+installGhostIO({ harnessPort: 1, addons: ['bcrypt', '@node-rs/argon2'] });
+beginJob([]);
+const code = (f) => { try { f(); return 'allowed'; } catch (e) { return e.code; } };
+console.log(JSON.stringify({
+  bcrypt: code(() => process.dlopen({ exports: {} }, '/app/node_modules/bcrypt/lib/binding/napi-v3/bcrypt_lib.node')),
+  scoped: code(() => process.dlopen({ exports: {} }, 'C:\\\\app\\\\node_modules\\\\@node-rs\\\\argon2\\\\argon2.node')),
+  sharp: code(() => process.dlopen({ exports: {} }, '/app/node_modules/sharp/build/Release/sharp.node')),
+}));
+`], { encoding: 'utf8' }));
+  // An allowed add-on reaches Node's real loader, which fails here only because the file does not exist.
+  assert.deepEqual(out, { bcrypt: 'ERR_DLOPEN_FAILED', scoped: 'ERR_DLOPEN_FAILED', sharp: 'EACCES' });
+});
+
+test('a ghost may not write to a file descriptor it did not open', () => {
+  const file = join(tmpdir(), `kern-ghost-fd-${process.pid}.txt`);
+  writeFileSync(file, 'real data');
+  try {
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob } from ${source('ghost-io.js')};
+import fs from 'node:fs';
+// Opened before the seal, as the app's own process might have: a ghost thread shares the process's file descriptors.
+const fd = fs.openSync(${JSON.stringify(file)}, 'r+');
+installGhostIO({ harnessPort: 1 });
+beginJob([]);
+const code = (f) => { try { f(); return 'allowed'; } catch (e) { return e.code; } };
+const out = {};
+out.writeSync = code(() => fs.writeSync(fd, 'ghost'));
+out.write = await new Promise((resolve) => fs.write(fd, 'ghost', (e) => resolve(e ? e.code : 'allowed')));
+out.truncate = code(() => fs.ftruncateSync(fd, 0));
+out.stdout = code(() => fs.writeSync(1, ''));
+console.log(JSON.stringify(out));
+`], { encoding: 'utf8' }));
+    assert.deepEqual(out, { writeSync: 'EACCES', write: 'EACCES', truncate: 'EACCES', stdout: 'allowed' });
+    assert.equal(readFileSync(file, 'utf8'), 'real data');
+  } finally {
+    rmSync(file, { force: true });
+  }
+});

@@ -19,7 +19,7 @@ const port = server.address().port;
 installWorld();
 // Before the seal, which would refuse the null device muteOutput() opens to write to.
 muteOutput();
-installGhostIO({ harnessPort: port });
+installGhostIO({ harnessPort: port, addons: workerData.addons ?? [] });
 const app = await import(pathToFileURL(workerData.module).href);
 const factory = app[workerData.export];
 if (typeof factory !== 'function') throw new Error(`has no function named ${workerData.export}`);
