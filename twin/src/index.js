@@ -2,8 +2,10 @@ import { Worker } from 'node:worker_threads';
 import { wrapListener } from './capture.js';
 import { recordFetch } from './record.js';
 import { ghostEnv } from './ghost.js';
+import { Router } from './router.js';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
+const SIDES = ['old', 'candidate'];
 const NO_COUNTS = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0, evidenceErrors: 0 };
 
 function version(value, name) {
@@ -82,7 +84,10 @@ function forThread(settings) {
   return rest;
 }
 
-/** The twin as the app's thread sees it: it copies sampled requests and hands them to the twin's own thread, which does the rest. */
+/**
+ * The twin as the app's thread sees it: it copies sampled requests and hands them to the twin's own thread, which does the rest, and
+ * it routes each request to the version serving now.
+ */
 class Twin {
   #settings;
   #thread = null;
@@ -95,6 +100,9 @@ class Twin {
   #dropped = 0;
   #inflight = new Set();
   #waiters = [];
+  #router = null;
+  #routed = null;
+  #switching = Promise.resolve(true);
   #closing = null;
 
   constructor(settings) {
@@ -151,19 +159,32 @@ class Twin {
       this.#settle();
     } else if (message?.type === 'closed') {
       this.#latest = message.snapshot;
+    } else if (message?.type === 'serve') {
+      this.#switch(message.side, message.reason);
     } else if (message?.type === 'disabled') {
       this.#fail(message.reason);
     }
   }
 
-  /** The twin stops for good and keeps its first reason. The app carries on as if there were no twin. */
+  /**
+   * The twin stops for good and keeps its first reason. The app carries on as if there were no twin; if the new version was serving,
+   * the old one serves again, because nothing would switch it back any more.
+   */
   #fail(reason) {
     if (this.#disabled) return;
     this.#disabled = reason;
+    if (this.#router?.serving === 'candidate') this.#switch('old', `the twin stopped, so the old version serves again: ${reason}`);
     const thread = this.#thread;
     this.#thread = null;
     if (thread && !this.#closing) thread.terminate().catch(() => {});
     this.#settle();
+  }
+
+  #switch(side, reason) {
+    if (!this.#router) return Promise.resolve(false);
+    const step = this.#switching.then(() => this.#router.switchTo(side, reason));
+    this.#switching = step.catch(() => false);
+    return step;
   }
 
   /** Whether to copy this request. A full queue sheds load: the customer is served as always, the request is only counted as dropped. */
@@ -215,6 +236,30 @@ class Twin {
     });
   }
 
+  /** The routing listener: it loads the old version in this thread, and records around whichever version serves each request. */
+  listener() {
+    this.#routed ??= (async () => {
+      this.#router = await Router.open({
+        old: this.#settings.old,
+        candidate: this.#settings.candidate,
+        candidateId: this.#candidateId,
+        stateDir: this.#disabled ? null : this.#settings.stateDir,
+        onSwitch: (side, reason, hold) => this.#thread?.postMessage({ type: 'serving', side, reason, hold, router: true }),
+      });
+      this.#thread?.postMessage({ type: 'serving', side: this.#router.serving, reason: this.#router.reason, hold: this.#router.hold, router: true });
+      return this.wrap(this.#router.listener());
+    })();
+    return this.#routed;
+  }
+
+  async serve(side, reason = 'switched by a person') {
+    if (!SIDES.includes(side)) throw new TypeError("serve takes 'old' or 'candidate'");
+    if (!this.#router) throw new Error("switching needs the twin's own listener: use twin.listener()");
+    // With the twin off, nothing would switch the new version back: it may not serve.
+    if (side === 'candidate' && this.#disabled) return false;
+    return this.#switch(side, reason);
+  }
+
   stats() {
     const latest = this.#latest;
     const counts = { ...NO_COUNTS, ...(latest?.counts ?? {}) };
@@ -224,7 +269,7 @@ class Twin {
       queued: Math.max(0, this.#sent - this.#judged) + this.#open,
       disabled: this.#disabled,
       reasons: { ...(latest?.reasons ?? {}) },
-      serving: 'old',
+      serving: this.#router?.serving ?? 'old',
     };
   }
 
@@ -240,13 +285,17 @@ class Twin {
     return this.#latest?.evidence ? structuredClone(this.#latest.evidence) : null;
   }
 
+  /** Resolves once every copy handed over so far has been judged, and every switch that caused has been applied. */
   async idle() {
     while (this.#inflight.size) await Promise.allSettled([...this.#inflight]);
     if (!this.#disabled && this.#judged < this.#sent) await new Promise((resolve) => this.#waiters.push(resolve));
+    await this.#switching;
   }
 
+  /** Writes the evidence and stops the twin's thread and its ghosts. It switches nothing, so a restart keeps what serves. */
   close() {
     this.#closing ??= (async () => {
+      this.#router?.close();
       const thread = this.#thread;
       this.#thread = null;
       if (thread) {
@@ -261,6 +310,7 @@ class Twin {
         });
         await thread.terminate();
       }
+      await this.#switching;
       this.#disabled ??= 'closed';
       this.#settle();
     })();
@@ -270,17 +320,20 @@ class Twin {
 
 /**
  * Starts a twin: the old and the new version of the app run as ghosts in the twin's own thread and answer copies of sampled real
- * requests. The twin never changes what a customer gets; if anything goes wrong inside it, it switches itself off and says why.
+ * requests. Customers get the answers of the version serving, which is the old one until the new one has earned it; if anything goes
+ * wrong inside the twin, it switches itself off, says why, and the old version serves.
  */
 export async function createTwin(options = {}) {
   const twin = new Twin(settingsOf(options));
   await twin.start();
   return {
+    listener: () => twin.listener(),
     wrap: (listener) => twin.wrap(listener),
     stats: () => twin.stats(),
     differences: () => twin.differences(),
     decision: () => twin.decision(),
     evidence: () => twin.evidence(),
+    serve: (side, reason) => twin.serve(side, reason),
     idle: () => twin.idle(),
     close: () => twin.close(),
   };
