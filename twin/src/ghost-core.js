@@ -2,7 +2,7 @@ import http from 'node:http';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { installWorld, resetWorld } from './world.js';
-import { installGhostIO, beginJob, endJob, note, take, wrote } from './ghost-io.js';
+import { installGhostIO, beginJob, endJob, note, packageOf, take, wrote } from './ghost-io.js';
 import { exactBytes } from './serialize.js';
 import { startCoverage, takeLines, targetsOf } from './coverage.js';
 import { ADAPTERS } from './adapters/index.js';
@@ -20,14 +20,26 @@ async function openCoverage(plan) {
   return { session, side: plan.side, targets: targetsOf(plan), cache: new Map() };
 }
 
-/** The calls a version made while starting that no answer was recorded for: why it could not start, and what would help. */
-function unanswered(events, recorded) {
+/**
+ * Why a version could not start in a ghost, and what would help: what the seal refused it (a native add-on that only computes can be
+ * allowed by its package), and the calls it made that no answer was recorded for.
+ */
+function startProblems(events, recorded) {
+  const refused = events.filter((event) => event.type === 'denied').map((event) => event.detail);
   const calls = events.filter((event) => event.type.startsWith('unmatched')).map((event) => event.detail);
-  if (!calls.length) return '';
-  const list = calls.slice(0, 3).join('; ');
-  return recorded
-    ? ` (at its start it made calls the record of the app's own start cannot answer: ${list})`
-    : ` (at its start it made calls the twin has no answer for: ${list}; with load: 'record' the twin answers them from the app's own start)`;
+  let text = '';
+  if (refused.length) {
+    const addons = [...new Set(refused.map((detail) => /^loading the native add-on (.+)$/.exec(detail)?.[1]).filter(Boolean).map(packageOf).filter(Boolean))];
+    const allow = addons.length ? `; a native add-on that only computes can be allowed with addons: ${JSON.stringify(addons)}` : '';
+    text += ` (at its start the ghost refused it: ${refused.slice(0, 3).join('; ')}${allow})`;
+  }
+  if (calls.length) {
+    const list = calls.slice(0, 3).join('; ');
+    text += recorded
+      ? ` (at its start it made calls the record of the app's own start cannot answer: ${list})`
+      : ` (at its start it made calls the twin has no answer for: ${list}; with load: 'record' the twin answers them from the app's own start)`;
+  }
+  return text;
 }
 
 /**
@@ -94,7 +106,7 @@ export async function runGhost(side, transport) {
       if (typeof handler !== 'function') throw new Error(`${side.export}() must return a request listener: (req, res) => { ... }`);
     });
   } catch (error) {
-    throw new Error(`${error?.message ?? error}${unanswered(endJob().events, Boolean(side.load))}`);
+    throw new Error(`${error?.message ?? error}${startProblems(endJob().events, Boolean(side.load))}`);
   } finally {
     end();
   }

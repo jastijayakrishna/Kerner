@@ -67,7 +67,7 @@ function refuseLater(args, what) {
   if (done) process.nextTick(done, refusal(what));
 }
 /** The package a native add-on file belongs to: the last node_modules/<name> (or @scope/name) on its path. */
-const packageOf = (file) => String(file).replaceAll('\\', '/').match(/.*node_modules\/((?:@[^/]+\/)?[^/]+)\//)?.[1] ?? null;
+export const packageOf = (file) => String(file).replaceAll('\\', '/').match(/.*node_modules\/((?:@[^/]+\/)?[^/]+)\//)?.[1] ?? null;
 const LOOKUPS = ['lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'];
 
 /**

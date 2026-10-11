@@ -48,6 +48,14 @@ test('with load: "record", the ghosts start from the record of the app\'s own st
   }
 });
 
+test('a start the seal refuses names what it refused, and how to allow a native add-on that only computes', async () => {
+  const shop = await routed('native');
+  await until(() => shop.twin.stats().disabled);
+  assert.match(shop.twin.stats().disabled, /could not start: the old version .*refused it: loading the native add-on \/opt\/shop\/node_modules\/fast-hash\/build\/Release\/fast_hash\.node; .*addons: \["fast-hash"\]/);
+  assert.deepEqual(await (await fetch(shop.url)).json(), { ok: true }, 'customers are served as always');
+  await shop.close();
+});
+
 test('a new version that asks at its start for what the old one never did cannot start, and the twin names the call', async () => {
   const config = await configService();
   try {
