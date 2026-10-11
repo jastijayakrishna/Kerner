@@ -91,6 +91,13 @@ function refuseLater(args, what) {
 }
 /** The package a native add-on file belongs to: the last node_modules/<name> (or @scope/name) on its path. */
 export const packageOf = (file) => String(file).replaceAll('\\', '/').match(/.*node_modules\/((?:@[^/]+\/)?[^/]+)\//)?.[1] ?? null;
+
+/**
+ * The name a native add-on is allowed and named by: its node_modules package, or, when it loads from a path outside node_modules (a
+ * build that copies its .node into the app, as firecrawl does with native/firecrawl-rs.<platform>.node), its file's stem — the base name
+ * before the platform suffix and extension (firecrawl-rs.linux-x64-gnu.node -> firecrawl-rs).
+ */
+export const addonName = (file) => packageOf(file) ?? String(file).replaceAll('\\', '/').split('/').pop().split('.')[0];
 const LOOKUPS = ['lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'];
 
 /**
@@ -193,7 +200,7 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
   };
   const dlopen = process.dlopen;
   process.dlopen = function ghostDlopen(module, filename, ...rest) {
-    if (addons.includes(packageOf(filename))) return dlopen.call(this, module, filename, ...rest);
+    if (addons.includes(addonName(filename))) return dlopen.call(this, module, filename, ...rest);
     note('denied', `loading the native add-on ${String(filename)}`);
     throw refusal('Loading a native add-on');
   };

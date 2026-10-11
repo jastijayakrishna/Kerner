@@ -2,7 +2,7 @@ import http from 'node:http';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { installWorld, resetWorld } from './world.js';
-import { installGhostIO, beginJob, endJob, note, packageOf, take, wrote } from './ghost-io.js';
+import { installGhostIO, beginJob, endJob, note, addonName, take, wrote } from './ghost-io.js';
 import { exactBytes } from './serialize.js';
 import { startCoverage, takeLines, targetsOf } from './coverage.js';
 import { ADAPTERS } from './adapters/index.js';
@@ -37,7 +37,7 @@ function startProblems(events, recorded) {
   const calls = events.filter((event) => event.type.startsWith('unmatched')).map((event) => event.detail);
   let text = '';
   if (refused.length) {
-    const addons = [...new Set(refused.map((detail) => /^loading the native add-on (.+)$/.exec(detail)?.[1]).filter(Boolean).map(packageOf).filter(Boolean))];
+    const addons = [...new Set(refused.map((detail) => /^loading the native add-on (.+)$/.exec(detail)?.[1]).filter(Boolean).map(addonName).filter(Boolean))];
     const allow = addons.length ? `; a native add-on that only computes can be allowed with addons: ${JSON.stringify(addons)}` : '';
     text += ` (at its start the ghost refused it: ${listed(refused)}${allow})`;
   }

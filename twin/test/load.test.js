@@ -56,6 +56,21 @@ test('a start the seal refuses names what it refused, and how to allow a native 
   await shop.close();
 });
 
+test('a native add-on loaded from a path outside node_modules is named, and allowed, by its file name', async () => {
+  const shop = await routed('native-path');
+  await until(() => shop.twin.stats().disabled);
+  // It has no node_modules package, so it is named by its file's stem (before the platform suffix): 'fast_hash'.
+  assert.match(shop.twin.stats().disabled, /refused it: loading the native add-on \/opt\/shop\/native\/fast_hash\.linux-x64-gnu\.node; .*addons: \["fast_hash"\]/, shop.twin.stats().disabled);
+  await shop.close();
+  // Allowed by that name, the seal lets the load through (the fake file then ENOENTs, which the app ignores), the ghosts start, and the
+  // request is compared.
+  const allowed = await routed('native-path', { addons: ['fast_hash'] });
+  assert.deepEqual(await (await fetch(allowed.url)).json(), { ok: true });
+  await allowed.twin.idle();
+  assert.equal(allowed.twin.stats().disabled, null, JSON.stringify(allowed.twin.stats()));
+  await allowed.close();
+});
+
 test('a start that ends its own process says so, with the calls the ghost could not answer, and leaves the app running', async () => {
   const config = await configService();
   try {
