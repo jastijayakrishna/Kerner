@@ -3,25 +3,47 @@ import { diffValues, readBody } from './serialize.js';
 /** Headers that change on every answer and say nothing about behaviour. */
 export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing', 'set-cookie']);
 
+/** Kinds only a rule that names them can state: a path rule never makes a crash, a hang, an opened door or another write "meant". */
+const SERIOUS = new Set(['crash', 'hang', 'door-opened', 'effects']);
+const KEPT = 20;
+
 const refused = (status) => status === 401 || status === 403 || status === 404 || status === 405 || (status >= 300 && status < 400);
 const succeeded = (status) => status >= 200 && status < 300;
 const writes = (list) => [...(list ?? [])].sort().join('\n');
 const strayCalls = (run) => run.events.filter((e) => e.type === 'unmatched-read' || e.type === 'unmatched-write');
+const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail));
 
 /**
  * Compares two runs of one request: `a` from the old code, `b` from the new.
  * A run is { status, headers, body: Buffer, effects: string[], events: [{ type, detail }], error?, timedOut? }.
- * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ path, old, new }] }.
+ * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ kind, path, old, new }] }, at most 20 details.
  */
 export function compareRuns(a, b) {
   const denied = [...a.events, ...b.events].filter((e) => e.type === 'denied');
-  if (denied.length) return { outcome: 'not-compared', kinds: ['unsupported'], details: denied.slice(0, 5).map((e) => ({ path: 'io', old: '', new: e.detail })) };
+  if (denied.length) return { outcome: 'not-compared', kinds: ['unsupported'], details: denied.slice(0, 5).map((e) => ({ kind: 'unsupported', path: 'io', old: '', new: e.detail })) };
   const kinds = new Set();
   const details = [];
   const add = (kind, path, old, now) => {
     kinds.add(kind);
-    if (details.length < 20) details.push({ path, old, new: now });
+    if (details.length < KEPT) details.push({ kind, path, old, new: now });
   };
+  // A write one version would make and the other would not is a difference whatever else happened: a double charge is caught even
+  // when the new code then fails on a call the recording cannot answer.
+  const before = writes(a.effects);
+  const after = writes(b.effects);
+  if (before !== after) add('effects', 'writes', before || 'none', after || 'none');
+  // A read the recording cannot answer, made by one ghost only: its answer is unknown, so nothing that ghost did after it can be
+  // compared. Unless the writes already differ, the request is not compared.
+  const oldReads = unansweredReads(a);
+  const newReads = unansweredReads(b);
+  const unanswered = [
+    ...[...newReads].filter((d) => !oldReads.has(d)).map((d) => ({ kind: 'unanswered', path: 'calls', old: 'none', new: d })),
+    ...[...oldReads].filter((d) => !newReads.has(d)).map((d) => ({ kind: 'unanswered', path: 'calls', old: d, new: 'none' })),
+  ];
+  if (unanswered.length) {
+    if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
+    return { outcome: 'not-compared', kinds: ['unanswered'], details: unanswered.slice(0, 5) };
+  }
   if (a.error || b.error) {
     if (!a.error) add(b.timedOut ? 'hang' : 'crash', 'result', `status ${a.status}`, b.error);
     else if (!b.error) add('fixed', 'result', a.error, `status ${b.status}`);
@@ -46,25 +68,40 @@ export function compareRuns(a, b) {
       for (const d of diffValues(x.value, y.value)) add('body', d.path, d.old, d.new);
     }
   }
-  const before = writes(a.effects);
-  const after = writes(b.effects);
-  if (before !== after) add('effects', 'writes', before || 'none', after || 'none');
-  if (strayCalls(b).length > strayCalls(a).length) add('new-calls', 'calls', strayCalls(a).map((e) => e.detail).join(', ') || 'none', strayCalls(b).map((e) => e.detail).join(', '));
   return kinds.size ? { outcome: 'different', kinds: [...kinds], details } : { outcome: 'same', kinds: [], details: [] };
 }
 
+const matches = (pattern, path) => (pattern.endsWith('*') ? path.startsWith(pattern.slice(0, -1)) : pattern === path);
+
 /**
- * Whether the old code's ghost reproduced the real run: the same status and the same writes, nothing refused, and no call the real
- * run did not make. Bodies may differ (real time, real randomness); the two ghosts are compared with each other for that.
- * Answers null when faithful, or the reason it is not.
+ * Marks a difference the team said is meant as 'stated'. The `allow` rules for this route (or for '*') must cover every detail: by
+ * naming the detail's kind, or, for kinds other than crash, hang, door-opened and effects, by matching its path ('$.user*' matches by
+ * prefix). A difference with more details than were kept can only be stated by naming every one of its kinds.
  */
-export function faithful(real, ghost) {
-  if (ghost.error) return `the old code's ghost failed: ${ghost.error}`;
+export function explain(verdict, route, allow) {
+  if (verdict.outcome !== 'different' || !allow?.length) return verdict;
+  const rules = allow.filter((rule) => rule.route === '*' || rule.route === route);
+  if (!rules.length) return verdict;
+  const byKind = (kind) => rules.some((rule) => rule.kinds?.includes(kind));
+  const covered = (detail) => byKind(detail.kind) || (!SERIOUS.has(detail.kind) && rules.some((rule) => rule.paths?.some((p) => matches(p, detail.path))));
+  const complete = verdict.details.length < KEPT;
+  const stated = verdict.kinds.every(byKind) || (complete && verdict.details.every(covered));
+  return stated ? { ...verdict, outcome: 'stated' } : verdict;
+}
+
+/**
+ * Whether the ghost of the version that served (`who`: 'old' or 'candidate') reproduced the real run: the same status and the same
+ * writes, nothing refused, and no call the real run did not make. Bodies may differ (real time, real randomness); the two ghosts are
+ * compared with each other for that. Answers null when faithful, or the reason it is not.
+ */
+export function faithful(real, ghost, who = 'old') {
+  const code = who === 'candidate' ? 'new' : 'old';
+  if (ghost.error) return `the ${code} code's ghost failed: ${ghost.error}`;
   const denied = ghost.events.find((e) => e.type === 'denied');
   if (denied) return `the ghost needed something it may not use: ${denied.detail}`;
   const stray = strayCalls(ghost);
-  if (stray.length) return `the old code's ghost made a call the real run did not: ${stray[0].detail}`;
-  if (real.status !== ghost.status) return `the old code's ghost answered ${ghost.status}, the real run ${real.status}`;
-  if (writes(real.effects) !== writes(ghost.effects)) return 'the old code\'s ghost wrote other things than the real run';
+  if (stray.length) return `the ${code} code's ghost made a call the real run did not: ${stray[0].detail}`;
+  if (real.status !== ghost.status) return `the ${code} code's ghost answered ${ghost.status}, the real run ${real.status}`;
+  if (writes(real.effects) !== writes(ghost.effects)) return `the ${code} code's ghost wrote other things than the real run`;
   return null;
 }

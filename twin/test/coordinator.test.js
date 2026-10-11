@@ -32,8 +32,8 @@ test('two ghosts answer a recorded request and the difference is named', async (
   assert.equal(found.url, '/user');
   assert.deepEqual(found.kinds, ['body']);
   assert.deepEqual(found.details, [
-    { path: '$.user_name', old: '"ada"', new: 'missing' },
-    { path: '$.username', old: 'missing', new: '"ada"' },
+    { kind: 'body', path: '$.user_name', old: '"ada"', new: 'missing' },
+    { kind: 'body', path: '$.username', old: 'missing', new: '"ada"' },
   ]);
   await pair.close();
 });

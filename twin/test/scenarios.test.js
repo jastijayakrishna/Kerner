@@ -45,7 +45,7 @@ test('a rounding change on one currency is caught with the exact field', async (
   assert.equal(shop.twin.stats().same, 1);
   const [found] = shop.twin.differences();
   assert.deepEqual(found.kinds, ['body']);
-  assert.deepEqual(found.details, [{ path: '$.total', old: '4051', new: '4050.9' }]);
+  assert.deepEqual(found.details, [{ kind: 'body', path: '$.total', old: '4051', new: '4050.9' }]);
   await shop.close();
 });
 
