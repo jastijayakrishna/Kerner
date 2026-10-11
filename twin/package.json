@@ -5,6 +5,7 @@
   "description": "Runs a new version of a service as a harmless ghost beside the old one on copies of real requests, and reports every difference",
   "type": "module",
   "exports": { ".": "./src/index.js" },
+  "bin": { "kern-twin": "./bin/kern-twin.js" },
   "engines": { "node": ">=22" },
   "scripts": { "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"" }
 }
