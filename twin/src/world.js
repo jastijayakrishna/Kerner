@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
+import timers from 'node:timers';
+import timersPromises from 'node:timers/promises';
+import { promisify } from 'node:util';
+import { isCurrent, owner } from './turn.js';
 
 // Time and chance inside a ghost. Both ghosts of one request see the same clock and the same random numbers, so time and
 // randomness can never show up as a difference. The clock does not move during a request.
@@ -96,5 +100,36 @@ export function installWorld() {
   };
   hrtime.bigint = () => BigInt(now) * 1000000n;
   put(process, 'hrtime', hrtime);
+  // Time belongs to the current turn (turn.js). A timer an earlier turn set (the app's start, or a request already answered) never
+  // fires, so background work waits instead of running into the request being answered. An interval that misses its turn is cleared.
+  const wait = (schedule, clear) => function ghostTimer(callback, ...rest) {
+    if (typeof callback !== 'function') return schedule(callback, ...rest);
+    const mine = owner();
+    const handle = schedule(function ghostTick(...args) {
+      if (!isCurrent(mine)) {
+        clear(handle);
+        return undefined;
+      }
+      return callback.apply(this, args);
+    }, ...rest);
+    return handle;
+  };
+  const later = (delay) => function ghostLater(...args) {
+    const mine = owner();
+    return delay(...args).then((value) => (isCurrent(mine) ? value : new Promise(() => {})));
+  };
+  const timed = {
+    setTimeout: wait(timers.setTimeout, timers.clearTimeout),
+    setInterval: wait(timers.setInterval, timers.clearInterval),
+    setImmediate: wait(timers.setImmediate, timers.clearImmediate),
+  };
+  const promised = { setTimeout: later(timersPromises.setTimeout), setImmediate: later(timersPromises.setImmediate) };
+  timed.setTimeout[promisify.custom] = promised.setTimeout;
+  timed.setImmediate[promisify.custom] = promised.setImmediate;
+  for (const [name, value] of Object.entries(timed)) {
+    put(globalThis, name, value);
+    put(timers, name, value);
+  }
+  for (const [name, value] of Object.entries(promised)) put(timersPromises, name, value);
   syncBuiltinESMExports();
 }

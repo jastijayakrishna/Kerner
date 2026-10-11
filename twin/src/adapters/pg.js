@@ -1,5 +1,6 @@
 import { pgIsWrite, pgKey } from '../keys.js';
 import { revive } from '../serialize.js';
+import { mine, never } from '../turn.js';
 
 // node-postgres (pg).
 // - In the app's thread, every query of a sampled request is written down at Client.prototype.query, which Pool.query goes through
@@ -111,6 +112,11 @@ function replay({ appRequire, take, wrote, note }) {
   };
   proto.query = function ghostQuery(config, values, callback) {
     if (config == null) throw new TypeError('Client was passed a null or undefined query');
+    // A query the current turn did not make waits forever (turn.js): no answer, no callback, nothing written down.
+    if (!mine()) {
+      if (typeof config.submit === 'function') return config;
+      return typeof values === 'function' || typeof callback === 'function' || typeof config.callback === 'function' ? undefined : never();
+    }
     if (typeof config.submit === 'function') {
       note('denied', 'a Postgres cursor or query stream');
       process.nextTick(() => config.handleError?.(new Error('Kern ghosts do not run Postgres cursors or streams')));

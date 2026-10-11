@@ -1,5 +1,6 @@
 import { redisIsWrite, redisKey } from '../keys.js';
 import { revive } from '../serialize.js';
+import { mine } from '../turn.js';
 
 // ioredis.
 // - In the app's thread, every command of a sampled request is written down at Redis.prototype.sendCommand (pipelines and transactions
@@ -70,6 +71,8 @@ function replay({ appRequire, take, wrote, note }) {
     this.setStatus('end');
   };
   proto.sendCommand = function ghostSendCommand(command) {
+    // A command the current turn did not send waits forever (turn.js): its promise never settles.
+    if (!mine()) return command.promise;
     command.setReplyContext?.(this.condition ?? this.options);
     const key = redisKey(command.name, command.args ?? []);
     const write = redisIsWrite(command.name);

@@ -8,6 +8,7 @@ import workerThreads from 'node:worker_threads';
 import { syncBuiltinESMExports } from 'node:module';
 import { callKey, isWrite, readAllowed, shapeOf } from './keys.js';
 import { installOverlay, resetOverlay } from './overlay.js';
+import { mine, never } from './turn.js';
 
 // What a ghost may do: have its calls answered from the real run's recording, and nothing else. Writes are written down and never
 // done. Every other way out is refused, so a ghost cannot touch anything real through Node's own APIs: network connections, UDP,
@@ -33,7 +34,7 @@ export function endJob() {
  * the clock or a random id, which a ghost cannot reproduce exactly; such a match is noted as 'loose'). Undefined when there is none.
  */
 export function take(key) {
-  if (!job) return undefined;
+  if (!job || !mine()) return undefined;
   const shape = shapeOf(key);
   const found = job.calls.find((entry) => !entry.used && entry.call.key === key) ?? job.calls.find((entry) => !entry.used && entry.shape === shape);
   if (!found) return undefined;
@@ -44,11 +45,13 @@ export function take(key) {
 
 /** Something the ghost was refused ('denied'), or a call the recording could not answer ('unmatched-read', 'unmatched-write'). */
 export function note(type, detail) {
+  if (!mine()) return;
   if (job && job.events.length < 50) job.events.push({ type, detail: String(detail).slice(0, 300) });
 }
 
 /** A write the ghost made: written down, never done. */
 export function wrote(effect) {
+  if (!mine()) return;
   if (job && job.effects.length < 200) job.effects.push(effect);
 }
 
@@ -79,6 +82,8 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (loopback(url.hostname) && allowed.has(Number(url.port))) return realFetch(request);
+    // A call the current turn did not make waits forever (turn.js): no answer, nothing written down.
+    if (!mine()) return never();
     const body = request.body ? Buffer.from(await request.arrayBuffer()) : Buffer.alloc(0);
     const key = callKey(request.method, request.url, body);
     const write = isWrite(request.method);

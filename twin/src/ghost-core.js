@@ -6,7 +6,10 @@ import { installGhostIO, beginJob, endJob, note, take, wrote } from './ghost-io.
 import { exactBytes } from './serialize.js';
 import { startCoverage, takeLines, targetsOf } from './coverage.js';
 import { ADAPTERS } from './adapters/index.js';
+import { begin, end, keepTurn, within } from './turn.js';
 
+// The real setImmediate, taken before the world is installed: the ghost's own steps run outside any turn, and must never wait.
+const tick = setImmediate;
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
 async function openCoverage(plan) {
@@ -35,7 +38,7 @@ function unanswered(events, recorded) {
  * 3. loads one version of the app;
  * 4. answers jobs.
  *
- * `side`: { module, export, addons, coverage, adapters, overlay, realReads }.
+ * `side`: { module, export, addons, coverage, adapters, overlay, realReads, load }.
  * `transport`: { send(message), onMessage(listener), beforeSeal() }.
  */
 export async function runGhost(side, transport) {
@@ -51,7 +54,13 @@ export async function runGhost(side, transport) {
     transport.send({ ...message, id, job: jobId });
   });
 
-  const harness = http.createServer((req, res) => handler(req, res));
+  // Each request belongs to the job being run. Its body's events would otherwise run outside that turn (turn.js).
+  const harness = http.createServer((req, res) => {
+    const id = jobId;
+    keepTurn(req, id);
+    keepTurn(res, id);
+    return within(id, () => handler(req, res));
+  });
   await listen(harness);
   const port = harness.address().port;
   const names = (side.adapters ?? []).filter((name) => ADAPTERS[name]);
@@ -75,14 +84,19 @@ export async function runGhost(side, transport) {
   // twin has one (load 'record'). A start that fails names the calls it could not have answered.
   if (side.load) resetWorld(side.load.start, side.load.seed);
   beginJob(side.load?.io ?? []);
+  begin('start');
   try {
-    const app = await import(pathToFileURL(side.module).href);
-    const factory = app[side.export];
-    if (typeof factory !== 'function') throw new Error(`has no function named ${side.export}`);
-    handler = await factory();
-    if (typeof handler !== 'function') throw new Error(`${side.export}() must return a request listener: (req, res) => { ... }`);
+    await within('start', async () => {
+      const app = await import(pathToFileURL(side.module).href);
+      const factory = app[side.export];
+      if (typeof factory !== 'function') throw new Error(`has no function named ${side.export}`);
+      handler = await factory();
+      if (typeof handler !== 'function') throw new Error(`${side.export}() must return a request listener: (req, res) => { ... }`);
+    });
   } catch (error) {
     throw new Error(`${error?.message ?? error}${unanswered(endJob().events, Boolean(side.load))}`);
+  } finally {
+    end();
   }
   endJob();
 
@@ -102,6 +116,7 @@ export async function runGhost(side, transport) {
 
   async function run(id, job) {
     jobId = id;
+    begin(id);
     resetWorld(job.start, job.seed);
     beginJob(job.io);
     const result = await new Promise((resolve) => {
@@ -119,7 +134,10 @@ export async function runGhost(side, transport) {
       req.end(body);
     });
     finish = null;
+    // As in the real run's record, calls the app starts right after answering still belong to this request: they get one more tick.
+    await new Promise((resolve) => tick(resolve));
     const io = endJob();
+    end();
     const lines = job.coverage && coverage ? await takeLines(coverage) : undefined;
     transport.send({
       type: 'result', id,

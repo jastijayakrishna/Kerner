@@ -3,6 +3,7 @@ import https from 'node:https';
 import { syncBuiltinESMExports } from 'node:module';
 import { callKey, isWrite, readAllowed } from '../keys.js';
 import { exactBytes } from '../serialize.js';
+import { mine, owner, turnOf, turnText, within } from '../turn.js';
 
 // node:http and node:https clients.
 // - In the app's thread, every client request made while serving a sampled request is written down: what was asked and what came back,
@@ -126,7 +127,10 @@ function record({ current, maxBodyBytes }) {
 
 /** In a ghost, before the seal: the replay server, on loopback, which answers every client request from the recording. */
 async function prepare({ take, wrote, note, ask, realReads }) {
-  const server = http.createServer(async (req, res) => {
+  // The replay server answers on its own context, so each client request carries the turn that made it (x-kern-turn), and is answered
+  // within that turn. A request the current turn did not make waits forever: its socket stays open and nothing is written down.
+  const server = http.createServer((req, res) => within(turnOf(String(req.headers['x-kern-turn'] ?? '')), async () => {
+    if (!mine()) return;
     const url = String(req.headers['x-kern-original-url'] ?? '');
     const method = String(req.headers['x-kern-original-method'] ?? req.method).toUpperCase();
     const parts = [];
@@ -152,7 +156,7 @@ async function prepare({ take, wrote, note, ask, realReads }) {
     const headers = Object.fromEntries(Object.entries(answer.headers ?? {}).filter(([name]) => !HOP.has(name)));
     res.writeHead(answer.status, headers);
     res.end(answer.body ? Buffer.from(answer.body.buffer, answer.body.byteOffset, answer.body.byteLength) : undefined);
-  });
+  }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return { ports: [server.address().port], replayPort: server.address().port };
 }
@@ -163,7 +167,7 @@ function replay({ replayPort }) {
   for (const [module, scheme] of [[http, 'http:'], [https, 'https:']]) {
     module.request = function ghostRequest(...args) {
       const target = addressOf(scheme, args);
-      const headers = { ...plainHeaders(target.headers), 'x-kern-original-url': target.url, 'x-kern-original-method': target.method };
+      const headers = { ...plainHeaders(target.headers), 'x-kern-original-url': target.url, 'x-kern-original-method': target.method, 'x-kern-turn': turnText(owner()) };
       const options = { host: '127.0.0.1', port: replayPort, method: target.method, path: '/', headers, agent: false, signal: target.options.signal, timeout: target.options.timeout };
       return target.callback ? realRequest(options, target.callback) : realRequest(options);
     };
