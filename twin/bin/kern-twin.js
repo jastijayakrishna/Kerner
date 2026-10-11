@@ -5,6 +5,7 @@ import { readControl, writeControl } from '../src/router.js';
 import { Evidence } from '../src/evidence.js';
 import { decide, pathsOf, totals } from '../src/decide.js';
 import { acceptMatcher, loadManifest } from '../src/manifest.js';
+import { buildOld } from '../src/build.js';
 
 const HELP = `kern-twin - the twin runtime's command line
 
@@ -13,6 +14,8 @@ const HELP = `kern-twin - the twin runtime's command line
       what the twin has seen of the current candidate, and whether it has earned serving customers
   kern-twin serve old|candidate --state <dir> [--reason <text>]
       switches serving by hand; a running twin follows within a second
+  kern-twin build --repo <dir> --base <commit> --out <new folder> [--install auto|always|never] [--build "<command>"]
+      writes the old version beside the new one, with the packages it needs, for the twin's old.module
 `;
 
 function parse(args) {
@@ -75,9 +78,16 @@ async function serve(flags) {
   return next;
 }
 
+async function build(flags) {
+  if (!flags.repo || !flags.base || !flags.out) throw new Error('build needs --repo <dir> --base <commit> --out <new folder>');
+  const install = flags.install ?? 'auto';
+  if (!['auto', 'always', 'never'].includes(install)) throw new Error("--install is 'auto', 'always' or 'never'");
+  return buildOld({ repo: flags.repo, base: flags.base, out: flags.out, install, build: flags.build ?? null });
+}
+
 const flags = parse(process.argv.slice(2));
-const command = { status, serve }[flags.words[0]];
-if (!command || !flags.state) {
+const command = { status, serve, build }[flags.words[0]];
+if (!command || (command !== build && !flags.state)) {
   process.stdout.write(HELP);
   process.exit(flags.words.length ? 2 : 0);
 }
