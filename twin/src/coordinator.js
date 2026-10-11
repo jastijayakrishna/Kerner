@@ -1,8 +1,10 @@
 import { appendFile } from 'node:fs/promises';
-import { compareRuns, faithful } from './compare.js';
+import { compareRuns, explain, faithful } from './compare.js';
 import { startGhost } from './ghost.js';
+import { routeOf } from './route.js';
 
 const KEEP = 1000;
+const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared' };
 
 /** Bytes from another thread as a Buffer, without copying them again. */
 const asBuffer = (bytes) => (bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Buffer.alloc(0));
@@ -19,9 +21,24 @@ function toRun(result) {
   };
 }
 
+/** Where a request belongs: when it came, its route, its customer segment and the version that served it. */
+function placeOf(capture) {
+  const time = Number(capture.start) || Date.now();
+  return {
+    time,
+    at: new Date(time).toISOString(),
+    route: capture.route ?? routeOf(capture.request?.method ?? 'GET', capture.request?.url ?? '/'),
+    segment: capture.segment ?? 'all',
+    serving: capture.serving === 'candidate' ? 'candidate' : 'old',
+  };
+}
+
 /**
  * Runs the ghost pair: the old and the new version, each in its own thread. They answer the same requests in the same order and
- * always restart together, so their histories stay identical and a difference can only come from the code.
+ * always restart together, so their histories stay identical and a difference can only come from the code. Every request handed in
+ * ends as one verdict (same, stated, different, not compared or skipped), handed to `onVerdict`.
+ * Options: old, candidate, timeoutMs, startMs, queueLimit, ghostMemoryMb, maxRestarts, log, allow, ghostExecArgv, addons, and the
+ * hooks onVerdict(verdict, capture, runs), onIdle() and onDisabled(reason).
  */
 export class Coordinator {
   #options;
@@ -33,7 +50,7 @@ export class Coordinator {
   #waiters = [];
   #found = [];
   disabled = null;
-  counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
+  counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
   reasons = {};
 
   constructor(options) {
@@ -84,22 +101,14 @@ export class Coordinator {
     }
   }
 
-  /** Whether a request may be recorded now. A full queue sheds load: the customer is served as always, the request is just not compared. */
-  admit() {
-    if (this.disabled || !this.#pair) return false;
-    if (this.#queue.length >= this.#options.queueLimit) {
-      this.counts.dropped++;
-      return false;
-    }
-    return true;
-  }
-
-  /** Takes the copy of one served request; requests are compared one at a time, in order. */
+  /** Takes one request handed in: a capture to compare, or a skip ({ skipped: reason, ... }) to count. Captures are compared one at a time, in order. */
   submit(capture) {
     if (this.disabled) return;
     if (capture.skipped) {
       this.counts.skipped++;
       this.#reason(`skipped: ${capture.skipped}`);
+      const skip = { n: 0, ...placeOf(capture), method: null, url: null, outcome: 'skipped', kinds: ['skipped'], details: [{ kind: 'skipped', path: 'request', old: '', new: String(capture.skipped) }] };
+      this.#judge(skip).catch((error) => this.disable(`the twin failed inside: ${error.message}`));
       return;
     }
     if (this.#queue.length >= this.#options.queueLimit) {
@@ -109,6 +118,11 @@ export class Coordinator {
     this.counts.sampled++;
     this.#queue.push(capture);
     this.#pump();
+  }
+
+  /** Requests handed in and not yet judged. */
+  pending() {
+    return this.#queue.length + (this.#busy ? 1 : 0);
   }
 
   async #pump() {
@@ -131,24 +145,29 @@ export class Coordinator {
 
   async #compare(capture) {
     if (!this.#pair) return;
-    const id = ++this.#seq;
+    const n = ++this.#seq;
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io };
-    const [old, candidate] = await Promise.all([this.#pair.old.ask(id, job, this.#options.timeoutMs), this.#pair.candidate.ask(id, job, this.#options.timeoutMs)]);
+    const timeout = this.#options.timeoutMs;
+    const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
     if (this.disabled) return;
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
+    const runs = { old: toRun(old), candidate: toRun(candidate) };
+    const place = placeOf(capture);
+    // The ghost of the version that served is checked against what really happened; then the two ghosts are compared with each other.
     const real = { status: capture.response.status, headers: capture.response.headers, body: asBuffer(capture.response.body), effects: capture.effects, events: [] };
-    const oldRun = toRun(old);
-    const unfaithful = faithful(real, oldRun);
-    const verdict = unfaithful
-      ? { outcome: 'not-compared', kinds: ['unfaithful'], details: [{ path: 'ghost', old: '', new: unfaithful }] }
-      : compareRuns(oldRun, toRun(candidate));
-    if (verdict.outcome === 'same') this.counts.same++;
-    else if (verdict.outcome === 'different') this.counts.different++;
-    else {
-      this.counts.notCompared++;
-      this.#reason(`not compared: ${verdict.details[0]?.new ?? verdict.kinds[0]}`);
-    }
-    if (verdict.outcome === 'different') await this.#remember({ at: new Date(capture.start).toISOString(), method: capture.request.method, url: capture.request.url, ...verdict });
+    const unfaithful = faithful(real, runs[place.serving], place.serving);
+    const judged = unfaithful
+      ? { outcome: 'not-compared', kinds: ['unfaithful'], details: [{ kind: 'unfaithful', path: 'ghost', old: '', new: unfaithful }] }
+      : explain(compareRuns(runs.old, runs.candidate), place.route, this.#options.allow ?? []);
+    await this.#judge({ n, ...place, method: capture.request.method, url: capture.request.url, ...judged }, capture, runs);
+  }
+
+  async #judge(verdict, capture = null, runs = null) {
+    const field = FIELD[verdict.outcome];
+    if (field) this.counts[field]++;
+    if (verdict.outcome === 'not-compared') this.#reason(`not compared: ${verdict.details[0]?.new ?? verdict.kinds[0]}`);
+    if (verdict.outcome === 'different') await this.#remember(verdict);
+    await this.#options.onVerdict?.(verdict, capture, runs);
   }
 
   #reason(text) {
@@ -156,17 +175,17 @@ export class Coordinator {
     if (key in this.reasons || Object.keys(this.reasons).length < 50) this.reasons[key] = (this.reasons[key] ?? 0) + 1;
   }
 
-  async #remember(entry) {
-    if (this.#found.length < KEEP) this.#found.push(entry);
+  async #remember(verdict) {
+    if (this.#found.length < KEEP) this.#found.push(verdict);
     if (!this.#options.log) return;
     try {
-      await appendFile(this.#options.log, `${JSON.stringify(entry)}\n`);
+      await appendFile(this.#options.log, `${JSON.stringify(verdict)}\n`);
     } catch {
       this.counts.logErrors++;
     }
   }
 
-  /** Resolves once every submitted request has been compared. */
+  /** Resolves once every submitted request has been judged. */
   idle() {
     if (!this.#busy && !this.#queue.length) return Promise.resolve();
     return new Promise((resolve) => this.#waiters.push(resolve));
@@ -175,11 +194,15 @@ export class Coordinator {
   #settle() {
     if (this.#busy || this.#queue.length) return;
     for (const resolve of this.#waiters.splice(0)) resolve();
+    this.#options.onIdle?.();
   }
 
   /** Switches the twin off for good, keeping the first reason. The app is never affected. */
   disable(reason) {
-    if (!this.disabled) this.disabled = reason;
+    if (!this.disabled) {
+      this.disabled = reason;
+      this.#options.onDisabled?.(reason);
+    }
     this.#queue.length = 0;
     const pair = this.#pair;
     this.#pair = null;
