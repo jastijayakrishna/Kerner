@@ -88,7 +88,7 @@ export function startProcessGhost(side, settings) {
       side: {
         module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null,
         adapters: settings.adapters ?? [], overlay: Boolean(settings.overlay), realReads: settings.realReads ?? [],
-        load: settings.load ?? null,
+        load: settings.load ?? null, pgReads: Boolean(settings.pgReads),
       },
     });
   });

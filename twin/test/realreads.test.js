@@ -1,6 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { listen, production } from './helpers.js';
+import { pgReadable } from '../src/real-reads.js';
+import { createTwin } from '../src/index.js';
+import { app, listen, production } from './helpers.js';
+
+test("pgReads takes a connection string, and needs the 'pg' adapter whose reads it answers", async () => {
+  const versions = { old: app('rates', 'old'), candidate: app('rates', 'new') };
+  await assert.rejects(createTwin({ ...versions, pgReads: 'postgres://reader@replica/app' }), /pgReads needs the 'pg' adapter/);
+  await assert.rejects(createTwin({ ...versions, adapters: ['pg'], pgReads: 42 }), /pgReads must be a Postgres connection string/);
+});
+
+test('a Postgres query is made for real only when it is a read and calls nothing that acts even in a read-only transaction', () => {
+  for (const query of ['select * from "access_approval_policies_approvers" where ("approverUserId" in ($1))', '  WITH t AS (SELECT 1) SELECT * FROM t', 'SHOW search_path', 'TABLE products']) {
+    assert.equal(pgReadable(query), true, query);
+  }
+  for (const query of [
+    'DELETE FROM membership_roles WHERE id = $1', 'WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x', "SELECT nextval('s')",
+    'SELECT pg_advisory_lock(1)', 'select pg_try_advisory_xact_lock($1)', 'SELECT pg_sleep(10)', "SELECT dblink('x', 'y')", "SELECT pg_notify('c', 'p')",
+    "SELECT set_config('a', 'b', false)", 'SELECT pg_terminate_backend(1)', 'SELECT * FROM t FOR UPDATE', 'COPY t TO STDOUT', 'BEGIN', 'SET search_path TO x',
+  ]) assert.equal(pgReadable(query), false, query);
+});
 
 test('a read the real app answered from its warm cache is made for real by the twin, once, for both cold ghosts', async () => {
   let hits = 0;

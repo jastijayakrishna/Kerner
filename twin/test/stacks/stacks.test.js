@@ -53,6 +53,39 @@ test('Postgres queries are replayed to the ghosts, a transaction and a clock-sta
   }
 });
 
+test('with pgReads, a read the new code makes and the old never did is answered for real and read-only; a write never is', { skip: !PG && 'needs Postgres: run scripts/test-stacks.sh' }, async () => {
+  const { default: pg } = await import('pg');
+  const admin = new pg.Client({ connectionString: PG });
+  await admin.connect();
+  await admin.query(`DROP TABLE IF EXISTS plan_features; DROP TABLE IF EXISTS plans; DROP SEQUENCE IF EXISTS plan_seq;
+    CREATE TABLE plans (id int PRIMARY KEY, name text); CREATE TABLE plan_features (plan_id int, feature text); CREATE SEQUENCE plan_seq;
+    INSERT INTO plans VALUES (1, 'pro'); INSERT INTO plan_features VALUES (1, 'sso'), (1, 'audit');`);
+  let shop = null;
+  try {
+    // Without pgReads, the new code's extra read has no answer: the request is not compared.
+    shop = await stack('pg-extra-read', { adapters: ['pg'] });
+    assert.deepEqual(await (await fetch(`${shop.url}/plan`)).json(), { plan: 'pro' });
+    await shop.twin.idle();
+    assert.equal(shop.twin.stats().notCompared, 1, JSON.stringify(shop.twin.stats()));
+    await shop.close();
+    // With pgReads, the twin's thread answers it for real, read-only, for both ghosts.
+    shop = await stack('pg-extra-read', { adapters: ['pg'], pgReads: PG });
+    assert.deepEqual(await (await fetch(`${shop.url}/plan`)).json(), { plan: 'pro' });
+    assert.deepEqual(await (await fetch(`${shop.url}/health`)).json(), { ok: true });
+    await shop.twin.idle();
+    const stats = shop.twin.stats();
+    assert.deepEqual([stats.different, stats.notCompared], [2, 0], JSON.stringify(stats));
+    const [plan, health] = shop.twin.differences();
+    assert.deepEqual(plan.details[0], { kind: 'body', path: '$.features', old: 'missing', new: '2' }, 'the real read answered the new code');
+    assert.deepEqual(health.kinds, ['effects'], "the new code's nextval is a write: never made for real, so it is the difference");
+    const { rows } = await admin.query('SELECT is_called FROM plan_seq');
+    assert.equal(rows[0].is_called, false, 'the sequence never moved');
+  } finally {
+    await shop?.close();
+    await admin.end();
+  }
+});
+
 test('Redis commands are replayed to the ghosts, pipelines and transformed replies included, and nothing is counted twice', { skip: !REDIS && 'needs Redis: run scripts/test-stacks.sh' }, async () => {
   const { default: Redis } = await import('ioredis');
   const admin = new Redis(REDIS);

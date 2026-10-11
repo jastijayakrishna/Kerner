@@ -42,6 +42,12 @@ function fn(value, name) {
   return value ?? null;
 }
 
+/** pgReads: where the twin's thread makes the ghosts' Postgres reads, read-only (a read replica or a read-only role, ideally). */
+function connection(value) {
+  if (typeof value !== 'string' || !value) throw new TypeError('pgReads must be a Postgres connection string, such as postgres://reader@replica/app');
+  return value;
+}
+
 function folder(value, name) {
   if (typeof value !== 'string' || !value) throw new TypeError(`${name} must be a folder path`);
   return value;
@@ -99,7 +105,9 @@ function settingsOf(options) {
     scrub: { headers: names(options.scrub?.headers, [], 'scrub.headers'), keys: names(options.scrub?.keys, [], 'scrub.keys') },
     humans: { kinds: names(options.humans?.kinds, [], 'humans.kinds'), hosts: names(options.humans?.hosts, [], 'humans.hosts') },
     load: oneOf(options.load, 'none', ['none', 'record'], 'load'),
+    pgReads: options.pgReads == null ? null : connection(options.pgReads),
   };
+  if (settings.pgReads && !settings.adapters.includes('pg')) throw new TypeError("pgReads needs the 'pg' adapter, whose reads it answers: add 'pg' to adapters");
   if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
   const unknown = settings.adapters.filter((name) => !ADAPTER_NAMES.includes(name));
   if (unknown.length) throw new TypeError(`adapters are ${ADAPTER_NAMES.map((n) => `'${n}'`).join(', ')}; not ${unknown.join(', ')}`);

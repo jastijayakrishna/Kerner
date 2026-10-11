@@ -3,7 +3,8 @@ import { compareRuns, explain, faithful } from './compare.js';
 import { startGhost } from './ghost.js';
 import { routeOf } from './route.js';
 import { attribute } from './manifest.js';
-import { realRead } from './real-reads.js';
+import { pgReader, realRead } from './real-reads.js';
+import { stable } from './keys.js';
 
 const KEEP = 1000;
 const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared' };
@@ -39,7 +40,7 @@ function placeOf(capture) {
  * Runs the ghost pair: the old and the new version, each in its own thread. They answer the same requests in the same order and
  * always restart together, so their histories stay identical and a difference can only come from the code. Every request handed in
  * ends as one verdict (same, stated, different, not compared or skipped), handed to `onVerdict`.
- * Options: old, candidate, timeoutMs, startMs, queueLimit, ghostMemoryMb, maxRestarts, log, allow, ghostExecArgv, addons, and the
+ * Options: old, candidate, timeoutMs, startMs, queueLimit, ghostMemoryMb, maxRestarts, log, allow, ghostExecArgv, addons, pgReads, and the
  * hooks onVerdict(verdict, capture, runs), onIdle(), onDisabled(reason) and redact(verdict), which scrubs what the log writes.
  */
 export class Coordinator {
@@ -55,6 +56,7 @@ export class Coordinator {
   #gate;
   #opened;
   #reads = new Map();
+  #pgReader = null;
   disabled = null;
   counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
   reasons = {};
@@ -83,7 +85,7 @@ export class Coordinator {
     const o = this.#options;
     const settings = {
       startMs: o.startMs, memoryMb: o.ghostMemoryMb, ghostExecArgv: o.ghostExecArgv, addons: o.addons, maxBodyBytes: o.maxBodyBytes,
-      adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [], load: this.#load,
+      adapters: o.adapters ?? [], overlay: Boolean(o.overlay), realReads: o.realReads ?? [], load: this.#load, pgReads: Boolean(o.pgReads),
       onRealRead: (message) => this.#realRead(message),
       kind: o.ghosts ?? 'thread', sandbox: o.sandbox ?? 'none',
     };
@@ -190,6 +192,15 @@ export class Coordinator {
 
   /** A real read for the ghosts of one request: made once, and both ghosts get the same answer, so their worlds stay the same. */
   #realRead(message) {
+    if (message.kind === 'pg') {
+      // A Postgres read (pgReads): read-only, through the app's own pg package, to the connection the operator named.
+      const key = `${message.job} PG ${message.text} ${stable(message.values)}`;
+      if (!this.#reads.has(key)) {
+        this.#pgReader ??= this.#options.pgReads ? pgReader(this.#options.pgReads, this.#options.old.module) : null;
+        this.#reads.set(key, this.#pgReader ? this.#pgReader.read(message.text, message.values) : Promise.resolve({ error: 'no Postgres real reads here' }));
+      }
+      return this.#reads.get(key);
+    }
     const key = `${message.job} ${message.method} ${message.url}`;
     if (!this.#reads.has(key)) this.#reads.set(key, realRead(message, this.#options.realReads ?? [], this.#options.maxBodyBytes));
     return this.#reads.get(key);
@@ -285,7 +296,9 @@ export class Coordinator {
     const pair = this.#pair;
     this.#pair = null;
     this.#settle();
-    return pair ? Promise.allSettled([pair.old.terminate(), pair.candidate.terminate()]) : Promise.resolve();
+    const reader = this.#pgReader;
+    this.#pgReader = null;
+    return Promise.allSettled([...(pair ? [pair.old.terminate(), pair.candidate.terminate()] : []), reader?.close()]);
   }
 
   close() {

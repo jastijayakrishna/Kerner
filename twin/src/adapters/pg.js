@@ -10,7 +10,8 @@ import { mine, never } from '../turn.js';
 const PATCHED = Symbol.for('kern.twin.pg');
 const ERROR_FIELDS = ['code', 'detail', 'hint', 'position', 'schema', 'table', 'column', 'dataType', 'constraint', 'severity', 'routine'];
 
-function resultOf(result) {
+/** A query's result as it is kept and sent between threads: command, row count, rows, and the fields' names and types. */
+export function resultOf(result) {
   if (Array.isArray(result)) return result.map(resultOf);
   return { command: result?.command ?? null, rowCount: result?.rowCount ?? null, rows: result?.rows ?? [], fields: (result?.fields ?? []).map((f) => ({ name: f.name, dataTypeID: f.dataTypeID })) };
 }
@@ -92,7 +93,7 @@ function errorFrom(pg, recorded) {
   return Object.assign(error, recorded);
 }
 
-function replay({ appRequire, take, wrote, note }) {
+function replay({ appRequire, take, wrote, note, ask = null, pgReads = false }) {
   const pg = appRequire('pg');
   const proto = pg.Client.prototype;
   // A ghost's client never connects: it is connected at once, and every query is answered from the recording.
@@ -130,7 +131,25 @@ function replay({ appRequire, take, wrote, note }) {
     const write = pgIsWrite(text);
     if (write) wrote(key);
     const recorded = take(key);
-    if (!recorded) note(write ? 'unmatched-write' : 'unmatched-read', `PG ${text.replace(/\s+/g, ' ').trim().slice(0, 120)}`);
+    const shown = `PG ${text.replace(/\s+/g, ' ').trim().slice(0, 120)}`;
+    // With pgReads, a read the recording cannot answer (one the new code makes and the old never did, say) is made for real by the
+    // twin's thread: read-only, once for both ghosts of the request. A write never is.
+    if (!recorded && !write && pgReads && ask) {
+      const real = ask({ type: 'real-read', kind: 'pg', text, values: given ?? config.values ?? [] }).then((answer) => {
+        if (answer?.error) {
+          note('unmatched-read', shown);
+          return { error: new Error('Connection terminated unexpectedly') };
+        }
+        note('real-read', shown);
+        return { result: resultFrom(answer.result) };
+      });
+      if (typeof done === 'function') {
+        real.then(({ error, result }) => done(error ?? null, result));
+        return undefined;
+      }
+      return real.then(({ error, result }) => (error ? Promise.reject(error) : result));
+    }
+    if (!recorded) note(write ? 'unmatched-write' : 'unmatched-read', shown);
     const error = !recorded ? new Error('Connection terminated unexpectedly') : recorded.error ? errorFrom(pg, recorded.error) : null;
     const result = error ? undefined : resultFrom(recorded.result);
     if (typeof done === 'function') {

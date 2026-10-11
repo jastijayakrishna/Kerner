@@ -58,7 +58,7 @@ function startProblems(events, recorded) {
  * 3. loads one version of the app;
  * 4. answers jobs.
  *
- * `side`: { module, export, addons, coverage, adapters, overlay, realReads, load }.
+ * `side`: { module, export, addons, coverage, adapters, overlay, realReads, load, pgReads }.
  * `transport`: { send(message), onMessage(listener), beforeSeal() }.
  */
 export async function runGhost(side, transport) {
@@ -96,7 +96,7 @@ export async function runGhost(side, transport) {
   installWorld();
   transport.beforeSeal?.();
   installGhostIO({ ports, addons: side.addons ?? [], overlay: Boolean(side.overlay), realReads: side.realReads ?? [], ask });
-  for (const name of names) ADAPTERS[name].replay({ appRequire, take, wrote, note, ...prepared[name] });
+  for (const name of names) ADAPTERS[name].replay({ appRequire, take, wrote, note, ask, pgReads: Boolean(side.pgReads), ...prepared[name] });
   // The changed lines this version runs, per request, when the twin has a manifest (Phase 3). Coverage starts before the app loads, so
   // every function the app compiles is counted precisely.
   const coverage = side.coverage ? await openCoverage(side.coverage) : null;
