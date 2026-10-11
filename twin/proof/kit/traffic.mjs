@@ -8,10 +8,12 @@ import { comparedShare, summarize } from './stats.mjs';
 // 1. it waits for the app;
 // 2. it runs the scenario (KERN_PROOF_SCENARIO exports `scenario`);
 // 3. it waits until the twin has judged everything;
-// 4. it writes the run's numbers to $KERN_PROOF_OUT/<app>-<label>.json, the label being 'off' or 'sample-<share>'.
+// 4. it writes the run's numbers to $KERN_PROOF_OUT/<app>-<label>.json, the label being 'off' or 'sample-<share>' (and '-pgreads' when
+//    Postgres real reads are on, so its numbers stay apart from the run without them — the proof server labels its log and cases the same way).
 const base = process.env.KERN_PROOF_URL ?? 'http://app:8080';
 const app = process.env.KERN_PROOF_APP;
-const label = process.env.KERN_PROOF_MODE === 'off' ? 'off' : `sample-${process.env.KERN_PROOF_SAMPLE ?? '1'}`;
+const pgReads = process.env.KERN_PROOF_MODE !== 'off' && process.env.KERN_PROOF_PG_READS ? '-pgreads' : '';
+const label = process.env.KERN_PROOF_MODE === 'off' ? 'off' : `sample-${process.env.KERN_PROOF_SAMPLE ?? '1'}${pgReads}`;
 const requests = Number(process.env.KERN_PROOF_REQUESTS ?? 300);
 const concurrency = Number(process.env.KERN_PROOF_CONCURRENCY ?? 2);
 const out = process.env.KERN_PROOF_OUT ?? '/out';

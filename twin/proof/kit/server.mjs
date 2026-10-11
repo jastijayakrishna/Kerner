@@ -11,7 +11,10 @@ import { pathToFileURL } from 'node:url';
 const config = JSON.parse(await readFile(process.env.KERN_PROOF_CONFIG, 'utf8'));
 const mode = process.env.KERN_PROOF_MODE === 'off' ? 'off' : 'twin';
 const sampleRate = mode === 'off' ? 0 : Number(process.env.KERN_PROOF_SAMPLE ?? 1);
-const label = mode === 'off' ? 'off' : `sample-${process.env.KERN_PROOF_SAMPLE ?? '1'}`;
+// KERN_PROOF_PG_READS, when set, turns on opt-in Postgres real reads (a read the new code makes and the old never did is answered for
+// real, read-only). It names its own run ('…-pgreads'), so its log and cases stay apart from the run without it.
+const pgReads = mode === 'twin' && process.env.KERN_PROOF_PG_READS ? process.env.KERN_PROOF_PG_READS : null;
+const label = mode === 'off' ? 'off' : `sample-${process.env.KERN_PROOF_SAMPLE ?? '1'}${pgReads ? '-pgreads' : ''}`;
 const named = (value) => (typeof value === 'string' ? value.replaceAll('{label}', label) : value);
 let twin = null;
 let listener;
@@ -21,6 +24,7 @@ if (mode === 'off') {
 } else {
   const { createTwin } = await import(pathToFileURL(config.twin).href);
   const options = { ...config.options, log: named(config.options.log), cases: named(config.options.cases) };
+  if (pgReads) options.pgReads = pgReads;
   // Each run starts from nothing: the twin appends to its log, and would check an earlier run's cases as known ones.
   for (const path of [options.log, options.cases]) if (path) await rm(path, { recursive: true, force: true });
   twin = await createTwin({ ...options, old: config.old, candidate: config.candidate, sampleRate });

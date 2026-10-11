@@ -1,6 +1,8 @@
 #!/bin/sh
 # One app's proof: three runs in throwaway containers (without the twin, 10% copied, all copied), each on a fresh database. Results go
 # to reports/twin-proof-<date>/. Usage, in WSL: sh twin/proof/run.sh <app> <minimum free MB>
+# KERN_PROOF_MODES picks the runs (default "off 0.1 1"); KERN_PROOF_PG_READS, when exported, turns on Postgres real reads (the runs
+# then name themselves '…-pgreads', apart from the runs without it).
 set -u
 app="$1"
 need="${2:-1500}"
@@ -15,7 +17,7 @@ if [ "$(free_mb)" -lt "$need" ]; then
 fi
 compose="docker compose -p kern-twin-proof-$app -f $here/$app/compose.yml"
 code=0
-for mode in off 0.1 1; do
+for mode in ${KERN_PROOF_MODES:-off 0.1 1}; do
   if [ "$mode" = off ]; then
     export KERN_PROOF_MODE=off KERN_PROOF_SAMPLE=0
   else

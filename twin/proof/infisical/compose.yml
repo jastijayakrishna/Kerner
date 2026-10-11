@@ -38,6 +38,8 @@ services:
       KERN_PROOF_CONFIG: /twin/proof/infisical/config.json
       KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
       KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+      # When set, opt-in Postgres real reads, through a read-only role (prepare.cjs makes it) and inside a READ ONLY transaction.
+      KERN_PROOF_PG_READS: ${KERN_PROOF_PG_READS:-}
     volumes:
       - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
     depends_on:
@@ -55,6 +57,7 @@ services:
       KERN_PROOF_AUTH_SECRET: 4bnfe4e407b8921c104518903515b218
       KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
       KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+      KERN_PROOF_PG_READS: ${KERN_PROOF_PG_READS:-}
       KERN_PROOF_REQUESTS: "300"
       KERN_PROOF_CONCURRENCY: "2"
     volumes:

@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 // - triage.json, adoption.json and gaps.md: written by hand, from the evidence.
 // A missing piece shows as '–'. Nothing is guessed.
 
-const MODES = [['off', 'without the twin'], ['sample-0.1', '10% copied'], ['sample-1', 'all copied']];
+const MODES = [['off', 'without the twin'], ['sample-0.1', '10% copied'], ['sample-1', 'all copied'], ['sample-1-pgreads', 'all copied + Postgres real reads']];
 const DASH = '–';
 const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x.toFixed(1) : DASH);
 const pct = (x) => (typeof x === 'number' && Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : DASH);
@@ -39,7 +39,7 @@ async function codeLines(file) {
 async function runsIn(dir) {
   const runs = {};
   for (const name of await readdir(dir)) {
-    const m = /^(.+)-(off|sample-[\d.]+)\.json$/.exec(name);
+    const m = /^(.+)-(off|sample-[\d.]+(?:-pgreads)?)\.json$/.exec(name);
     if (m) (runs[m[1]] ??= {})[m[2]] = await readJson(join(dir, name), null);
   }
   return runs;
@@ -115,6 +115,21 @@ export async function report(dir) {
   for (const app of apps) {
     const reasons = Object.entries(runs[app]['sample-1']?.twin?.reasons ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 8);
     out.push(`### ${app}`, '', reasons.length ? reasons.map(([why, n]) => `- ${n} × ${why}`).join('\n') : 'Nothing.', '');
+  }
+
+  // Opt-in Postgres real reads were run a second time, labeled, for the apps that have such a run. The report shows both numbers side by
+  // side: a read the new code makes that the old never did is answered read-only, so a request that would be not compared can be compared.
+  const withReads = apps.filter((app) => runs[app]['sample-1']?.twin && runs[app]['sample-1-pgreads']?.twin);
+  if (withReads.length) {
+    out.push('## What Postgres real reads changed', '', 'A second, labeled run turned on opt-in Postgres real reads (off by default). The columns are without them → with them.', '');
+    out.push('| App | Compared without | Compared with | Different | Not compared |', '|---|---|---|---|---|');
+    for (const app of withReads) {
+      const a = runs[app]['sample-1'].twin;
+      const b = runs[app]['sample-1-pgreads'].twin;
+      const share = (t) => `${t.compared} of ${t.judged} (${pct(t.share)})`;
+      out.push(`| ${app} | ${share(a)} | ${share(b)} | ${a.different} → ${b.different} | ${a.notCompared} → ${b.notCompared} |`);
+    }
+    out.push('');
   }
 
   out.push('## Gaps found, and what was done', '', gaps || 'None.', '');

@@ -97,6 +97,26 @@ test('the report sums each app up from its runs, its differences and the hand-wr
   }
 });
 
+test('the report shows what opt-in Postgres real reads changed, comparing the run with them to the run without', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kern-proof-'));
+  const dir = join(root, 'twin-proof-2026-10-12');
+  mkdirSync(dir);
+  try {
+    const mk = (label, twin) => ({ app: 'demo', label, latency: { count: 10, p50: 1, p90: 2, p99: 2, max: 2 }, rssMb: 80, peakRssMb: 90, twin, lines: {} });
+    writeFileSync(join(dir, 'demo-off.json'), JSON.stringify(mk('off', null)));
+    writeFileSync(join(dir, 'demo-sample-1.json'), JSON.stringify(mk('sample-1', { compared: 288, judged: 302, share: 0.9536, different: 14, notCompared: 14 })));
+    writeFileSync(join(dir, 'demo-sample-1-pgreads.json'), JSON.stringify(mk('sample-1-pgreads', { compared: 302, judged: 302, share: 1, different: 28, notCompared: 0 })));
+    writeFileSync(join(dir, 'demo-sample-1-differences.jsonl'), '');
+    const text = await report(dir);
+    assert.match(text, /## What Postgres real reads changed/);
+    assert.ok(text.includes('| demo | 288 of 302 (95.4%) | 302 of 302 (100.0%) | 14 → 28 | 14 → 0 |'), `missing pgreads row\n${text}`);
+    // It also appears as its own run in the cost table.
+    assert.ok(text.includes('all copied + Postgres real reads'), `missing pgreads cost row\n${text}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the proof server and its traffic runner measure an app without the twin and with it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-proof-run-'));
   const config = join(dir, 'config.json');

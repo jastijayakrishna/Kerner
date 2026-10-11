@@ -25,7 +25,14 @@ const { hsmServiceFactory } = require('./src/ee/services/hsm/hsm-service');
   try {
     await db.migrate.latest({ directory: path.join(__dirname, 'src/db/migrations'), loadExtensions: ['.ts'], tableName: 'infisical_migrations' });
     await db.seed.run({ directory: path.join(__dirname, 'src/db/seeds'), loadExtensions: ['.ts'] });
-    console.log('the database is migrated and seeded');
+    // A read-only role for the proof's pgReads run: it may read every table and nothing more. The twin also wraps each read in a
+    // READ ONLY transaction, so a write is refused twice over; this is the role an operator would point pgReads at in production.
+    await db.raw("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern_reader') THEN CREATE ROLE kern_reader LOGIN PASSWORD 'kern_reader'; END IF; END $$;");
+    await db.raw('GRANT CONNECT ON DATABASE infisical TO kern_reader');
+    await db.raw('GRANT USAGE ON SCHEMA public TO kern_reader');
+    await db.raw('GRANT SELECT ON ALL TABLES IN SCHEMA public TO kern_reader');
+    await db.raw('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO kern_reader');
+    console.log('the database is migrated and seeded, and a read-only role is ready');
   } finally {
     await db.destroy();
   }
