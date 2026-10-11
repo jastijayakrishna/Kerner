@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createTwin } from '../src/index.js';
+import { join } from 'node:path';
 
 /** One version of a test app, as the twin loads it: an absolute file and the function that builds the request listener. */
 export const app = (name, version) => ({ module: fileURLToPath(new URL(`./apps/${name}/${version}.js`, import.meta.url)), export: 'createApp' });
@@ -63,4 +64,26 @@ export async function until(check, ms = 5000) {
     if (Date.now() > end) throw new Error(`still waiting after ${ms} ms`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+}
+
+/** One version of the three-pull-request shop, with the folder its manifest's paths start from. */
+export const shopVersion = (version) => {
+  const root = fileURLToPath(new URL(`./apps/three-prs/${version}/`, import.meta.url));
+  return { module: join(root, 'src', 'app.js'), export: 'createApp', root };
+};
+
+export const shopManifest = fileURLToPath(new URL('./apps/three-prs/manifest.json', import.meta.url));
+
+/** The three-pull-request shop in production: the old version serves, and the twin has the manifest of the three changes. */
+export async function threePrs(options = {}) {
+  const twin = await createTwin({ old: shopVersion('base'), candidate: shopVersion('head'), manifest: shopManifest, timeoutMs: 3000, ...options });
+  const server = await listen(await twin.listener());
+  return {
+    twin,
+    url: server.url,
+    close: async () => {
+      await server.close();
+      await twin.close();
+    },
+  };
 }

@@ -27,26 +27,36 @@ const keyOf = (name) => (name === '__proto__' ? '(__proto__)' : name);
 const capped = (table, name, max, other) => (Object.hasOwn(table, name) || Object.keys(table).length < max ? name : other);
 
 /**
- * What the twin has seen of one candidate: per customer segment and route, how many requests were the same, different in a way the
- * team stated, different with no explanation, not compared, or skipped. Kept in one file, rewritten whole (a temporary file, then a
- * rename) with a checksum, so a crash or a hand edit can never leave counts that look valid but are not.
+ * What the twin has seen of one candidate. Per customer segment and route, it counts how many requests were:
+ * - the same;
+ * - different in a way the team stated;
+ * - different with no explanation;
+ * - not compared, or skipped.
+ *
+ * With a manifest (Phase 3) it also records, per changed line, how often requests ran it and which of its characters clean
+ * comparisons ran.
+ *
+ * Everything is kept in one file, rewritten whole (a temporary file, then a rename) with a checksum. So a crash or a hand edit can
+ * never leave counts that look valid but are not.
  */
 export class Evidence {
   #file;
+  #hashes;
   #dirty = false;
   #writing = null;
   note = null;
   errors = 0;
   data;
 
-  constructor({ file = null, candidate }) {
+  constructor({ file = null, candidate, hashes = new Map() }) {
     this.#file = file;
-    this.data = { version: 1, candidate, since: 0, segments: {}, unexplained: [] };
+    this.#hashes = hashes;
+    this.data = { version: 1, candidate, since: 0, segments: {}, unexplained: [], lines: {}, loadLines: [] };
   }
 
   /** The evidence for this candidate: what `file` holds if it is intact and for this candidate, else a fresh start with the reason. */
-  static async open({ file, candidate }) {
-    const evidence = new Evidence({ file, candidate });
+  static async open({ file, candidate, hashes }) {
+    const evidence = new Evidence({ file, candidate, hashes });
     if (!file) return evidence;
     let text;
     try {
@@ -71,11 +81,12 @@ export class Evidence {
       evidence.note = `the evidence file was for another candidate (${body.candidate}); started again`;
       return evidence;
     }
-    evidence.data = body;
+    // A file written before Phase 3 has no line evidence yet.
+    evidence.data = { lines: {}, loadLines: [], ...body };
     return evidence;
   }
 
-  /** Counts one verdict: { outcome, route, segment, time, kinds, details, ... }. */
+  /** Counts one verdict: { outcome, route, segment, time, kinds, details, lines?, ... }. */
   add(verdict) {
     const field = FIELD[verdict.outcome];
     if (!field) return;
@@ -93,6 +104,30 @@ export class Evidence {
       const { n, at, route: r, segment: s, serving, method, url, kinds } = verdict;
       this.data.unexplained.push({ n, at, route: r, segment: s, serving, method, url, kinds, details: (verdict.details ?? []).slice(0, 5) });
     }
+    if (verdict.lines) this.#addLines(field, verdict.lines);
+    this.#dirty = true;
+  }
+
+  /**
+   * Per changed line, counts the requests that touched it, the requests that ran it fully, and those of them that were clean. Per code
+   * character, it counts how many clean comparisons ran it (one digit, 0 to 9), so `a ? b : c` is proven only once both branches ran.
+   */
+  #addLines(field, lines) {
+    const clean = field === 'same' || field === 'stated';
+    for (const [key, mask] of Object.entries(lines)) {
+      const entry = (this.data.lines[key] ??= { hash: this.#hashes.get(key) ?? null, touched: 0, runs: 0, clean: 0, cover: '' });
+      if (entry.cover.length !== mask.length) entry.cover = '0'.repeat(mask.length);
+      const full = !mask.includes('0');
+      entry.touched++;
+      if (full) entry.runs++;
+      if (full && clean) entry.clean++;
+      if (clean) entry.cover = [...entry.cover].map((digit, i) => (mask[i] === '1' ? String(Math.min(9, Number(digit) + 1)) : digit)).join('');
+    }
+  }
+
+  /** The changed lines that ran while the versions loaded: they ran before every request. */
+  setLoadLines(keys) {
+    this.data.loadLines = [...new Set([...this.data.loadLines, ...keys])].sort();
     this.#dirty = true;
   }
 

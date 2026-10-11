@@ -2,14 +2,14 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { join } from 'node:path';
 import { Coordinator } from './coordinator.js';
 import { Evidence } from './evidence.js';
-import { decide, totals } from './decide.js';
+import { decide, pathsOf, totals } from './decide.js';
 import { versionId } from './identity.js';
+import { acceptMatcher, checkRoots, coveragePlan, loadManifest } from './manifest.js';
 
 // The twin's own thread. Comparing, counting, remembering and deciding all happen here, so none of it can slow or stop the app's
 // thread. The app's thread hands over copies of sampled requests; this thread answers with snapshots, and with 'serve' when the
 // candidate has earned serving customers or must stop serving them.
 const settings = workerData;
-const policy = { epsilon: settings.epsilon, minHours: settings.minHours, segments: settings.segments, maxUncovered: settings.maxUncovered };
 // Only for Kern's own fault tests: the thread ends after its first verdict, as if it had crashed.
 const crashOnVerdict = process.env.KERN_TWIN_FAULT === 'thread-exit';
 const SNAPSHOT_MS = 250;
@@ -23,6 +23,8 @@ let lastReport = 0;
 let closing = false;
 let flusher = null;
 let candidateId = null;
+let manifest = null;
+let policy = null;
 let evidence = null;
 let coordinator = null;
 
@@ -44,6 +46,7 @@ function snapshot() {
       totals: Object.fromEntries(['*', ...Object.keys(data.segments)].map((segment) => [segment, totals(data, segment)])),
       unexplained: data.unexplained,
     },
+    paths: manifest ? pathsOf(data, manifest.lines, policy) : [],
   };
 }
 
@@ -71,7 +74,7 @@ async function onVerdict(verdict) {
     await serve('old', `switched back: an unexplained difference (${verdict.kinds.join(', ')}) on ${verdict.route}`);
   } else if (settings.switchOn === 'auto' && router && serving === 'old' && !hold && verdict.outcome !== 'skipped') {
     const decision = decide(evidence.data, policy, Date.now());
-    if (decision.ready) await serve('candidate', `switched on: ${decision.needed} clean comparisons in ${policy.segments.join(', ')} and no unexplained difference`);
+    if (decision.ready) await serve('candidate', `switched on: ${decision.needed} clean comparisons in ${policy.segments.join(', ')}, every changed line proven, and no unexplained difference`);
   }
   report();
 }
@@ -109,9 +112,26 @@ async function close() {
 
 try {
   candidateId = settings.candidate.id ?? (await versionId(settings.candidate.module, settings.candidate.export));
-  evidence = await Evidence.open({ file: settings.stateDir ? join(settings.stateDir, 'evidence.json') : null, candidate: candidateId });
+  if (settings.manifest) {
+    manifest = await loadManifest(settings.manifest);
+    // A manifest describes one change: applied to other code, its line numbers would point at the wrong lines.
+    await checkRoots(manifest, { old: settings.old.root, new: settings.candidate.root });
+  }
+  policy = {
+    epsilon: settings.epsilon,
+    minHours: settings.minHours,
+    segments: settings.segments,
+    maxUncovered: settings.maxUncovered,
+    minLineRuns: settings.minLineRuns,
+    accepted: acceptMatcher(settings.accept ?? []),
+    lineKeys: manifest ? [...manifest.lines.keys()] : [],
+  };
+  const hashes = new Map(manifest ? [...manifest.lines].map(([key, line]) => [key, line.hash]) : []);
+  evidence = await Evidence.open({ file: settings.stateDir ? join(settings.stateDir, 'evidence.json') : null, candidate: candidateId, hashes });
   coordinator = new Coordinator({
     ...settings,
+    manifest,
+    coverage: manifest ? { old: coveragePlan(manifest, 'old', settings.old.root), new: coveragePlan(manifest, 'new', settings.candidate.root) } : null,
     onVerdict,
     onIdle: () => report(true),
     onDisabled: (reason) => {
@@ -119,6 +139,7 @@ try {
     },
   });
   await coordinator.start();
+  if (manifest && !coordinator.disabled) evidence.setLoadLines(coordinator.loadLines());
 } catch (error) {
   post({ type: 'disabled', reason: `the twin could not start: ${error.message}` });
   coordinator = null;

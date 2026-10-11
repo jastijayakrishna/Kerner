@@ -3,6 +3,7 @@ import { wrapListener } from './capture.js';
 import { recordFetch } from './record.js';
 import { ghostEnv } from './ghost.js';
 import { Router } from './router.js';
+import { acceptMatcher } from './manifest.js';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
@@ -11,7 +12,8 @@ const NO_COUNTS = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, diff
 function version(value, name) {
   if (!value || typeof value.module !== 'string' || typeof value.export !== 'string') throw new TypeError(`${name} must be { module: '/absolute/path/to/app.js', export: 'createApp' }`);
   if (value.id !== undefined && (typeof value.id !== 'string' || !value.id)) throw new TypeError(`${name}.id must be a non-empty string`);
-  return { module: value.module, export: value.export, ...(value.id ? { id: value.id } : {}) };
+  if (value.root !== undefined && (typeof value.root !== 'string' || !value.root)) throw new TypeError(`${name}.root must be the folder the manifest's paths start from`);
+  return { module: value.module, export: value.export, ...(value.id ? { id: value.id } : {}), ...(value.root ? { root: value.root } : {}) };
 }
 
 function number(value, fallback, min, max, name) {
@@ -53,7 +55,8 @@ function allowRules(value) {
 function settingsOf(options) {
   if (options.stateDir != null && (typeof options.stateDir !== 'string' || !options.stateDir)) throw new TypeError('stateDir must be a folder path');
   if (options.log != null && typeof options.log !== 'string') throw new TypeError('log must be a file path');
-  return {
+  if (options.manifest != null && (typeof options.manifest !== 'string' || !options.manifest)) throw new TypeError('manifest must be the file kern twin plan wrote');
+  const settings = {
     old: version(options.old, 'old'),
     candidate: version(options.candidate, 'candidate'),
     sampleRate: number(options.sampleRate, 1, 0, 1, 'sampleRate'),
@@ -75,7 +78,19 @@ function settingsOf(options) {
     switchOn: oneOf(options.switchOn, 'manual', ['manual', 'auto'], 'switchOn'),
     ghostExecArgv: names(options.ghostExecArgv, [], 'ghostExecArgv'),
     addons: names(options.addons, [], 'addons'),
+    manifest: options.manifest ?? null,
+    minLineRuns: number(options.minLineRuns, 3, 1, 9, 'minLineRuns'),
+    accept: acceptList(options.accept),
   };
+  if (settings.manifest && (!settings.old.root || !settings.candidate.root)) throw new TypeError("with a manifest, old.root and candidate.root must be the folders its paths start from (each version's checkout)");
+  return settings;
+}
+
+/** `accept` entries, checked here: 'old:src/x.js:12' or 'new:src/x.js:20-24'. */
+function acceptList(value) {
+  const list = names(value, [], 'accept');
+  acceptMatcher(list);
+  return list;
 }
 
 /** What the twin's thread needs: everything but the app's own functions, which cannot cross threads. */
@@ -285,6 +300,11 @@ class Twin {
     return this.#latest?.evidence ? structuredClone(this.#latest.evidence) : null;
   }
 
+  /** Every changed line of the manifest with its status: never run, partly run, run, proven, at load or accepted. */
+  paths() {
+    return [...(this.#latest?.paths ?? [])];
+  }
+
   /** Resolves once every copy handed over so far has been judged, and every switch that caused has been applied. */
   async idle() {
     while (this.#inflight.size) await Promise.allSettled([...this.#inflight]);
@@ -343,6 +363,7 @@ export async function createTwin(options = {}) {
     differences: () => twin.differences(),
     decision: () => twin.decision(),
     evidence: () => twin.evidence(),
+    paths: () => twin.paths(),
     serve: (side, reason) => twin.serve(side, reason),
     idle: () => twin.idle(),
     close: () => twin.close(),

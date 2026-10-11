@@ -70,3 +70,16 @@ test('evidence that cannot be written is counted, leaves nothing behind, and is 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('each changed line keeps, per character, how many clean comparisons ran it, so the branches of a line add up', () => {
+  const evidence = new Evidence({ candidate: 'c1', hashes: new Map([['old:src/app.js:17', 'h17']]) });
+  const given = `${'1'.repeat(37)}0000`;
+  const blank = `${'1'.repeat(19)}${'0'.repeat(18)}1111`;
+  evidence.add(verdict('same', { lines: { 'old:src/app.js:17': given } }));
+  evidence.add(verdict('same', { lines: { 'old:src/app.js:17': blank } }));
+  evidence.add(verdict('different', { kinds: ['crash'], lines: { 'old:src/app.js:17': blank } }));
+  const data = evidence.snapshot();
+  assert.deepEqual(data.lines['old:src/app.js:17'], { hash: 'h17', touched: 3, runs: 0, clean: 0, cover: `${'2'.repeat(19)}${'1'.repeat(22)}` }, 'a difference adds nothing to the cover');
+  evidence.setLoadLines(['new:src/app.js:1', 'new:src/app.js:1']);
+  assert.deepEqual(evidence.snapshot().loadLines, ['new:src/app.js:1']);
+});

@@ -1,7 +1,8 @@
 // When a candidate has earned serving customers.
 //
 // The rule of three: after n comparisons with no unexplained difference, the true rate of unexplained differences is below 3/n with
-// 95% confidence (from -ln 0.05 ≈ 3). So a candidate needs ceil(3/ε) clean comparisons for the bound ε.
+// 95% confidence (from -ln 0.05 ≈ 3). So a candidate needs ceil(3/ε) clean comparisons for the bound ε. With a manifest (Phase 3) every
+// changed line, old and new, must also have run, every part of it, in minLineRuns clean comparisons.
 
 /** The clean comparisons that bound the rate of unexplained differences below `epsilon`, with 95% confidence. */
 export const needed = (epsilon) => Math.ceil(3 / epsilon - 1e-9);
@@ -21,10 +22,50 @@ export function totals(snapshot, segment) {
 const percent = (x) => `${(x * 100).toFixed(1)}%`;
 
 /**
+ * What the evidence says of one changed line.
+ * - 'accepted': a person accepted it.
+ * - 'at load': it ran while the version loaded.
+ * - 'proven': every code character ran in at least minLineRuns clean comparisons.
+ * - 'run': every character ran in a clean comparison, but not that often yet.
+ * - 'partly run': some characters never ran in a clean comparison.
+ * - 'never run'.
+ */
+export function lineStatus(snapshot, key, policy, loaded) {
+  if (policy.accepted?.(key)) return 'accepted';
+  if (loaded.has(key)) return 'at load';
+  const entry = snapshot.lines?.[key];
+  if (!entry || !entry.touched) return 'never run';
+  const digits = [...entry.cover].map(Number);
+  if (digits.length && digits.every((d) => d >= policy.minLineRuns)) return 'proven';
+  if (digits.length && digits.every((d) => d >= 1)) return 'run';
+  return 'partly run';
+}
+
+/** Every changed line (at most 2,000) with its status and counts. `lines` is the manifest's Map of line keys. */
+export function pathsOf(snapshot, lines, policy) {
+  const loaded = new Set(snapshot.loadLines ?? []);
+  const out = [];
+  for (const [key, info] of lines) {
+    if (out.length >= 2000) break;
+    const entry = snapshot.lines?.[key];
+    out.push({
+      key, side: info.side, path: info.path, line: info.line, text: info.text, pull: info.pull,
+      touched: entry?.touched ?? 0, runs: entry?.runs ?? 0, clean: entry?.clean ?? 0, status: lineStatus(snapshot, key, policy, loaded),
+    });
+  }
+  return out;
+}
+
+/**
  * Whether the candidate has earned serving customers, with every reason it has not.
- * policy: { epsilon, minHours, segments, maxUncovered }. Ready needs all of: no unexplained difference; in every listed segment at
- * least ceil(3/ε) clean comparisons (same or stated) and at most maxUncovered of its requests left uncompared (the bound says nothing
- * about requests it never saw); and minHours since the first comparison, so a full cycle of traffic was seen.
+ *
+ * The policy is { epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lineKeys? }. Ready needs all of:
+ * - no unexplained difference;
+ * - in every listed segment, at least ceil(3/ε) clean comparisons (same or stated);
+ * - in every listed segment, at most maxUncovered of its requests left uncompared, since the bound says nothing about requests it
+ *   never saw;
+ * - minHours since the first comparison;
+ * - with lineKeys, every changed line 'proven', 'at load' or 'accepted'. The others are listed in `waiting`.
  */
 export function decide(snapshot, policy, now) {
   const reasons = [];
@@ -44,5 +85,16 @@ export function decide(snapshot, policy, now) {
   }
   const hours = snapshot.since ? Math.max(0, now - snapshot.since) / 3600000 : 0;
   if (hours < policy.minHours) reasons.push(`${hours.toFixed(1)} of ${policy.minHours} hours watched`);
-  return { ready: reasons.length === 0, reasons, needed: need, bound };
+  const result = { ready: false, reasons, needed: need, bound };
+  if (policy.lineKeys?.length) {
+    const loaded = new Set(snapshot.loadLines ?? []);
+    const waiting = policy.lineKeys.filter((key) => !['accepted', 'at load', 'proven'].includes(lineStatus(snapshot, key, policy, loaded)));
+    result.waiting = waiting;
+    if (waiting.length) {
+      const list = `${waiting.slice(0, 5).join(', ')}${waiting.length > 5 ? ', ...' : ''}`;
+      reasons.push(`${waiting.length} changed line${waiting.length === 1 ? ' has' : 's have'} not yet run in full in ${policy.minLineRuns} clean comparisons: ${list}`);
+    }
+  }
+  result.ready = reasons.length === 0;
+  return result;
 }
