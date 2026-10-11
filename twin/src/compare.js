@@ -36,6 +36,14 @@ export function compareRuns(a, b) {
   const before = writes(a.effects);
   const after = writes(b.effects);
   if (before !== after) add('effects', 'writes', before || 'none', after || 'none');
+  // A write the recording cannot answer was never made, and its answer is unknown (a version's new code path writes what the old one
+  // never did, say), so whatever its ghost did after it, a status, a body or a crash, came from the replay, not from the version. The
+  // write itself is the difference.
+  const unanswerable = [...a.events, ...b.events].find((e) => e.type === 'unmatched-write');
+  if (kinds.size && unanswerable) {
+    add('effects', 'answer', 'compared', `unknown: the recording cannot answer ${unanswerable.detail}, so what the ghost did after it is not compared`);
+    return { outcome: 'different', kinds: [...kinds], details };
+  }
   // A read the recording cannot answer, made by one ghost only: its answer is unknown, so nothing that ghost did after it can be
   // compared. Unless the writes already differ, the request is not compared.
   const oldReads = unansweredReads(a);

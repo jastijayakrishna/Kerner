@@ -68,6 +68,19 @@ test('a write one version would make and the other would not is a difference, wh
   assert.deepEqual(verdict.kinds, ['effects']);
 });
 
+test("after a write the recording cannot answer, a ghost's answer is the replay's, not the version's: the write is the difference", () => {
+  // The new version demotes the only admin where the old one refused: its write has no recorded answer, so its ghost then fails.
+  const write = 'PG delete from "membership_roles" where "membershipId" = $1';
+  const verdict = compareRuns(run(400, { error: 'BadRequest' }), run(500, { error: 'Delete' }, {
+    effects: [`${write} 0123456789abcdef 0123456789abcdef`],
+    events: [{ type: 'unmatched-write', detail: write }],
+  }));
+  assert.equal(verdict.outcome, 'different');
+  assert.deepEqual(verdict.kinds, ['effects'], 'no crash, status or body: those came from the write the ghost could not make');
+  assert.equal(verdict.details[0].path, 'writes');
+  assert.match(verdict.details[1].new, /^unknown: the recording cannot answer PG delete from "membership_roles"/);
+});
+
 test('a difference an allow rule covers in full is stated; a crash is stated only by naming its kind', () => {
   const renamed = compareRuns(run(200, { user_name: 'ada' }), run(200, { username: 'ada' }));
   assert.equal(explain(renamed, 'GET /user', [{ route: 'GET /user', paths: ['$.user_name', '$.username'], kinds: [] }]).outcome, 'stated');
