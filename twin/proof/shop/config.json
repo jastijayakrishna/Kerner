@@ -1,0 +1,7 @@
+{
+  "name": "shop",
+  "twin": "/twin/src/index.js",
+  "old": { "module": "/shop/old/app.js", "export": "createApp" },
+  "candidate": { "module": "/shop/new/app.js", "export": "createApp" },
+  "options": { "adapters": ["pg"], "queueLimit": 2000, "epsilon": 0.05, "minHours": 0, "log": "/out/shop-{label}-differences.jsonl" }
+}

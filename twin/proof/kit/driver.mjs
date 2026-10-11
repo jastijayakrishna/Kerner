@@ -3,9 +3,16 @@ import { performance } from 'node:perf_hooks';
 // Sends a scenario's requests to a server, a fixed number at a time, and times each one from the client's side, body included. The
 // same seed sends the same requests on every run, at any concurrency: each step gets a random generator of its own.
 
-/** Numbers in [0, 1) from a seed (xorshift32): the same seed always gives the same numbers. */
+/**
+ * Numbers in [0, 1) from a seed (xorshift32): the same seed always gives the same numbers. The seed is mixed first (murmur3's
+ * finalizer): xorshift32 started from neighbouring seeds gives nearly the same first numbers, and each step's seed is its neighbour's
+ * plus one (measured: the first number of 300 steps fell in two narrow bands, so a scenario took the same branch every time).
+ */
 export function seeded(seed) {
-  let state = seed >>> 0 || 0x9e3779b9;
+  let state = seed >>> 0;
+  state = Math.imul(state ^ (state >>> 16), 0x85ebca6b) >>> 0;
+  state = Math.imul(state ^ (state >>> 13), 0xc2b2ae35) >>> 0;
+  state = (state ^ (state >>> 16)) >>> 0 || 0x9e3779b9;
   return () => {
     state ^= state << 13;
     state >>>= 0;

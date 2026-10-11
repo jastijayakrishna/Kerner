@@ -1,0 +1,46 @@
+# The Phase 6 kit check: the Phase 4 shop under the proof kit. No port is opened on the host.
+name: kern-twin-proof-shop
+services:
+  db:
+    image: docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    environment:
+      POSTGRES_PASSWORD: kern
+      POSTGRES_DB: shop
+    volumes:
+      - ../../examples/shop/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shop"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  app:
+    build:
+      context: ../..
+      dockerfile: proof/shop/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:kern@db:5432/shop
+      KERN_PROOF_CONFIG: /twin/proof/shop/config.json
+      KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
+      KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+    volumes:
+      - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
+    depends_on:
+      db:
+        condition: service_healthy
+  traffic:
+    build:
+      context: ../..
+      dockerfile: proof/shop/Dockerfile
+    command: ["node", "/twin/proof/kit/traffic.mjs"]
+    environment:
+      KERN_PROOF_APP: shop
+      KERN_PROOF_URL: http://app:8080
+      KERN_PROOF_SCENARIO: /twin/proof/shop/scenario.mjs
+      KERN_PROOF_MODE: ${KERN_PROOF_MODE:-twin}
+      KERN_PROOF_SAMPLE: ${KERN_PROOF_SAMPLE:-1}
+      KERN_PROOF_REQUESTS: "300"
+      KERN_PROOF_CONCURRENCY: "2"
+    volumes:
+      - ${KERN_PROOF_OUT:-/tmp/kern-proof}:/out
+    depends_on:
+      - app

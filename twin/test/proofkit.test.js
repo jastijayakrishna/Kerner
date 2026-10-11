@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { comparedShare, percentile, summarize } from '../proof/kit/stats.mjs';
 import { drive, seeded } from '../proof/kit/driver.mjs';
 import { report } from '../proof/kit/report.mjs';
-import { listen } from './helpers.js';
+import { listen, shopManifest, shopVersion } from './helpers.js';
 
 test('percentiles are exact, by nearest rank, and the share compared counts same, stated and different', () => {
   const values = Array.from({ length: 100 }, (_, i) => 100 - i);
@@ -50,6 +52,16 @@ test('the driver sends the same requests for the same seed at any concurrency, t
   }
 });
 
+test("each step's numbers are spread evenly, even the first one: neighbouring steps must not send alike requests", () => {
+  const tenths = (values) => values.reduce((bins, x) => {
+    bins[Math.min(9, Math.floor(x * 10))]++;
+    return bins;
+  }, Array(10).fill(0));
+  // The first number of 1,000 neighbouring steps, as the driver seeds them; each tenth should get about 100.
+  const first = tenths(Array.from({ length: 1000 }, (_, i) => seeded(7 * 1000003 + i)()));
+  assert.ok(first.every((n) => n >= 60 && n <= 140), `first numbers by tenth: ${first.join(' ')}`);
+});
+
 test('the report sums each app up from its runs, its differences and the hand-written triage', async () => {
   const root = mkdtempSync(join(tmpdir(), 'kern-proof-'));
   const dir = join(root, 'twin-proof-2026-10-12');
@@ -82,5 +94,54 @@ test('the report sums each app up from its runs, its differences and the hand-wr
     ]) assert.ok(text.includes(line), `missing: ${line}\n${text}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the proof server and its traffic runner measure an app without the twin and with it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-proof-run-'));
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({
+    name: 'three-prs',
+    twin: fileURLToPath(new URL('../src/index.js', import.meta.url)),
+    old: shopVersion('base'),
+    candidate: shopVersion('head'),
+    options: { manifest: shopManifest, epsilon: 0.5, minHours: 0, timeoutMs: 3000 },
+  }));
+  const kit = (name) => fileURLToPath(new URL(`../proof/kit/${name}`, import.meta.url));
+  try {
+    for (const mode of ['off', 'twin']) {
+      const env = { ...process.env, KERN_PROOF_CONFIG: config, KERN_PROOF_MODE: mode, KERN_PROOF_SAMPLE: '1', KERN_PROOF_PORT: '0' };
+      const server = spawn(process.execPath, [kit('server.mjs')], { env, stdio: ['ignore', 'pipe', 'inherit'] });
+      try {
+        const port = await new Promise((resolve, reject) => {
+          let text = '';
+          server.stdout.on('data', (chunk) => {
+            text += chunk;
+            const m = /listening on :(\d+)/.exec(text);
+            if (m) resolve(Number(m[1]));
+          });
+          server.once('exit', (code) => reject(new Error(`the proof server stopped (exit ${code})`)));
+        });
+        const traffic = spawnSync(process.execPath, [kit('traffic.mjs')], {
+          env: {
+            ...env, KERN_PROOF_URL: `http://127.0.0.1:${port}`, KERN_PROOF_APP: 'three-prs', KERN_PROOF_REQUESTS: '20', KERN_PROOF_CONCURRENCY: '2',
+            KERN_PROOF_SCENARIO: fileURLToPath(new URL('./apps/three-prs/scenario.mjs', import.meta.url)), KERN_PROOF_OUT: dir,
+          },
+          encoding: 'utf8',
+          timeout: 120000,
+        });
+        assert.equal(traffic.status, 0, traffic.stdout + traffic.stderr);
+      } finally {
+        server.kill();
+      }
+    }
+    const off = JSON.parse(readFileSync(join(dir, 'three-prs-off.json'), 'utf8'));
+    const full = JSON.parse(readFileSync(join(dir, 'three-prs-sample-1.json'), 'utf8'));
+    assert.deepEqual([off.latency.count, off.twin], [20, null]);
+    assert.deepEqual([full.latency.count, full.twin.judged, full.twin.compared], [20, 20, 20], JSON.stringify(full.twin));
+    assert.ok(full.differences.some((d) => d.route === 'POST /profile' && d.cause === 102), JSON.stringify(full.differences));
+    assert.ok(full.rssMb > 0 && full.lines.proven >= 1, JSON.stringify(full.lines));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
