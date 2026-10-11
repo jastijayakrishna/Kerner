@@ -11,7 +11,7 @@ const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-com
 /** Bytes from another thread as a Buffer, without copying them again. */
 const asBuffer = (bytes) => (bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Buffer.alloc(0));
 
-function toRun(result) {
+export function toRun(result) {
   return {
     status: result.status,
     headers: result.headers ?? {},
