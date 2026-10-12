@@ -287,7 +287,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 | `ghosts`: `'thread'` or `'process'` | `'thread'` | 4 |
 | `sandbox`: `'none'` or `'bwrap'` | `'none'` (`'bwrap'` needs Linux and process ghosts) | 4 |
 | `adapters`: a subset of `['fetch', 'http', 'pg', 'ioredis']` | `['fetch']` | 4 |
-| `realReads`: `['GET https://api.example.com/*']` | `[]` (GET and HEAD only; a trailing `*` matches by prefix) | 4 |
+| `realReads`: `['GET https://api.example.com/*']` | `[]` (GET and HEAD only; a trailing `*` matches by prefix, inside the pattern's own origin, after `..` is resolved; a pattern is a whole http or https address) | 4 |
 | `overlay` | `false` (when true, ghost file writes land in an in-memory overlay, are recorded, and are never done) | 4 |
 | `cases` | `null` (a folder for scrubbed, re-checked cases; every later candidate must pass them) | 5 |
 | `scrub`: `{ headers, keys }` | `DEFAULT_SCRUB`, plus these: more private header names, and more value names (JSON properties, form and query names) whose values are private. Emails, card numbers, UUIDs and long tokens are scrubbed anywhere | 5 |

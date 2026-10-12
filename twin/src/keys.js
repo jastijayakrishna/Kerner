@@ -102,13 +102,32 @@ const REDIS_SESSION = /^REDIS (HELLO|AUTH|SELECT|CLIENT|INFO|PING) /;
 /** Whether a call (by its key) is about the connection or the server: never used up when it is replayed. */
 export const isSession = (key) => PG_SESSION.test(String(key)) || REDIS_SESSION.test(String(key));
 
-/** Whether an allow-listed real read covers a call: 'GET https://rates.example/*' (a trailing * matches by prefix). GET and HEAD only. */
+/** An http or https address as fetch reads it ('..' and '%2e%2e' resolved), or null for anything else. */
+export function plainAddress(url) {
+  try {
+    const parsed = new URL(String(url));
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether an allow-listed real read covers a call: 'GET https://rates.example/*' (a trailing * matches by prefix). GET and HEAD only.
+ * The address and the pattern are both read as fetch reads them. The call must go to the pattern's very origin (scheme, host and port), so
+ * neither a longer host nor a user name that looks like the host passes, and its path is matched once '..' is resolved.
+ */
 export function readAllowed(patterns, method, url) {
   const verb = String(method).toUpperCase();
   if (verb !== 'GET' && verb !== 'HEAD') return false;
+  const target = plainAddress(url);
+  if (!target) return false;
   return (patterns ?? []).some((pattern) => {
     const [want, address] = String(pattern).split(' ', 2);
     if (want !== verb || !address) return false;
-    return address.endsWith('*') ? url.startsWith(address.slice(0, -1)) : url === address;
+    const prefix = address.endsWith('*');
+    const allowed = plainAddress(prefix ? address.slice(0, -1) : address);
+    if (!allowed || allowed.origin !== target.origin) return false;
+    return prefix ? target.href.startsWith(allowed.href) : target.href === allowed.href;
   });
 }

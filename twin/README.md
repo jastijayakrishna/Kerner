@@ -123,7 +123,7 @@ const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis']
 ```
 
 - **Matching by shape.** Every call is named by its shape and its payload. A ghost whose payload carries the clock or a fresh id (an `INSERT ... created_at`) gets the recorded call of the same shape. Writes are checked against the real run by shape. The two ghosts are still compared exactly, since they share one world.
-- **Real reads.** `realReads: ['GET https://rates.example/*']` lets the twin's own thread make those reads for real, once per request, when a cold ghost needs one the warm real app did not. Both ghosts get the same answer. Only GET and HEAD, at most 5 s.
+- **Real reads.** `realReads: ['GET https://rates.example/*']` lets the twin's own thread make those reads for real, once per request, when a cold ghost needs one the warm real app did not. Both ghosts get the same answer. Only GET and HEAD, at most 5 s. A read must go to the very origin a pattern names (scheme, host and port), and its path is matched after `..` is resolved, as `fetch` resolves it; a pattern is a whole http or https address.
 - **File overlay.** With `overlay: true`, a ghost's file writes land in memory for the request. They are written down, read back by the ghost, and never touch the disk.
 - **Process ghosts.**
   - With `ghosts: 'process'`, each ghost is a Node process under the permission model: Node itself refuses file writes, programs, threads, native add-ons and the inspector. This stops even code that runs before the JavaScript seal, such as a module given in `ghostExecArgv`.

@@ -7,6 +7,7 @@ import { acceptMatcher } from './manifest.js';
 import { createRequire } from 'node:module';
 import { ADAPTERS, ADAPTER_NAMES } from './adapters/index.js';
 import { spawnSync } from 'node:child_process';
+import { plainAddress } from './keys.js';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
@@ -129,7 +130,11 @@ function acceptList(value) {
 /** Allow-listed real reads, checked here: 'GET https://rates.example/*' or 'HEAD https://status.example/ping'. */
 function readPatterns(value) {
   const list = names(value, [], 'realReads');
-  for (const pattern of list) if (!/^(GET|HEAD) \S+$/.test(pattern)) throw new TypeError(`realReads entries look like 'GET https://rates.example/*', not '${pattern}'`);
+  for (const pattern of list) {
+    if (!/^(GET|HEAD) \S+$/.test(pattern)) throw new TypeError(`realReads entries look like 'GET https://rates.example/*', not '${pattern}'`);
+    const address = pattern.slice(pattern.indexOf(' ') + 1).replace(/\*$/, '');
+    if (!plainAddress(address)) throw new TypeError(`realReads addresses are whole http or https addresses, such as 'GET https://rates.example/*', not '${pattern}'`);
+  }
   return list;
 }
 

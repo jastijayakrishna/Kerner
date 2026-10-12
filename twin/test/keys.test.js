@@ -51,3 +51,15 @@ test('values are named alike in every thread, and real reads are matched by meth
   assert.equal(readAllowed(allowed, 'GET', 'https://status.example/ping'), false, 'the method must match');
   assert.equal(readAllowed(allowed, 'HEAD', 'https://status.example/ping'), true);
 });
+
+test('a real read goes only to the origin its pattern names, and a path that climbs out of the prefix is not under it', () => {
+  const allowed = ['GET https://rates.example/eur/*', 'GET https://api.example.com*'];
+  assert.equal(readAllowed(allowed, 'GET', 'https://rates.example/eur/today'), true);
+  assert.equal(readAllowed(allowed, 'GET', 'https://rates.example/eur/../admin'), false, 'dot segments are resolved, as fetch resolves them');
+  assert.equal(readAllowed(allowed, 'GET', 'https://rates.example/eur/%2e%2e/admin'), false, 'encoded dot segments too');
+  assert.equal(readAllowed(allowed, 'GET', 'https://api.example.com/v1/x'), true);
+  assert.equal(readAllowed(allowed, 'GET', 'https://api.example.com.other.test/v1'), false, 'another host that starts with the same letters');
+  assert.equal(readAllowed(allowed, 'GET', 'https://api.example.com@other.test/v1'), false, 'a user name that looks like the host');
+  assert.equal(readAllowed(allowed, 'GET', 'https://api.example.com:8443/v1'), false, 'another port is another origin');
+  assert.equal(readAllowed(allowed, 'GET', 'not an address'), false);
+});

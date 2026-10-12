@@ -4,6 +4,13 @@ import { pgReadable } from '../src/real-reads.js';
 import { createTwin } from '../src/index.js';
 import { app, listen, production } from './helpers.js';
 
+test('a realReads address is a whole http or https address, so the origin it allows is plain', async () => {
+  const versions = { old: app('rates', 'old'), candidate: app('rates', 'new') };
+  for (const pattern of ['GET /rates/*', 'GET rates.example/*', 'GET file:///etc/*']) {
+    await assert.rejects(createTwin({ ...versions, realReads: [pattern] }), /realReads addresses are whole http or https addresses/, pattern);
+  }
+});
+
 test("pgReads takes a connection string, and needs the 'pg' adapter whose reads it answers", async () => {
   const versions = { old: app('rates', 'old'), candidate: app('rates', 'new') };
   await assert.rejects(createTwin({ ...versions, pgReads: 'postgres://reader@replica/app' }), /pgReads needs the 'pg' adapter/);
