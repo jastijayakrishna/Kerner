@@ -9,8 +9,14 @@ const PG_READ = /^\s*(select|with|table|values|show)\b/i;
 // files; sequences; row locks.
 const PG_ACTS = /\b(pg_(try_)?advisory\w*|pg_sleep\w*|dblink\w*|lo_\w+|pg_notify|set_config|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_file_write|pg_read_file|pg_read_binary_file|pg_ls_dir|nextval|setval|currval)\s*\(|\bfor\s+(update|no\s+key\s+update|share|key\s+share)\b/i;
 
-/** Whether a Postgres query may be made for real for the ghosts: a read by its first word, and calling nothing that acts even when read-only. */
+// More than one statement: a semicolon with anything after it. pg sends a text without values whole, and Postgres runs every statement
+// in it, so a COMMIT among them would end the read-only transaction and let the rest write. It is looked for in the text as written: a
+// comment marker inside a string literal ('--', '/*') could otherwise hide what follows it.
+const MORE_STATEMENTS = /;\s*\S/;
+
+/** Whether a Postgres query may be made for real for the ghosts: one statement, a read by its first word, calling nothing that acts even when read-only. */
 export function pgReadable(text) {
+  if (MORE_STATEMENTS.test(String(text))) return false;
   const query = String(text).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ');
   return PG_READ.test(query) && !pgIsWrite(query) && !PG_ACTS.test(query);
 }
