@@ -22,7 +22,7 @@ test('a recorded answer that set several cookies keeps them as a list: scrubbed 
     };
     const { capture: scrubbed } = scrubCapture(capture, {});
     assert.deepEqual(scrubbed.io[0].headers['set-cookie'], ['[scrubbed]', '[scrubbed]']);
-    const file = await writeCase(dir, { version: 1, n: 1, time: 1, route: 'GET /', io: scrubbed.io });
+    const file = await writeCase(dir, { version: 1, n: 1, time: 1, route: 'GET /', kinds: ['body'], io: scrubbed.io });
     assert.deepEqual((await readCase(file)).io[0].headers['set-cookie'], ['[scrubbed]', '[scrubbed]']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
