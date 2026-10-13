@@ -44,9 +44,17 @@ function record({ appRequire, current, maxBodyBytes }) {
     }
     const given = typeof values === 'function' ? undefined : values;
     const done = typeof values === 'function' ? values : callback;
-    const text = typeof config === 'string' ? config : String(config.text ?? '');
-    const params = given ?? config.values ?? [];
-    const call = { kind: 'pg', key: pgKey(text, params), write: pgIsWrite(text), text, values: params, result: null, error: null };
+    let call;
+    try {
+      const text = typeof config === 'string' ? config : String(config.text ?? '');
+      const params = given ?? config.values ?? [];
+      call = { kind: 'pg', key: pgKey(text, params), write: pgIsWrite(text), text, values: params, result: null, error: null };
+    } catch {
+      // Values JSON cannot write (a circle, a depth past its limit) cannot be named. The call is not copied, and goes to pg untouched:
+      // the app gets pg's own answer, never a throw from the twin.
+      sampled.problem ??= 'a Postgres call Kern could not name';
+      return query.call(this, config, values, callback);
+    }
     sampled.io.push(call);
     let settle;
     const tracked = new Promise((resolve) => {

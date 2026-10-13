@@ -15,9 +15,10 @@ const redisOf = (module) => module.default ?? module.Redis ?? module;
 
 /** Writes down one command and its raw reply. A command sent again (from the offline queue) is written down once. */
 function watch(sampled, command, maxBodyBytes) {
-  command[WATCHED] = true;
   const args = [...(command.args ?? [])];
+  // Named before anything is changed: a command that cannot be named (an argument with no text form) is left exactly as it was.
   const call = { kind: 'redis', key: redisKey(command.name, args), write: redisIsWrite(command.name), command: String(command.name), args, reply: null, error: null };
+  command[WATCHED] = true;
   sampled.io.push(call);
   let settle;
   const tracked = new Promise((resolve) => {
@@ -49,7 +50,14 @@ function record({ appRequire, current, maxBodyBytes }) {
   const send = proto.sendCommand;
   proto.sendCommand = function kernSendCommand(command, stream) {
     const sampled = current.getStore();
-    if (sampled && !sampled.done && typeof command?.name === 'string' && !command[WATCHED]) watch(sampled, command, maxBodyBytes);
+    if (sampled && !sampled.done && typeof command?.name === 'string' && !command[WATCHED]) {
+      try {
+        watch(sampled, command, maxBodyBytes);
+      } catch {
+        // The command goes to ioredis untouched, and the app gets ioredis's own answer; the request is not copied.
+        sampled.problem ??= 'a Redis command Kern could not name';
+      }
+    }
     return send.call(this, command, stream);
   };
   proto[PATCHED] = true;
