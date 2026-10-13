@@ -202,7 +202,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 
 `twin.differences()` holds the first 100 unexplained differences of this run, with their real values. The `log` file holds all of them, scrubbed, one JSON line each:
 - `n`, `at`, `route`, `segment`, `serving`, `method` and `url`;
-- `kinds`: `crash`, `hang`, `door-opened`, `status`, `headers`, `body`, `effects`, `refused` (the new code reached for something a ghost may not use, such as a program or a connection, which the old code did not), `fixed` or `changed-error`;
+- `kinds`: `crash` (a crash after the answer, in work the request left running, has the path `after the answer`), `hang`, `door-opened`, `status`, `headers`, `body`, `effects`, `refused` (the new code reached for something a ghost may not use, such as a program or a connection, which the old code did not), `fixed` or `changed-error`;
 - `details`: `{ kind, path, old, new }`.
 
 `twin.evidence()` gives the counts across restarts, per segment.

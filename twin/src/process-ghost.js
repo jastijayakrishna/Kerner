@@ -64,9 +64,9 @@ export function startProcessGhost(side, settings) {
       if (message?.type !== 'ready') return;
       cleanup();
       const dirty = [];
-      child.on('error', () => dirty.forEach((listener) => listener()));
+      child.on('error', (error) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost failed: ${error?.message ?? error}` })));
       child.on('message', (m) => {
-        if (m?.type === 'dirty') dirty.forEach((listener) => listener());
+        if (m?.type === 'dirty') dirty.forEach((listener) => listener(m));
         else if (m?.type === 'real-read') answer((reply) => child.connected && child.send(reply), m, settings);
       });
       resolve({

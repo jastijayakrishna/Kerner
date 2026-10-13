@@ -7,6 +7,8 @@ import { pgReader, realRead } from './real-reads.js';
 import { stable } from './keys.js';
 
 const KEEP = 1000;
+// How long a failure after one ghost's result waits for the other ghost's: the same work fails at much the same moment in both.
+const LATE_MS = 500;
 const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared' };
 
 /** Bytes from another thread as a Buffer, without copying them again. */
@@ -25,6 +27,7 @@ export function toRun(result) {
     error: result.error,
     timedOut: result.timedOut,
     gone: result.gone,
+    after: result.after,
   };
 }
 
@@ -61,6 +64,9 @@ export class Coordinator {
   #opened;
   #reads = new Map();
   #pgReader = null;
+  // The last real request compared, and the failures each ghost reported after its result for it (in work it left running).
+  #last = null;
+  #late = { old: null, candidate: null };
   disabled = null;
   counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
   reasons = {};
@@ -107,9 +113,18 @@ export class Coordinator {
     const pair = { old: old.value, candidate: candidate.value };
     // A process ghost's last messages are read after it has stopped, so a pair already replaced can still report itself broken: only
     // the current pair's own ghosts mark it for a restart.
-    for (const ghost of [pair.old, pair.candidate]) {
-      ghost.onDirty(() => {
-        if (this.#pair === pair) this.#dirty = true;
+    for (const [side, ghost] of [['old', pair.old], ['candidate', pair.candidate]]) {
+      ghost.onDirty((message) => {
+        if (this.#pair !== pair) return;
+        this.#dirty = true;
+        // A failure after the last request's result, in work that request left running: judged on that request, at once.
+        if (message?.error && message.job !== undefined && message.job === this.#last?.n && !this.#late[side]) {
+          this.#late[side] = String(message.error);
+          if (!this.#queue.some((item) => item.late)) {
+            this.#queue.push({ late: true });
+            this.#pump();
+          }
+        }
       });
     }
     return pair;
@@ -169,9 +184,26 @@ export class Coordinator {
    *   names that, and the pair restarts after. Restarting first would hide a version whose process ends after it answers.
    */
   async #ready() {
+    await this.#judgeLate();
     const pair = this.#pair;
     if (pair && this.#dirty && !pair.old.stopped() && !pair.candidate.stopped()) await this.#restart();
     return Boolean(this.#pair) && !this.disabled;
+  }
+
+  /**
+   * Judges a failure a ghost reported after the last request's result, in work that request left running (a thread-pool callback): it
+   * would end a production process that has no handler for it, so it is a crash on that request, unless both versions failed alike. The
+   * other ghost, running the same work, may report its own a moment later: it gets that moment.
+   */
+  async #judgeLate() {
+    const last = this.#last;
+    if (!last || (!this.#late.old && !this.#late.candidate)) return;
+    if (!this.#late.old || !this.#late.candidate) await new Promise((resolve) => setTimeout(resolve, LATE_MS));
+    const { old, candidate } = this.#late;
+    this.#late = { old: null, candidate: null };
+    this.#last = null;
+    if (!last.compared || old === candidate) return;
+    await this.#judge({ ...last.verdict, outcome: 'different', kinds: ['crash'], details: [{ kind: 'crash', path: 'after the answer', old: old ?? 'none', new: candidate ?? 'none' }] });
   }
 
   /** Both ghosts on one more copy of a request (a scrubbed case being checked). Answers { old, candidate } runs, or null when the pair is gone. */
@@ -234,7 +266,7 @@ export class Coordinator {
       while (this.#queue.length && !this.disabled) {
         const capture = this.#queue.shift();
         try {
-          await (capture.check ? this.#recheck(capture) : this.#compare(capture));
+          await (capture.late ? this.#judgeLate() : capture.check ? this.#recheck(capture) : this.#compare(capture));
         } catch (error) {
           await this.disable(`the twin failed inside: ${error.message}`);
         }
@@ -253,9 +285,11 @@ export class Coordinator {
     const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
     this.#reads.clear();
     if (this.disabled) return;
+    const place = placeOf(capture);
+    // From its result on, a failure a ghost reports belongs to this request: noted before anything else waits.
+    this.#last = { n, verdict: { n, ...place, method: capture.request.method, url: capture.request.url }, compared: false };
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
     const runs = { old: toRun(old), candidate: toRun(candidate) };
-    const place = placeOf(capture);
     // The ghost of the version that served is checked against what really happened; then the two ghosts are compared with each other.
     const real = { status: capture.response.status, headers: capture.response.headers, body: asBuffer(capture.response.body), effects: capture.effects, events: [] };
     const unfaithful = faithful(real, runs[place.serving], place.serving);
@@ -265,6 +299,7 @@ export class Coordinator {
     // The changed lines each ghost ran (keys carry their side), and the pull requests behind them.
     const lines = this.#options.coverage ? { ...(old.lines ?? {}), ...(candidate.lines ?? {}) } : null;
     const named = lines && this.#options.manifest ? attribute(Object.keys(lines), this.#options.manifest) : {};
+    if (this.#last?.n === n) this.#last.compared = ['same', 'stated', 'different'].includes(judged.outcome);
     await this.#judge({ n, ...place, method: capture.request.method, url: capture.request.url, ...judged, ...(lines ? { lines } : {}), ...named }, capture, runs);
   }
 

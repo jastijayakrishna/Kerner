@@ -117,6 +117,9 @@ export function compareRuns(a, b) {
     if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
     return { outcome: 'not-compared', kinds: ['unanswered'], details: unanswered.slice(0, 5) };
   }
+  // A version that failed after it had answered (an uncaught error in work the request left running) would end a production process
+  // that has no handler for it: a difference, whatever its answer was. Both failing alike behave alike.
+  if ((a.after ?? null) !== (b.after ?? null)) add('crash', 'after the answer', a.after ?? 'none', b.after ?? 'none');
   if (a.error || b.error) {
     // Neither ghost answered (each ran out of time, or had stopped before the request came), so what either version would have answered
     // is unknown: the request is not compared, unless the writes already differ. Two equal crashes are compared, and are the same: both

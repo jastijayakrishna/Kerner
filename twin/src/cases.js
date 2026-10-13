@@ -83,5 +83,7 @@ export function runOf(saved) {
     status: saved?.status, headers: saved?.headers ?? {},
     body: body ? Buffer.from(body.buffer, body.byteOffset, body.byteLength) : Buffer.alloc(0),
     effects: saved?.effects ?? [], writes: saved?.writes, tooMany: saved?.tooMany, events: saved?.events ?? [], error: saved?.error, timedOut: saved?.timedOut,
+    // An answer too large to hand over is kept by its size and sha256; a failure after the answer, by its message.
+    large: saved?.large, after: saved?.after,
   };
 }

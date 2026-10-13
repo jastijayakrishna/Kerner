@@ -55,9 +55,13 @@ test('a ghost that failed after it answered is restarted with its pair before th
   pair.submit(served('/', { open: 0 }));
   await pair.idle();
   await settle();
+  // The failure itself is a crash on the request that left the work running.
+  assert.deepEqual([pair.counts.same, pair.counts.different], [1, 1], JSON.stringify(pair.differences()));
   pair.submit(served('/', { open: 0 }));
   await pair.idle();
-  assert.deepEqual([pair.counts.same, pair.counts.different], [2, 0], JSON.stringify(pair.differences()));
+  // The next request is judged on a fresh pair: its answers are the same (nothing it left, such as `open`, shows).
+  assert.equal(pair.counts.same, 2, JSON.stringify(pair.differences()));
+  assert.ok(pair.differences().every((d) => d.details.every((detail) => detail.path === 'after the answer')), JSON.stringify(pair.differences()));
   // A known case's check runs on the pair the same way.
   await settle();
   const judged = await pair.check({ ...served('/', { open: 0 }), route: 'GET /' });
@@ -141,4 +145,21 @@ await pair.close();
   } finally {
     rmSync(file, { force: true });
   }
+});
+
+test('a version that fails after it has answered, in work the request left running, is a crash on that request', async () => {
+  const pair = new Coordinator(options('late-crash'));
+  await pair.start();
+  pair.submit(served('/report', { open: 0 }));
+  await pair.idle();
+  // The new version's audit fails about 60 ms after its answer, after its result: it is judged before the next request.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  pair.submit(served('/next', { open: 0 }));
+  await pair.idle();
+  const late = pair.differences().find((d) => d.details.some((detail) => detail.path === 'after the answer'));
+  assert.ok(late, JSON.stringify(pair.differences()));
+  assert.deepEqual([late.url, late.kinds], ['/report', ['crash']]);
+  assert.equal(late.details[0].old, 'none');
+  assert.match(late.details[0].new, /the audit entry could not be written/);
+  await pair.close();
 });

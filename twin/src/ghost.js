@@ -48,9 +48,9 @@ export function startGhost(side, settings) {
       const dirty = [];
       // From here on an error (running out of memory, say) ends only this ghost. Without a listener, Node would throw the worker's
       // 'error' event in the thread that started it: one must always be attached.
-      worker.on('error', () => dirty.forEach((listener) => listener()));
+      worker.on('error', (error) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost failed: ${error?.message ?? error}` })));
       worker.on('message', (m) => {
-        if (m?.type === 'dirty') dirty.forEach((listener) => listener());
+        if (m?.type === 'dirty') dirty.forEach((listener) => listener(m));
         else if (m?.type === 'real-read') answer((reply) => worker.postMessage(reply), m, settings);
       });
       // A ghost never keeps a process alive; while it answers, ask()'s time limit does. This comes after the 'message' listener above:

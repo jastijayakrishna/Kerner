@@ -11,6 +11,7 @@ const run = (status, value, more = {}) => ({
   events: more.events ?? [],
   error: more.error,
   timedOut: more.timedOut,
+  after: more.after,
 });
 
 test('the same answer is the same, whatever the date header says', () => {
@@ -192,4 +193,14 @@ test('the serving ghost must make writes of the same shapes as the real run; fil
   const real = run(200, {}, { effects: ['POST https://x.example/events aaaa'] });
   assert.equal(faithful(real, run(200, {}, { effects: ['POST https://x.example/events bbbb', 'FS writeFile /tmp/x -'] })), null);
   assert.match(faithful(real, run(200, {}, { effects: ['DELETE https://x.example/events bbbb'] })), /wrote other things/);
+});
+
+test('a version that fails after it has answered is a crash, though its answer was the same; both failing alike behave alike', () => {
+  // An uncaught error in work the request left running ends a production process that has no handler for it.
+  const failed = { after: 'uncaught Error: the audit entry could not be written' };
+  const verdict = compareRuns(run(200, { ok: true }), run(200, { ok: true }, failed));
+  assert.equal(verdict.outcome, 'different');
+  assert.deepEqual(verdict.kinds, ['crash']);
+  assert.deepEqual(verdict.details[0], { kind: 'crash', path: 'after the answer', old: 'none', new: failed.after });
+  assert.equal(compareRuns(run(200, {}, failed), run(200, {}, failed)).outcome, 'same');
 });

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { caseName, readCase, runOf, writeCase } from '../src/cases.js';
 import { replayCase } from '../src/replay.js';
 import { compareRuns } from '../src/compare.js';
@@ -91,6 +92,26 @@ test('a case that says it reproduces cannot be read unless it holds all it needs
     for (const [value, why] of broken) await assert.rejects(readCase(saved(value)), why, JSON.stringify(value).slice(0, 120));
     const stub = await readCase(saved({ version: 1, route: 'POST /', kinds: ['body'], reproduces: false, why: 'a person must look' }));
     assert.equal(stub.reproduces, false, 'a stub holds no request, and is read as it is');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a case keeps an answer too large to hand over by its size and sha256, and a failure after the answer, so a replay is judged on them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-cases-'));
+  try {
+    const body = Buffer.from('a large answer, here three words long');
+    const large = { size: body.length, digest: createHash('sha256').update(body).digest('hex') };
+    const run = (more) => ({ status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.alloc(0), effects: [], events: [], ...more });
+    const file = await writeCase(dir, {
+      version: 1, n: 1, time: 1, route: 'GET /', kinds: ['crash'], reproduces: true, world: { start: 1, seed: 2 },
+      request: { method: 'GET', url: '/', headers: {}, body: new Uint8Array() }, io: [],
+      old: { status: 200, headers: { 'content-type': 'text/plain' }, body: null, large, effects: [], events: [] },
+      new: { status: 200, headers: { 'content-type': 'text/plain' }, body: null, large, effects: [], events: [], after: 'uncaught Error: late' },
+    });
+    const back = await readCase(file);
+    assert.equal(compareRuns(runOf(back.old), run({ body })).outcome, 'same', 'a replay that answers the same bytes in full is the same');
+    assert.equal(compareRuns(runOf(back.old), runOf(back.new)).outcome, 'different', 'the failure after the answer is kept');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

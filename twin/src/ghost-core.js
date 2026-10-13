@@ -133,21 +133,29 @@ export async function runGhost(side, transport) {
   endJob();
 
   let finish = null;
+  // Between a request's answer and its result (its one more tick): a failure then is the request's own, sent with its result (`after`).
+  let tail = false;
+  let after = null;
+  // The last request this ghost sent a result for: a failure that comes later, in work that request left running (a thread-pool callback,
+  // which no turn holds), is named after it.
+  let answered = null;
   function crashed(error) {
-    // The app's state may now be broken: the coordinator restarts both ghosts after this request.
-    transport.send({ type: 'dirty' });
     const message = `uncaught ${error?.name ?? 'error'}: ${String(error?.message ?? error).slice(0, 300)}`;
+    // The app's state may now be broken: the coordinator restarts both ghosts before the next request, and judges a failure that came
+    // after a request's result on that request.
+    transport.send({ type: 'dirty', error: message, job: finish || tail ? jobId : answered });
     if (finish) {
       const done = finish;
       finish = null;
       done({ error: message });
-    }
+    } else if (tail) after ??= message;
   }
   process.on('uncaughtException', crashed);
   process.on('unhandledRejection', crashed);
 
   async function run(id, job) {
     jobId = id;
+    after = null;
     begin(id);
     resetWorld(job.start, job.seed);
     beginJob(job.io);
@@ -181,15 +189,18 @@ export async function runGhost(side, transport) {
     });
     finish = null;
     // As in the real run's record, calls the app starts right after answering still belong to this request: they get one more tick.
+    tail = true;
     await new Promise((resolve) => tick(resolve));
+    tail = false;
     const io = endJob();
     end();
     const lines = job.coverage && coverage ? await takeLines(coverage) : undefined;
+    answered = id;
     transport.send({
       type: 'result', id,
       result: {
         status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, large: result.large,
-        effects: io.effects, writes: io.writes, tooMany: io.tooMany, events: io.events, lines,
+        effects: io.effects, writes: io.writes, tooMany: io.tooMany, events: io.events, lines, ...(after ? { after } : {}),
       },
     });
   }
