@@ -14,27 +14,46 @@ async function load(version) {
   return listener;
 }
 
-/** The control file's value, or null when it is missing, unreadable or not a control file. */
-export async function readControl(file) {
+// A control file write that failed is tried again this often, until it lands.
+const RETRY_MS = 1000;
+
+/** The control file's text, or null when it is missing or cannot be read. */
+async function readText(file) {
   try {
-    const value = JSON.parse(await readFile(file, 'utf8'));
+    return await readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** A control file's value from its text, or null when the text is not a control file. */
+function parseControl(text) {
+  try {
+    const value = JSON.parse(text);
     return value?.version === 1 && typeof value.candidate === 'string' && (value.serving === 'old' || value.serving === 'candidate') ? value : null;
   } catch {
     return null;
   }
 }
 
-/** Writes the control file whole: a temporary file, then a rename, so a reader never sees half of it. */
+/** The control file's value, or null when it is missing, unreadable or not a control file. */
+export async function readControl(file) {
+  return parseControl(await readText(file));
+}
+
+/** Writes the control file whole: a temporary file, then a rename, so a reader never sees half of it. Answers the text written. */
 export async function writeControl(file, value) {
   await mkdir(dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const text = `${JSON.stringify(value, null, 2)}\n`;
   try {
-    await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
+    await writeFile(temp, text);
     await rename(temp, file);
   } catch (error) {
     await rm(temp, { force: true }).catch(() => {});
     throw error;
   }
+  return text;
 }
 
 /**
@@ -50,6 +69,13 @@ export class Router {
   #onSwitch;
   #queue = Promise.resolve(true);
   #watcher = null;
+  // The control file's text as this router last wrote or read it. Seeing it again is no person's switch: after a write of the router's
+  // own failed, the file still holds the router's earlier text, which must not switch serving back to what it said.
+  #seen = null;
+  // Whether serving changed since the last write that landed, and the timer that tries that write again.
+  #unwritten = false;
+  #retry = null;
+  #closed = false;
   serving = 'old';
   hold = false;
   reason = 'start';
@@ -67,8 +93,10 @@ export class Router {
     const router = new Router(options);
     router.#listeners.old = await load(options.old);
     if (router.#file) {
-      const control = await readControl(router.#file);
+      const text = await readText(router.#file);
+      const control = parseControl(text);
       if (control?.candidate === router.#candidateId) {
+        router.#seen = text;
         router.hold = control.hold === true;
         router.reason = String(control.reason ?? 'restored');
         if (control.serving === 'candidate') await router.switchTo('candidate', `restored from the control file: ${control.reason}`, { persist: false });
@@ -132,13 +160,33 @@ export class Router {
     }
   }
 
+  /** Writes how serving stands to the control file. A write that fails is counted, and tried again every second until one lands. */
   async #persist() {
     if (!this.#file) return;
     try {
-      await writeControl(this.#file, { version: 1, candidate: this.#candidateId, serving: this.serving, hold: this.hold, changedAt: new Date().toISOString(), reason: this.reason });
+      this.#seen = await writeControl(this.#file, { version: 1, candidate: this.#candidateId, serving: this.serving, hold: this.hold, changedAt: new Date().toISOString(), reason: this.reason });
+      this.#unwritten = false;
     } catch {
       this.writeErrors++;
+      this.#unwritten = true;
+      this.#writeLater();
     }
+  }
+
+  /**
+   * Tries the control file write again in a second, in turn with switches and reads, and never keeps the process alive. Until a write
+   * lands, a restart reads what the file said before, and a switch back that never reached the disk would let the candidate serve again.
+   * A file that changed since the router last wrote or read it holds a person's switch: that is the watcher's to follow, never to cover.
+   */
+  #writeLater() {
+    if (this.#retry || this.#closed) return;
+    this.#retry = setTimeout(() => {
+      this.#retry = null;
+      this.#enqueue(async () => {
+        if (this.#unwritten && !this.#closed && (await readText(this.#file)) === this.#seen) await this.#persist();
+      }).catch(() => {});
+    }, RETRY_MS);
+    this.#retry.unref();
   }
 
   #watch() {
@@ -151,17 +199,27 @@ export class Router {
     watchFile(this.#file, { interval: 1000, persistent: false }, this.#watcher);
   }
 
-  /** Follows a person's switch in the control file. A file that cannot be read leaves serving as it is. */
+  /**
+   * Follows a person's switch in the control file. Text the router itself last wrote or read is nothing new, and a file that cannot be
+   * read, or is not a control file for this candidate, leaves serving as it is.
+   */
   async #follow() {
-    const control = await readControl(this.#file);
-    if (control?.candidate === this.#candidateId && control.serving !== this.serving) {
-      await this.#apply(control.serving, `the control file: ${control.reason ?? 'changed'}`, false);
-    }
+    const text = await readText(this.#file);
+    if (text === null || text === this.#seen) return;
+    const control = parseControl(text);
+    if (control?.candidate !== this.#candidateId) return;
+    this.#seen = text;
+    // A person's word supersedes a write of the router's own that has not landed yet.
+    this.#unwritten = false;
+    if (control.serving !== this.serving) await this.#apply(control.serving, `the control file: ${control.reason ?? 'changed'}`, false);
   }
 
-  /** Stops watching the control file. */
+  /** Stops watching the control file, and trying a failed write again. */
   close() {
+    this.#closed = true;
     if (this.#watcher) unwatchFile(this.#file, this.#watcher);
     this.#watcher = null;
+    clearTimeout(this.#retry);
+    this.#retry = null;
   }
 }

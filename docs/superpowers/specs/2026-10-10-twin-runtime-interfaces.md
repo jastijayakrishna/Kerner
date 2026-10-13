@@ -198,6 +198,7 @@ Notes on the verdict:
 - **On start:** if the file names the same candidate and says `candidate`, the candidate serves. Otherwise the old version serves.
 - **While running:** the router checks the file every second with `fs.watchFile`, which does not keep the process alive. A person can switch by editing the file, or with `kern-twin serve old|candidate --state <dir>`. The file is read in the router's switch queue, so a read of older content can never undo a switch back made while it was in flight. The watcher never leaves a promise to reject, which would end the app's process.
 - **If the file cannot be read:** the last known value stays.
+- **If the file cannot be written:** serving changes anyway, and the write is counted in `writeErrors`. It is tried again every second, in turn with switches, until it lands, so a restart never brings back a candidate that was switched back. It is never written over a file a person changed since the router last wrote or read it: that change is the watcher's to follow. The text the router itself last wrote or read is never taken for a person's switch, so the file's older text cannot undo a switch whose write failed. (`writeControl(file, value)` answers the text it wrote.)
 - **If the twin fails:** when the twin's thread stops unexpectedly, the old version serves, and the file says why.
 - **A normal close:** `twin.close()` switches nothing, so a restart keeps a candidate that earned serving.
 

@@ -203,6 +203,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | Evidence | Cannot be written | None | `evidenceErrors` | Kept in memory and written at the next try |
 | Evidence | Damaged, or for other code | None | Checksum or candidate mismatch | Starts again; `evidence().note` says why |
 | Control file | Cannot be read | None | `readControl` answers null | The last known value stays |
+| Control file | Cannot be written | None | `writeErrors` | Serving changes anyway; the write is tried again every second until it lands, never over a person's newer edit; the file's older text is never taken for a person's switch |
 | Router | The new version cannot load in the app's thread | None | `switchTo` answers false | The old version keeps serving; `reason` says why |
 
 ## 9. Budgets

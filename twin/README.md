@@ -68,7 +68,7 @@ http.createServer(await twin.listener()).listen(3000);
 ## The state folder
 
 With `stateDir`, the twin keeps two files:
-- **`control.json`:** which version serves, whether switching on by itself is held, and when and why serving last changed. Edit it, or use `kern-twin serve`; a running twin follows within a second.
+- **`control.json`:** which version serves, whether switching on by itself is held, and when and why serving last changed. Edit it, or use `kern-twin serve`; a running twin follows within a second. If the twin cannot write it (a full disk, say), it tries again every second until it can, so a switch back is kept across a restart; it never writes over an edit a person made meanwhile.
 - **`evidence.json`:** the counts per segment and route for the current candidate, with a sha256 checksum. A damaged file, or one for other code, starts again and says why in `twin.evidence().note`.
 
 A candidate is named by its code: the sha256 of its package's code files, or `candidate.id`. Any change to the code starts its evidence again.
