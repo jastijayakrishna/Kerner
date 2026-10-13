@@ -116,7 +116,7 @@ test('a hand-written file saved with a byte order mark is read, and one that can
     const twin = { same: 1, stated: 0, different: 1, notCompared: 0, skipped: 0, compared: 2, judged: 2, share: 1, reasons: {} };
     writeFileSync(join(dir, 'demo-sample-1.json'), JSON.stringify({ app: 'demo', label: 'sample-1', latency: { count: 2, p50: 1, p90: 1, p99: 1, max: 1 }, rssMb: 1, peakRssMb: 1, twin, lines: {} }));
     writeFileSync(join(dir, 'demo-sample-1-differences.jsonl'), `${JSON.stringify({ route: 'POST /x', kinds: ['body'], pulls: [] })}\n`);
-    writeFileSync(join(dir, 'triage.json'), `﻿${JSON.stringify({ demo: [{ route: 'POST /x', kinds: ['body'], count: 1, verdict: 'meant', why: 'said so' }] })}`);
+    writeFileSync(join(dir, 'triage.json'), `\uFEFF${JSON.stringify({ demo: [{ route: 'POST /x', kinds: ['body'], count: 1, verdict: 'meant', why: 'said so' }] })}`);
     writeFileSync(join(dir, 'adoption.json'), '{ not json');
     const text = await report(dir);
     assert.ok(text.includes('| demo | 2 of 2 (100.0%) | 1 | 1 | 0 | 0 |'), text);
