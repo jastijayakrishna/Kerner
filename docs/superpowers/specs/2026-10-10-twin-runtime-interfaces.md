@@ -205,7 +205,7 @@ Notes on the verdict:
 ## 6. Evidence and the switch-on decision
 
 **`class Evidence`** runs in the twin thread:
-- `Evidence.open({ file, candidate, hashes })` loads `file` only if it is intact (valid JSON, version 1, matching sha256) and for the same candidate. Otherwise it starts empty and says why in `note`. Evidence never carries over from one candidate to another, not even to a fix (Phase 5 plan, decision 6).
+- `Evidence.open({ file, candidate, old, hashes })` loads `file` only if it is intact (valid JSON, version 1, matching sha256), for the same candidate, and gathered against the same old version (`old`, the old version's id: `settings.old.id ?? versionId(old.module, old.export)`, worked out in the twin thread beside the candidate's). Otherwise it starts empty and says why in `note`. Evidence never carries over from one candidate to another, not even to a fix (Phase 5 plan, decision 6), nor from one old version to another: every comparison was the candidate against one old version, and against a hotfix deployed as old it proves nothing. A file written before the old version was recorded names none, and counts as another old version. Without `old` (as `kern-twin status` opens it), the file is read whatever old version it names.
 - `add(verdict)` counts one verdict, including `skipped` ones.
 - `setLoadLines(keys)` (Phase 3) records the changed lines that ran while the versions loaded.
 - `snapshot()` returns a copy of the data.
@@ -216,7 +216,7 @@ The evidence file is `<stateDir>/evidence.json`:
 
 ```json
 {
-  "version": 1, "candidate": "<id>", "since": 1760000000000,
+  "version": 1, "candidate": "<id>", "old": "<the old version's id>", "since": 1760000000000,
   "segments": { "all": { "GET /users/:id": { "same": 0, "stated": 0, "different": 0, "notCompared": 0, "skipped": 0, "first": 0, "last": 0 } } },
   "unexplained": [ { "n": 1, "at": "...", "route": "...", "segment": "...", "serving": "old", "kinds": [], "details": [] } ],
   "lines": { "new:src/quota.js:2": { "hash": "<sha16 of the line text>", "touched": 0, "runs": 0, "clean": 0, "cover": "3321" } },

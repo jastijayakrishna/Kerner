@@ -131,7 +131,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 11. **Evidence is one small file, written whole with a checksum.**
     - Append-only lines would grow without bound and need compaction.
     - A whole file written through a temporary file and a rename is never half-written. Its sha256 makes a hand edit or a damaged file start again, never count.
-    - The evidence belongs to one candidate, named by its code, so trust never carries over to code it was not earned on.
+    - The evidence belongs to one candidate, named by its code, so trust never carries over to code it was not earned on. It is gathered against one old version, named the same way: against another old version (a hotfix deployed as old) the comparisons prove nothing, since the candidate may still have a bug the new old version fixed, so the evidence starts again.
 12. **Both versions in the app's process (Phase 2).**
     - Switching inside the process is instant: the next request goes to the other version, and switching back needs no deploy.
     - The cost: once the new version serves, two copies of the app live in one process. So `createApp` must start no background work and must load twice safely.
@@ -201,7 +201,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | Capture | The client aborts the request | None | `close` without `finish` | Counted as skipped |
 | Twin thread | Crashes, or stops | None | Worker `error` or `exit` | Twin off with the reason; if the new version was serving, the old one serves |
 | Evidence | Cannot be written | None | `evidenceErrors` | Kept in memory and written at the next try |
-| Evidence | Damaged, or for other code | None | Checksum or candidate mismatch | Starts again; `evidence().note` says why |
+| Evidence | Damaged, or for other code | None | Checksum, candidate or old version mismatch | Starts again; `evidence().note` says why |
 | Known cases | A case file is broken, or says it reproduces but lacks its request or recording | None | `readCase` throws | Listed in `known.unreadable`, which holds the candidate; the twin stays on |
 | Control file | Cannot be read | None | `readControl` answers null | The last known value stays |
 | Control file | Cannot be written | None | `writeErrors` | Serving changes anyway; the write is tried again every second until it lands, never over a person's newer edit; the file's older text is never taken for a person's switch |

@@ -234,7 +234,9 @@ async function close() {
 }
 
 try {
-  candidateId = settings.candidate.id ?? (await versionId(settings.candidate.module, settings.candidate.export));
+  // The evidence is this candidate against this old version: against another old version (a hotfix deployed as old) it proves nothing.
+  const [candidate, old] = await Promise.all([settings.candidate, settings.old].map((version) => version.id ?? versionId(version.module, version.export)));
+  candidateId = candidate;
   if (settings.manifest) {
     manifest = await loadManifest(settings.manifest);
     // A manifest describes one change: applied to other code, its line numbers would point at the wrong lines.
@@ -252,7 +254,7 @@ try {
     known,
   };
   const hashes = new Map(manifest ? [...manifest.lines].map(([key, line]) => [key, line.hash]) : []);
-  evidence = await Evidence.open({ file: settings.stateDir ? join(settings.stateDir, 'evidence.json') : null, candidate: candidateId, hashes });
+  evidence = await Evidence.open({ file: settings.stateDir ? join(settings.stateDir, 'evidence.json') : null, candidate: candidateId, old, hashes });
   coordinator = new Coordinator({
     ...settings,
     manifest,

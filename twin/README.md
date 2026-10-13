@@ -70,7 +70,7 @@ http.createServer(await twin.listener()).listen(3000);
 
 With `stateDir`, the twin keeps two files:
 - **`control.json`:** which version serves, whether switching on by itself is held, and when and why serving last changed. Edit it, or use `kern-twin serve`; a running twin follows within a second. If the twin cannot write it (a full disk, say), it tries again every second until it can, so a switch back is kept across a restart; it never writes over an edit a person made meanwhile.
-- **`evidence.json`:** the counts per segment and route for the current candidate, with a sha256 checksum. A damaged file, or one for other code, starts again and says why in `twin.evidence().note`.
+- **`evidence.json`:** the counts per segment and route for the current candidate against the current old version, with a sha256 checksum. A damaged file, or one for other code on either side (a hotfix deployed as the old version, say), starts again and says why in `twin.evidence().note`.
 
 A candidate is named by its code: the sha256 of its package's code, template and data files, or `candidate.id`. That covers JavaScript and TypeScript, JSON, SQL, GraphQL, Prisma, protobuf, YAML and TOML, templates (EJS, Handlebars, Pug, Mustache, Nunjucks, HTML and more), Vue, Svelte and Astro components, native add-ons and WebAssembly. It also covers the workspace packages linked into `node_modules` (pnpm, yarn or npm workspaces, `file:` dependencies), in the version's own `node_modules` and in those of the folders above it; installed packages are named by the lockfile. Any change to them starts its evidence again; files the app writes as it runs, such as logs and uploads, do not.
 

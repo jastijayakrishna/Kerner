@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Evidence } from '../src/evidence.js';
+import { Evidence, canonical } from '../src/evidence.js';
 import { T, verdict } from './verdicts.js';
 
 test('evidence counts every outcome per segment and route, and keeps the first unexplained differences', () => {
@@ -45,6 +46,31 @@ test('evidence survives a restart; a damaged file or another candidate\'s file s
     assert.deepEqual(damaged.snapshot().segments, {});
     writeFileSync(file, '{ not json');
     assert.match((await Evidence.open({ file, candidate: 'c1' })).note, /not JSON/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('evidence gathered against one old version starts again against another, and its note names the old version', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-evidence-'));
+  const file = join(dir, 'evidence.json');
+  try {
+    const first = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-a' });
+    for (let i = 0; i < 3; i++) first.add(verdict('same'));
+    await first.flush();
+    const again = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-a' });
+    assert.equal(again.note, null);
+    assert.equal(again.snapshot().segments.all['GET /users/:id'].same, 3);
+    // A hotfix deployed as the old version: comparisons against the version before it prove nothing about the candidate against this one.
+    const hotfixed = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-b' });
+    assert.match(hotfixed.note, /another old version \(sha256:old-a\).*sha256:old-b/);
+    assert.deepEqual(hotfixed.snapshot().segments, {});
+    // A file written before evidence named its old version is for an old version no one knows: it starts again too.
+    const { sha256, old, ...earlier } = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(file, JSON.stringify({ ...earlier, sha256: createHash('sha256').update(canonical(earlier)).digest('hex') }));
+    const unnamed = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-a' });
+    assert.match(unnamed.note, /another old version/);
+    assert.deepEqual(unnamed.snapshot().segments, {});
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

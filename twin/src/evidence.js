@@ -50,15 +50,18 @@ export class Evidence {
   errors = 0;
   data;
 
-  constructor({ file = null, candidate, hashes = new Map() }) {
+  constructor({ file = null, candidate, old = null, hashes = new Map() }) {
     this.#file = file;
     this.#hashes = hashes;
-    this.data = { version: 1, candidate, since: 0, segments: {}, unexplained: [], lines: {}, loadLines: [] };
+    this.data = { version: 1, candidate, old, since: 0, segments: {}, unexplained: [], lines: {}, loadLines: [] };
   }
 
-  /** The evidence for this candidate: what `file` holds if it is intact and for this candidate, else a fresh start with the reason. */
-  static async open({ file, candidate, hashes }) {
-    const evidence = new Evidence({ file, candidate, hashes });
+  /**
+   * The evidence for this candidate against this old version: what `file` holds if it is intact, for this candidate and gathered against
+   * this old version (`old`, its id), else a fresh start with the reason. Without `old`, any old version's evidence is read.
+   */
+  static async open({ file, candidate, old = null, hashes }) {
+    const evidence = new Evidence({ file, candidate, old, hashes });
     if (!file) return evidence;
     let text;
     try {
@@ -81,6 +84,13 @@ export class Evidence {
     }
     if (body.candidate !== candidate) {
       evidence.note = `the evidence file was for another candidate (${body.candidate}); started again`;
+      return evidence;
+    }
+    // Every comparison was this candidate against one old version. Against another (a hotfix deployed as old) they prove nothing: a bug
+    // the new old version fixed may still be in the candidate. A file that names no old version was written before this was kept, so
+    // its old version is unknown, and it starts again too.
+    if (old !== null && body.old !== old) {
+      evidence.note = `the evidence file was gathered against another old version (${body.old ?? 'not named'}), not ${old}; started again`;
       return evidence;
     }
     // A file written before Phase 3 has no line evidence yet.

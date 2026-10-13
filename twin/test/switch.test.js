@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { get, post, routed, until } from './helpers.js';
+import { app, get, post, routed, until } from './helpers.js';
 
 test('with switchOn auto, the new version starts serving after exactly ceil(3/ε) clean comparisons', async () => {
   const shop = await routed('refactor', { switchOn: 'auto', epsilon: 0.1, minHours: 0 });
@@ -46,6 +46,23 @@ test('a person switches serving with the control file, and a restart keeps the s
     assert.equal(second.twin.stats().serving, 'candidate', 'the switch survives a restart');
     assert.equal(second.twin.evidence().totals['*'].same, 5, 'so do the counts');
     assert.equal(second.twin.evidence().note, null);
+    await second.close();
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('evidence gathered against one old version does not carry over when another old version is deployed', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'kern-twin-state-'));
+  try {
+    const first = await routed('refactor', { stateDir });
+    for (let n = 1; n <= 5; n++) assert.equal(await get(`${first.url}/?n=${n}`), 200);
+    await first.twin.idle();
+    await first.close();
+    // The same candidate, now beside another old version (a hotfix deployed as old).
+    const second = await routed('refactor', { stateDir, old: app('broken', 'old') });
+    assert.equal(second.twin.evidence().totals['*'].same, 0, 'the comparisons against the version before prove nothing against this one');
+    assert.match(second.twin.evidence().note, /another old version/);
     await second.close();
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
