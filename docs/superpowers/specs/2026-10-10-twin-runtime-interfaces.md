@@ -172,7 +172,7 @@ Notes on the verdict:
 | `src/coverage.js` | `plausible`, `lineMasks`, `mappedMasks`, `decodeMappings`, `sourceMapOf`, `targetsOf`, `startCoverage`, `takeLines`; `isCode`, the rule for a code character, which `decide.js` reuses | 3 |
 | `src/manifest.js` | `lineHash`, `loadManifest`, `checkManifest`, `coveragePlan`, `checkRoots`, `attribute`, `acceptMatcher` | 3 |
 | `src/scrub.js` | `DEFAULT_SCRUB`, `scrubber(rules)`, `scrubCapture(capture, rules)` → `{ capture, opaque }` | 5 |
-| `src/cases.js` | `caseName(entry)`, `writeCase(dir, entry)`, `readCase(file)`, `runOf(saved)` | 5 |
+| `src/cases.js` | `caseName(entry)`, `writeCase(dir, entry)`, `readCase(file)`, `runOf(saved)`. `readCase` throws on a file that is not a case, and on a case that says it reproduces but lacks what running it again takes (section 9) | 5 |
 | `src/replay.js` | `replayCase(caseValue, version, settings)`: one version on one case, in a fresh sealed ghost | 5 |
 | `src/case-test.js` | The `node:test` file `kern-twin test` runs | 5 |
 | `src/feedback.js` | `DEFAULT_HUMANS`, `needsHuman(verdict, humans)`, `SCHEMA`, `toFeedback(cases, options)`, `forAgent(feedback)`, `commentBody(cases, head, options)` | 5 |
@@ -243,7 +243,7 @@ The evidence file is `<stateDir>/evidence.json`:
 - `failing`: cases that still show a difference.
 - `unchecked`: cases the ghosts could no longer compare.
 - `stubs`: differences only a person can judge, until that person removes the file.
-- `unreadable`: case files that could not be read.
+- `unreadable`: case files that could not be read, including a case that says it reproduces but lacks its world, request, recording or answers. One broken file holds the candidate; it never switches the twin off.
 
 **`decide(snapshot, policy, now)`** returns:
 
@@ -364,7 +364,7 @@ The fields:
 - **Bytes** anywhere in a case are `{ "$bytes": "<base64>" }`, and dates are `{ "$date": "<ISO>" }`.
 - **`adapters` and `overlay`** are the twin settings the case was recorded under; a replay uses them.
 - **`opaque`** names bodies the scrubber could not read (binary, or broken compression). They are kept as they were, so a person must look before the case is shared.
-- **`reproduces`** says whether the difference was seen again on the scrubbed copy.
+- **`reproduces`** says whether the difference was seen again on the scrubbed copy. A case with `reproduces: true` must hold `world` (`start` and `seed`, numbers), `request` (`method`, `url`, a `headers` object and body bytes), `io` (a list) and both answers, `old` and `new`; `readCase` refuses one that does not.
 - **A stub** is a case with `reproduces: false`. It has no `world`, `request`, `io`, `old`, `new` or `verdict`, only the route, the kinds and `why`. A person must look, and removes the file once done.
 - **`human`** is true when a person must decide (section 7, `humans`).
 

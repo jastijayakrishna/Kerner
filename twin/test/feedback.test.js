@@ -10,11 +10,16 @@ import { commentBody, forAgent, toFeedback } from '../src/feedback.js';
 
 const cli = fileURLToPath(new URL('../bin/kern-twin.js', import.meta.url));
 const base = { version: 1, candidate: 'sha256:abc', segment: 'all', adapters: ['fetch'], overlay: false, lines: {}, scrubbed: true, opaque: [] };
+// What a case that reproduces holds to run again: its world, request and recording, and both answers.
+const replayable = (method, url, oldStatus, newStatus) => ({
+  world: { start: 1, seed: 1 }, request: { method, url, headers: {}, body: new Uint8Array() }, io: [],
+  old: { status: oldStatus, headers: {}, body: new Uint8Array(), effects: [], events: [] }, new: { status: newStatus, headers: {}, body: new Uint8Array(), effects: [], events: [] },
+});
 const cases = [
-  { ...base, n: 1, time: 1, route: 'POST /limit', kinds: ['crash'], pulls: [103], cause: 103, human: false, reproduces: true,
+  { ...base, n: 1, time: 1, route: 'POST /limit', kinds: ['crash'], pulls: [103], cause: 103, human: false, reproduces: true, ...replayable('POST', '/limit', 200, 500),
     verdict: { kinds: ['crash'], details: [{ kind: 'crash', path: 'result', old: 'status 200', new: "uncaught TypeError: Cannot read properties of null (reading 'max')" }] },
     lines: { 'new:src/app.js:17': '1111' } },
-  { ...base, n: 2, time: 2, route: 'GET /admin', kinds: ['door-opened'], pulls: [], cause: null, human: true, reproduces: true,
+  { ...base, n: 2, time: 2, route: 'GET /admin', kinds: ['door-opened'], pulls: [], cause: null, human: true, reproduces: true, ...replayable('GET', '/admin', 401, 200),
     verdict: { kinds: ['door-opened'], details: [{ kind: 'door-opened', path: 'status', old: '401', new: '200' }] } },
   { ...base, n: 3, time: 3, route: 'POST /email', kinds: ['body'], pulls: [], cause: null, human: false, reproduces: false, why: 'the difference did not show again on the scrubbed copy: it may depend on a private value, so a person must look' },
 ];

@@ -97,6 +97,26 @@ test('a known difference only a person can judge, or a case file that cannot be 
   }
 });
 
+test('a case file that says it reproduces but holds no request is listed as unreadable and holds the candidate, and the twin stays on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-known-'));
+  try {
+    writeFileSync(join(dir, '1-1-post.json'), JSON.stringify({ version: 1, route: 'POST /', kinds: ['body'], reproduces: true }));
+    // The candidate is the old code itself, so nothing ever differs: only the known case can hold it.
+    const shop = await routed('emails', { ...watched(dir), candidate: app('emails', 'old') });
+    for (let i = 0; i < 6; i++) await (await post(shop.url, { email: `u${i}@example.com` })).arrayBuffer();
+    await shop.twin.idle();
+    assert.equal(shop.twin.stats().disabled, null, 'one broken file does not switch the twin off');
+    assert.deepEqual(shop.twin.evidence().known.unreadable, ['1-1-post.json']);
+    assert.equal(shop.twin.decision().ready, false);
+    assert.match(reasons(shop.twin), /1 known case file could not be read: 1-1-post\.json/);
+    assert.equal(shop.twin.stats().serving, 'old');
+    assert.equal(shop.twin.stats().same, 6, 'and the twin keeps comparing');
+    await shop.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('twin.idle() waits for the known cases to be checked, and for the switch the last check allows', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-known-'));
   const cases = join(dir, 'cases');

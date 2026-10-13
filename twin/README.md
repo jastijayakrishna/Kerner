@@ -173,7 +173,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 - **A known difference is never forgotten.** Before any later candidate may switch on, the twin runs every case on both versions, one at a time and in turn with real requests.
   - A case that still shows a difference holds it.
   - So does a stub, until a person has looked and removed its file.
-  - So does a case file that cannot be read.
+  - So does a case file that cannot be read, or that says it reproduces but lacks what running it again takes. One broken file never switches the twin off.
   - A case the twin can no longer run is only listed in `twin.evidence().known`. Live traffic must then prove that path.
   - `twin.idle()` also waits until the known cases are checked.
 - **A fix earns its evidence again.** It is a new candidate, and nothing carries over from the one it fixes. Code that did not change can still behave differently after a fix, through state the fixed code leaves behind for later requests.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { caseName, readCase, runOf, writeCase } from '../src/cases.js';
@@ -32,6 +32,40 @@ test('a case keeps bytes and dates as they were, and replays a version in a fres
     assert.equal(compareRuns(runOf(back.old), fixed).outcome, 'same', 'the old version answers as recorded');
     const broken = await replayCase(back, app('blank-field', 'new'));
     assert.ok(compareRuns(runOf(back.old), broken).kinds.includes('crash'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a case that says it reproduces cannot be read unless it holds all it needs to run again; a stub needs none of it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-cases-'));
+  let n = 0;
+  const saved = (value) => {
+    const file = join(dir, `case-${++n}.json`);
+    writeFileSync(file, JSON.stringify(value));
+    return file;
+  };
+  try {
+    const whole = {
+      version: 1, route: 'POST /', kinds: ['crash'], reproduces: true,
+      world: { start: 1760000000000, seed: 42 },
+      request: { method: 'POST', url: '/', headers: { 'content-type': 'application/json' }, body: { $bytes: 'e30=' } },
+      io: [], old: { status: 200, headers: {}, body: { $bytes: '' } }, new: { status: 500, headers: {}, body: null },
+    };
+    assert.equal((await readCase(saved(whole))).world.seed, 42);
+    const { world, ...worldless } = whole;
+    const broken = [
+      [worldless, /its world needs a start and a seed/],
+      [{ ...whole, world: { start: 1760000000000 } }, /its world needs a start and a seed/],
+      [{ ...whole, request: { method: 'POST', url: '/', headers: {} } }, /its request needs a method, a url, headers and body bytes/],
+      [{ ...whole, request: { ...whole.request, headers: [] } }, /its request needs a method, a url, headers and body bytes/],
+      [{ ...whole, io: null }, /its io must be a list of calls/],
+      [{ ...whole, old: undefined }, /it has no old answer/],
+      [{ ...whole, new: 'crashed' }, /it has no new answer/],
+    ];
+    for (const [value, why] of broken) await assert.rejects(readCase(saved(value)), why, JSON.stringify(value).slice(0, 120));
+    const stub = await readCase(saved({ version: 1, route: 'POST /', kinds: ['body'], reproduces: false, why: 'a person must look' }));
+    assert.equal(stub.reproduces, false, 'a stub holds no request, and is read as it is');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

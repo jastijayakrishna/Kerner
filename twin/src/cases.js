@@ -44,10 +44,30 @@ export async function writeCase(dir, entry) {
   return file;
 }
 
-/** Reads one case back, bytes and dates included. */
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/** What a case that reproduces lacks to run again on both ghosts, or null when it holds it all. */
+function lacking(value) {
+  const { world, request } = value;
+  if (!isObject(world) || !Number.isFinite(world.start) || !Number.isFinite(world.seed)) return 'its world needs a start and a seed (numbers)';
+  if (!isObject(request) || typeof request.method !== 'string' || typeof request.url !== 'string' || !isObject(request.headers) || !(request.body instanceof Uint8Array)) {
+    return 'its request needs a method, a url, headers and body bytes';
+  }
+  if (!Array.isArray(value.io)) return 'its io must be a list of calls';
+  if (!isObject(value.old)) return 'it has no old answer';
+  if (!isObject(value.new)) return 'it has no new answer';
+  return null;
+}
+
+/**
+ * Reads one case back, bytes and dates included. A file that is not a case, or a case that says it reproduces but lacks what running
+ * it again takes, cannot be read: the twin then lists it as unreadable, which holds the candidate, instead of failing inside.
+ */
 export async function readCase(file) {
   const value = JSON.parse(await readFile(file, 'utf8'), reviver);
   if (value?.version !== 1 || typeof value.route !== 'string') throw new Error(`${file} is not a Kern twin case (version 1)`);
+  const lack = value.reproduces ? lacking(value) : null;
+  if (lack) throw new Error(`${file} is a broken Kern twin case: ${lack}`);
   return { ...value, file };
 }
 
