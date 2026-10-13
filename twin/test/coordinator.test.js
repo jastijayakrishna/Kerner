@@ -47,6 +47,16 @@ test('a change that answers the same is counted as the same', async () => {
   await pair.close();
 });
 
+test('a known case on which both versions hang is not counted as passed: it was never compared', async () => {
+  // Both ghosts run the version that never answers.
+  const pair = new Coordinator({ ...options('hang'), old: app('hang', 'new'), timeoutMs: 300 });
+  await pair.start();
+  const judged = await pair.check({ ...served('/?n=3', { n: 3, total: 6 }), route: 'GET /' });
+  assert.equal(judged.outcome, 'not-compared', JSON.stringify(judged));
+  assert.deepEqual(judged.kinds, ['no-answer']);
+  await pair.close();
+});
+
 test('running ghosts never keep the app\'s process alive', () => {
   // An app that closes its server expects its process to end; ghosts that are still running must not hold it open.
   // The child runs from a file: ghosts inherit Node's flags, and --input-type (needed for -e) is refused for a ghost's file.

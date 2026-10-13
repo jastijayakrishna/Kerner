@@ -138,6 +138,7 @@ Notes on the verdict:
 - **The kinds of `crash`, `hang`, `door-opened`, `effects` and `refused`:** only a rule that names that kind can state them. A path rule never does.
 - **Something a ghost may not use** (a program, a connection no recording answers): reached for by the new code alone, it is `different` with kind `refused`, and nothing after it is compared. Reached for by both versions, or by the old one alone, the outcome is `not-compared` with kind `unsupported`, unless the writes already differ.
 - **A read the recording cannot answer:** when only one ghost makes it, the outcome is `not-compared` with kind `unanswered`, not "different". Its answer is unknown, so nothing after it can be compared. A write one version makes and the other does not is still "different".
+- **Neither ghost answered in time:** the outcome is `not-compared` with kind `no-answer`, unless the writes already differ. What either version would have answered is unknown, so a known case on which both versions hang is never counted as passed. Two ghosts that fail with the same error (the same uncaught error, say) are `same`: both versions ran the request and failed alike.
 - **What goes to disk is scrubbed (Phase 5):** the evidence's examples and the differences log get the verdict with its URL and shown values scrubbed. Only `differences()`, in memory, keeps the real values. `routeOf` treats a path segment with an `@` inside as an id, so no email reaches the disk in a route name.
 
 ## 4. Files and their exports

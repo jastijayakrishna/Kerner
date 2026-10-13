@@ -74,6 +74,12 @@ export function compareRuns(a, b) {
     return { outcome: 'not-compared', kinds: ['unanswered'], details: unanswered.slice(0, 5) };
   }
   if (a.error || b.error) {
+    // Neither ghost answered in time, so what either version would have answered is unknown: the request is not compared, unless the
+    // writes already differ. Two equal crashes are compared, and are the same: both versions failed alike on the same request.
+    if (a.timedOut && b.timedOut) {
+      if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
+      return { outcome: 'not-compared', kinds: ['no-answer'], details: [{ kind: 'no-answer', path: 'result', old: a.error, new: b.error }] };
+    }
     if (!a.error) add(b.timedOut ? 'hang' : 'crash', 'result', `status ${a.status}`, b.error);
     else if (!b.error) add('fixed', 'result', a.error, `status ${b.status}`);
     else if (a.error !== b.error) add('changed-error', 'result', a.error, b.error);

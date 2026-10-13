@@ -24,6 +24,20 @@ test('a server error or a thrown error where the old code answered is a crash; n
   assert.equal(compareRuns(run(200, {}), run(0, null, { error: 'no answer within 500 ms', timedOut: true })).kinds[0], 'hang');
 });
 
+test('two ghosts that both ran out of time are not compared: neither answered, so nothing is known of either', () => {
+  const hung = run(0, null, { error: 'no answer within 500 ms', timedOut: true });
+  assert.deepEqual(compareRuns(hung, hung), {
+    outcome: 'not-compared',
+    kinds: ['no-answer'],
+    details: [{ kind: 'no-answer', path: 'result', old: 'no answer within 500 ms', new: 'no answer within 500 ms' }],
+  });
+  const charge = 'POST https://pay.example/charge abc';
+  assert.deepEqual(compareRuns(hung, { ...hung, effects: [charge] }).kinds, ['effects'], 'a write only one of them made still differs');
+  // Two versions that fail the same way on the same request behave alike: that was compared, and it is the same.
+  const crashed = run(0, null, { error: 'uncaught TypeError: x' });
+  assert.equal(compareRuns(crashed, crashed).outcome, 'same');
+});
+
 test('a refused request that now succeeds is a door that opened', () => {
   assert.ok(compareRuns(run(401, { error: 'sign in first' }), run(200, { users: 3 })).kinds.includes('door-opened'));
 });
