@@ -1,5 +1,5 @@
 import { Worker } from 'node:worker_threads';
-import { answer, ask, ghostEnv } from './ghost-common.js';
+import { answer, ask, ghostEnv, stopped } from './ghost-common.js';
 import { startProcessGhost } from './process-ghost.js';
 
 export { ghostEnv };
@@ -8,7 +8,7 @@ const THREAD = new URL('./worker.js', import.meta.url);
 
 /**
  * Starts one ghost (one version of the app, sealed, waiting for requests) and resolves once that version has loaded. It answers
- * { kind, loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener) }.
+ * { kind, loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener), stopped() }.
  * `settings.kind` picks a thread ('thread', the default) or a process of its own ('process'). The other settings are
  * { startMs, memoryMb, ghostExecArgv, addons, coverage, adapters, overlay, realReads, sandbox, onRealRead }.
  */
@@ -62,6 +62,7 @@ export function startGhost(side, settings) {
         ask: (id, job, timeoutMs) => ask(worker, (m) => worker.postMessage(m), id, job, timeoutMs),
         terminate: () => worker.terminate(),
         onDirty: (listener) => dirty.push(listener),
+        stopped: () => stopped(worker),
       });
     };
     const onError = (error) => fail(error);

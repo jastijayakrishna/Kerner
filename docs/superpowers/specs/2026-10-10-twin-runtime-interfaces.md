@@ -85,7 +85,7 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 - Only lines with at least one `1` are listed.
 
 **Ghost → twin thread (other):**
-- `{ type: 'dirty' }`: this ghost's state may be broken, so the pair must restart.
+- `{ type: 'dirty' }`: this ghost's state may be broken, so the pair must restart. One that comes between two requests (an uncaught error in work a request left running) restarts the pair before the next request is asked, unless a ghost has stopped: a stopped ghost is asked all the same, answers at once that it had stopped, and the pair restarts after.
 - `{ type: 'load-lines', lines }` (Phase 3): the keys of the changed lines that ran while the app loaded. It is sent before `ready`.
 - `{ type: 'real-read', id, job, method, url, headers }` (Phase 4): a ghost asks for an allow-listed real read. The twin thread makes it once per request, and both ghosts get the same answer.
 
@@ -154,7 +154,7 @@ Notes on the verdict:
 | `src/ghost-core.js` | `runGhost(side, transport)`: one ghost, whatever carries its messages | 4 |
 | `src/worker.js` | The thread ghost's entry | 1; a thin transport around `ghost-core.js` from 4 |
 | `src/ghost-common.js` | `ghostEnv()`, `ask(ghost, post, id, job, timeoutMs)`, `answer(post, message, settings)`. `ask` of a ghost that has already stopped answers at once `{ error: 'the ghost had stopped before this request', exited: true, gone: true }` | 4 (`ghostEnv` moves here from `ghost.js`, which re-exports it) |
-| `src/ghost.js` | `ghostEnv()`, `startGhost(side, settings)` → `{ kind, ask(id, job, timeoutMs), terminate(), onDirty(fn), loadLines }` | 2; `loadLines` in 3; `settings.kind` `'process'` in 4 |
+| `src/ghost.js` | `ghostEnv()`, `startGhost(side, settings)` → `{ kind, ask(id, job, timeoutMs), terminate(), onDirty(fn), stopped(), loadLines }` | 2; `loadLines` in 3; `settings.kind` `'process'` in 4; `stopped()` (whether the ghost has ended) after 6 |
 | `src/process-ghost.js`, `src/process-ghost-main.js` | `ghostCommand(settings)`, `startProcessGhost(side, settings)`, with the same shape as `startGhost` | 4 |
 | `src/adapters/index.js` | `ADAPTERS`, `ADAPTER_NAMES` | 4 |
 | `src/adapters/http.js`, `pg.js`, `ioredis.js` | Each exports `{ kind, record(api), prepare?(api), replay(api) }` by default: `record` runs in the app's thread, `prepare` in a ghost before its seal, `replay` in a ghost after it | 4 |

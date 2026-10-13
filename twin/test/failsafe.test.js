@@ -116,6 +116,20 @@ test('a ghost that ended its own process after answering is named at once on the
   }
 });
 
+test('a ghost that ran out of memory after answering is still named on the next request', async () => {
+  const shop = await production('late-hog', { ghostMemoryMb: 64 });
+  assert.equal((await fetch(`${shop.url}/?n=2`)).status, 200);
+  await shop.twin.idle();
+  // The new version's background work fills its ghost's memory between two requests: the ghost reports a failure, and stops.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal((await fetch(`${shop.url}/?n=3`)).status, 200);
+  await shop.twin.idle();
+  const stats = shop.twin.stats();
+  assert.deepEqual(shop.twin.differences()[0]?.details[0], { kind: 'crash', path: 'result', old: 'status 200', new: 'the ghost had stopped before this request' }, JSON.stringify(stats));
+  assert.equal(stats.disabled, null);
+  await shop.close();
+});
+
 test('a request too large to copy is served and counted as skipped', async () => {
   const shop = await production('yen', { maxBodyBytes: 1024 });
   const answer = await post(shop.url, { amount: 1, currency: 'EUR', note: 'x'.repeat(4096) });

@@ -47,6 +47,25 @@ test('a change that answers the same is counted as the same', async () => {
   await pair.close();
 });
 
+test('a ghost that failed after it answered is restarted with its pair before the next request, so nothing is judged on what the failure left', async () => {
+  const pair = new Coordinator(options('late-crash'));
+  await pair.start();
+  // Each request's audit ends about 60 ms after its answer; the new version's then throws, between two requests.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 1000));
+  pair.submit(served('/', { open: 0 }));
+  await pair.idle();
+  await settle();
+  pair.submit(served('/', { open: 0 }));
+  await pair.idle();
+  assert.deepEqual([pair.counts.same, pair.counts.different], [2, 0], JSON.stringify(pair.differences()));
+  // A known case's check runs on the pair the same way.
+  await settle();
+  const judged = await pair.check({ ...served('/', { open: 0 }), route: 'GET /' });
+  assert.equal(judged.outcome, 'same', JSON.stringify(judged));
+  assert.equal(pair.counts.restarts, 2, 'once before the second request, once before the check');
+  await pair.close();
+});
+
 test('a known case on which both versions hang is not counted as passed: it was never compared', async () => {
   // Both ghosts run the version that never answers.
   const pair = new Coordinator({ ...options('hang'), old: app('hang', 'new'), timeoutMs: 300 });

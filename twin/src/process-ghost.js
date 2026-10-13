@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { answer, ask, ghostEnv } from './ghost-common.js';
+import { answer, ask, ghostEnv, stopped } from './ghost-common.js';
 
 const MAIN = fileURLToPath(new URL('./process-ghost-main.js', import.meta.url));
 // Node 22.13 named the permission model's flag --permission; Node 22.12 still calls it --experimental-permission.
@@ -75,6 +75,7 @@ export function startProcessGhost(side, settings) {
         ask: (id, job, timeoutMs) => ask(child, (m) => child.connected && child.send(m), id, job, timeoutMs),
         terminate: () => stop(child),
         onDirty: (listener) => dirty.push(listener),
+        stopped: () => stopped(child),
       });
     };
     const onError = (error) => fail(new Error(`could not start ${command} (${error.code ?? error.message})`));

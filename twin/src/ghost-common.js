@@ -9,7 +9,7 @@ export function ghostEnv() {
 }
 
 /** Whether a ghost has stopped: a Worker's threadId is -1 once its thread has ended, and a ChildProcess has its exit code or signal. */
-const stopped = (ghost) => ghost.threadId === -1 || (ghost.exitCode ?? null) !== null || (ghost.signalCode ?? null) !== null;
+export const stopped = (ghost) => ghost.threadId === -1 || (ghost.exitCode ?? null) !== null || (ghost.signalCode ?? null) !== null;
 
 /**
  * Sends one request to one ghost and answers its result, or why there is none. `ghost` is the Worker or the ChildProcess (both emit

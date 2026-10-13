@@ -192,6 +192,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | Recorder | Cannot copy a call or body | None | `record.problem` | That request is skipped and counted |
 | Ghost start | A version does not load | None | `spawn` rejects | Twin off, reason names the version and the error |
 | Ghost run | Uncaught error | None | `dirty` message or exit | Pair restarts; reported as a crash difference |
+| Ghost run | Uncaught error after its answer (in work the request left running) | None | `dirty` message between requests | The pair restarts before the next request is asked, so no request is judged on the state the error left; the error itself shows only as a restart |
 | Ghost run | Hangs | None | Timeout | Both terminated and restarted; reported as a hang |
 | Ghost run | Out of memory | None | Worker exit | Pair restarts |
 | Ghost run | Stops after its answer (work the request left running ends its process, or runs out of memory) | None | It has stopped when the next request is asked | That request names it at once, as a crash ("the ghost had stopped before this request"), never as a hang; the pair restarts |

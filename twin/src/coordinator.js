@@ -155,9 +155,22 @@ export class Coordinator {
     return this.#pair ? [...this.#pair.old.loadLines, ...this.#pair.candidate.loadLines] : [];
   }
 
+  /**
+   * Readies the pair before it is asked, and answers whether there is one.
+   * - A ghost that failed after its last answer (an uncaught error in work that request left running) may have left its app's state
+   *   broken: the pair restarts first, so no request is judged on that state.
+   * - A ghost that has stopped is asked all the same: it answers at once that it had stopped (ghost-common.js ask), the request's verdict
+   *   names that, and the pair restarts after. Restarting first would hide a version whose process ends after it answers.
+   */
+  async #ready() {
+    const pair = this.#pair;
+    if (pair && this.#dirty && !pair.old.stopped() && !pair.candidate.stopped()) await this.#restart();
+    return Boolean(this.#pair) && !this.disabled;
+  }
+
   /** Both ghosts on one more copy of a request (a scrubbed case being checked). Answers { old, candidate } runs, or null when the pair is gone. */
   async rerun(capture) {
-    if (!this.#pair) return null;
+    if (!(await this.#ready())) return null;
     const n = ++this.#seq;
     // A ghost counts the changed lines it ran since its last take: this run takes its own counts, and drops them, so the next real
     // request is not credited with lines only this copy ran.
@@ -227,7 +240,7 @@ export class Coordinator {
   }
 
   async #compare(capture) {
-    if (!this.#pair) return;
+    if (!(await this.#ready())) return;
     const n = ++this.#seq;
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
     const timeout = this.#options.timeoutMs;
