@@ -136,7 +136,13 @@ export class Router {
       try {
         this.#listeners.candidate = await load(this.#versions.candidate);
       } catch (error) {
+        // Serving stays old, and switching on by itself is held until a person switches the candidate on: trying again would run its
+        // factory in the app's thread on every verdict. The twin's thread, which asked for the switch believing it would happen, is
+        // told how things really stand, and the control file says why.
+        this.hold = true;
         this.reason = `the new version could not load in the app's thread: ${error.message}`.slice(0, 300);
+        this.#tell();
+        await this.#persist();
         return false;
       }
     }

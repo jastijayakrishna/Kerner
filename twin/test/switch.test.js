@@ -78,6 +78,30 @@ test('a new version that cannot load is never switched on, and the old one keeps
   await shop.close();
 });
 
+test("a new version that cannot load in the app's thread is tried once: the old version keeps serving, the reason says why, and the twin keeps comparing", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'kern-twin-state-'));
+  try {
+    const shop = await routed('ghost-only', { stateDir, switchOn: 'auto', epsilon: 0.5, minHours: 0 });
+    for (let n = 1; n <= 6; n++) assert.equal(await get(`${shop.url}/?n=${n}`), 200);
+    await shop.twin.idle();
+    assert.equal(globalThis.kernTwinMainThreadLoads, 1, 'the twin tried to switch it on');
+    assert.equal(shop.twin.stats().serving, 'old');
+    const control = JSON.parse(readFileSync(join(stateDir, 'control.json'), 'utf8'));
+    assert.deepEqual([control.serving, control.hold], ['old', true], 'switching on by itself is held');
+    assert.match(control.reason, /the new version could not load in the app's thread: this version cannot start in the app's thread/);
+    for (let n = 7; n <= 12; n++) assert.equal(await get(`${shop.url}/?n=${n}`), 200);
+    await shop.twin.idle();
+    assert.equal(shop.twin.stats().same, 12, 'the twin keeps comparing');
+    assert.equal(globalThis.kernTwinMainThreadLoads, 1, 'and does not try again by itself');
+    assert.equal(await shop.twin.serve('candidate', 'a person tries again'), false);
+    assert.equal(globalThis.kernTwinMainThreadLoads, 2, 'a person may try again');
+    assert.equal(shop.twin.stats().serving, 'old');
+    await shop.close();
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('a person who switches the new version off keeps it off, even where it would switch on by itself', async () => {
   const shop = await routed('refactor', { switchOn: 'auto', epsilon: 0.5, minHours: 0 });
   for (let n = 1; n <= 6; n++) await get(`${shop.url}/?n=${n}`);

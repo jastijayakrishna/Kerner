@@ -136,7 +136,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
     - Switching inside the process is instant: the next request goes to the other version, and switching back needs no deploy.
     - The cost: once the new version serves, two copies of the app live in one process. So `createApp` must start no background work and must load twice safely.
     - Apps that cannot do that use `wrap()` and switch with their deploy system, reading `kern-twin status`.
-13. **A switch back holds switching on by itself.** A person, or the twin itself, decided the old version should serve; the twin does not overrule that until a person switches the new version on again.
+13. **A switch back holds switching on by itself.** A person, or the twin itself, decided the old version should serve; the twin does not overrule that until a person switches the new version on again. A switch on that failed, because the new version could not load in the app's thread, holds too: trying again would run its factory in the app's thread on every verdict.
 14. **Changed lines are judged per character, across requests (Phase 3).** One request takes one branch, so a line with a ternary never runs in full in one request. Per code character the evidence counts the clean comparisons that ran it, and a line is proven when every character has run often enough. This keeps kern drive's rule (nothing left out) while adding runs up the way a ghost sees them.
 15. **The old side counts.** The lines a change removed or replaced must have run too: a branch only the old code had (the blank-field case) holds switch-on until real traffic has taken it.
 16. **Calls are matched by shape when their payload carries the clock (Phase 4).** A ghost's clock is frozen at the request's arrival, so an insert stamped with the time can never match the real run's exactly. The shape (method and address, query text, command and key) still does. Writes are checked against reality by shape and between the ghosts exactly.
@@ -204,7 +204,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | Evidence | Damaged, or for other code | None | Checksum or candidate mismatch | Starts again; `evidence().note` says why |
 | Control file | Cannot be read | None | `readControl` answers null | The last known value stays |
 | Control file | Cannot be written | None | `writeErrors` | Serving changes anyway; the write is tried again every second until it lands, never over a person's newer edit; the file's older text is never taken for a person's switch |
-| Router | The new version cannot load in the app's thread | None | `switchTo` answers false | The old version keeps serving; `reason` says why |
+| Router | The new version cannot load in the app's thread | None | `switchTo` answers false | The old version keeps serving; switching on by itself is held until a person switches it on; the twin's thread is told, and the control file says why |
 
 ## 9. Budgets
 

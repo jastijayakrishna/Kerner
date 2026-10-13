@@ -52,7 +52,7 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 **Main → twin thread:**
 - `{ type: 'capture', capture }`: one served, sampled request. Its shape is in section 3.
 - `{ type: 'skip', reason, route, segment, serving, start }`: a sampled request that could not be copied, or that was aborted.
-- `{ type: 'serving', side, reason, hold, router }`: serving changed, or a router now exists (`router: true`). `side` is `'old'` or `'candidate'`; `hold` is true after a switch back, so the twin thread does not switch on by itself.
+- `{ type: 'serving', side, reason, hold, router }`: serving changed, a router now exists (`router: true`), or a switch did not happen (the candidate could not load in the app's thread), so the twin thread, which may have asked for it, stays in step with the router. `side` is `'old'` or `'candidate'`; `hold` is true after a switch back or a failed switch on, so the twin thread does not switch on by itself.
 - `{ type: 'load', load: { start, seed, io } }` (Phase 6, `load: 'record'` only): the record of the old version's start in the app's thread. It is sent once, and the ghosts start only then. `wrap()` sends one with no calls.
 - `{ type: 'close' }`.
 
@@ -182,10 +182,10 @@ Notes on the verdict:
 
 **`class Router`** runs in the app's thread:
 - `Router.open({ old, candidate, candidateId, stateDir, onSwitch })` loads the old version's listener in the app's thread. It loads the candidate's listener only when serving first switches to it.
-- `onSwitch(side, reason, hold)` tells the twin's thread how serving stands, before the next request. If it throws, the switch still stands and is still written to the control file.
+- `onSwitch(side, reason, hold)` tells the twin's thread how serving stands, before the next request, after every switch and after a switch that did not happen. If it throws, the switch still stands and is still written to the control file.
 - `listener()` returns one request listener. It sends each request to the version serving at that moment and writes that side into the sampled request's record.
 - `serving` is `'old'` or `'candidate'`, and `reason` says why.
-- `switchTo(side, reason)` applies from the next request on. Switches happen one at a time, and so do the router's reads of the control file: a read comes after every switch asked for before it, and its write. A candidate that fails to load leaves serving at old, with the reason. The method answers whether the switch happened.
+- `switchTo(side, reason)` applies from the next request on. Switches happen one at a time, and so do the router's reads of the control file: a read comes after every switch asked for before it, and its write. A candidate that fails to load leaves serving at old, with the reason, and holds switching on by itself until a person switches the candidate on: trying again would run its factory in the app's thread on every verdict. `onSwitch` is told, and the control file says why. The method answers whether the switch happened.
 - `close()` stops watching the control file.
 
 **The control file** is `<stateDir>/control.json`. It is written atomically: a temporary file, then a rename.
@@ -194,7 +194,7 @@ Notes on the verdict:
 { "version": 1, "candidate": "<candidate id>", "serving": "old", "hold": false, "changedAt": "2026-10-10T12:00:00.000Z", "reason": "start" }
 ```
 
-- **`hold`:** true after any switch back to the old version. The twin then does not switch on by itself until a person switches the candidate on.
+- **`hold`:** true after any switch back to the old version, and after a switch to the candidate that failed because it could not load in the app's thread. The twin then does not switch on by itself until a person switches the candidate on.
 - **On start:** if the file names the same candidate and says `candidate`, the candidate serves. Otherwise the old version serves.
 - **While running:** the router checks the file every second with `fs.watchFile`, which does not keep the process alive. A person can switch by editing the file, or with `kern-twin serve old|candidate --state <dir>`. The file is read in the router's switch queue, so a read of older content can never undo a switch back made while it was in flight. The watcher never leaves a promise to reject, which would end the app's process.
 - **If the file cannot be read:** the last known value stays.
