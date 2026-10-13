@@ -13,7 +13,16 @@ const dir = process.env.KERN_TWIN_CASES;
 const candidate = { module: process.env.KERN_TWIN_CANDIDATE, export: process.env.KERN_TWIN_EXPORT || 'createApp' };
 
 for (const name of readdirSync(dir).filter((file) => file.endsWith('.json')).sort()) {
-  const value = await readCase(join(dir, name));
+  let value;
+  try {
+    value = await readCase(join(dir, name));
+  } catch (error) {
+    // A case that cannot be read fails as a test of its own, by name: it never passes quietly, and every other case still runs.
+    test(`${name}: could not be read`, () => {
+      throw error;
+    });
+    continue;
+  }
   if (!value.reproduces) {
     test(`${name}: ${value.route}`, { skip: value.why }, () => {});
     continue;
