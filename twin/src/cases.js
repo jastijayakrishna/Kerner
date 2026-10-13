@@ -53,7 +53,10 @@ function lacking(value) {
   if (!isObject(request) || typeof request.method !== 'string' || typeof request.url !== 'string' || !isObject(request.headers) || !(request.body instanceof Uint8Array)) {
     return 'its request needs a method, a url, headers and body bytes';
   }
-  if (!Array.isArray(value.io)) return 'its io must be a list of calls';
+  // Each recorded call is named by its kind and key, which the ghosts look it up by.
+  if (!Array.isArray(value.io) || !value.io.every((call) => isObject(call) && typeof call.kind === 'string' && typeof call.key === 'string')) {
+    return 'its io must be a list of calls, each with a kind and a key';
+  }
   if (!isObject(value.old)) return 'it has no old answer';
   if (!isObject(value.new)) return 'it has no new answer';
   return null;
@@ -66,6 +69,8 @@ function lacking(value) {
 export async function readCase(file) {
   const value = JSON.parse(await readFile(file, 'utf8'), reviver);
   if (value?.version !== 1 || typeof value.route !== 'string') throw new Error(`${file} is not a Kern twin case (version 1)`);
+  // Every case names its kinds: the feedback, the comment and the known-case check all read them.
+  if (!Array.isArray(value.kinds) || !value.kinds.every((kind) => typeof kind === 'string')) throw new Error(`${file} is a broken Kern twin case: its kinds must be a list of names`);
   const lack = value.reproduces ? lacking(value) : null;
   if (lack) throw new Error(`${file} is a broken Kern twin case: ${lack}`);
   return { ...value, file };

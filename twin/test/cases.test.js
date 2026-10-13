@@ -13,7 +13,7 @@ test('a case keeps bytes and dates as they were, and replays a version in a fres
   try {
     const body = new Uint8Array(Buffer.from('{"region":"","limits":null}'));
     const entry = {
-      version: 1, candidate: 'sha256:abc', n: 3, time: 1760000000000, route: 'POST /', segment: 'all', adapters: ['fetch'], overlay: false,
+      version: 1, candidate: 'sha256:abc', n: 3, time: 1760000000000, route: 'POST /', segment: 'all', adapters: ['fetch'], overlay: false, kinds: ['crash'],
       world: { start: 1760000000000, seed: 42 },
       request: { method: 'POST', url: '/', headers: { 'content-type': 'application/json' }, body },
       io: [{ kind: 'pg', key: 'PG x', write: false, text: 'x', values: [new Date(0), new Uint8Array([1, 2])], result: null, error: null }],
@@ -60,6 +60,10 @@ test('a case that says it reproduces cannot be read unless it holds all it needs
       [{ ...whole, request: { method: 'POST', url: '/', headers: {} } }, /its request needs a method, a url, headers and body bytes/],
       [{ ...whole, request: { ...whole.request, headers: [] } }, /its request needs a method, a url, headers and body bytes/],
       [{ ...whole, io: null }, /its io must be a list of calls/],
+      [{ ...whole, io: [null] }, /its io must be a list of calls/],
+      [{ ...whole, io: [{ kind: 'fetch' }] }, /its io must be a list of calls/],
+      [{ ...whole, kinds: undefined }, /its kinds must be a list of names/],
+      [{ version: 1, route: 'POST /', reproduces: false, why: 'a person must look' }, /its kinds must be a list of names/],
       [{ ...whole, old: undefined }, /it has no old answer/],
       [{ ...whole, new: 'crashed' }, /it has no new answer/],
     ];
