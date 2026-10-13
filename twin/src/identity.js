@@ -70,8 +70,18 @@ export async function versionId(file, exportName) {
       else if (SKIP.has(entry.name)) continue;
       else if (entry.isDirectory()) await walk(path, shown);
       else if (entry.isFile() && CODE.test(entry.name)) files.push([shown, path]);
+      else if (entry.isSymbolicLink()) await follow(path, shown);
       if (files.length > MOST_FILES) throw new Error(`more than ${MOST_FILES} code files under ${root} and the packages it links: give the candidate an id`);
     }
+  };
+  // A link inside the version (src/shared -> ../../shared) leads to code the app loads by a relative path: it is followed, unless it
+  // leads into an installed package. A link back to a folder already walked ends there.
+  const follow = async (path, shown) => {
+    const real = await realpath(path).catch(() => null);
+    if (!real || installed(real)) return;
+    const info = await stat(real).catch(() => null);
+    if (info?.isDirectory()) await walk(real, shown);
+    else if (info?.isFile() && CODE.test(real)) files.push([shown, real]);
   };
   const top = await realpath(root);
   await walk(top, '');

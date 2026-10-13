@@ -97,3 +97,24 @@ test("a version's name covers the workspace packages linked into node_modules, a
     rmSync(mono, { recursive: true, force: true });
   }
 });
+
+test("a version's name covers code its package links to from inside it, and a link that loops back ends", async () => {
+  // src/shared -> ../../shared: the app imports it by a relative path, so it is the version's code, though it lives outside the package.
+  const root = mkdtempSync(join(tmpdir(), 'kern-identity-'));
+  try {
+    const app = join(root, 'app');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'package.json'), '{"type":"module"}');
+    const entry = join(app, 'src', 'app.js');
+    writeFileSync(entry, "import { total } from './shared/total.js';\nexport const createApp = () => (req, res) => res.end(String(total));\n");
+    mkdirSync(join(root, 'shared'), { recursive: true });
+    writeFileSync(join(root, 'shared', 'total.js'), 'export const total = 1;\n');
+    symlinkSync(join(root, 'shared'), join(app, 'src', 'shared'), 'junction');
+    symlinkSync(app, join(root, 'shared', 'loop'), 'junction');
+    const before = await versionId(entry, 'createApp');
+    writeFileSync(join(root, 'shared', 'total.js'), 'export const total = 2;\n');
+    assert.notEqual(await versionId(entry, 'createApp'), before, 'a change in the linked code is a new version');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
