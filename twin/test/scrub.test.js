@@ -91,3 +91,26 @@ test('scrubbing takes time in proportion to the text, so a large body cannot sta
   const ms = performance.now() - started;
   assert.ok(ms < 2000, `took ${Math.round(ms)} ms`);
 });
+
+test('a body nested a hundred thousand deep is scrubbed in full, private names included, without running out of stack', () => {
+  // JSON.parse reads any depth. A scrubber that gave up on it would fall back to patterns alone, and a value under a private name
+  // (a password) would reach the disk as it was.
+  const deep = `${'['.repeat(100000)}"ada@corp.com"${']'.repeat(100000)}`;
+  const body = new Uint8Array(Buffer.from(`{"password":"hunter2","deep":${deep}}`));
+  const reply = JSON.parse(deep);
+  const capture = {
+    start: 1, seed: 2, route: 'POST /x', segment: 'all', serving: 'old',
+    request: { method: 'POST', url: '/x', headers: { 'content-type': 'application/json' }, body },
+    response: { status: 200, headers: {}, body: new Uint8Array() },
+    io: [{ kind: 'redis', key: 'REDIS EVALSHA - -', write: true, command: 'evalsha', args: [], reply, error: null }],
+    effects: [],
+  };
+  const { capture: out, opaque } = scrubCapture(capture, {});
+  assert.deepEqual(opaque, []);
+  const text = Buffer.from(out.request.body).toString();
+  assert.doesNotMatch(text, /hunter2|ada@corp\.com/);
+  assert.match(text, /^\{"password":"[a-z]{6}\d","deep":\[{100000}"user-[0-9a-f]{8}@example\.com"\]{100000}\}$/);
+  let inner = out.io[0].reply;
+  for (let i = 0; i < 100000; i++) inner = inner[0];
+  assert.match(inner, /^user-[0-9a-f]{8}@example\.com$/);
+});

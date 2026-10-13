@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { callKey, pgKey, redisKey } from './keys.js';
-import { decodeBody, exactBytes } from './serialize.js';
+import { decodeBody, exactBytes, jsonText } from './serialize.js';
 
 // Before a case leaves the twin, private values are replaced by stand-ins.
 // - The same value always gets the same stand-in within one case: an HMAC under a key that is thrown away. Nothing links one case's
@@ -90,13 +90,47 @@ export function scrubber(rules = {}) {
     const replaced = text(v);
     return sensitive && replaced === v ? shaped(v) : replaced;
   };
-  const value = (v, name = '') => {
+  const leaf = (v, name) => {
     const sensitive = keys.has(String(name).toLowerCase());
     if (typeof v === 'string') return scalar(v, sensitive);
     if (typeof v === 'number' && sensitive) return Number(shaped(String(v)));
-    if (Array.isArray(v)) return v.map((item) => value(item, name));
-    if (v === null || typeof v !== 'object' || v instanceof Uint8Array || v instanceof Date) return v;
-    return Object.fromEntries(Object.entries(v).map(([k, item]) => [k, value(item, k)]));
+    return v;
+  };
+  const container = (v) => v !== null && typeof v === 'object' && !(v instanceof Uint8Array) && !(v instanceof Date);
+  /**
+   * A value rebuilt with its private values replaced, at any depth: arrays and objects are walked with a stack of their own, never by
+   * recursion, so a body nested a hundred thousand deep is scrubbed in full. An array's items are judged by the array's own name (a list
+   * of tokens is a list of private values), an object's members by their names. A circle, which JSON cannot hold, is cut.
+   */
+  const value = (input, name = '') => {
+    if (!container(input)) return leaf(input, name);
+    const frame = (source, key, slot) => ({ source, key, slot, entries: Array.isArray(source) ? null : Object.entries(source), next: 0, items: [] });
+    const keep = (holder, slot, built) => (holder.entries ? holder.items.push([slot, built]) : holder.items.push(built));
+    const path = new Set([input]);
+    const stack = [frame(input, name, null)];
+    let result;
+    while (stack.length) {
+      const top = stack.at(-1);
+      const size = top.entries ? top.entries.length : top.source.length;
+      if (top.next >= size) {
+        stack.pop();
+        path.delete(top.source);
+        const built = top.entries ? Object.fromEntries(top.items) : top.items;
+        if (stack.length) keep(stack.at(-1), top.slot, built);
+        else result = built;
+        continue;
+      }
+      const i = top.next++;
+      const [slot, item] = top.entries ? top.entries[i] : [i, top.source[i]];
+      const key = top.entries ? slot : top.key;
+      if (!container(item)) keep(top, slot, leaf(item, key));
+      else if (path.has(item)) keep(top, slot, null);
+      else {
+        path.add(item);
+        stack.push(frame(item, key, slot));
+      }
+    }
+    return result;
   };
   // The content type is kept as it is: it holds nothing private, and a file upload's parts are found by the boundary it names.
   const headersOf = (list) => Object.fromEntries(Object.entries(list ?? {}).map(([name, v]) => {
@@ -164,7 +198,7 @@ export function scrubber(rules = {}) {
     const utf8 = plain.toString('utf8');
     if (type.includes('json') || /^\s*[[{]/.test(utf8)) {
       try {
-        return { bytes: exactBytes([Buffer.from(JSON.stringify(value(JSON.parse(utf8))))]), headers: out, opaque: false };
+        return { bytes: exactBytes([Buffer.from(jsonText(value(JSON.parse(utf8))))]), headers: out, opaque: false };
       } catch {
         // Not JSON after all: read as text below.
       }

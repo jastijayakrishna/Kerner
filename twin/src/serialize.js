@@ -108,15 +108,76 @@ export function exactBytes(parts) {
   return out;
 }
 
-/** A value that crossed between threads, where every Buffer became a Uint8Array, with its Buffers back (in place, deeply). */
+const container = (value) => value !== null && typeof value === 'object' && !(value instanceof Uint8Array) && !(value instanceof Date);
+
+/**
+ * A value that crossed between threads, where every Buffer became a Uint8Array, with its Buffers back: in place, at any depth (a list of
+ * what is left, not recursion), each array or object once.
+ */
 export function revive(value) {
   if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) value[i] = revive(value[i]);
-    return value;
-  }
-  if (value && typeof value === 'object' && !(value instanceof Date)) {
-    for (const key of Object.keys(value)) value[key] = revive(value[key]);
+  if (!container(value)) return value;
+  const seen = new Set([value]);
+  const left = [value];
+  while (left.length) {
+    const holder = left.pop();
+    for (const key of Array.isArray(holder) ? holder.keys() : Object.keys(holder)) {
+      const item = holder[key];
+      if (item instanceof Uint8Array) holder[key] = Buffer.from(item.buffer, item.byteOffset, item.byteLength);
+      else if (container(item) && !seen.has(item)) {
+        seen.add(item);
+        left.push(item);
+      }
+    }
   }
   return value;
+}
+
+/**
+ * The JSON text of a value, exactly as JSON.stringify writes it, at any depth: JSON.stringify gives up at a few thousand levels, so arrays
+ * and objects are written with a stack of their own. Plain values still go through JSON.stringify, so strings are escaped as it escapes them.
+ */
+export function jsonText(value) {
+  const parts = [];
+  const frames = [];
+  const resolved = (item, key) => (item !== null && typeof item === 'object' && typeof item.toJSON === 'function' ? item.toJSON(key) : item);
+  const absent = (item) => item === undefined || typeof item === 'function' || typeof item === 'symbol';
+  const open = (item) => {
+    if (Array.isArray(item)) {
+      parts.push('[');
+      frames.push({ item, names: null, next: 0, written: 0 });
+    } else if (item !== null && typeof item === 'object') {
+      parts.push('{');
+      frames.push({ item, names: Object.keys(item), next: 0, written: 0 });
+    } else parts.push(JSON.stringify(item));
+  };
+  const top = resolved(value, '');
+  if (absent(top)) return undefined;
+  open(top);
+  while (frames.length) {
+    const frame = frames.at(-1);
+    const size = frame.names ? frame.names.length : frame.item.length;
+    if (frame.next >= size) {
+      parts.push(frame.names ? '}' : ']');
+      frames.pop();
+      continue;
+    }
+    const i = frame.next++;
+    if (!frame.names) {
+      // In an array, what JSON cannot write is written as null.
+      if (i > 0) parts.push(',');
+      const item = resolved(frame.item[i], String(i));
+      if (absent(item)) parts.push('null');
+      else open(item);
+      continue;
+    }
+    // In an object, a member JSON cannot write is left out.
+    const name = frame.names[i];
+    const item = resolved(frame.item[name], name);
+    if (absent(item)) continue;
+    if (frame.written++ > 0) parts.push(',');
+    parts.push(`${JSON.stringify(name)}:`);
+    open(item);
+  }
+  return parts.join('');
 }

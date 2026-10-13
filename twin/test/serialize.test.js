@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
-import { diffValues, readBody, preview } from '../src/serialize.js';
+import { diffValues, jsonText, readBody, preview, revive } from '../src/serialize.js';
 import { callKey, isWrite, digest } from '../src/keys.js';
 
 test('differences are named by their path', () => {
@@ -60,4 +60,18 @@ test('a call has the same name everywhere, and only reads are not writes', () =>
   assert.equal(callKey('GET', 'https://api.example/x', Buffer.alloc(0)), 'GET https://api.example/x -');
   assert.equal(isWrite('GET'), false);
   assert.equal(isWrite('delete'), true);
+});
+
+test('JSON text of a value is what JSON.stringify writes, at any depth', () => {
+  for (const value of [{ b: [1, 'x', null, true, { c: 2.5 }], a: -0, s: 'a"b\n\u2028' }, [], {}, 'plain', 7, null, [undefined, () => 1], { u: undefined, d: new Date(0) }]) {
+    assert.equal(jsonText(value), JSON.stringify(value), JSON.stringify(value));
+  }
+  assert.equal(jsonText(nested(100000, 1)), `${'['.repeat(100000)}1${']'.repeat(100000)}`);
+});
+
+test('values that crossed threads get their Buffers back at any depth', () => {
+  const value = nested(100000, new Uint8Array([1, 2]));
+  let inner = revive(value);
+  for (let i = 0; i < 100000; i++) inner = inner[0];
+  assert.ok(Buffer.isBuffer(inner));
 });
