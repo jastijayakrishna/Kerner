@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { callKey, isWrite, readAllowed } from '../keys.js';
 import { exactBytes } from '../serialize.js';
 import { mine, owner, turnOf, turnText, within } from '../turn.js';
+import { CALL_BYTES, spend } from '../capture.js';
 
 // node:http and node:https clients.
 // - In the app's thread, every client request made while serving a sampled request is written down: what was asked and what came back,
@@ -57,13 +58,16 @@ function plainHeaders(headers) {
 }
 
 /** Writes down one client request of a sampled request: its body as it is written, and its answer as the HTTP parser hands it over. */
-function watch(sampled, req, scheme, maxBodyBytes) {
+function watch(sampled, req, scheme, installedLimit) {
+  // The limit of the twin whose request this is: node:http is patched once per process, by the first twin.
+  const maxBodyBytes = sampled.maxBodyBytes ?? installedLimit;
   const method = String(req.method ?? 'GET').toUpperCase();
   // Named by the Host header Node sends (the app's own, or Node's: an IPv6 host in brackets, a port that is not the scheme's own). With
   // none, the bare host, an IPv6 one in brackets too. addressOf() names a ghost's call the same way.
   const url = `${req.protocol ?? scheme}//${req.getHeader('host') ?? bracketed(String(req.host))}${req.path}`;
   const call = { kind: 'http', key: callKey(method, url, null), method, url, write: isWrite(method), sent: new Uint8Array(), status: 0, headers: {}, body: null, error: null };
   sampled.io.push(call);
+  spend(sampled, CALL_BYTES);
   let settle;
   const tracked = new Promise((resolve) => {
     settle = resolve;
@@ -85,7 +89,10 @@ function watch(sampled, req, scheme, maxBodyBytes) {
     }
     size += bytes.length;
     if (size > maxBodyBytes) sampled.problem ??= 'an outgoing request with a body over the limit';
-    else sent.push(Buffer.from(bytes));
+    else {
+      sent.push(Buffer.from(bytes));
+      spend(sampled, bytes.length);
+    }
   };
   const { write, end, emit } = req;
   req.write = function (chunk, encoding, callback) {
@@ -122,7 +129,10 @@ function watch(sampled, req, scheme, maxBodyBytes) {
           const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
           total += bytes.length;
           if (total > maxBodyBytes) sampled.problem ??= 'an outgoing call answered with a body over the limit';
-          else parts.push(Buffer.from(bytes));
+          else {
+            parts.push(Buffer.from(bytes));
+            spend(sampled, bytes.length);
+          }
         }
       } catch {
         sampled.problem ??= "an outgoing call's answer could not be copied";

@@ -1,6 +1,7 @@
 import { pgIsWrite, pgKey } from '../keys.js';
 import { revive } from '../serialize.js';
 import { mine, never } from '../turn.js';
+import { CALL_BYTES, spend } from '../capture.js';
 
 // node-postgres (pg).
 // - In the app's thread, every query of a sampled request is written down at Client.prototype.query, which Pool.query goes through
@@ -44,6 +45,8 @@ function record({ appRequire, current, maxBodyBytes }) {
     }
     const given = typeof values === 'function' ? undefined : values;
     const done = typeof values === 'function' ? values : callback;
+    // The limit of the twin whose request this is: pg is patched once per process, by the first twin.
+    const limit = sampled.maxBodyBytes ?? maxBodyBytes;
     let call;
     try {
       const text = typeof config === 'string' ? config : String(config.text ?? '');
@@ -56,6 +59,7 @@ function record({ appRequire, current, maxBodyBytes }) {
       return query.call(this, config, values, callback);
     }
     sampled.io.push(call);
+    spend(sampled, CALL_BYTES);
     let settle;
     const tracked = new Promise((resolve) => {
       settle = resolve;
@@ -67,7 +71,9 @@ function record({ appRequire, current, maxBodyBytes }) {
         if (error) call.error = errorOf(error);
         else {
           call.result = resultOf(result);
-          if (sizeOf(call.result) > maxBodyBytes) sampled.problem ??= 'a Postgres result over the limit';
+          const size = sizeOf(call.result);
+          if (size > limit) sampled.problem ??= 'a Postgres result over the limit';
+          else spend(sampled, size);
         }
       } catch {
         sampled.problem ??= 'a Postgres result Kern could not copy';

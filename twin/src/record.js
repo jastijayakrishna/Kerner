@@ -1,4 +1,4 @@
-import { current } from './capture.js';
+import { CALL_BYTES, current, spend } from './capture.js';
 import { callKey, isWrite } from './keys.js';
 import { exactBytes } from './serialize.js';
 
@@ -34,7 +34,9 @@ export function recordFetch(maxBodyBytes) {
   };
 }
 
-async function recorded(record, realFetch, input, init, maxBodyBytes) {
+async function recorded(record, realFetch, input, init, installedLimit) {
+  // The limit of the twin whose request this is: fetch is patched once per process, by the first twin.
+  const maxBodyBytes = record.maxBodyBytes ?? installedLimit;
   // The copy is complete only once the answer has been read to the end; finish() waits for this, a little.
   let settle;
   const tracked = new Promise((resolve) => {
@@ -64,6 +66,7 @@ async function recorded(record, realFetch, input, init, maxBodyBytes) {
   // `sent` is what the app sent: Phase 5 scrubs it and names the call again from the scrubbed copy.
   const call = { kind: 'fetch', key: callKey(method, request.url, body), method, url: request.url, write: isWrite(method), sent: exactBytes([body]), status: 0, headers: {}, body: null, error: null };
   record.io.push(call);
+  spend(record, CALL_BYTES + body.length);
   let response;
   try {
     response = await realFetch(request);
@@ -82,7 +85,10 @@ async function recorded(record, realFetch, input, init, maxBodyBytes) {
   readCapped(response.clone().body, maxBodyBytes).then(
     (copy) => {
       if (copy === null) record.problem ??= 'an outgoing call answered with a body over the limit';
-      else call.body = exactBytes([copy]);
+      else {
+        call.body = exactBytes([copy]);
+        spend(record, copy.length);
+      }
     },
     () => {
       record.problem ??= 'an outgoing call\'s answer could not be copied';

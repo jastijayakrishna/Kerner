@@ -6,6 +6,19 @@ import { routeOf } from './route.js';
 /** The record of the sampled request being served, so the calls the app makes while serving it are written down with it. */
 export const current = new AsyncLocalStorage();
 
+// What one request may copy in all: its body, its answer and every call it makes, each call counting at least CALL_BYTES beside its bodies
+// (what keeping it costs). Each body has its own cap, maxBodyBytes; without this one, a request that fans out to many calls, however
+// small, could hold any amount of the app's memory (R7).
+const BUDGET_BODIES = 8;
+export const CALL_BYTES = 1024;
+const budgetOf = (maxBodyBytes) => BUDGET_BODIES * maxBodyBytes;
+
+/** Counts what a request's copies take; past its budget, the request is skipped. */
+export function spend(record, bytes) {
+  record.spent += bytes;
+  if (record.spent > record.budget) record.problem ??= `copies of more than ${record.budget} bytes in all (${BUDGET_BODIES} times maxBodyBytes; a call counts at least ${CALL_BYTES} bytes)`;
+}
+
 // Headers about the connection, not the request; the ghost's own connection sets its own.
 const HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'content-length'];
 
@@ -60,7 +73,7 @@ function begin(req, res, maxBodyBytes, deliver, describe) {
     // routing and may not restore it, so these are read now, before the app runs, not when the answer is recorded.
     method: req.method, url: req.url,
     start: Date.now(), seed: randomInt(2 ** 31), io: [], pending: new Set(), serving: 'old',
-    incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false,
+    incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false, spent: 0, budget: budgetOf(maxBodyBytes), maxBodyBytes,
   };
   const copy = (side, chunk, encoding) => {
     try {
@@ -69,7 +82,10 @@ function begin(req, res, maxBodyBytes, deliver, describe) {
       if (!bytes) return;
       record.sizes[side] += bytes.length;
       if (record.sizes[side] > maxBodyBytes) record.problem = `a body over ${maxBodyBytes} bytes`;
-      else record[side].push(Buffer.from(bytes));
+      else {
+        record[side].push(Buffer.from(bytes));
+        spend(record, bytes.length);
+      }
     } catch {
       record.problem ??= 'a body Kern could not copy';
     }
@@ -162,10 +178,10 @@ async function finish(req, res, record, describe) {
  * A record for the app's start (Phase 6): the calls the old version makes while it loads in the app's thread are written down into it
  * exactly as a sampled request's are, by the same recorders.
  */
-export function loadRecord() {
+export function loadRecord(maxBodyBytes = 1 << 20) {
   return {
     start: Date.now(), seed: randomInt(2 ** 31), io: [], pending: new Set(), serving: 'old',
-    incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false,
+    incoming: [], outgoing: [], sizes: { incoming: 0, outgoing: 0 }, head: null, problem: null, done: false, spent: 0, budget: budgetOf(maxBodyBytes), maxBodyBytes,
   };
 }
 

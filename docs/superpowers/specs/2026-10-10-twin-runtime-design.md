@@ -218,7 +218,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
   - after the answer: one `setImmediate`, then one `postMessage` of exact bytes to the twin's thread.
 - **The twin's thread:** at most 512 MiB of heap; all comparing, counting and deciding.
 - **Ghosts:** two threads, each capped at `ghostMemoryMb`, one request at a time. Each hands over at most `maxBodyBytes` of an answer; past it, only the answer's size and sha256, so a candidate that dumps a table cannot fill the twin's thread.
-- **Memory held:** at most `queueLimit` × (two bodies plus recordings).
+- **Memory held:** at most `queueLimit` × 8 × `maxBodyBytes`. Each request's copies together (its body, its answer and every call it makes, a call counting at least 1 KiB beside its bodies) are capped at 8 × `maxBodyBytes`; a request past that is skipped.
 - **Measured cost:** recorded by Phase 1 Task 9 in `twin/README.md`, measured, not guessed.
 
 ## 10. What it does not do yet

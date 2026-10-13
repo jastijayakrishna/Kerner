@@ -200,3 +200,51 @@ test('an answer nested fifty thousand levels deep is judged like any other, and 
   assert.equal(stats.same, 1, JSON.stringify(stats));
   await shop.close();
 });
+
+test('a request whose copies come to more than eight times maxBodyBytes in all is skipped, though each is small enough, and the customer served', async () => {
+  // Each answer is under maxBodyBytes; ten of them, or six hundred tiny calls (each counting at least 1 KiB), are not: R7 bounds what
+  // one request may hold in the app's memory, not only each body.
+  const data = await listen((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    res.end(req.url.startsWith('/flag/') ? '1' : Buffer.alloc(60 * 1024, 1));
+  });
+  process.env.KERN_TEST_DATA = data.url;
+  try {
+    for (const [name, answer] of [['fan-out', { size: 10 * 60 * 1024 }], ['chatty', { on: 600 }]]) {
+      const shop = await production(name, { maxBodyBytes: 64 * 1024 });
+      assert.deepEqual(await (await fetch(shop.url)).json(), answer);
+      await shop.twin.idle();
+      const stats = shop.twin.stats();
+      assert.equal(stats.skipped, 1, `${name}: ${JSON.stringify(stats)}`);
+      assert.ok(Object.keys(stats.reasons).some((reason) => /copies of more than 524288 bytes in all/.test(reason)), `${name}: ${JSON.stringify(stats.reasons)}`);
+      await shop.close();
+    }
+  } finally {
+    delete process.env.KERN_TEST_DATA;
+    await data.close();
+  }
+});
+
+test("each twin's maxBodyBytes holds for its own requests, though an earlier twin in the process patched the recorders", async () => {
+  // fetch, node:http, pg and ioredis are patched once per process; the limit must still be the twin's whose request it is.
+  const data = await listen((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    res.end(Buffer.alloc(8 * 1024, 1));
+  });
+  process.env.KERN_TEST_DATA = data.url;
+  try {
+    const small = await production('fan-out', { maxBodyBytes: 1024 });
+    await (await fetch(small.url)).arrayBuffer();
+    await small.twin.idle();
+    assert.equal(small.twin.stats().skipped, 1, 'over the first twin\'s 1 KiB');
+    await small.close();
+    const large = await production('fan-out', { maxBodyBytes: 64 * 1024 });
+    await (await fetch(large.url)).arrayBuffer();
+    await large.twin.idle();
+    assert.equal(large.twin.stats().same, 1, JSON.stringify(large.twin.stats()));
+    await large.close();
+  } finally {
+    delete process.env.KERN_TEST_DATA;
+    await data.close();
+  }
+});

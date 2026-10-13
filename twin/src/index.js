@@ -397,7 +397,7 @@ class Twin {
       });
       // With load 'record', the old version starts inside a record of its own: every call it makes while starting is written down,
       // and the ghosts start from those answers.
-      const record = this.#settings.load === 'record' && this.#thread && !this.#disabled ? loadRecord() : null;
+      const record = this.#settings.load === 'record' && this.#thread && !this.#disabled ? loadRecord(this.#settings.maxBodyBytes) : null;
       this.#router = record ? await current.run(record, open) : await open();
       if (record) this.#sendLoad(await settleLoad(record));
       this.#tell({ type: 'serving', side: this.#router.serving, reason: this.#router.reason, hold: this.#router.hold, router: true });

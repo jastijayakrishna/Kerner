@@ -1,6 +1,7 @@
 import { redisIsWrite, redisKey } from '../keys.js';
 import { revive } from '../serialize.js';
 import { mine } from '../turn.js';
+import { CALL_BYTES, spend } from '../capture.js';
 
 // ioredis.
 // - In the app's thread, every command of a sampled request is written down at Redis.prototype.sendCommand (pipelines and transactions
@@ -14,12 +15,15 @@ const WATCHED = Symbol.for('kern.twin.ioredis.command');
 const redisOf = (module) => module.default ?? module.Redis ?? module;
 
 /** Writes down one command and its raw reply. A command sent again (from the offline queue) is written down once. */
-function watch(sampled, command, maxBodyBytes) {
+function watch(sampled, command, installedLimit) {
+  // The limit of the twin whose request this is: ioredis is patched once per process, by the first twin.
+  const maxBodyBytes = sampled.maxBodyBytes ?? installedLimit;
   const args = [...(command.args ?? [])];
   // Named before anything is changed: a command that cannot be named (an argument with no text form) is left exactly as it was.
   const call = { kind: 'redis', key: redisKey(command.name, args), write: redisIsWrite(command.name), command: String(command.name), args, reply: null, error: null };
   command[WATCHED] = true;
   sampled.io.push(call);
+  spend(sampled, CALL_BYTES);
   let settle;
   const tracked = new Promise((resolve) => {
     settle = resolve;
@@ -30,7 +34,9 @@ function watch(sampled, command, maxBodyBytes) {
   command.resolve = (value) => {
     call.reply = value;
     try {
-      if (Buffer.byteLength(JSON.stringify(value) ?? '') > maxBodyBytes) sampled.problem ??= 'a Redis reply over the limit';
+      const size = Buffer.byteLength(JSON.stringify(value) ?? '');
+      if (size > maxBodyBytes) sampled.problem ??= 'a Redis reply over the limit';
+      else spend(sampled, size);
     } catch {
       // A reply JSON cannot show is still copied between threads as it is.
     }
