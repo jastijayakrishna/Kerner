@@ -13,7 +13,22 @@ import { mine, owner, turnOf, turnText, within } from '../turn.js';
 const PATCHED = Symbol.for('kern.twin.http');
 const HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length', 'proxy-connection', 'te', 'trailer', 'upgrade']);
 
-/** Where a client request goes, as the recording names it: protocol, host, port (when not the default) and path. */
+/** An IPv6 address in brackets, as Node writes one in a Host header; any other host as it is. */
+const bracketed = (host) => (/:.*:/.test(host) && !host.startsWith('[') ? `[${host}]` : host);
+
+/** The Host header the app set itself, in headers given as an object, or null. */
+function hostHeader(headers) {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return null;
+  const name = Object.keys(headers).find((key) => key.toLowerCase() === 'host');
+  return name === undefined || headers[name] == null ? null : String(headers[name]);
+}
+
+/**
+ * Where a client request goes, named as the recorder names it (watch()): the protocol, the Host header Node sends, and the path. That is
+ * the app's own Host header when it set one (a virtual host, a signed request); else the host, in brackets when it is an IPv6 address,
+ * with the port when it is not the scheme's own. With setHost: false, or headers given as a list, Node writes no Host header of its own,
+ * and the recorder takes the bare host.
+ */
 function addressOf(scheme, args) {
   let url = null;
   let options = {};
@@ -23,12 +38,16 @@ function addressOf(scheme, args) {
     else if (typeof arg === 'string' || arg instanceof URL) url = new URL(String(arg));
     else if (arg && typeof arg === 'object') options = { ...options, ...arg };
   }
-  const protocol = options.protocol ?? url?.protocol ?? scheme;
-  const host = options.hostname ?? (options.host ? String(options.host).replace(/:\d+$/, '') : null) ?? url?.hostname ?? 'localhost';
-  const port = String(options.port ?? url?.port ?? '');
-  const path = options.path ?? (url ? `${url.pathname}${url.search}` : '/');
-  const usual = (protocol === 'http:' && port === '80') || (protocol === 'https:' && port === '443');
-  return { url: `${protocol}//${host}${port && !usual ? `:${port}` : ''}${path}`, method: String(options.method ?? 'GET').toUpperCase(), headers: options.headers ?? {}, options, callback };
+  // As Node reads its arguments: an address's parts first (its host without brackets), the options over them.
+  const parts = url ? { protocol: url.protocol, hostname: url.hostname.replace(/^\[(.*)\]$/, '$1'), port: url.port || undefined, path: `${url.pathname}${url.search}` } : {};
+  const merged = { ...parts, ...options };
+  const protocol = merged.protocol ?? scheme;
+  const host = bracketed(String(merged.hostname || merged.host || 'localhost'));
+  const defaultPort = Number(merged.defaultPort || merged.agent?.defaultPort || (protocol === 'https:' ? 443 : 80));
+  const port = Number(merged.port || defaultPort);
+  const bare = merged.setHost === false || Array.isArray(merged.headers);
+  const authority = hostHeader(merged.headers) ?? (bare || port === defaultPort ? host : `${host}:${port}`);
+  return { url: `${protocol}//${authority}${merged.path ?? '/'}`, method: String(merged.method ?? 'GET').toUpperCase(), headers: merged.headers ?? {}, options: merged, callback };
 }
 
 function plainHeaders(headers) {
@@ -40,7 +59,9 @@ function plainHeaders(headers) {
 /** Writes down one client request of a sampled request: its body as it is written, and its answer as the HTTP parser hands it over. */
 function watch(sampled, req, scheme, maxBodyBytes) {
   const method = String(req.method ?? 'GET').toUpperCase();
-  const url = `${req.protocol ?? scheme}//${req.getHeader('host') ?? req.host}${req.path}`;
+  // Named by the Host header Node sends (the app's own, or Node's: an IPv6 host in brackets, a port that is not the scheme's own). With
+  // none, the bare host, an IPv6 one in brackets too. addressOf() names a ghost's call the same way.
+  const url = `${req.protocol ?? scheme}//${req.getHeader('host') ?? bracketed(String(req.host))}${req.path}`;
   const call = { kind: 'http', key: callKey(method, url, null), method, url, write: isWrite(method), sent: new Uint8Array(), status: 0, headers: {}, body: null, error: null };
   sampled.io.push(call);
   let settle;
@@ -53,7 +74,15 @@ function watch(sampled, req, scheme, maxBodyBytes) {
   let size = 0;
   const keep = (chunk, encoding) => {
     if (chunk == null || typeof chunk === 'function') return;
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+    let bytes;
+    try {
+      bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+    } catch {
+      // A chunk Node's own write refuses with its own error (a number), or takes without a word (an encoding it does not know): the app
+      // must see exactly that, so the copy only notes that this body could not be copied, and the request is skipped.
+      sampled.problem ??= "an outgoing request's body could not be copied";
+      return;
+    }
     size += bytes.length;
     if (size > maxBodyBytes) sampled.problem ??= 'an outgoing request with a body over the limit';
     else sent.push(Buffer.from(bytes));

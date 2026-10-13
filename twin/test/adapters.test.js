@@ -1,16 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { listen, production } from './helpers.js';
 
-async function upstream(counts) {
-  return listen((req, res) => {
-    counts[req.url] = (counts[req.url] ?? 0) + 1;
-    req.resume();
-    req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(req.url === '/rate' ? '{"rate":2}' : '{"ok":true}');
-    });
+const answering = (counts) => (req, res) => {
+  counts[req.url] = (counts[req.url] ?? 0) + 1;
+  req.resume();
+  req.on('end', () => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(req.url === '/rate' ? '{"rate":2}' : '{"ok":true}');
   });
+};
+
+async function upstream(counts) {
+  return listen(answering(counts));
+}
+
+/** The same upstream on IPv6's loopback address, or null on a machine without one. */
+async function upstreamSix(counts) {
+  const server = http.createServer(answering(counts));
+  const listening = await new Promise((resolve) => {
+    server.once('error', () => resolve(false));
+    server.listen(0, '::1', () => resolve(true));
+  });
+  if (!listening) return null;
+  return {
+    port: server.address().port,
+    close: () => new Promise((resolve) => {
+      server.closeAllConnections();
+      server.close(resolve);
+    }),
+  };
 }
 
 test('node:http client calls are recorded in the app and replayed to the ghosts, so nothing is charged twice', async () => {
@@ -44,6 +64,66 @@ test('without the http adapter, a node:http call leaves the request not compared
     await shop.twin.idle();
     assert.deepEqual(counts, { '/rate': 1 });
     assert.equal(shop.twin.stats().notCompared, 1);
+    await shop.close();
+  } finally {
+    delete process.env.KERN_TEST_UPSTREAM;
+    await server.close();
+  }
+});
+
+test('a node:http call to an address, with a Host header of its own (a virtual host), is replayed under the name it was recorded by', async () => {
+  const counts = {};
+  const server = await upstream(counts);
+  process.env.KERN_TEST_UPSTREAM_PORT = new URL(server.url).port;
+  try {
+    const shop = await production('vhost', { adapters: ['http'] });
+    assert.deepEqual(await (await fetch(`${shop.url}/vhost`)).json(), { rate: 2 });
+    await shop.twin.idle();
+    const stats = shop.twin.stats();
+    assert.deepEqual([stats.same, stats.notCompared], [1, 0], JSON.stringify(stats.reasons));
+    assert.deepEqual(counts, { '/rate': 1 }, 'only the real app reached the upstream');
+    await shop.close();
+  } finally {
+    delete process.env.KERN_TEST_UPSTREAM_PORT;
+    await server.close();
+  }
+});
+
+test('a node:http call to an IPv6 address is named with the address in brackets, in the app and in the ghosts alike', async (t) => {
+  const counts = {};
+  const six = await upstreamSix(counts);
+  if (!six) {
+    t.skip('this machine has no IPv6 loopback address');
+    return;
+  }
+  process.env.KERN_TEST_UPSTREAM6_PORT = String(six.port);
+  try {
+    const shop = await production('vhost', { adapters: ['http'] });
+    assert.deepEqual(await (await fetch(`${shop.url}/ipv6`)).json(), { rate: 2 });
+    await shop.twin.idle();
+    const stats = shop.twin.stats();
+    assert.deepEqual([stats.same, stats.notCompared], [1, 0], JSON.stringify(stats.reasons));
+    await shop.close();
+  } finally {
+    delete process.env.KERN_TEST_UPSTREAM6_PORT;
+    await six.close();
+  }
+});
+
+test('a body chunk Node itself refuses, or takes without a word, does exactly what it does without the twin', async () => {
+  const counts = {};
+  const server = await upstream(counts);
+  process.env.KERN_TEST_UPSTREAM = server.url;
+  try {
+    const { tryWrites } = await import('./apps/odd-write/old.js');
+    // Outside any sampled request, nothing records: these are Node's own answers.
+    const alone = tryWrites();
+    assert.match(alone[0], /^ERR_INVALID_ARG_TYPE: The "chunk" argument/);
+    assert.equal(alone[1], 'written');
+    const shop = await production('odd-write', { adapters: ['http'] });
+    assert.deepEqual(await (await fetch(shop.url)).json(), { seen: alone });
+    await shop.twin.idle();
+    assert.equal(shop.twin.stats().skipped, 1, 'a body the recorder could not copy leaves the request skipped');
     await shop.close();
   } finally {
     delete process.env.KERN_TEST_UPSTREAM;
