@@ -66,6 +66,30 @@ test('a ghost that failed after it answered is restarted with its pair before th
   await pair.close();
 });
 
+test('a ghost pair that was replaced can no longer mark the new pair for a restart', async () => {
+  // A process ghost's last messages are read after it has stopped. Here the candidate reports itself broken without end until its pair
+  // restarts, and the coordinator's thread is busy (as when it judges large bodies), so those messages keep coming after the new pair is up.
+  const pair = new Coordinator({ ...options('flood'), ghosts: 'process', maxRestarts: 50 });
+  await pair.start();
+  const busy = setInterval(() => {
+    const end = Date.now() + 3;
+    while (Date.now() < end);
+  }, 1);
+  try {
+    pair.submit(served('/flood', { ok: true }));
+    await pair.idle();
+    assert.equal(pair.counts.restarts, 1);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  } finally {
+    clearInterval(busy);
+  }
+  pair.submit(served('/', { ok: true }));
+  await pair.idle();
+  assert.equal(pair.counts.restarts, 1, 'the new pair was restarted for what the old one reported');
+  assert.equal(pair.counts.same, 1);
+  await pair.close();
+});
+
 test('a known case on which both versions hang is not counted as passed: it was never compared', async () => {
   // Both ghosts run the version that never answers.
   const pair = new Coordinator({ ...options('hang'), old: app('hang', 'new'), timeoutMs: 300 });

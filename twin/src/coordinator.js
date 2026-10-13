@@ -101,12 +101,15 @@ export class Coordinator {
       throw old.status === 'rejected' ? old.reason : candidate.reason;
     }
     this.#dirty = false;
-    for (const ghost of [old.value, candidate.value]) {
+    const pair = { old: old.value, candidate: candidate.value };
+    // A process ghost's last messages are read after it has stopped, so a pair already replaced can still report itself broken: only
+    // the current pair's own ghosts mark it for a restart.
+    for (const ghost of [pair.old, pair.candidate]) {
       ghost.onDirty(() => {
-        this.#dirty = true;
+        if (this.#pair === pair) this.#dirty = true;
       });
     }
-    return { old: old.value, candidate: candidate.value };
+    return pair;
   }
 
   async #restart() {

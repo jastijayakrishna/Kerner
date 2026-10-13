@@ -85,7 +85,7 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 - Only lines with at least one `1` are listed.
 
 **Ghost → twin thread (other):**
-- `{ type: 'dirty' }`: this ghost's state may be broken, so the pair must restart. One that comes between two requests (an uncaught error in work a request left running) restarts the pair before the next request is asked, unless a ghost has stopped: a stopped ghost is asked all the same, answers at once that it had stopped, and the pair restarts after.
+- `{ type: 'dirty' }`: this ghost's state may be broken, so the pair must restart. One that comes between two requests (an uncaught error in work a request left running) restarts the pair before the next request is asked, unless a ghost has stopped: a stopped ghost is asked all the same, answers at once that it had stopped, and the pair restarts after. Only a ghost of the current pair marks it: a process ghost's last messages are read after it has stopped (measured: up to about 350 ms on Windows), and a pair already replaced is ignored.
 - `{ type: 'load-lines', lines }` (Phase 3): the keys of the changed lines that ran while the app loaded. It is sent before `ready`.
 - `{ type: 'real-read', id, job, method, url, headers }` (Phase 4): a ghost asks for an allow-listed real read. The twin thread makes it once per request, and both ghosts get the same answer.
 
