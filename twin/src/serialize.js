@@ -133,51 +133,5 @@ export function revive(value) {
   return value;
 }
 
-/**
- * The JSON text of a value, exactly as JSON.stringify writes it, at any depth: JSON.stringify gives up at a few thousand levels, so arrays
- * and objects are written with a stack of their own. Plain values still go through JSON.stringify, so strings are escaped as it escapes them.
- */
-export function jsonText(value) {
-  const parts = [];
-  const frames = [];
-  const resolved = (item, key) => (item !== null && typeof item === 'object' && typeof item.toJSON === 'function' ? item.toJSON(key) : item);
-  const absent = (item) => item === undefined || typeof item === 'function' || typeof item === 'symbol';
-  const open = (item) => {
-    if (Array.isArray(item)) {
-      parts.push('[');
-      frames.push({ item, names: null, next: 0, written: 0 });
-    } else if (item !== null && typeof item === 'object') {
-      parts.push('{');
-      frames.push({ item, names: Object.keys(item), next: 0, written: 0 });
-    } else parts.push(JSON.stringify(item));
-  };
-  const top = resolved(value, '');
-  if (absent(top)) return undefined;
-  open(top);
-  while (frames.length) {
-    const frame = frames.at(-1);
-    const size = frame.names ? frame.names.length : frame.item.length;
-    if (frame.next >= size) {
-      parts.push(frame.names ? '}' : ']');
-      frames.pop();
-      continue;
-    }
-    const i = frame.next++;
-    if (!frame.names) {
-      // In an array, what JSON cannot write is written as null.
-      if (i > 0) parts.push(',');
-      const item = resolved(frame.item[i], String(i));
-      if (absent(item)) parts.push('null');
-      else open(item);
-      continue;
-    }
-    // In an object, a member JSON cannot write is left out.
-    const name = frame.names[i];
-    const item = resolved(frame.item[name], name);
-    if (absent(item)) continue;
-    if (frame.written++ > 0) parts.push(',');
-    parts.push(`${JSON.stringify(name)}:`);
-    open(item);
-  }
-  return parts.join('');
-}
+// jsonText lives in keys.js, which names calls by it too; it is shared from here as before.
+export { jsonText } from './keys.js';

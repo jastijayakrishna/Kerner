@@ -115,7 +115,7 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 | `pg` | `text, values, result: { command, rowCount, rows, fields }, error` | Phase 4 |
 | `redis` | `command, args, reply, error` | Phase 4 |
 
-- `key` is built by `keys.js`: `callKey(method, url, sent)` for `fetch` and `http`; from Phase 4, `pgKey(text, values)` and `redisKey(command, args)`.
+- `key` is built by `keys.js`: `callKey(method, url, sent)` for `fetch` and `http`; from Phase 4, `pgKey(text, values)` and `redisKey(command, args)`. A `sent` body that is a JSON object or array of at most 256 KiB is named by its value, every object's keys in order (an object has no order, RFC 8259), so a refactor that builds the same body another way makes the same write.
 - From Phase 4 every key is `<shape> <payload>`, and `shapeOf(key)` drops the payload. A ghost takes the unused entry with the exact key, else the next unused one with the same shape, and notes that match as `loose`. A payload that carries the clock or a random id can never match exactly; its shape still does.
 - `sent` is the body the app sent. Phase 5 scrubs it and builds the key again from the scrubbed copy.
 

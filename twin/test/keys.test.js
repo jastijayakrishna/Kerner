@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { callKey, isSession, pgIsWrite, pgKey, readAllowed, redisIsWrite, redisKey, shapeOf, stable } from '../src/keys.js';
+import { callKey, digest, isSession, pgIsWrite, pgKey, readAllowed, redisIsWrite, redisKey, shapeOf, stable } from '../src/keys.js';
 
 test('every call is named <shape> <payload>; the shape is all but the last word', () => {
   assert.equal(shapeOf(callKey('post', 'https://pay.example/charge', Buffer.from('{"a":1}'))), 'POST https://pay.example/charge');
@@ -50,6 +50,19 @@ test('values are named alike in every thread, and real reads are matched by meth
   assert.equal(readAllowed(allowed, 'POST', 'https://rates.example/eur'), false, 'never a write');
   assert.equal(readAllowed(allowed, 'GET', 'https://status.example/ping'), false, 'the method must match');
   assert.equal(readAllowed(allowed, 'HEAD', 'https://status.example/ping'), true);
+});
+
+test("a JSON payload is named by its value: the order of an object's keys and the spacing do not change a call's name", () => {
+  // JSON objects have no order (RFC 8259): a refactor that builds the same body another way sends the same write.
+  const url = 'https://pay.example/charge';
+  const a = callKey('POST', url, Buffer.from('{"amount":5,"currency":"usd","meta":{"b":1,"a":2}}'));
+  assert.equal(a, callKey('POST', url, Buffer.from('{ "currency": "usd", "meta": {"a": 2, "b": 1}, "amount": 5 }')));
+  assert.notEqual(a, callKey('POST', url, Buffer.from('{"amount":6,"currency":"usd","meta":{"b":1,"a":2}}')), 'another value is another call');
+  assert.notEqual(callKey('POST', url, Buffer.from('[1,2]')), callKey('POST', url, Buffer.from('[2,1]')), 'an array keeps its order');
+  assert.notEqual(callKey('POST', url, Buffer.from('5')), callKey('POST', url, Buffer.from(' 5')), 'a body that is not a JSON object or array is named by its bytes');
+  assert.equal(callKey('POST', url, Buffer.from('{"a":1}')), `POST ${url} ${digest('{"a":1}').slice(0, 16)}`, 'a body already in order keeps its name');
+  const deep = `${'['.repeat(100000)}{"b":1,"a":2}${']'.repeat(100000)}`;
+  assert.equal(callKey('POST', url, Buffer.from(deep)), callKey('POST', url, Buffer.from(deep.replace('{"b":1,"a":2}', '{"a":2,"b":1}'))), 'at any depth');
 });
 
 test('a real read goes only to the origin its pattern names, and a path that climbs out of the prefix is not under it', () => {

@@ -131,3 +131,25 @@ test('an app that reads its body the way express.json() does is still compared, 
     await pay.close();
   }
 });
+
+test('a charge whose JSON body is built in another key order is the same write, not a difference', async () => {
+  const pay = await listen((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  process.env.KERN_TEST_PAY = pay.url;
+  try {
+    const shop = await production('reordered');
+    assert.deepEqual(await (await post(shop.url, { amount: 5, currency: 'usd' })).json(), { charged: true });
+    await shop.twin.idle();
+    const stats = shop.twin.stats();
+    assert.deepEqual([stats.same, stats.different, stats.notCompared], [1, 0, 0], JSON.stringify({ stats, differences: shop.twin.differences() }));
+    await shop.close();
+  } finally {
+    delete process.env.KERN_TEST_PAY;
+    await pay.close();
+  }
+});

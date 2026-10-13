@@ -31,10 +31,79 @@ export function stable(value) {
   });
 }
 
-/** One HTTP call (fetch, or a node:http client): its shape is the method and the address, its payload the body. */
+/**
+ * The JSON text of a value, exactly as JSON.stringify writes it, at any depth: JSON.stringify gives up at a few thousand levels, so arrays
+ * and objects are written with a stack of their own. Plain values still go through JSON.stringify, so strings are escaped as it escapes them.
+ * With `sorted`, every object's keys are written in order: the same JSON value then always gives the same text.
+ */
+export function jsonText(value, { sorted = false } = {}) {
+  const parts = [];
+  const frames = [];
+  const resolved = (item, key) => (item !== null && typeof item === 'object' && typeof item.toJSON === 'function' ? item.toJSON(key) : item);
+  const absent = (item) => item === undefined || typeof item === 'function' || typeof item === 'symbol';
+  const open = (item) => {
+    if (Array.isArray(item)) {
+      parts.push('[');
+      frames.push({ item, names: null, next: 0, written: 0 });
+    } else if (item !== null && typeof item === 'object') {
+      parts.push('{');
+      frames.push({ item, names: sorted ? Object.keys(item).sort() : Object.keys(item), next: 0, written: 0 });
+    } else parts.push(JSON.stringify(item));
+  };
+  const top = resolved(value, '');
+  if (absent(top)) return undefined;
+  open(top);
+  while (frames.length) {
+    const frame = frames.at(-1);
+    const size = frame.names ? frame.names.length : frame.item.length;
+    if (frame.next >= size) {
+      parts.push(frame.names ? '}' : ']');
+      frames.pop();
+      continue;
+    }
+    const i = frame.next++;
+    if (!frame.names) {
+      // In an array, what JSON cannot write is written as null.
+      if (i > 0) parts.push(',');
+      const item = resolved(frame.item[i], String(i));
+      if (absent(item)) parts.push('null');
+      else open(item);
+      continue;
+    }
+    // In an object, a member JSON cannot write is left out.
+    const name = frame.names[i];
+    const item = resolved(frame.item[name], name);
+    if (absent(item)) continue;
+    if (frame.written++ > 0) parts.push(',');
+    parts.push(`${JSON.stringify(name)}:`);
+    open(item);
+  }
+  return parts.join('');
+}
+
+// A JSON object or array is named by its value, whatever the order of its keys or its spacing (RFC 8259: an object has no order), so a
+// refactor that builds the same body another way sends the same write. Bodies larger than this, and anything else, are named by their bytes.
+const MOST_CANONICAL = 256 << 10;
+
+/** A body's text with every object's keys in order, when it is a JSON object or array of at most 256 KiB; otherwise null. */
+function canonical(body) {
+  if (typeof body !== 'string' && !(body instanceof Uint8Array)) return null;
+  if (body.length > MOST_CANONICAL) return null;
+  const text = typeof body === 'string' ? body : Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('utf8');
+  const first = text.trimStart()[0];
+  if (first !== '{' && first !== '[') return null;
+  try {
+    const value = JSON.parse(text);
+    return value !== null && typeof value === 'object' ? jsonText(value, { sorted: true }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One HTTP call (fetch, or a node:http client): its shape is the method and the address, its payload the body, a JSON one by its value. */
 export function callKey(method, url, body) {
   const verb = String(method).toUpperCase();
-  return `${verb} ${url} ${body && body.length ? short(body) : '-'}`;
+  return `${verb} ${url} ${body && body.length ? short(canonical(body) ?? body) : '-'}`;
 }
 
 export function isWrite(method) {
