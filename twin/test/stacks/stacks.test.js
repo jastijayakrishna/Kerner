@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { createTwin } from '../../src/index.js';
+import { pgReader } from '../../src/real-reads.js';
 import { listen, post } from '../helpers.js';
 
 // Against real Postgres and Redis: run by scripts/test-stacks.sh, which starts both and sets these.
@@ -105,5 +106,24 @@ test('Redis commands are replayed to the ghosts, pipelines and transformed repli
   } finally {
     await shop?.close();
     admin.disconnect();
+  }
+});
+
+test('a Postgres real read is one statement: a COMMIT inside its text never lets the rest of it write', { skip: !PG && 'needs Postgres: run scripts/test-stacks.sh' }, async () => {
+  const { default: pg } = await import('pg');
+  const admin = new pg.Client({ connectionString: PG });
+  await admin.connect();
+  await admin.query('DROP TABLE IF EXISTS ledger; CREATE TABLE ledger (id int); INSERT INTO ledger VALUES (1);');
+  const reader = pgReader(PG, stackApp('pg-extra-read', 'old').module);
+  try {
+    for (const text of ['SELECT 1; COMMIT; DELETE FROM ledger', "SELECT '--'; COMMIT; DELETE FROM ledger"]) {
+      const answer = await reader.read(text, []);
+      assert.ok(answer.error, `${text}: ${JSON.stringify(answer)}`);
+    }
+    const { rows } = await admin.query('SELECT count(*)::int AS n FROM ledger');
+    assert.equal(rows[0].n, 1, 'the row is still there');
+  } finally {
+    await reader.close();
+    await admin.end();
   }
 });
