@@ -38,6 +38,15 @@ test('background work an app starts never mixes into the request a ghost is answ
   }
 });
 
+test('background loops on the promise timers (an interval\'s rounds, scheduler.wait, scheduler.yield) never run into a later request', async () => {
+  const shop = await production('loops');
+  for (let i = 0; i < 2; i++) assert.deepEqual(await (await fetch(shop.url)).json(), { interval: false, wait: false, yield: false });
+  await shop.twin.idle();
+  const stats = shop.twin.stats();
+  assert.deepEqual([stats.same, stats.different], [2, 0], JSON.stringify(shop.twin.differences()));
+  await shop.close();
+});
+
 test('a request keeps its turn through its body\'s events and through its own timers', async () => {
   const pay = await payService();
   try {

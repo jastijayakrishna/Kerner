@@ -37,7 +37,7 @@ Measured on Node 22.12 (Windows) and on Node 22.23.3 in the pinned Linux image. 
 The twin thread is `unref()`ed: it never keeps the app's process alive by itself. Only `idle()` holds it, while someone waits for it; otherwise an app that closed its server and then awaited `idle()` would end with the work half done (found while building Phase 2).
 
 **Turns inside a ghost (Phase 6, `turn.js`).** The app's start is one turn (`'start'`), and each request is another (its job number); the turn is carried by `AsyncLocalStorage`.
-- Only the current turn's timers fire, and only its calls are answered and counted.
+- Only the current turn's timers fire, and only its calls are answered and counted. That holds for the promise timers too: `timers/promises`' `setTimeout`, `setImmediate`, the rounds of its `setInterval` (an interval whose round comes after its turn stops), and its `scheduler.wait` and `scheduler.yield`, which run on timers of their own.
 - A timer an earlier turn set never fires. A call made outside the current turn waits forever and is written down nowhere.
 - The ghost's harness keeps a request's turn through the request's body events.
 - A turn ends one tick after its answer, as a request's record does in the app's thread.

@@ -181,7 +181,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 ## Real apps
 
 - **An app that reads while it starts** (its database, its cache, its key store) needs `load: 'record'`. The old version then starts in the app's process inside a record of its own, and the ghosts start from those answers. A new version that asks at its start for something the old one never did is named, call by call.
-- **Background work stays out of the comparison.** Inside a ghost, only the request being answered gets time and the outside world. Work an app leaves running (a cron tick, a queue's polling loop, a retry) waits forever there, so it never mixes into another request.
+- **Background work stays out of the comparison.** Inside a ghost, only the request being answered gets time and the outside world. Work an app leaves running (a cron tick, a queue's polling loop, a retry) waits forever there, so it never mixes into another request. That covers every timer, the promise ones of `timers/promises` included (`setInterval`'s rounds, `scheduler.wait`, `scheduler.yield`).
 - **An app that does not export a listener** needs a small entry module that builds it without listening. See `twin/proof/infisical/twin-entry.mjs` and `twin/proof/firecrawl/twin-entry.mjs`.
 - **A read the new code makes that the old never did** can be answered for real, read-only, with `pgReads: '<connection string>'` (Postgres; off by default; best pointed at a read replica or a read-only role). Every such read runs inside `BEGIN TRANSACTION READ ONLY`, so a write is refused by the database itself.
 - **What it took, and what it found, on two real apps:** `reports/twin-proof-<date>.md`.

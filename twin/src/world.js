@@ -139,6 +139,30 @@ export function installWorld() {
   const promised = { setTimeout: later(timersPromises.setTimeout), setImmediate: later(timersPromises.setImmediate) };
   timed.setTimeout[promisify.custom] = promised.setTimeout;
   timed.setImmediate[promisify.custom] = promised.setImmediate;
+  // timers/promises' interval and its scheduler run on timers of their own, not on the functions above, so they are held to their turn
+  // here: a round of an interval, or a scheduler's wait or yield, that comes after its turn waits forever, and such an interval stops.
+  const rounds = (interval) => function ghostInterval(...args) {
+    const mine = owner();
+    const inner = interval(...args);
+    return {
+      next: (...more) => inner.next(...more).then((step) => {
+        if (isCurrent(mine)) return step;
+        inner.return().catch(() => {});
+        return new Promise(() => {});
+      }),
+      return: (...more) => inner.return(...more),
+      throw: (...more) => inner.throw(...more),
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+  };
+  promised.setInterval = rounds(timersPromises.setInterval);
+  const { scheduler } = timersPromises;
+  if (scheduler) {
+    put(scheduler, 'wait', later(scheduler.wait.bind(scheduler)));
+    put(scheduler, 'yield', later(scheduler.yield.bind(scheduler)));
+  }
   for (const [name, value] of Object.entries(timed)) {
     put(globalThis, name, value);
     put(timers, name, value);
