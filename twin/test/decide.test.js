@@ -37,6 +37,22 @@ test('an unexplained difference, too much left uncompared, a thin segment or too
   ]);
 });
 
+test('the clock for minHours starts at the first comparison, never at a request that was skipped or not compared', () => {
+  const HOUR = 3600000;
+  const policy = { epsilon: 0.5, minHours: 24, segments: ['*'], maxUncovered: 1 };
+  const evidence = new Evidence({ candidate: 'c1' });
+  for (let i = 0; i < 20; i++) evidence.add(verdict('skipped', { time: T + i * HOUR }));
+  evidence.add(verdict('not-compared', { time: T + 19 * HOUR }));
+  assert.equal(evidence.snapshot().since, 0, 'twenty hours of requests too large to copy compared nothing');
+  assert.match(decide(evidence.snapshot(), policy, T + 24 * HOUR).reasons.join('; '), /0\.0 of 24 hours watched/);
+  evidence.add(verdict('same', { time: T + 20 * HOUR }));
+  assert.equal(evidence.snapshot().since, T + 20 * HOUR, 'the first comparison starts the clock');
+  assert.match(decide(evidence.snapshot(), policy, T + 24 * HOUR).reasons.join('; '), /4\.0 of 24 hours watched/);
+  const differing = new Evidence({ candidate: 'c1' });
+  differing.add(verdict('different', { time: T, kinds: ['body'] }));
+  assert.equal(differing.snapshot().since, T, 'an unexplained difference is a comparison too');
+});
+
 test('every changed line must have run, every part of it, in minLineRuns clean comparisons, unless it ran at load or a person accepted it', () => {
   const evidence = new Evidence({ candidate: 'c1' });
   for (let i = 0; i < 6; i++) evidence.add(verdict('same', { lines: { 'old:src/app.js:17': i % 2 ? '1100' : '1111', 'new:src/app.js:17': '1111' } }));

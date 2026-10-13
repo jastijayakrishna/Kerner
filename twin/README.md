@@ -56,7 +56,7 @@ http.createServer(await twin.listener()).listen(3000);
   - there is no unexplained difference;
   - every segment listed in `segments` has at least ceil(3/ε) clean comparisons (`same` or `stated`); `'*'` is all traffic;
   - at most `maxUncovered` of its requests were not compared or skipped;
-  - at least `minHours` have passed since the first comparison.
+  - at least `minHours` have passed since the first comparison (skipped or uncompared requests do not start the clock).
 
   When it is not ready, `reasons` says why.
 - **Switching on.** With `switchOn: 'auto'`, the new version is switched on as soon as the decision is ready. With `'manual'` (the default), a person does it: `twin.serve('candidate')`, or `kern-twin serve candidate --state <dir>`.

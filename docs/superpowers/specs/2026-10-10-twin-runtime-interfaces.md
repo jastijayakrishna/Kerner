@@ -225,6 +225,7 @@ The evidence file is `<stateDir>/evidence.json`:
 }
 ```
 
+- `since` is when the first comparison (same, stated or different) was counted, and 0 until then; `minHours` counts from it. A request that was skipped or not compared never starts it, since it says nothing of the candidate. A file written before keeps the `since` it has.
 - `lines` and `loadLines` arrive in Phase 3. Each `lines` entry counts:
   - `touched`: requests that ran any of the line;
   - `runs`: requests that ran all of it;
@@ -258,7 +259,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
    - The count is `same + stated`, of this candidate's own comparisons.
    - It must reach `needed = ceil(3 / epsilon)`. This is the rule of three: with no failures in n tries, the true rate is below 3/n with 95% confidence.
 3. **Little left uncompared in every listed segment.** At most `maxUncovered` of the requests are not compared or skipped, because the bound says nothing about requests it never saw.
-4. **Enough time.** At least `minHours` have passed since the first comparison.
+4. **Enough time.** At least `minHours` have passed since the first comparison (`since`); skipped and not compared requests do not start the clock.
 5. **Enough runs of every changed line (Phase 3).** Each measured changed line, on both sides, must be one of these:
    - `proven`: every code character ran in at least `minLineRuns` clean comparisons;
    - `at load`: it ran while the version loaded;

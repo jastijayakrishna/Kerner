@@ -167,7 +167,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 
   Example: ε = 1/10,000 and r = 1 request per second give 30,000 s, about 8.3 hours.
 - **Throughput.** One pair compares about 1 / (t_old + t_new + overhead) requests per second. The sample rate should keep the sampled rate under that; beyond it, the queue sheds load and counts it.
-- **Traffic changes over the day.** The bound assumes typical requests. High-stakes switch-on also requires a minimum time that covers a full daily cycle (Phase 2 option `minHours`).
+- **Traffic changes over the day.** The bound assumes typical requests. High-stakes switch-on also requires a minimum time that covers a full daily cycle (Phase 2 option `minHours`). It counts from the first comparison: hours in which every request was skipped or not compared watched nothing.
 - **Per customer group.** The bound is kept per segment (for example a tenant or a plan). Switch-on can require it for each listed segment.
 
 ## 7. Modes (built in Phase 2)

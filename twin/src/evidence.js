@@ -101,7 +101,9 @@ export class Evidence {
     const time = Number(verdict.time) || Date.now();
     counts.first = counts.first ? Math.min(counts.first, time) : time;
     counts.last = Math.max(counts.last, time);
-    this.data.since = this.data.since ? Math.min(this.data.since, time) : time;
+    // minHours counts from the first comparison. Requests that were skipped or not compared say nothing of the candidate: a day of them
+    // would otherwise meet a 24-hour minHours after an hour of real comparisons.
+    if (field === 'same' || field === 'stated' || field === 'different') this.data.since = this.data.since ? Math.min(this.data.since, time) : time;
     if (field === 'different' && this.data.unexplained.length < KEEP_UNEXPLAINED) {
       const { n, at, route: r, segment: s, serving, method, url, kinds } = verdict;
       this.data.unexplained.push({ n, at, route: r, segment: s, serving, method, url, kinds, details: (verdict.details ?? []).slice(0, 5) });
