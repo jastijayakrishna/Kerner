@@ -14,10 +14,24 @@ const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x.toFixed(1) :
 const pct = (x) => (typeof x === 'number' && Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : DASH);
 const signed = (x) => (typeof x === 'number' && Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${x.toFixed(1)}` : DASH);
 
+// Files that are there but could not be read: the report names them, so nothing drops out of it unseen.
+let unreadable = [];
+
+/**
+ * A JSON file, or `fallback` when it is not there. A byte order mark (PowerShell 5.1 writes one) is skipped. A file that is there but is
+ * not JSON is named in the report.
+ */
 async function readJson(file, fallback) {
+  let text;
   try {
-    return JSON.parse(await readFile(file, 'utf8'));
+    text = await readFile(file, 'utf8');
   } catch {
+    return fallback;
+  }
+  try {
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (error) {
+    unreadable.push(`${basename(file)} could not be read: ${error.message}`);
     return fallback;
   }
 }
@@ -66,12 +80,14 @@ function groups(differences) {
 
 /** The report, as markdown, for the results folder `dir`. */
 export async function report(dir) {
+  unreadable = [];
   const runs = await runsIn(dir);
   const triage = await readJson(join(dir, 'triage.json'), {});
   const adoption = await readJson(join(dir, 'adoption.json'), {});
   const gaps = (await readText(join(dir, 'gaps.md'))).trim();
   const apps = Object.keys(runs).sort();
   const out = [`# Kern twin: proof on real apps (${basename(dir).replace(/^twin-proof-/, '')})`, ''];
+  if (unreadable.length) out.push(...unreadable.map((line) => `- **${line}**`), '');
 
   out.push('## In short', '', '| App | Compared, all copied | Unexplained differences | Meant | Bugs | False alarms | Changed lines proven |', '|---|---|---|---|---|---|---|');
   for (const app of apps) {
