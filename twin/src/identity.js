@@ -5,7 +5,10 @@ import { dirname, join, relative, sep } from 'node:path';
 
 // What is not the version's own code: installed packages (the lockfile names them), git's store, and Kern's own working files.
 const SKIP = new Set(['node_modules', '.git', '.kern-twin']);
-const CODE = /\.(?:[cm]?[jt]sx?|json)$/;
+// The files that make up what a version does: its code (JavaScript and TypeScript, components, native add-ons, WebAssembly), the
+// templates it renders, and the data and schemas it reads (JSON, YAML, TOML, SQL, GraphQL, Prisma, protobuf). A change to any of them
+// is a new version. It is an explicit list, so the files an app writes while it runs (logs, uploads) never change the name.
+const CODE = /\.(?:[cm]?[jt]sx?|json|vue|svelte|astro|node|wasm|ejs|hbs|handlebars|pug|jade|mustache|njk|liquid|eta|twig|html?|ya?ml|toml|sql|graphqls?|gql|prisma|proto)$/i;
 const MOST_FILES = 20000;
 
 /** The folder of the nearest package.json above `file`: where the version's own code lives. */
@@ -20,9 +23,9 @@ export function packageRoot(file) {
 }
 
 /**
- * A name for one version of the code: sha256 over its entry point and over the path and content of every code file of its package
- * (JavaScript, TypeScript and JSON, lockfiles included). Any change to the code is a new candidate, so evidence never carries over
- * to code it was not gathered on.
+ * A name for one version of the code: sha256 over its entry point and over the path and content of every code, template and data file
+ * of its package (see CODE; lockfiles included). Any change to them is a new candidate, so evidence never carries over to code it was
+ * not gathered on.
  */
 export async function versionId(file, exportName) {
   const root = packageRoot(file);

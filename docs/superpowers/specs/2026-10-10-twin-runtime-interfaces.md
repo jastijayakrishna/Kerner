@@ -272,7 +272,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 
 | Option | Default | Phase |
 |---|---|---|
-| `old`, `candidate`: `{ module, export, id?, root? }` | Required. `module` and `root` are paths (a relative one is read from the working folder) or file URLs; `createTwin` makes them absolute, because a ghost requires the version's packages relative to its module. `id` defaults to `versionId()`, the sha256 over the code files of the version's package. `root` is used from Phase 3 | 1; `id` in 2; `root` in 3 |
+| `old`, `candidate`: `{ module, export, id?, root? }` | Required. `module` and `root` are paths (a relative one is read from the working folder) or file URLs; `createTwin` makes them absolute, because a ghost requires the version's packages relative to its module. `id` defaults to `versionId()`, the sha256 over the code, template and data files of the version's package: an explicit list of extensions (JavaScript and TypeScript, JSON, SQL, GraphQL, Prisma, protobuf, YAML, TOML, templates, components, `.node` and `.wasm`), so files written at run time (logs, uploads) never change it. `root` is used from Phase 3 | 1; `id` in 2; `root` in 3 |
 | `sampleRate`, `timeoutMs`, `startMs`, `queueLimit`, `maxBodyBytes`, `ghostMemoryMb`, `maxRestarts`, `log` | As in Phase 1 | 1 |
 | `route(req)` | `routeOf(req.method, req.url)` | 2 |
 | `segment(req)` | Answers `'all'` | 2 |

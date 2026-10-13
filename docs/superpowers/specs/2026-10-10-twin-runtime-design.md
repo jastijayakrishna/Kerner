@@ -76,7 +76,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | `src/index.js` | The public API: `createTwin()` returns `wrap`, `stats`, `differences`, `idle` and `close` | all of the above |
 | `src/ghost.js` | Starts one ghost thread with no app preloads; asks it, stops it | `worker.js` |
 | `src/route.js` | Names a request's route: the path with ids replaced | — |
-| `src/identity.js` | Names a version by its code: sha256 over its package's code files | `node:crypto` |
+| `src/identity.js` | Names a version by its code: sha256 over its package's code, template and data files (an explicit list of extensions, so logs and uploads never change it) | `node:crypto` |
 | `src/evidence.js` | Counts per segment and route for one candidate, in a checksummed file written whole | `node:fs` |
 | `src/decide.js` | The switch-on decision: rule of three, segments, `maxUncovered`, `minHours` | — |
 | `src/twin-thread.js` | The twin's own thread: coordinator, evidence, decision, switch requests | `coordinator.js`, `evidence.js`, `decide.js` |
