@@ -185,3 +185,17 @@ test("the control file's watcher never rejects, even when telling the twin's thr
     done();
   }
 });
+
+test('a person who holds the old version in the control file while it already serves is followed: the hold reaches the twin', async () => {
+  // kern-twin serve old, while old already serves, changes only the hold. Ignored, the twin could still switch the candidate on by itself.
+  const { router, told, file, done } = await opened();
+  try {
+    assert.deepEqual([router.serving, router.hold], ['old', false]);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), hold: true, changedAt: new Date().toISOString(), reason: 'a person holds it' }));
+    await until(() => router.hold === true);
+    assert.deepEqual(told.at(-1), ['old', true], 'the twin\'s thread is told the hold');
+    assert.equal(router.serving, 'old');
+  } finally {
+    done();
+  }
+});

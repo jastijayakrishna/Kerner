@@ -218,6 +218,13 @@ export class Router {
     // A person's word supersedes a write of the router's own that has not landed yet.
     this.#unwritten = false;
     if (control.serving !== this.serving) await this.#apply(control.serving, `the control file: ${control.reason ?? 'changed'}`, false);
+    else if (this.serving === 'old' && (control.hold === true) !== this.hold) {
+      // The old version still serves, under another hold: a person holds it (kern-twin serve old), or lets the twin switch on by itself
+      // again. The twin's thread must know, or it would switch the candidate on against that word.
+      this.hold = control.hold === true;
+      this.reason = `the control file: ${control.reason ?? 'changed'}`.slice(0, 300);
+      this.#tell();
+    }
   }
 
   /** Stops watching the control file, and trying a failed write again. */
