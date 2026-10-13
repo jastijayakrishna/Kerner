@@ -207,7 +207,7 @@ Notes on the verdict:
 - `add(verdict)` counts one verdict, including `skipped` ones.
 - `setLoadLines(keys)` (Phase 3) records the changed lines that ran while the versions loaded.
 - `snapshot()` returns a copy of the data.
-- `flush()` writes the file atomically. The twin thread calls it every 5 s, before every switch, and on close.
+- `flush()` writes the file atomically. The twin thread calls it every 5 s, before every switch, and on close. Flushes run one at a time, in the order they were asked for: one resolves only once every write asked for before it, and its own, are on disk. So the thread's last flush on close covers every verdict, even with a timed flush still writing.
 - Write errors are counted in `errors` and retried.
 
 The evidence file is `<stateDir>/evidence.json`:

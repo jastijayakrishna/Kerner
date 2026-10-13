@@ -71,6 +71,30 @@ test('evidence that cannot be written is counted, leaves nothing behind, and is 
   }
 });
 
+test('a flush resolves only once every write asked for before it, and its own, are on disk', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-evidence-'));
+  const file = join(dir, 'evidence.json');
+  const earlier = [];
+  try {
+    const evidence = await Evidence.open({ file, candidate: 'c1' });
+    evidence.add(verdict('same'));
+    earlier.push(evidence.flush());
+    evidence.add(verdict('same', { route: 'POST /orders' }));
+    earlier.push(evidence.flush());
+    // The twin's thread awaits one last flush when it closes, and is stopped right after: everything must be on disk by then.
+    await evidence.flush();
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    assert.deepEqual(Object.keys(stored.segments.all).sort(), ['GET /users/:id', 'POST /orders'], 'both verdicts are on disk');
+    await Promise.all(earlier);
+    const again = await Evidence.open({ file, candidate: 'c1' });
+    assert.equal(again.note, null, 'and the file is whole: its checksum holds');
+    assert.equal(again.snapshot().segments.all['POST /orders'].same, 1);
+  } finally {
+    await Promise.allSettled(earlier);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('each changed line keeps, per character, how many clean comparisons ran it, so the branches of a line add up', () => {
   const evidence = new Evidence({ candidate: 'c1', hashes: new Map([['old:src/app.js:17', 'h17']]) });
   const given = `${'1'.repeat(37)}0000`;

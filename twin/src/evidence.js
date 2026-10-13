@@ -43,7 +43,9 @@ export class Evidence {
   #file;
   #hashes;
   #dirty = false;
-  #writing = null;
+  // Every flush waits here for the ones asked for before it. A flush that found nothing new to write while an earlier write was still
+  // in flight would otherwise resolve before that write landed, and the twin's thread, stopped right after its last flush, would lose it.
+  #flushing = Promise.resolve();
   note = null;
   errors = 0;
   data;
@@ -136,27 +138,32 @@ export class Evidence {
     return structuredClone(this.data);
   }
 
-  /** Writes the evidence if it changed: whole, through a temporary file and a rename. A failed write is counted and tried again later. */
-  async flush() {
-    if (this.#writing) await this.#writing;
+  /**
+   * Writes the evidence if it changed: whole, through a temporary file and a rename. A failed write is counted and tried again later.
+   * Flushes run one at a time, in the order they were asked for, so one resolves only once every write asked for before it, and its
+   * own, are on disk.
+   */
+  flush() {
+    const turn = this.#flushing.then(() => this.#write());
+    this.#flushing = turn.catch(() => {});
+    return turn;
+  }
+
+  async #write() {
     if (!this.#file || !this.#dirty) return;
     this.#dirty = false;
     // The checksum is taken over exactly what JSON keeps, which is what a later open reads back.
     const body = JSON.parse(JSON.stringify(this.data));
     const text = `${JSON.stringify({ ...body, sha256: checksum(body) })}\n`;
     const temp = `${this.#file}.${process.pid}.${Date.now()}.tmp`;
-    this.#writing = (async () => {
-      try {
-        await mkdir(dirname(this.#file), { recursive: true });
-        await writeFile(temp, text);
-        await rename(temp, this.#file);
-      } catch {
-        this.errors++;
-        this.#dirty = true;
-        await rm(temp, { force: true }).catch(() => {});
-      }
-    })();
-    await this.#writing;
-    this.#writing = null;
+    try {
+      await mkdir(dirname(this.#file), { recursive: true });
+      await writeFile(temp, text);
+      await rename(temp, this.#file);
+    } catch {
+      this.errors++;
+      this.#dirty = true;
+      await rm(temp, { force: true }).catch(() => {});
+    }
   }
 }
