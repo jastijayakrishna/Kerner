@@ -33,6 +33,10 @@ test('two ghosts that both ran out of time are not compared: neither answered, s
   });
   const charge = 'POST https://pay.example/charge abc';
   assert.deepEqual(compareRuns(hung, { ...hung, effects: [charge] }).kinds, ['effects'], 'a write only one of them made still differs');
+  // A ghost that had stopped before the request came never saw it.
+  const gone = { ...run(0, null, { error: 'the ghost had stopped before this request' }), exited: true, gone: true };
+  assert.equal(compareRuns(gone, gone).outcome, 'not-compared');
+  assert.deepEqual(compareRuns(hung, gone).kinds, ['no-answer']);
   // Two versions that fail the same way on the same request behave alike: that was compared, and it is the same.
   const crashed = run(0, null, { error: 'uncaught TypeError: x' });
   assert.equal(compareRuns(crashed, crashed).outcome, 'same');

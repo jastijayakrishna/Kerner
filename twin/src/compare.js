@@ -20,10 +20,12 @@ const recordedShapes = (list) => [...(list ?? [])].filter((effect) => !effect.st
 const strayCalls = (run) => run.events.filter((e) => e.type === 'unmatched-read' || e.type === 'unmatched-write');
 const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail));
 const refusals = (run) => new Set(run.events.filter((e) => e.type === 'denied').map((e) => e.detail));
+// A ghost that gave this request no answer of its own: it ran out of time, or it had stopped before the request came (`gone`).
+const silent = (run) => Boolean(run.timedOut || run.gone);
 
 /**
  * Compares two runs of one request: `a` from the old code, `b` from the new.
- * A run is { status, headers, body: Buffer, effects: string[], events: [{ type, detail }], error?, timedOut? }.
+ * A run is { status, headers, body: Buffer, effects: string[], events: [{ type, detail }], error?, timedOut?, gone? }.
  * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ kind, path, old, new }] }, at most 20 details.
  */
 export function compareRuns(a, b) {
@@ -74,9 +76,10 @@ export function compareRuns(a, b) {
     return { outcome: 'not-compared', kinds: ['unanswered'], details: unanswered.slice(0, 5) };
   }
   if (a.error || b.error) {
-    // Neither ghost answered in time, so what either version would have answered is unknown: the request is not compared, unless the
-    // writes already differ. Two equal crashes are compared, and are the same: both versions failed alike on the same request.
-    if (a.timedOut && b.timedOut) {
+    // Neither ghost answered (each ran out of time, or had stopped before the request came), so what either version would have answered
+    // is unknown: the request is not compared, unless the writes already differ. Two equal crashes are compared, and are the same: both
+    // versions failed alike on the same request.
+    if (silent(a) && silent(b)) {
       if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
       return { outcome: 'not-compared', kinds: ['no-answer'], details: [{ kind: 'no-answer', path: 'result', old: a.error, new: b.error }] };
     }

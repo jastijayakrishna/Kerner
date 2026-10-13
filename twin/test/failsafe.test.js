@@ -96,6 +96,26 @@ test('a new version that ends its own process only ends its ghost', async () => 
   await shop.close();
 });
 
+test('a ghost that ended its own process after answering is named at once on the next request, not after the whole time limit as a hang', async () => {
+  for (const ghosts of ['thread', 'process']) {
+    const shop = await production('quits', { ghosts, timeoutMs: 8000 });
+    assert.equal((await fetch(`${shop.url}/?n=2`)).status, 200);
+    await shop.twin.idle();
+    // The new version's slow background work ends, and its ghost with it: between two requests, after its answer was sent.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const asked = Date.now();
+    assert.equal((await fetch(`${shop.url}/?n=3`)).status, 200);
+    await shop.twin.idle();
+    const took = Date.now() - asked;
+    const stats = shop.twin.stats();
+    assert.equal(stats.same, 1, `${ghosts}: ${JSON.stringify(stats)}`);
+    assert.deepEqual(shop.twin.differences()[0]?.details[0], { kind: 'crash', path: 'result', old: 'status 200', new: 'the ghost had stopped before this request' }, ghosts);
+    assert.ok(took < 4000, `${ghosts}: judged ${took} ms after it was asked, with a time limit of 8000 ms`);
+    assert.equal(stats.disabled, null);
+    await shop.close();
+  }
+});
+
 test('a request too large to copy is served and counted as skipped', async () => {
   const shop = await production('yen', { maxBodyBytes: 1024 });
   const answer = await post(shop.url, { amount: 1, currency: 'EUR', note: 'x'.repeat(4096) });

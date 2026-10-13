@@ -194,6 +194,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 | Ghost run | Uncaught error | None | `dirty` message or exit | Pair restarts; reported as a crash difference |
 | Ghost run | Hangs | None | Timeout | Both terminated and restarted; reported as a hang |
 | Ghost run | Out of memory | None | Worker exit | Pair restarts |
+| Ghost run | Stops after its answer (work the request left running ends its process, or runs out of memory) | None | It has stopped when the next request is asked | That request names it at once, as a crash ("the ghost had stopped before this request"), never as a hang; the pair restarts |
 | Queue | Full | None | `dropped` count | Load is shed |
 | Restarts | Too many | None | `restarts > maxRestarts` | Twin off |
 | Log file | Cannot be written | None | `logErrors` | Differences kept in memory |

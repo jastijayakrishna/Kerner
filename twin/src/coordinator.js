@@ -21,6 +21,7 @@ export function toRun(result) {
     events: result.events ?? [],
     error: result.error,
     timedOut: result.timedOut,
+    gone: result.gone,
   };
 }
 

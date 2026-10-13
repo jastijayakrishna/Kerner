@@ -8,11 +8,18 @@ export function ghostEnv() {
   return env;
 }
 
+/** Whether a ghost has stopped: a Worker's threadId is -1 once its thread has ended, and a ChildProcess has its exit code or signal. */
+const stopped = (ghost) => ghost.threadId === -1 || (ghost.exitCode ?? null) !== null || (ghost.signalCode ?? null) !== null;
+
 /**
  * Sends one request to one ghost and answers its result, or why there is none. `ghost` is the Worker or the ChildProcess (both emit
  * 'message' and 'exit'); `post` sends it a message. `dirty` means the ghost must be restarted.
  */
 export function ask(ghost, post, id, job, timeoutMs) {
+  // A ghost that stopped after its last answer (work a request left running ended its process, or ran it out of memory) emits no 'exit'
+  // again, and a job posted to it goes nowhere. It answers at once that it had stopped (`gone`: it never saw this request), never after
+  // the whole time limit as a hang.
+  if (stopped(ghost)) return Promise.resolve({ error: 'the ghost had stopped before this request', exited: true, gone: true, dirty: true });
   return new Promise((resolve) => {
     let dirty = false;
     let timer = null;

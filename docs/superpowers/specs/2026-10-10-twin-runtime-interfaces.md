@@ -138,7 +138,8 @@ Notes on the verdict:
 - **The kinds of `crash`, `hang`, `door-opened`, `effects` and `refused`:** only a rule that names that kind can state them. A path rule never does.
 - **Something a ghost may not use** (a program, a connection no recording answers): reached for by the new code alone, it is `different` with kind `refused`, and nothing after it is compared. Reached for by both versions, or by the old one alone, the outcome is `not-compared` with kind `unsupported`, unless the writes already differ.
 - **A read the recording cannot answer:** when only one ghost makes it, the outcome is `not-compared` with kind `unanswered`, not "different". Its answer is unknown, so nothing after it can be compared. A write one version makes and the other does not is still "different".
-- **Neither ghost answered in time:** the outcome is `not-compared` with kind `no-answer`, unless the writes already differ. What either version would have answered is unknown, so a known case on which both versions hang is never counted as passed. Two ghosts that fail with the same error (the same uncaught error, say) are `same`: both versions ran the request and failed alike.
+- **A ghost that stopped after its answer** (work a request left running ended its process, or ran it out of memory) is named at once on the next request, never after the whole time limit as a hang. Its run is `{ error: 'the ghost had stopped before this request', gone: true }`: a `crash` when only that ghost stopped. The pair restarts after.
+- **Neither ghost answered in time** (or both had stopped before the request came): the outcome is `not-compared` with kind `no-answer`, unless the writes already differ. What either version would have answered is unknown, so a known case on which both versions hang is never counted as passed. Two ghosts that fail with the same error (the same uncaught error, say) are `same`: both versions ran the request and failed alike.
 - **What goes to disk is scrubbed (Phase 5):** the evidence's examples and the differences log get the verdict with its URL and shown values scrubbed. Only `differences()`, in memory, keeps the real values. `routeOf` treats a path segment with an `@` inside as an id, so no email reaches the disk in a route name.
 
 ## 4. Files and their exports
@@ -152,7 +153,7 @@ Notes on the verdict:
 | `src/ghost-io.js` | `installGhostIO({ ports, addons, realReads, ask, overlay })`, `beginJob(io)`, `endJob()`, `take(key)`, `wrote(effect)`, `note(type, detail)` | 1; Phase 2 seals more and exports `take`, `wrote` and `note`; Phase 4 matches by shape and adds `ports`, `realReads`, `ask` and `overlay` |
 | `src/ghost-core.js` | `runGhost(side, transport)`: one ghost, whatever carries its messages | 4 |
 | `src/worker.js` | The thread ghost's entry | 1; a thin transport around `ghost-core.js` from 4 |
-| `src/ghost-common.js` | `ghostEnv()`, `ask(ghost, post, id, job, timeoutMs)`, `answer(post, message, settings)` | 4 (`ghostEnv` moves here from `ghost.js`, which re-exports it) |
+| `src/ghost-common.js` | `ghostEnv()`, `ask(ghost, post, id, job, timeoutMs)`, `answer(post, message, settings)`. `ask` of a ghost that has already stopped answers at once `{ error: 'the ghost had stopped before this request', exited: true, gone: true }` | 4 (`ghostEnv` moves here from `ghost.js`, which re-exports it) |
 | `src/ghost.js` | `ghostEnv()`, `startGhost(side, settings)` → `{ kind, ask(id, job, timeoutMs), terminate(), onDirty(fn), loadLines }` | 2; `loadLines` in 3; `settings.kind` `'process'` in 4 |
 | `src/process-ghost.js`, `src/process-ghost-main.js` | `ghostCommand(settings)`, `startProcessGhost(side, settings)`, with the same shape as `startGhost` | 4 |
 | `src/adapters/index.js` | `ADAPTERS`, `ADAPTER_NAMES` | 4 |
