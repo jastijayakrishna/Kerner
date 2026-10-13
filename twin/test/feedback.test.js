@@ -46,6 +46,14 @@ test('cases become kern-feedback/v1 instructions: the agent fixes what it may, a
   assert.doesNotMatch(body, /kern-feedback:v1 head=/, "Kern's own marker is left to Kern");
 });
 
+test("a route with a pipe in it stays in its own cell of the comment's table", () => {
+  // In a GitHub table a | ends a cell even inside code formatting, unless it is written \|.
+  const body = commentBody([{ ...cases[0], route: 'GET /a|b' }], 'a'.repeat(40));
+  const row = body.split('\n').find((line) => line.includes('GET /a'));
+  assert.equal(row.split(/(?<!\\)\|/).length - 2, 4, row);
+  assert.match(row, /`GET \/a\\\|b`/);
+});
+
 test('kern-twin feedback and comment read a cases folder', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-feedback-'));
   try {

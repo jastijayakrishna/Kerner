@@ -20,6 +20,8 @@ const MARKER = '<!-- kern-twin:v1 head=';
 
 /** Text from a case only ever shows inside code formatting, on one line. */
 const code = (text) => `\`${String(text).replace(/`/g, "'").replace(/[\r\n]+/g, ' ').slice(0, 200)}\``;
+/** In a table, a | ends a cell even inside code formatting, unless it is written \|. */
+const cell = (text) => text.replace(/\|/g, '\\|');
 
 /** The changed file a case's difference most likely comes from: the first changed line of the new code it ran. */
 function pathOf(value) {
@@ -76,7 +78,7 @@ export function forAgent(feedback) {
 /** The pull request comment: a table of the cases, what to do, the agent's copy of the verdict, and the twin's marker for `head`. */
 export function commentBody(cases, head, options = {}) {
   const feedback = toFeedback(cases, options);
-  const rows = cases.map((value) => `| ${code(value.route)} | ${value.kinds.join(', ')} | ${value.cause ? `#${value.cause}` : value.pulls?.length ? value.pulls.map((p) => `#${p}`).join(', ') : 'unknown'} | ${!value.reproduces ? 'a person must look' : value.human ? 'a person must decide' : 'the agent can fix it'} |`);
+  const rows = cases.map((value) => `| ${cell(code(value.route))} | ${value.kinds.join(', ')} | ${value.cause ? `#${value.cause}` : value.pulls?.length ? value.pulls.map((p) => `#${p}`).join(', ') : 'unknown'} | ${!value.reproduces ? 'a person must look' : value.human ? 'a person must decide' : 'the agent can fix it'} |`);
   const lead = feedback.agent_fixable
     ? `To fix: run ${code(`npx kern-twin test --cases ${options.casesDir ?? '<cases folder>'} --candidate ${options.candidate ?? '<entry module>'}`)} and change the new code until every case answers as the old version did. If a difference is meant, say so in the pull request.`
     : 'Some of these need a person before an agent changes anything; the table says which.';
