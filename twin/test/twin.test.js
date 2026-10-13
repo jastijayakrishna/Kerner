@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative as relativePath } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { app, production } from './helpers.js';
 
 test('a running twin never keeps the app\'s process alive', () => {
@@ -148,5 +149,18 @@ await twin.close();
     assert.equal(JSON.parse(out).same, 3, out);
   } finally {
     rmSync(file, { force: true });
+  }
+});
+
+test('a version named by a path relative to the working folder, or by a file URL, loads in the ghosts as it does in the app', async () => {
+  const relative = (version) => ({ ...version, module: relativePath(process.cwd(), version.module) });
+  const url = (version) => ({ ...version, module: pathToFileURL(version.module).href });
+  for (const name of [relative, url]) {
+    const shop = await production('refactor', { old: name(app('refactor', 'old')), candidate: name(app('refactor', 'new')) });
+    assert.equal(shop.twin.stats().disabled, null, shop.twin.stats().disabled);
+    assert.deepEqual(await (await fetch(`${shop.url}/?n=5`)).json(), { n: 5, total: 15 });
+    await shop.twin.idle();
+    assert.equal(shop.twin.stats().same, 1, JSON.stringify(shop.twin.stats()));
+    await shop.close();
   }
 });

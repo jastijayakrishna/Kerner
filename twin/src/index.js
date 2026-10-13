@@ -8,16 +8,32 @@ import { createRequire } from 'node:module';
 import { ADAPTERS, ADAPTER_NAMES } from './adapters/index.js';
 import { spawnSync } from 'node:child_process';
 import { plainAddress } from './keys.js';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
 const NO_COUNTS = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0, evidenceErrors: 0, cases: 0, caseErrors: 0 };
 
+/**
+ * A file or folder as an absolute path: the app's thread imports a version by its path, but a ghost also requires the version's packages
+ * relative to it (createRequire), which takes only an absolute path or a file URL. A relative path is read from the working folder, as
+ * import() reads it.
+ */
+function absolute(path, name) {
+  if (!path.startsWith('file:')) return resolve(path);
+  try {
+    return fileURLToPath(path);
+  } catch (error) {
+    throw new TypeError(`${name} must be a path or a file URL: ${error.message}`);
+  }
+}
+
 function version(value, name) {
-  if (!value || typeof value.module !== 'string' || typeof value.export !== 'string') throw new TypeError(`${name} must be { module: '/absolute/path/to/app.js', export: 'createApp' }`);
+  if (!value || typeof value.module !== 'string' || !value.module || typeof value.export !== 'string') throw new TypeError(`${name} must be { module: '/absolute/path/to/app.js', export: 'createApp' }`);
   if (value.id !== undefined && (typeof value.id !== 'string' || !value.id)) throw new TypeError(`${name}.id must be a non-empty string`);
   if (value.root !== undefined && (typeof value.root !== 'string' || !value.root)) throw new TypeError(`${name}.root must be the folder the manifest's paths start from`);
-  return { module: value.module, export: value.export, ...(value.id ? { id: value.id } : {}), ...(value.root ? { root: value.root } : {}) };
+  return { module: absolute(value.module, `${name}.module`), export: value.export, ...(value.id ? { id: value.id } : {}), ...(value.root ? { root: absolute(value.root, `${name}.root`) } : {}) };
 }
 
 function number(value, fallback, min, max, name) {

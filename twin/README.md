@@ -206,7 +206,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 
 | Option | Default | Meaning |
 |---|---|---|
-| `old` | required | `{ module, export }` of the version that serves customers today |
+| `old` | required | `{ module, export }` of the version that serves customers today; `module` is a path (a relative one is read from the working folder) or a file URL |
 | `candidate` | required | `{ module, export, id? }` of the version to prove |
 | `sampleRate` | `1` | Share of requests compared, from 0 to 1 |
 | `timeoutMs` | `5000` | How long a ghost may take for one request |
