@@ -51,9 +51,18 @@ function addressOf(scheme, args) {
   return { url: `${protocol}//${authority}${merged.path ?? '/'}`, method: String(merged.method ?? 'GET').toUpperCase(), headers: merged.headers ?? {}, options: merged, callback };
 }
 
-function plainHeaders(headers) {
+/**
+ * A client request's headers as one object of lower-case names, without the connection's own and the Host. Node takes headers as an
+ * object or as its raw list of names and values ([name, value, name, value, ...]); a name given twice in a list keeps both values.
+ */
+export function plainHeaders(headers) {
+  const pairs = Array.isArray(headers) ? headers.flatMap((item, i) => (i % 2 ? [] : [[String(item), headers[i + 1]]])) : Object.entries(headers ?? {});
   const out = {};
-  for (const [name, value] of Object.entries(headers ?? {})) if (value !== undefined && !HOP.has(name.toLowerCase()) && name.toLowerCase() !== 'host') out[name.toLowerCase()] = value;
+  for (const [name, value] of pairs) {
+    const lower = name.toLowerCase();
+    if (value === undefined || HOP.has(lower) || lower === 'host') continue;
+    out[lower] = lower in out ? [out[lower], value].flat() : value;
+  }
   return out;
 }
 

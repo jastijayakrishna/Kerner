@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { listen, production } from './helpers.js';
+import { plainHeaders } from '../src/adapters/http.js';
 
 const answering = (counts) => (req, res) => {
   counts[req.url] = (counts[req.url] ?? 0) + 1;
@@ -149,4 +150,10 @@ test('a body chunk Node itself refuses, or takes without a word, does exactly wh
     delete process.env.KERN_TEST_UPSTREAM;
     await server.close();
   }
+});
+
+test("headers a node:http call gives as Node's raw list keep their names when the replay passes them on", () => {
+  // Node takes headers as an object or as a raw list of names and values; read as an object, a list became headers named '0', '1', ...
+  assert.deepEqual(plainHeaders(['X-Trace', 'abc', 'Host', 'shop.example', 'Content-Length', '2', 'x-tag', 'a', 'x-tag', 'b']), { 'x-trace': 'abc', 'x-tag': ['a', 'b'] });
+  assert.deepEqual(plainHeaders({ 'X-Trace': 'abc', host: 'shop.example' }), { 'x-trace': 'abc' });
 });
