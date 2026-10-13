@@ -120,7 +120,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
    - Any other way out is refused. When both versions reach for it, the request is "not compared": honest, never silently wrong.
    - When only the new code reaches for it, on the same request in the same world, that reach is itself a difference (kind `refused`). Left "not compared", a rare path that starts a program or opens a connection could switch on unseen, under `maxUncovered`.
    - `pg`, `node:http` clients and Redis come in Phase 4.
-6. **No dependencies, Node 22 or newer, ESM.** Nothing to audit in the supply chain, and the twin runs inside customers' production.
+6. **No dependencies, Node 22.3 or newer, ESM.** Nothing to audit in the supply chain, and the twin runs inside customers' production. (The seal needs `process.getBuiltinModule`, from Node 22.3; on an older Node the twin stays off and says so.)
 7. **One request at a time per ghost pair; restart both together.** Both ghosts then always have identical histories, so a difference can only come from the code. Throughput is managed by sampling and, later, by more pairs.
 8. **Fail open for customers, fail closed for comparisons.** Any doubt about a comparison means "not compared". Any internal error switches the twin off and the app carries on.
 9. **The Rust `kern` tool stays the build-time analyser.** It already knows changed lines, measured lines and git history (`drive.rs`), and it is the PR-level product (`kern drive`). The runtime is JavaScript because it runs inside customers' Node processes.

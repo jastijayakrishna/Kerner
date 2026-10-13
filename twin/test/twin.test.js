@@ -166,6 +166,24 @@ test('a version named by a path relative to the working folder, or by a file URL
   }
 });
 
+test('on a Node older than 22.3 the twin stays off and says why, and the app is served as always', () => {
+  // The ghosts need process.getBuiltinModule (Node 22.3). Taking it away in the app's process stands in for an older Node.
+  const file = join(tmpdir(), `kern-twin-old-node-${process.pid}.mjs`);
+  writeFileSync(file, `
+delete process.getBuiltinModule;
+const { createTwin } = await import(${JSON.stringify(new URL('../src/index.js', import.meta.url).href)});
+const twin = await createTwin(${JSON.stringify({ old: app('refactor', 'old'), candidate: app('refactor', 'new') })});
+console.log(JSON.stringify({ disabled: twin.stats().disabled }));
+await twin.close();
+`);
+  try {
+    const out = execFileSync(process.execPath, [file], { encoding: 'utf8', timeout: 20000 });
+    assert.match(JSON.parse(out).disabled, /needs Node 22\.3 or newer; this is Node \d+\.\d+\.\d+/, out);
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
+
 test('createTwin without options, or with null, says which option is missing', async () => {
   for (const options of [undefined, null, {}]) await assert.rejects(createTwin(options), /old must be \{ module/);
 });

@@ -6,6 +6,6 @@
   "type": "module",
   "exports": { ".": "./src/index.js" },
   "bin": { "kern-twin": "./bin/kern-twin.js" },
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.3" },
   "scripts": { "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"" }
 }

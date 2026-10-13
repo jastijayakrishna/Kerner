@@ -192,6 +192,12 @@ class Twin {
       this.#disabled = 'switched off with KERN_TWIN=off';
       return;
     }
+    // The ghosts' seal needs process.getBuiltinModule (Node 22.3): on an older Node the twin stays off and says so, rather than failing in
+    // every ghost with Node's own message.
+    if (typeof process.getBuiltinModule !== 'function') {
+      this.#disabled = `the twin needs Node 22.3 or newer; this is Node ${process.versions.node}`;
+      return;
+    }
     // A sandbox that was asked for and does not work is never quietly dropped: the twin stays off and says why.
     if (this.#settings.sandbox === 'bwrap') {
       const probe = spawnSync('bwrap', ['--unshare-user', '--unshare-net', '--ro-bind', '/', '/', 'true'], { encoding: 'utf8', timeout: 10000 });
