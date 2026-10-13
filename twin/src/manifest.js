@@ -25,7 +25,9 @@ export function checkManifest(manifest) {
   const lines = new Map();
   for (const file of manifest.files) {
     const path = file?.path;
-    if (typeof path !== 'string' || !path || path.startsWith('/') || /^[A-Za-z]:/.test(path) || path.split('/').includes('..')) throw new Error(`a manifest path must stay inside the repository: ${path}`);
+    // On Windows a backslash separates folders too: '..\\x.js' climbs out, and '\\x.js' or '\\\\server\\share' starts outside.
+    const outside = typeof path !== 'string' || !path || /^[\\/]/.test(path) || /^[A-Za-z]:/.test(path) || path.split(/[\\/]/).includes('..');
+    if (outside) throw new Error(`a manifest path must stay inside the repository: ${path}`);
     for (const side of SIDES) {
       for (const [number, entry] of Object.entries(file[side] ?? {})) {
         const line = Number(number);

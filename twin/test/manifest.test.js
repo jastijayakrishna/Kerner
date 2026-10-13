@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { acceptMatcher, attribute, checkRoots, coveragePlan, loadManifest } from '../src/manifest.js';
+import { acceptMatcher, attribute, checkManifest, checkRoots, coveragePlan, loadManifest } from '../src/manifest.js';
 
 const fixture = (path) => fileURLToPath(new URL(`./apps/three-prs/${path}`, import.meta.url));
 
@@ -30,4 +30,12 @@ test('a difference names the one pull request whose lines it ran, and accepted l
   const accepted = acceptMatcher(['old:src/app.js:17', 'new:src/app.js:9-13']);
   assert.deepEqual(['old:src/app.js:17', 'new:src/app.js:13', 'new:src/app.js:17', 'old:src/app.js:9'].map(accepted), [true, true, false, false]);
   assert.throws(() => acceptMatcher(['src/app.js:17']), /accept entries look like/);
+});
+
+test('a manifest path must stay inside the repository whichever separator it uses', () => {
+  const manifest = (path) => ({ version: 1, files: [{ path, old: {}, new: { 1: { text: 'x', commit: null } } }], commits: {} });
+  for (const path of ['../x.js', '/etc/x.js', 'C:/x.js', 'src/../../x.js', 'src\\..\\..\\x.js', '..\\x.js', '\\\\server\\share\\x.js', '\\x.js']) {
+    assert.throws(() => checkManifest(manifest(path)), /must stay inside the repository/, path);
+  }
+  assert.equal(checkManifest(manifest('src/a.js')).lines.size, 1);
 });
