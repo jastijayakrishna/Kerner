@@ -138,7 +138,7 @@ const twin = await createTwin({ ...versions, adapters: ['http', 'pg', 'ioredis']
   node twin/bin/kern-twin.js build --repo . --base "$BASE_SHA" --out .kern-twin/old
   ```
 
-  It shares the new version's `node_modules` when no package file changed, and otherwise installs the old version's own.
+  It shares the new version's `node_modules` when no package file changed, and otherwise installs the old version's own. In a monorepo, the workspace packages linked into `node_modules` are linked to the old version's own copy of them, so a change to a workspace package shows as a difference.
 - **The acceptance run** (`twin/examples/shop/run.sh`): an Express and Postgres shop under the twin. Measured on 2026-10-11:
 
   ```text
