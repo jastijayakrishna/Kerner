@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pgReadable } from '../src/real-reads.js';
+import { pgReadable, realRead } from '../src/real-reads.js';
 import { createTwin } from '../src/index.js';
 import { app, listen, production } from './helpers.js';
 
@@ -68,5 +68,18 @@ test('a read the real app answered from its warm cache is made for real by the t
   } finally {
     delete process.env.KERN_TEST_RATES;
     await rates.close();
+  }
+});
+
+test('an allow-listed real read keeps every cookie its answer sets, as the recording does', async () => {
+  const upstream = await listen((req, res) => {
+    res.setHeader('set-cookie', ['session=s1; HttpOnly', 'csrf=c1']);
+    res.end('{}');
+  });
+  try {
+    const answer = await realRead({ method: 'GET', url: `${upstream.url}/session`, headers: {} }, [`GET ${upstream.url}/*`], 1 << 20);
+    assert.deepEqual(answer.headers['set-cookie'], ['session=s1; HttpOnly', 'csrf=c1']);
+  } finally {
+    await upstream.close();
   }
 });

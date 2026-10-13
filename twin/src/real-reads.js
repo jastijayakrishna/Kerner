@@ -74,6 +74,9 @@ export async function realRead({ method, url, headers }, patterns, maxBodyBytes)
     const body = method === 'HEAD' ? Buffer.alloc(0) : await readCapped(response.body, maxBodyBytes);
     if (body === null) return { error: 'the answer was over the limit' };
     const answer = Object.fromEntries([...response.headers].filter(([name]) => name !== 'content-encoding' && name !== 'content-length'));
+    // Each cookie is a Set-Cookie header of its own, and Object.fromEntries keeps only the last: they are kept as a list, as the recording keeps them.
+    const cookies = response.headers.getSetCookie();
+    if (cookies.length) answer['set-cookie'] = cookies;
     return { status: response.status, headers: answer, body: exactBytes([body]) };
   } catch (error) {
     return { error: String(error?.message ?? error) };
