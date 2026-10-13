@@ -3,7 +3,8 @@
 //! which of these lines each real request ran, holds switch-on until every one has run cleanly, and names the pull request behind a
 //! difference. Which lines changed and which hold code are kern drive's rules (drive::changed, drive::measured).
 use crate::drive::{Item, blobs, changed, commit_check, listing, measured, minified, same_program};
-use crate::git::{git, git_with};
+use crate::ensure;
+use crate::git::{git, git_with, trimmed};
 use crate::util::*;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,6 +66,10 @@ fn landing(repo: &Path, head: &str, first: &[String], commit: &str, seen: &mut B
 pub fn plan(repo: &Path, base: &str, head: &str, out: &Path) -> R<Value> {
     commit_check(repo, base)?;
     commit_check(repo, head)?;
+    // In a shallow clone git blame gives every line, changed ones too, to the commit at the shallow edge, even when the base is there: no
+    // line's commit, and so no pull request, could be named, and the manifest would say so nowhere.
+    ensure!(trimmed(git(repo, &["rev-parse", "--is-shallow-repository"], None)?) == "false",
+        "The repository is a shallow clone, so git blame cannot name the commit behind each changed line. Fetch the full history first: git fetch --unshallow");
     let (old, new) = (listing(repo, base)?, listing(repo, head)?);
     let index = |items: &[Item]| -> BTreeMap<String, Item> { items.iter().map(|i| (i.path.clone(), i.clone())).collect() };
     let (old_at, new_at) = (index(&old), index(&new));

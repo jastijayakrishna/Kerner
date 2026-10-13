@@ -115,6 +115,39 @@ fn a_line_changed_on_a_merged_branch_names_the_merge_pull_request() {
 }
 
 #[test]
+fn a_shallow_clone_is_refused_because_its_blame_cannot_name_the_commits() {
+    // In a shallow clone git blame gives every line, changed ones too, to the commit at the shallow edge, so each line's commit, and so
+    // its pull request, would be silently missing.
+    let t = Temp::new();
+    let r = t.join("repo");
+    std::fs::create_dir_all(&r).unwrap();
+    git(&r, &["init", "-q"]);
+    write(&r, "src/a.js", "export function a() {\n  return 1;\n}\n");
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-qm", "Start"]);
+    write(&r, "src/b.js", "export const b = 1;\n");
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-qm", "Add b"]);
+    let base = git(&r, &["rev-parse", "HEAD"]);
+    git(&r, &["checkout", "-qb", "topic"]);
+    write(&r, "src/a.js", "export function a() {\n  return 2;\n}\n");
+    git(&r, &["commit", "-qam", "Return two"]);
+    write(&r, "notes.txt", "x\n");
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-qm", "More on the topic"]);
+    git(&r, &["checkout", "-q", "-"]);
+    git(&r, &["merge", "-q", "--no-ff", "topic", "-m", "Merge pull request #104 from me/topic"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    let url = format!("file://{}", r.display().to_string().replace('\\', "/"));
+    git(&t.0, &["clone", "-q", "--depth", "2", &url, "shallow"]);
+    let shallow = t.join("shallow");
+    assert_eq!(git(&shallow, &["cat-file", "-t", &base]), "commit", "the shallow clone holds the base");
+    let err = twin::plan(&shallow, &base, &head, &t.join("manifest.json")).unwrap_err().to_string();
+    assert!(err.contains("shallow") && err.contains("git fetch --unshallow"), "{err}");
+    assert!(!t.join("manifest.json").exists(), "no manifest is written");
+}
+
+#[test]
 fn a_change_without_code_is_named_and_an_existing_manifest_is_never_replaced() {
     let t = Temp::new();
     let r = t.join("repo");

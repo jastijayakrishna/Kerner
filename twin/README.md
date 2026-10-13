@@ -83,6 +83,8 @@ With a manifest from `kern twin plan`, the twin knows which changed lines of cod
 kern twin plan . "$BASE_SHA" "$HEAD_SHA" .kern-twin/manifest.json
 ```
 
+It needs the full history: in a shallow clone, git blame cannot name the commit behind a changed line, so `kern twin plan` refuses one (`git fetch --unshallow` first; in GitHub Actions, `actions/checkout` with `fetch-depth: 0`).
+
 ```js
 const twin = await createTwin({
   old: { module: '/srv/shop/current/src/app.js', export: 'createApp', root: '/srv/shop/current' },

@@ -315,7 +315,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 
 ## 9. File formats from later phases
 
-**The manifest** (Phase 3). `kern twin plan <repo> <base> <head> <out.json>` writes it:
+**The manifest** (Phase 3). `kern twin plan <repo> <base> <head> <out.json>` writes it. It refuses a shallow clone, where git blame gives every line to the commit at the shallow edge:
 
 ```json
 {
