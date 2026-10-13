@@ -210,3 +210,15 @@ test('a request the old version failed on and the new version now hangs on is a 
   assert.deepEqual(verdict.kinds, ['hang']);
   assert.equal(explain(verdict, '*', [{ route: '*', paths: ['result'] }]).outcome, 'different');
 });
+
+test("a Set-Cookie is compared by its name, its attributes and a plain value; a session token's own value is not", () => {
+  const cookies = (...list) => ({ status: 200, headers: { 'content-type': 'application/json', 'set-cookie': list }, body: Buffer.from('{}'), effects: [], events: [] });
+  const session = (token, flags = 'Path=/; HttpOnly; Secure; SameSite=Lax') => `sid=${token}; ${flags}`;
+  // A session id drawn after one more random number differs, though nothing that matters did.
+  assert.equal(compareRuns(cookies(session('s%3A9f8e7d6c5b4a3f2e1d0c'), 'lang=en'), cookies(session('s%3A1a2b3c4d5e6f7a8b9c0d'), 'lang=en')).outcome, 'same');
+  assert.equal(compareRuns(cookies(session('s%3A9f8e7d6c5b4a3f2e1d0c')), cookies('sid=s%3A9f8e7d6c5b4a3f2e1d0c; secure; httponly; samesite=Lax; path=/')).outcome, 'same', 'attributes in any order and case');
+  const weaker = compareRuns(cookies(session('s%3A9f8e7d6c5b4a3f2e1d0c')), cookies(session('s%3A9f8e7d6c5b4a3f2e1d0c', 'Path=/; SameSite=Lax')));
+  assert.deepEqual([weaker.outcome, weaker.kinds, weaker.details[0].path], ['different', ['headers'], 'header set-cookie'], 'HttpOnly and Secure dropped');
+  assert.equal(compareRuns(cookies(session('s%3A9f8e7d6c5b4a3f2e1d0c'), 'lang=en'), cookies(session('s%3A9f8e7d6c5b4a3f2e1d0c'))).outcome, 'different', 'a cookie no longer set');
+  assert.equal(compareRuns(cookies('role=user; Path=/'), cookies('role=admin; Path=/')).outcome, 'different', 'a plain value that changed');
+});

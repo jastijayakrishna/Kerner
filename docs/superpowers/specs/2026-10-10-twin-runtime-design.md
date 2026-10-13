@@ -39,7 +39,7 @@ Later phases add three things:
 5. **Kern checks the old ghost against reality.** Did it give the real status and make the real writes? If not, the request is "not compared", and the reason is counted.
 6. **Kern compares the two ghosts:**
    - status;
-   - headers that mean something;
+   - headers that mean something, Set-Cookie included: each cookie by its name, its attributes and a plain value (an opaque token's own value, such as a session id, is left out, since it changes whenever a version draws one more random number);
    - the body, by value for JSON and text;
    - the writes.
 

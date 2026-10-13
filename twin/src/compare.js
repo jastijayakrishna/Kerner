@@ -2,7 +2,28 @@ import { diffValues, readBody } from './serialize.js';
 import { digest, shapeOf } from './keys.js';
 
 /** Headers that change on every answer and say nothing about behaviour. */
-export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing', 'set-cookie']);
+export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing']);
+
+/**
+ * A Set-Cookie as it is compared: its name, its attributes (in order, their names in lower case) and its value, but for a value that is
+ * an opaque token (16 or more characters, letters and digits: a session id, a signed or random value), which changes whenever a version
+ * draws one more random number first. So a cookie no longer set, a weaker flag (HttpOnly, Secure, SameSite) or a plain value that changed
+ * (role=user to role=admin) is a difference, and a fresh session id is not.
+ */
+function cookieShape(line) {
+  const [pair = '', ...attributes] = String(line).split(';').map((part) => part.trim());
+  const at = pair.indexOf('=');
+  const name = at < 0 ? pair : pair.slice(0, at).trim();
+  const value = at < 0 ? '' : pair.slice(at + 1).trim();
+  const opaque = value.length >= 16 && /[A-Za-z]/.test(value) && /\d/.test(value);
+  const attrs = attributes.filter(Boolean).map((part) => {
+    const eq = part.indexOf('=');
+    return eq < 0 ? part.toLowerCase() : `${part.slice(0, eq).trim().toLowerCase()}=${part.slice(eq + 1).trim()}`;
+  }).sort();
+  return [`${name}=${opaque ? '(a token)' : value}`, ...attrs].join('; ');
+}
+
+const cookiesOf = (headers) => [headers?.['set-cookie'] ?? []].flat().map(cookieShape).sort().join('\n');
 
 /**
  * Kinds only a rule that names them can state: a path rule never makes a crash, a hang, an opened door, another write or a reach for
@@ -141,6 +162,11 @@ export function compareRuns(a, b) {
     }
     const names = [...new Set([...Object.keys(a.headers), ...Object.keys(b.headers)])].filter((h) => !VOLATILE_HEADERS.has(h)).sort();
     for (const name of names) {
+      if (name === 'set-cookie') {
+        const [x, y] = [cookiesOf(a.headers), cookiesOf(b.headers)];
+        if (x !== y) add('headers', 'header set-cookie', x || 'missing', y || 'missing');
+        continue;
+      }
       const x = a.headers[name] === undefined ? 'missing' : String(a.headers[name]);
       const y = b.headers[name] === undefined ? 'missing' : String(b.headers[name]);
       if (x !== y) add('headers', `header ${name}`, x, y);
