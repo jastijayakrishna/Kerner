@@ -181,6 +181,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 - **Switching back.**
   - An unexplained difference while the new version serves switches serving back to the old version before the next request, and holds switching on by itself.
   - The control file keeps the state across restarts. If it cannot be read, the router keeps its last known value; if there is none, the old version serves.
+  - The router reads the control file in the same queue as its switches. A read of older content that was in flight during a switch back can then never switch the new version on again.
   - If the twin's thread fails, the old version serves.
 
 ## 8. Failure modes

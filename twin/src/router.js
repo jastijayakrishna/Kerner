@@ -92,9 +92,14 @@ export class Router {
 
   /** Switches serving from the next request on. Answers false when the candidate could not load (serving stays old; `reason` says why). */
   switchTo(side, reason, { persist = true } = {}) {
-    const step = this.#queue.then(() => this.#apply(side, reason, persist));
-    this.#queue = step.catch(() => false);
-    return step;
+    return this.#enqueue(() => this.#apply(side, reason, persist));
+  }
+
+  /** Runs `step` once every switch and control file check queued before it has finished. The queue itself never rejects. */
+  #enqueue(step) {
+    const run = this.#queue.then(step);
+    this.#queue = run.catch(() => false);
+    return run;
   }
 
   async #apply(side, reason, persist) {
@@ -110,9 +115,21 @@ export class Router {
     this.serving = side;
     this.hold = side === 'old';
     this.reason = String(reason).slice(0, 300);
-    this.#onSwitch?.(side, this.reason, this.hold);
+    this.#tell();
     if (persist) await this.#persist();
     return true;
+  }
+
+  /**
+   * Tells the twin's thread how serving stands, before any request reaches the new side. A failure to tell it never stops the switch
+   * from being written: serving and the control file must always agree.
+   */
+  #tell() {
+    try {
+      this.#onSwitch?.(this.serving, this.reason, this.hold);
+    } catch {
+      // The twin's own callback failed; the switch stands, and is written next.
+    }
   }
 
   async #persist() {
@@ -125,15 +142,21 @@ export class Router {
   }
 
   #watch() {
-    const file = this.#file;
-    // Looked at once a second; it never keeps the process alive. A file that cannot be read leaves serving as it is.
-    this.#watcher = async () => {
-      const control = await readControl(file);
-      if (control?.candidate === this.#candidateId && control.serving !== this.serving) {
-        await this.switchTo(control.serving, `the control file: ${control.reason ?? 'changed'}`, { persist: false });
-      }
+    // Looked at once a second; it never keeps the process alive. The file is read in the switch queue, after every switch asked for
+    // before and its write: a read of older content still in flight could otherwise undo a switch back made meanwhile. The watcher is
+    // called by fs.watchFile, which ignores what it answers, so it must never leave a promise to reject: that would end the app.
+    this.#watcher = () => {
+      this.#enqueue(() => this.#follow()).catch(() => {});
     };
-    watchFile(file, { interval: 1000, persistent: false }, this.#watcher);
+    watchFile(this.#file, { interval: 1000, persistent: false }, this.#watcher);
+  }
+
+  /** Follows a person's switch in the control file. A file that cannot be read leaves serving as it is. */
+  async #follow() {
+    const control = await readControl(this.#file);
+    if (control?.candidate === this.#candidateId && control.serving !== this.serving) {
+      await this.#apply(control.serving, `the control file: ${control.reason ?? 'changed'}`, false);
+    }
   }
 
   /** Stops watching the control file. */

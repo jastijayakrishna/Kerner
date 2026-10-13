@@ -182,9 +182,10 @@ Notes on the verdict:
 
 **`class Router`** runs in the app's thread:
 - `Router.open({ old, candidate, candidateId, stateDir, onSwitch })` loads the old version's listener in the app's thread. It loads the candidate's listener only when serving first switches to it.
+- `onSwitch(side, reason, hold)` tells the twin's thread how serving stands, before the next request. If it throws, the switch still stands and is still written to the control file.
 - `listener()` returns one request listener. It sends each request to the version serving at that moment and writes that side into the sampled request's record.
 - `serving` is `'old'` or `'candidate'`, and `reason` says why.
-- `switchTo(side, reason)` applies from the next request on. Switches happen one at a time. A candidate that fails to load leaves serving at old, with the reason. The method answers whether the switch happened.
+- `switchTo(side, reason)` applies from the next request on. Switches happen one at a time, and so do the router's reads of the control file: a read comes after every switch asked for before it, and its write. A candidate that fails to load leaves serving at old, with the reason. The method answers whether the switch happened.
 - `close()` stops watching the control file.
 
 **The control file** is `<stateDir>/control.json`. It is written atomically: a temporary file, then a rename.
@@ -195,7 +196,7 @@ Notes on the verdict:
 
 - **`hold`:** true after any switch back to the old version. The twin then does not switch on by itself until a person switches the candidate on.
 - **On start:** if the file names the same candidate and says `candidate`, the candidate serves. Otherwise the old version serves.
-- **While running:** the router checks the file every second with `fs.watchFile`, which does not keep the process alive. A person can switch by editing the file, or with `kern-twin serve old|candidate --state <dir>`.
+- **While running:** the router checks the file every second with `fs.watchFile`, which does not keep the process alive. A person can switch by editing the file, or with `kern-twin serve old|candidate --state <dir>`. The file is read in the router's switch queue, so a read of older content can never undo a switch back made while it was in flight. The watcher never leaves a promise to reject, which would end the app's process.
 - **If the file cannot be read:** the last known value stays.
 - **If the twin fails:** when the twin's thread stops unexpectedly, the old version serves, and the file says why.
 - **A normal close:** `twin.close()` switches nothing, so a restart keeps a candidate that earned serving.
