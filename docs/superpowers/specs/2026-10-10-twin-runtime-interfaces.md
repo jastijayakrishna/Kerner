@@ -144,8 +144,8 @@ Notes on the verdict:
 
 | File | Exports | Phase |
 |---|---|---|
-| `src/keys.js` | `READS`, `digest`, `callKey`, `isWrite` | 1; Phase 4 adds `shapeOf`, `stable`, `pgKey`, `pgIsWrite`, `redisKey`, `redisIsWrite`, `readAllowed` |
-| `src/serialize.js` | `decodeBody`, `readBody`, `preview`, `diffValues` | 1; Phase 2 adds `exactBytes`; Phase 4 adds `revive` |
+| `src/keys.js` | `READS`, `digest`, `callKey`, `isWrite` | 1; Phase 4 adds `shapeOf`, `stable`, `pgKey`, `pgIsWrite`, `redisKey`, `redisIsWrite`, `readAllowed` and `isSession`; the 2026-10-12 hardening adds `plainAddress(url)` (an http or https address as fetch reads it, or null) and `jsonText(value, { sorted })` (JSON text at any depth, exactly as JSON.stringify writes it; with `sorted`, every object's keys in order) |
+| `src/serialize.js` | `decodeBody`, `readBody`, `preview`, `diffValues` | 1; Phase 2 adds `exactBytes`; Phase 4 adds `revive`; it shares `jsonText` from `keys.js`. `diffValues`, `revive` and `jsonText` walk values with stacks of their own, so any depth JSON.parse reads is handled |
 | `src/compare.js` | `VOLATILE_HEADERS`, `compareRuns(a, b)`, `faithful(real, ghost, who)`, `explain(verdict, route, allow)` | 1; `explain` and `who` in 2 |
 | `src/world.js` | `installWorld`, `resetWorld` | 1 |
 | `src/ghost-io.js` | `installGhostIO({ ports, addons, realReads, ask, overlay })`, `beginJob(io)`, `endJob()`, `take(key)`, `wrote(effect)`, `note(type, detail)` | 1; Phase 2 seals more and exports `take`, `wrote` and `note`; Phase 4 matches by shape and adds `ports`, `realReads`, `ask` and `overlay` |
@@ -156,7 +156,7 @@ Notes on the verdict:
 | `src/process-ghost.js`, `src/process-ghost-main.js` | `ghostCommand(settings)`, `startProcessGhost(side, settings)`, with the same shape as `startGhost` | 4 |
 | `src/adapters/index.js` | `ADAPTERS`, `ADAPTER_NAMES` | 4 |
 | `src/adapters/http.js`, `pg.js`, `ioredis.js` | Each exports `{ kind, record(api), prepare?(api), replay(api) }` by default: `record` runs in the app's thread, `prepare` in a ghost before its seal, `replay` in a ghost after it | 4 |
-| `src/real-reads.js` | `realRead(request, patterns, maxBodyBytes)` → `{ status, headers, body }` or `{ error }` | 4 |
+| `src/real-reads.js` | `realRead(request, patterns, maxBodyBytes)` → `{ status, headers, body }` or `{ error }` | 4; Phase 6 adds `pgReadable(text)` (one statement, a read, calling nothing that acts even read-only) and `pgReader(url, appModule)` |
 | `src/overlay.js` | `installOverlay({ wrote })`, `resetOverlay()` | 4 |
 | `src/build.js` | `buildOld({ repo, base, out, install, build })` | 4 |
 | `src/identity.js` | `packageRoot(file)`, `versionId(file, exportName)` | 2 |
