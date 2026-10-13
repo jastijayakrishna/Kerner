@@ -231,6 +231,12 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 - **Frozen time.** Code that waits for time to pass in a busy loop never finishes in a ghost. That ends as a timeout, never as a wrong "same".
 - **Coverage.** It compares the requests that happen. A path no request takes needs Phase 3's path list and Level 1's generated inputs (`kern drive`).
 - **Scrubbing.** A body the scrubber cannot read (binary, a file upload) is kept and named in the case's `opaque` list. In other text (XML, say) only the patterns apply, not the private names. A value the app adds from its own configuration is not a request value, and is not scrubbed.
+- **Work outside a turn.** Timers and calls belong to the turn that started them, but thread-pool callbacks (async `fs`, `crypto` and `zlib`), `MessagePort` messages, `AbortSignal.timeout` and `Atomics.waitAsync` are not held to one. Background work they finish may change the app's memory between requests; a failure there is judged on the request that left it running, and the pair restarts before the next request.
+- **node:http without a Host header.** A client request with `setHost: false`, or with headers given as Node's raw list, is named without its port, as the recorder sees it; an allow-listed real read cannot be made for it, so such a request is not compared when its recording lacks the call.
+- **Source maps from bundlers that name their sources by a scheme** (`webpack://`). Their changed lines cannot be measured and wait for switch-on; `accept` them, or ship maps with file paths.
+- **The overlay and folders.** With `overlay: true`, removing or renaming a real folder does not hide the real files inside it from later reads in the same request.
+- **`kern-twin build` and git submodules.** `git archive` leaves submodules out of the old version.
+- **Calls named by value** only up to 256 KiB: a larger JSON body is named by its bytes, so the same write with its keys in another order is then a difference.
 
 ## 11. Reused from Kern
 

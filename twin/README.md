@@ -254,6 +254,12 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 - **In-memory state.** Caches and counters inside the app differ between the real app and the ghosts, so such requests may be "not compared".
 - **Below Node's APIs.** Thread ghosts are sealed in JavaScript only. Process ghosts add Node's permission model, and `bwrap` adds the kernel's network and file isolation.
 - **Two versions in one process.** Once the new version serves, both versions are loaded in the app's process. An app whose `createApp` starts background work, or registers process-wide singletons, should use `wrap()` and switch with its deploy system, reading `kern-twin status`.
+- **Work outside a turn.** Timers and calls belong to the turn that started them, but thread-pool callbacks (async `fs`, `crypto` and `zlib`), `MessagePort` messages, `AbortSignal.timeout` and `Atomics.waitAsync` are not held to one. Background work they finish may change the app's memory between requests; a failure there is judged on the request that left it running, and the pair restarts before the next request.
+- **node:http without a Host header.** A client request with `setHost: false`, or with headers given as Node's raw list, is named without its port, as the recorder sees it; an allow-listed real read cannot be made for it, so such a request is not compared when its recording lacks the call.
+- **Source maps from bundlers that name their sources by a scheme** (`webpack://`). Their changed lines cannot be measured and wait for switch-on; `accept` them, or ship maps with file paths.
+- **The overlay and folders.** With `overlay: true`, removing or renaming a real folder does not hide the real files inside it from later reads in the same request.
+- **`kern-twin build` and git submodules.** `git archive` leaves submodules out of the old version.
+- **Calls named by value** only up to 256 KiB: a larger JSON body is named by its bytes, so the same write with its keys in another order is then a difference.
 
 ## Cost (measured)
 
