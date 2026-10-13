@@ -130,6 +130,9 @@ export function compareRuns(a, b) {
     }
     if (!a.error) add(b.timedOut ? 'hang' : 'crash', 'result', `status ${a.status}`, b.error);
     else if (!b.error) add('fixed', 'result', a.error, `status ${b.status}`);
+    // A request the old version failed on fast and the new one now hangs on is a hang: worse for a customer, so only a rule naming it may
+    // state it.
+    else if (b.timedOut && !a.timedOut) add('hang', 'result', a.error, b.error);
     else if (a.error !== b.error) add('changed-error', 'result', a.error, b.error);
   } else {
     if (a.status !== b.status) {

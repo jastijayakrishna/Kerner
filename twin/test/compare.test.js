@@ -204,3 +204,9 @@ test('a version that fails after it has answered is a crash, though its answer w
   assert.deepEqual(verdict.details[0], { kind: 'crash', path: 'after the answer', old: 'none', new: failed.after });
   assert.equal(compareRuns(run(200, {}, failed), run(200, {}, failed)).outcome, 'same');
 });
+
+test('a request the old version failed on and the new version now hangs on is a hang, which a path rule never states', () => {
+  const verdict = compareRuns(run(0, null, { error: 'uncaught TypeError: x' }), run(0, null, { error: 'no answer within 500 ms', timedOut: true }));
+  assert.deepEqual(verdict.kinds, ['hang']);
+  assert.equal(explain(verdict, '*', [{ route: '*', paths: ['result'] }]).outcome, 'different');
+});
