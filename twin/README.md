@@ -188,7 +188,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 `twin.stats()` counts, for this run:
 - **`same`, `stated` and `different`.** `stated` means different only where `allow` says it may be.
 - **`notCompared`,** with its reasons in `reasons`. It covers three cases:
-  - a ghost needed something it may not use;
+  - both versions needed something a ghost may not use (when only the new code reaches for it, that is a difference of kind `refused`);
   - one ghost read something the recording cannot answer (`unanswered`);
   - the serving version's ghost did not reproduce the real run.
 - **`skipped`:** too large to copy, or aborted by the client.
@@ -197,7 +197,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 
 `twin.differences()` holds the first 100 unexplained differences of this run, with their real values. The `log` file holds all of them, scrubbed, one JSON line each:
 - `n`, `at`, `route`, `segment`, `serving`, `method` and `url`;
-- `kinds`: `crash`, `hang`, `door-opened`, `status`, `headers`, `body`, `effects`, `fixed` or `changed-error`;
+- `kinds`: `crash`, `hang`, `door-opened`, `status`, `headers`, `body`, `effects`, `refused` (the new code reached for something a ghost may not use, such as a program or a connection, which the old code did not), `fixed` or `changed-error`;
 - `details`: `{ kind, path, old, new }`.
 
 `twin.evidence()` gives the counts across restarts, per segment.

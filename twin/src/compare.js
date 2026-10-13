@@ -4,8 +4,11 @@ import { shapeOf } from './keys.js';
 /** Headers that change on every answer and say nothing about behaviour. */
 export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing', 'set-cookie']);
 
-/** Kinds only a rule that names them can state: a path rule never makes a crash, a hang, an opened door or another write "meant". */
-const SERIOUS = new Set(['crash', 'hang', 'door-opened', 'effects']);
+/**
+ * Kinds only a rule that names them can state: a path rule never makes a crash, a hang, an opened door, another write or a reach for
+ * something a ghost may not use "meant".
+ */
+const SERIOUS = new Set(['crash', 'hang', 'door-opened', 'effects', 'refused']);
 const KEPT = 20;
 
 const refused = (status) => status === 401 || status === 403 || status === 404 || status === 405 || (status >= 300 && status < 400);
@@ -16,6 +19,7 @@ const writes = (list) => [...(list ?? [])].sort().join('\n');
 const recordedShapes = (list) => [...(list ?? [])].filter((effect) => !effect.startsWith('FS ')).map(shapeOf).sort().join('\n');
 const strayCalls = (run) => run.events.filter((e) => e.type === 'unmatched-read' || e.type === 'unmatched-write');
 const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail));
+const refusals = (run) => new Set(run.events.filter((e) => e.type === 'denied').map((e) => e.detail));
 
 /**
  * Compares two runs of one request: `a` from the old code, `b` from the new.
@@ -23,8 +27,6 @@ const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'un
  * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ kind, path, old, new }] }, at most 20 details.
  */
 export function compareRuns(a, b) {
-  const denied = [...a.events, ...b.events].filter((e) => e.type === 'denied');
-  if (denied.length) return { outcome: 'not-compared', kinds: ['unsupported'], details: denied.slice(0, 5).map((e) => ({ kind: 'unsupported', path: 'io', old: '', new: e.detail })) };
   const kinds = new Set();
   const details = [];
   const add = (kind, path, old, now) => {
@@ -32,10 +34,25 @@ export function compareRuns(a, b) {
     if (details.length < KEPT) details.push({ kind, path, old, new: now });
   };
   // A write one version would make and the other would not is a difference whatever else happened: a double charge is caught even
-  // when the new code then fails on a call the recording cannot answer.
+  // when the new code then fails on a call the recording cannot answer, or reaches for something a ghost may not use.
   const before = writes(a.effects);
   const after = writes(b.effects);
   if (before !== after) add('effects', 'writes', before || 'none', after || 'none');
+  // Something a ghost may not use (a program, a connection no recording answers) is refused, so what it would have answered is unknown,
+  // and nothing after it can be compared. Reached for by the new code alone, on the same request in the same world, it is a difference
+  // in itself: left "not compared", a rare path could switch on with it unseen. Reached for by both versions, or by the old one alone
+  // (while the new version serves, the old ghost is the one not checked against reality), the request is not compared, unless the
+  // writes already differ.
+  const oldRefused = refusals(a);
+  const newRefused = refusals(b);
+  if (oldRefused.size || newRefused.size) {
+    const added = [...newRefused].filter((detail) => !oldRefused.has(detail));
+    for (const detail of added) add('refused', 'io', 'none', detail);
+    if (added.length) add('refused', 'answer', 'compared', `unknown: the ghost refused ${added[0]}, so what the new code did after it is not compared`);
+    if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
+    const denied = [...a.events, ...b.events].filter((e) => e.type === 'denied');
+    return { outcome: 'not-compared', kinds: ['unsupported'], details: denied.slice(0, 5).map((e) => ({ kind: 'unsupported', path: 'io', old: '', new: e.detail })) };
+  }
   // A write the recording cannot answer was never made, and its answer is unknown (a version's new code path writes what the old one
   // never did, say), so whatever its ghost did after it, a status, a body or a crash, came from the replay, not from the version. The
   // write itself is the difference.

@@ -49,6 +49,18 @@ test('a rounding change on one currency is caught with the exact field', async (
   await shop.close();
 });
 
+test('new code that starts a program the old code never started is a difference, though it falls back to the same answer', async () => {
+  const shop = await production('reach-out');
+  assert.deepEqual(await (await fetch(shop.url)).json(), { formats: ['png'] });
+  await shop.twin.idle();
+  const stats = shop.twin.stats();
+  assert.deepEqual([stats.same, stats.different, stats.notCompared], [0, 1, 0], JSON.stringify(stats));
+  const [found] = shop.twin.differences();
+  assert.deepEqual(found.kinds, ['refused'], JSON.stringify(found));
+  assert.match(found.details[0].new, /starting the program/);
+  await shop.close();
+});
+
 test('a route that refused a stranger and would now let them in is a door that opened', async () => {
   const shop = await production('open-door');
   assert.equal((await fetch(`${shop.url}/admin`)).status, 401);

@@ -38,9 +38,37 @@ test('an extra write is a difference in effects', () => {
   assert.deepEqual(compareRuns(run(200, {}, { effects: once }), run(200, {}, { effects: [...once, ...once] })).kinds, ['effects']);
 });
 
-test('a call a ghost may not make leaves the request not compared', () => {
-  const verdict = compareRuns(run(200, {}), run(200, {}, { events: [{ type: 'denied', detail: 'a network connection to db.example:5432' }] }));
+test('a call a ghost may not make, which both versions make, leaves the request not compared', () => {
+  const refused = { events: [{ type: 'denied', detail: 'a network connection to db.example:5432' }] };
+  const verdict = compareRuns(run(200, {}, refused), run(200, {}, refused));
   assert.equal(verdict.outcome, 'not-compared');
+  assert.deepEqual(verdict.kinds, ['unsupported']);
+});
+
+test('the new code reaching for something a ghost may not use, which the old code did not, is a difference; what follows it is not compared', () => {
+  // A program started, a connection opened: on the same request, in the same world, only the code changed. Left "not compared", a rare
+  // path could switch on with it unseen, under maxUncovered.
+  const verdict = compareRuns(run(200, { a: 1 }), run(500, { error: 'x' }, { events: [{ type: 'denied', detail: 'starting the program sh' }] }));
+  assert.equal(verdict.outcome, 'different');
+  assert.deepEqual(verdict.kinds, ['refused']);
+  assert.deepEqual(verdict.details[0], { kind: 'refused', path: 'io', old: 'none', new: 'starting the program sh' });
+  assert.match(verdict.details.at(-1).new, /not compared/);
+  assert.deepEqual(explain(verdict, '*', [{ route: '*', paths: ['io'] }]).outcome, 'different', 'a path rule never states it');
+  assert.deepEqual(explain(verdict, '*', [{ route: '*', kinds: ['refused'] }]).outcome, 'stated');
+});
+
+test('a double charge is caught even when the new code then reaches for something a ghost may not use', () => {
+  const charge = 'POST https://pay.example/charge abc';
+  const verdict = compareRuns(run(200, {}, { effects: [charge] }), run(200, {}, { effects: [charge, charge], events: [{ type: 'denied', detail: 'starting the program sh' }] }));
+  assert.equal(verdict.outcome, 'different');
+  assert.deepEqual(verdict.kinds, ['effects', 'refused']);
+});
+
+test('a call only the old code made that a ghost may not use leaves the request not compared, unless the writes differ', () => {
+  // While the new version serves, the old one is the ghost not checked against reality: what it would have answered is unknown.
+  const refused = { events: [{ type: 'denied', detail: 'starting the program convert' }] };
+  assert.equal(compareRuns(run(200, {}, refused), run(200, {})).outcome, 'not-compared');
+  assert.equal(compareRuns(run(200, {}, { ...refused, effects: ['POST https://x.example/ -'] }), run(200, {})).outcome, 'different');
 });
 
 test('the old code\'s ghost must reproduce the real status and writes, not the real clock', () => {

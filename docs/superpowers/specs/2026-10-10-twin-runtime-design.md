@@ -117,7 +117,8 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
 4. **Replay through the real HTTP stack on loopback.** Frameworks depend on many details of `IncomingMessage` and `ServerResponse`. A real local server and client is the most faithful replay, and the simplest to get right. Fake request and response objects were rejected.
 5. **Deny I/O by default; add replayable clients one by one.**
    - Phase 1 replays `fetch`.
-   - Any other way out is refused, and the request is "not compared". That is honest, never silently wrong.
+   - Any other way out is refused. When both versions reach for it, the request is "not compared": honest, never silently wrong.
+   - When only the new code reaches for it, on the same request in the same world, that reach is itself a difference (kind `refused`). Left "not compared", a rare path that starts a program or opens a connection could switch on unseen, under `maxUncovered`.
    - `pg`, `node:http` clients and Redis come in Phase 4.
 6. **No dependencies, Node 22 or newer, ESM.** Nothing to audit in the supply chain, and the twin runs inside customers' production.
 7. **One request at a time per ghost pair; restart both together.** Both ghosts then always have identical histories, so a difference can only come from the code. Throughput is managed by sampling and, later, by more pairs.
