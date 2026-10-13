@@ -144,3 +144,20 @@ test('without a state folder, the twin still says why the new version does not s
     await shop.close();
   }
 });
+
+test('a new version that never answers a request while it serves is switched back once a customer gives up on it', async () => {
+  // The request never finishes, so there is no answer to compare: it is replayed in both ghosts, and the new one hangs where the old
+  // one answers.
+  const shop = await routed('forgets-answer', { timeoutMs: 1000 });
+  try {
+    assert.equal(await shop.twin.serve('candidate', 'switched on by hand'), true);
+    assert.equal(await get(`${shop.url}/report`), 200);
+    await assert.rejects(fetch(`${shop.url}/report?weekly=1`, { signal: AbortSignal.timeout(500) }));
+    await until(() => shop.twin.stats().serving === 'old', 8000);
+    const [found] = shop.twin.differences();
+    assert.deepEqual([found.kinds, found.url], [['hang'], '/report?weekly=1'], JSON.stringify(found));
+    assert.equal(await get(`${shop.url}/report?weekly=1`), 200, 'the old version answers it again');
+  } finally {
+    await shop.close();
+  }
+});

@@ -123,8 +123,7 @@ function begin(req, res, maxBodyBytes, deliver, describe) {
   res.once('close', () => {
     if (ended) return;
     ended = true;
-    record.done = true;
-    deliver(Promise.resolve({ skipped: 'the request was aborted before its answer finished', ...where(req, record, describe) }));
+    deliver(aborted(req, record, describe));
   });
   keep(req, record);
   keep(res, record);
@@ -169,6 +168,29 @@ async function finish(req, res, record, describe) {
     seed: record.seed,
     request: { method: record.method, url: record.url, headers, body: exactBytes(record.incoming) },
     response: { status: res.statusCode, headers: { ...lower(res.getHeaders()), ...lower(record.head) }, body: exactBytes(record.outgoing) },
+    io: record.io,
+    effects: record.io.filter((call) => call.write).map((call) => call.key),
+  };
+}
+
+/**
+ * A request the customer gave up on before its answer finished. Nothing answered it in full, so it is skipped, unless its request came in
+ * whole and its calls were all copied: then both ghosts can answer it, and the coordinator looks for one thing only, a version that hangs
+ * where the other answers. While the new version serves, that is the hang the customer met, and it switches serving back.
+ */
+async function aborted(req, record, describe) {
+  await new Promise((resolve) => setImmediate(resolve));
+  if (record.pending.size) await Promise.race([Promise.allSettled([...record.pending]), new Promise((resolve) => setTimeout(resolve, 100))]);
+  record.done = true;
+  const place = where(req, record, describe);
+  if (record.problem || record.pending.size || !req.complete) return { skipped: 'the request was aborted before its answer finished', ...place };
+  const headers = lower(req.headers);
+  for (const name of HOP) delete headers[name];
+  return {
+    ...place,
+    seed: record.seed,
+    aborted: true,
+    request: { method: record.method, url: record.url, headers, body: exactBytes(record.incoming) },
     io: record.io,
     effects: record.io.filter((call) => call.write).map((call) => call.key),
   };

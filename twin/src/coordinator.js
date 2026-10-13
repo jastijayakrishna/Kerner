@@ -164,10 +164,12 @@ export class Coordinator {
       return;
     }
     if (this.#queue.length >= this.#options.queueLimit) {
-      this.counts.dropped++;
+      // A request the customer gave up on stays what it always was when there is no room for it: skipped, never dropped.
+      if (capture.aborted) this.submit({ ...capture, skipped: 'the request was aborted before its answer finished' });
+      else this.counts.dropped++;
       return;
     }
-    this.counts.sampled++;
+    if (!capture.aborted) this.counts.sampled++;
     this.#queue.push(capture);
     this.#pump();
   }
@@ -306,6 +308,10 @@ export class Coordinator {
     this.#last = { n, verdict: { n, ...place, method: capture.request.method, url: capture.request.url }, compared: false };
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
     const runs = { old: toRun(old), candidate: toRun(candidate) };
+    if (capture.aborted) {
+      await this.#judgeAborted(n, place, capture, runs);
+      return;
+    }
     // The ghost of the version that served is checked against what really happened; then the two ghosts are compared with each other.
     const real = { status: capture.response.status, headers: capture.response.headers, body: asBuffer(capture.response.body), effects: capture.effects, events: [] };
     const unfaithful = faithful(real, runs[place.serving], place.serving);
@@ -317,6 +323,24 @@ export class Coordinator {
     const named = lines && this.#options.manifest ? attribute(Object.keys(lines), this.#options.manifest) : {};
     if (this.#last?.n === n) this.#last.compared = ['same', 'stated', 'different'].includes(judged.outcome);
     await this.#judge({ n, ...place, method: capture.request.method, url: capture.request.url, ...judged, ...(lines ? { lines } : {}), ...named }, capture, runs);
+  }
+
+  /**
+   * A request the customer gave up on (capture.js aborted()). Nothing really answered it, so nothing is checked against reality, and it is
+   * never counted as clean: it is skipped, as always, unless the new version hangs where the old one answers, both replayed without a
+   * gap. That is a difference, and while the new version serves, the hang customers met.
+   */
+  async #judgeAborted(n, place, capture, runs) {
+    const verdict = explain(compareRuns(runs.old, runs.candidate), place.route, this.#options.allow ?? []);
+    const where = { n, ...place, method: capture.request.method, url: capture.request.url };
+    if (verdict.outcome === 'different' && verdict.kinds.includes('hang') && !runs.old.error) {
+      await this.#judge({ ...where, ...verdict }, capture, runs);
+      return;
+    }
+    const reason = 'the request was aborted before its answer finished';
+    this.counts.skipped++;
+    this.#reason(`skipped: ${reason}`);
+    await this.#judge({ ...where, outcome: 'skipped', kinds: ['skipped'], details: [{ kind: 'skipped', path: 'request', old: '', new: reason }] });
   }
 
   async #judge(verdict, capture = null, runs = null) {

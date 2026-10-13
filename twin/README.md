@@ -60,7 +60,7 @@ http.createServer(await twin.listener()).listen(3000);
 
   When it is not ready, `reasons` says why.
 - **Switching on.** With `switchOn: 'auto'`, the new version is switched on as soon as the decision is ready. With `'manual'` (the default), a person does it: `twin.serve('candidate')`, or `kern-twin serve candidate --state <dir>`.
-- **Switching back.** The first unexplained difference while the new version serves switches serving back to the old version before the next request. After any switch back, the twin does not switch on by itself again until a person switches the new version on.
+- **Switching back.** The first unexplained difference while the new version serves switches serving back to the old version before the next request. That includes a request the new version never answered: when a customer gives up on one, both ghosts replay it, and a new version that hangs where the old one answers is switched back. (Such a request is otherwise skipped, and never counts as a clean comparison.) After any switch back, the twin does not switch on by itself again until a person switches the new version on.
 - **A new version that cannot load in the app's thread,** where it would serve, is tried once. The old version keeps serving, `control.json` says why, and the twin keeps comparing but does not try again by itself until a person switches the new version on.
 - **Allowed differences.** A difference the team means is stated with `allow`, for example `{ route: 'GET /user', paths: ['$.user_name', '$.username'] }`:
   - every detail must be covered;

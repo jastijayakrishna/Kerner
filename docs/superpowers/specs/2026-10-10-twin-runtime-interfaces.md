@@ -51,7 +51,8 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 
 **Main → twin thread:**
 - `{ type: 'capture', capture }`: one served, sampled request. Its shape is in section 3.
-- `{ type: 'skip', reason, route, segment, serving, start }`: a sampled request that could not be copied, or that was aborted.
+- `{ type: 'skip', reason, route, segment, serving, start }`: a sampled request that could not be copied, or that was aborted and cannot be replayed.
+- A request the customer gave up on whose request came in whole and whose calls were all copied is a `capture` with `aborted: true` and no `response`. Nothing is checked against reality for it, and it is never counted as clean: it is skipped, unless the new version's ghost hangs where the old one answers with no gap in either replay, which is a difference of kind `hang` (and, while the new version serves, a switch back).
 - `{ type: 'serving', side, reason, hold, router }`: serving changed, a router now exists (`router: true`), or a switch did not happen (the candidate could not load in the app's thread), so the twin thread, which may have asked for it, stays in step with the router. `side` is `'old'` or `'candidate'`; `hold` is true after a switch back or a failed switch on, so the twin thread does not switch on by itself.
 - `{ type: 'load', load: { start, seed, io } }` (Phase 6, `load: 'record'` only): the record of the old version's start in the app's thread. It is sent once, and the ghosts start only then. `wrap()` sends one with no calls.
 - `{ type: 'close' }`.
