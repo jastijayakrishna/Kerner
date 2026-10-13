@@ -11,7 +11,8 @@ const HELPERS = new Set(['__name', '__export', '__copyProps', '__toCommonJS', '_
   '__defNormalProp', '__publicField', '__decorateClass', '__decorateParam', '__async', '__await', '__spreadValues', '__spreadProps', '__objRest',
   '__template', '__using', 'get']);
 const QUIET = new Set([...'{}()[];,']);
-const isCode = (c) => c.trim() !== '' && !QUIET.has(c);
+/** Whether a character is code, the rule every mask is built on: braces, brackets, parentheses, `;`, `,` and blanks are not. */
+export const isCode = (c) => c.trim() !== '' && !QUIET.has(c);
 const normalize = (path) => (process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
 
 /**

@@ -1,8 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { post, shopVersion, threePrs } from './helpers.js';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createTwin } from '../src/index.js';
+import { get, listen, post, shopVersion, threePrs } from './helpers.js';
 
 const status = (twin, key) => twin.paths().find((p) => p.key === key)?.status;
+
+/** One version of the plans shop, whose change adds a plan written with a brace alone on its line, and the manifest of that change. */
+const plans = (version) => {
+  const root = fileURLToPath(new URL(`./apps/plans/${version}/`, import.meta.url));
+  return { module: join(root, 'src', 'app.js'), export: 'createApp', root };
+};
+const plansManifest = fileURLToPath(new URL('./apps/plans/manifest.json', import.meta.url));
 
 test('a change whose old branch no request has taken stays off, and that line is listed, until a request takes it', async () => {
   const shop = await threePrs({
@@ -38,6 +48,21 @@ test('each difference names the pull request whose changed lines it ran', async 
   const found = Object.fromEntries(shop.twin.differences().map((d) => [d.url, [d.cause, d.pulls]]));
   assert.deepEqual(found, { '/total': [101, [101]], '/profile': [102, [102]], '/limit': [103, [103]] });
   await shop.close();
+});
+
+test('a changed line with no code on it, such as a brace alone, has nothing to prove and holds nothing back', async () => {
+  const twin = await createTwin({ old: plans('base'), candidate: plans('head'), manifest: plansManifest, timeoutMs: 3000, switchOn: 'auto', epsilon: 0.5, minHours: 0, minLineRuns: 1 });
+  const server = await listen(await twin.listener());
+  try {
+    for (let i = 0; i < 6; i++) assert.equal(await get(`${server.url}/?plan=free`), 200);
+    await twin.idle();
+    assert.deepEqual(twin.paths().map((p) => [p.key, p.status]), [['new:src/app.js:7', 'no code'], ['new:src/app.js:8', 'at load'], ['new:src/app.js:9', 'at load']]);
+    assert.deepEqual(twin.decision().waiting, []);
+    assert.equal(twin.stats().serving, 'candidate', 'six clean comparisons, and every changed line ran at load or has no code');
+  } finally {
+    await server.close();
+    await twin.close();
+  }
 });
 
 test('a manifest that does not describe the code switches the twin off and names the line, and customers are served as always', async () => {

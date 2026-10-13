@@ -247,7 +247,8 @@ try {
     maxUncovered: settings.maxUncovered,
     minLineRuns: settings.minLineRuns,
     accepted: acceptMatcher(settings.accept ?? []),
-    lineKeys: manifest ? [...manifest.lines.keys()] : [],
+    // With their text: a changed line with no code on it has nothing to prove.
+    lines: manifest ? manifest.lines : new Map(),
     known,
   };
   const hashes = new Map(manifest ? [...manifest.lines].map(([key, line]) => [key, line.hash]) : []);

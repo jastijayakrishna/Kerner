@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "base": "base",
+  "head": "head",
+  "files": [
+    {
+      "path": "src/app.js",
+      "status": "modified",
+      "changed": { "old": [], "new": [7, 8, 9, 10] },
+      "old": {},
+      "new": {
+        "7": { "text": "  {", "commit": "c201" },
+        "8": { "text": "    name: 'team',", "commit": "c201" },
+        "9": { "text": "    max: 10,", "commit": "c201" }
+      }
+    }
+  ],
+  "commits": {
+    "c201": { "summary": "Add the team plan (#201)", "pull": 201 }
+  },
+  "skipped": []
+}

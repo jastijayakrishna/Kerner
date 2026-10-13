@@ -41,20 +41,39 @@ test('every changed line must have run, every part of it, in minLineRuns clean c
   const evidence = new Evidence({ candidate: 'c1' });
   for (let i = 0; i < 6; i++) evidence.add(verdict('same', { lines: { 'old:src/app.js:17': i % 2 ? '1100' : '1111', 'new:src/app.js:17': '1111' } }));
   evidence.setLoadLines(['new:src/app.js:13']);
+  const changed = (...keys) => new Map(keys.map((key) => [key, { text: 'return x;' }]));
   const policy = {
     epsilon: 0.5, minHours: 0, segments: ['*'], maxUncovered: 0.05, minLineRuns: 3, accepted: acceptMatcher(['new:src/app.js:9']),
-    lineKeys: ['old:src/app.js:17', 'new:src/app.js:17', 'new:src/app.js:9', 'new:src/app.js:13', 'old:src/app.js:9'],
+    lines: changed('old:src/app.js:17', 'new:src/app.js:17', 'new:src/app.js:9', 'new:src/app.js:13', 'old:src/app.js:9'),
   };
   const held = decide(evidence.snapshot(), policy, Date.now());
   assert.deepEqual(held.waiting, ['old:src/app.js:9']);
   assert.deepEqual(held.reasons, ['1 changed line has not yet run in full in 3 clean comparisons: old:src/app.js:9']);
-  const ready = decide(evidence.snapshot(), { ...policy, lineKeys: policy.lineKeys.slice(0, 4) }, Date.now());
+  const ready = decide(evidence.snapshot(), { ...policy, lines: changed('old:src/app.js:17', 'new:src/app.js:17', 'new:src/app.js:9', 'new:src/app.js:13') }, Date.now());
   assert.equal(ready.ready, true, ready.reasons.join('; '));
-  const stricter = decide(evidence.snapshot(), { ...policy, minLineRuns: 4, lineKeys: ['old:src/app.js:17'] }, Date.now());
+  const stricter = decide(evidence.snapshot(), { ...policy, minLineRuns: 4, lines: changed('old:src/app.js:17') }, Date.now());
   assert.deepEqual(stricter.waiting, ['old:src/app.js:17'], 'its last two characters ran in only 3 clean comparisons');
   const lines = new Map([
     ['old:src/app.js:17', { side: 'old', path: 'src/app.js', line: 17, text: 'a', pull: 103 }],
     ['old:src/app.js:9', { side: 'old', path: 'src/app.js', line: 9, text: 'b', pull: 101 }],
   ]);
   assert.deepEqual(pathsOf(evidence.snapshot(), lines, policy).map((p) => [p.key, p.status, p.clean]), [['old:src/app.js:17', 'proven', 3], ['old:src/app.js:9', 'never run', 0]]);
+});
+
+test('a changed line with no code on it, such as a brace alone the way Prettier writes arrays of objects, has nothing to prove', () => {
+  const evidence = new Evidence({ candidate: 'c1' });
+  for (let i = 0; i < 6; i++) evidence.add(verdict('same', { lines: { 'new:src/plans.js:4': '1111' } }));
+  const line = (key, text) => [key, { side: key.split(':')[0], path: 'src/plans.js', line: Number(key.split(':')[2]), text, pull: 7 }];
+  const lines = new Map([
+    line('new:src/plans.js:3', '  {'),
+    line('new:src/plans.js:4', "    name: 'team',"),
+    line('new:src/plans.js:6', '  }, {'),
+    line('new:src/plans.js:9', "    name: 'pro',"),
+    line('old:src/plans.js:2', '  ({'),
+  ]);
+  const policy = { epsilon: 0.5, minHours: 0, segments: ['*'], maxUncovered: 0.05, minLineRuns: 3, lines };
+  assert.deepEqual(pathsOf(evidence.snapshot(), lines, policy).map((p) => [p.key, p.status]), [
+    ['new:src/plans.js:3', 'no code'], ['new:src/plans.js:4', 'proven'], ['new:src/plans.js:6', 'no code'], ['new:src/plans.js:9', 'never run'], ['old:src/plans.js:2', 'no code'],
+  ]);
+  assert.deepEqual(decide(evidence.snapshot(), policy, Date.now()).waiting, ['new:src/plans.js:9'], 'only the line with code that never ran holds it back');
 });

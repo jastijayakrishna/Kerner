@@ -169,7 +169,7 @@ Notes on the verdict:
 | `src/capture.js` | `current`, `wrapListener(listener, hooks)` | 1, extended in 2; Phase 6 adds `loadRecord()` and `settleLoad(record)` |
 | `src/turn.js` | `begin(id)`, `end()`, `within(id, fn)`, `owner()`, `isCurrent(id)`, `mine()`, `never()`, `keepTurn(emitter, id)`, `turnText(id)`, `turnOf(text)` | 6 |
 | `src/record.js` | `readCapped`, `recordFetch(maxBodyBytes)` | 1 |
-| `src/coverage.js` | `plausible`, `lineMasks`, `mappedMasks`, `decodeMappings`, `sourceMapOf`, `targetsOf`, `startCoverage`, `takeLines` | 3 |
+| `src/coverage.js` | `plausible`, `lineMasks`, `mappedMasks`, `decodeMappings`, `sourceMapOf`, `targetsOf`, `startCoverage`, `takeLines`; `isCode`, the rule for a code character, which `decide.js` reuses | 3 |
 | `src/manifest.js` | `lineHash`, `loadManifest`, `checkManifest`, `coveragePlan`, `checkRoots`, `attribute`, `acceptMatcher` | 3 |
 | `src/scrub.js` | `DEFAULT_SCRUB`, `scrubber(rules)`, `scrubCapture(capture, rules)` → `{ capture, opaque }` | 5 |
 | `src/cases.js` | `caseName(entry)`, `writeCase(dir, entry)`, `readCase(file)`, `runOf(saved)` | 5 |
@@ -251,7 +251,7 @@ The evidence file is `<stateDir>/evidence.json`:
 { ready, reasons: string[], needed, bound: { [segment]: number }, waiting?: string[] }
 ```
 
-The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lineKeys?, known? }`. `accepted` is a function made by `acceptMatcher(accept)`. In `segments`, the name `'*'` means all traffic together. A candidate is ready only when all of these hold:
+The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lines?, known? }`. `accepted` is a function made by `acceptMatcher(accept)`. `lines` is the manifest's Map of changed lines (line key → `{ text, ... }`, as `loadManifest` answers it): the line rule needs each line's text. In `segments`, the name `'*'` means all traffic together. A candidate is ready only when all of these hold:
 
 1. **No unexplained difference** since the candidate started.
 2. **Enough clean comparisons in every listed segment.**
@@ -262,9 +262,10 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 5. **Enough runs of every changed line (Phase 3).** Each measured changed line, on both sides, must be one of these:
    - `proven`: every code character ran in at least `minLineRuns` clean comparisons;
    - `at load`: it ran while the version loaded;
-   - `accepted`: it is listed in `accept`.
+   - `accepted`: it is listed in `accept`;
+   - `no code`: its text has no code character by `coverage.js`'s own rule (`isCode`: braces, brackets, parentheses, `;`, `,` and blanks are not code), such as a `{` alone on its line, which Prettier writes in arrays of objects. `kern twin plan` keeps such lines, coverage never reports them, and nothing on them can run.
 
-   `waiting` lists the lines that are none of these. `pathsOf()` gives every line's status: `never run`, `partly run`, `run`, `proven`, `at load` or `accepted`.
+   `waiting` lists the lines that are none of these. `pathsOf()` gives every line's status: `never run`, `partly run`, `run`, `proven`, `at load`, `accepted` or `no code`.
 6. **Every known case passed (Phase 5).** None is pending, failing, a stub or unreadable. An `unchecked` case does not hold the candidate: live traffic must prove that path.
 
 ## 7. Options of `createTwin`

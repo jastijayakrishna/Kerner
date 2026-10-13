@@ -63,7 +63,7 @@ async function status(flags) {
     maxUncovered: number(flags['max-uncovered'], 0.05, 'max-uncovered'),
     minLineRuns: number(flags['min-line-runs'], 3, 'min-line-runs'),
     accepted: acceptMatcher(flags.accept ? String(flags.accept).split(',') : []),
-    lineKeys: manifest ? [...manifest.lines.keys()] : [],
+    lines: manifest ? manifest.lines : new Map(),
   };
   return {
     candidate: now.candidate,

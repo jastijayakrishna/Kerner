@@ -3,6 +3,10 @@
 // The rule of three: after n comparisons with no unexplained difference, the true rate of unexplained differences is below 3/n with
 // 95% confidence (from -ln 0.05 ≈ 3). So a candidate needs ceil(3/ε) clean comparisons for the bound ε. With a manifest (Phase 3) every
 // changed line, old and new, must also have run, every part of it, in minLineRuns clean comparisons.
+import { isCode } from './coverage.js';
+
+/** The statuses that satisfy the line rule. */
+const SATISFIED = ['no code', 'accepted', 'at load', 'proven'];
 
 /** The clean comparisons that bound the rate of unexplained differences below `epsilon`, with 95% confidence. */
 export const needed = (epsilon) => Math.ceil(3 / epsilon - 1e-9);
@@ -22,7 +26,9 @@ export function totals(snapshot, segment) {
 const percent = (x) => `${(x * 100).toFixed(1)}%`;
 
 /**
- * What the evidence says of one changed line.
+ * What the evidence says of one changed line, whose text is `text`.
+ * - 'no code': the text has no code character (a brace alone, as Prettier writes an array of objects), so nothing on it can run, and
+ *   coverage never reports it. kern twin plan keeps such lines; without this status they would wait forever.
  * - 'accepted': a person accepted it.
  * - 'at load': it ran while the version loaded.
  * - 'proven': every code character ran in at least minLineRuns clean comparisons.
@@ -30,7 +36,8 @@ const percent = (x) => `${(x * 100).toFixed(1)}%`;
  * - 'partly run': some characters never ran in a clean comparison.
  * - 'never run'.
  */
-export function lineStatus(snapshot, key, policy, loaded) {
+export function lineStatus(snapshot, key, policy, loaded, text) {
+  if (typeof text === 'string' && ![...text].some(isCode)) return 'no code';
   if (policy.accepted?.(key)) return 'accepted';
   if (loaded.has(key)) return 'at load';
   const entry = snapshot.lines?.[key];
@@ -50,7 +57,7 @@ export function pathsOf(snapshot, lines, policy) {
     const entry = snapshot.lines?.[key];
     out.push({
       key, side: info.side, path: info.path, line: info.line, text: info.text, pull: info.pull,
-      touched: entry?.touched ?? 0, runs: entry?.runs ?? 0, clean: entry?.clean ?? 0, status: lineStatus(snapshot, key, policy, loaded),
+      touched: entry?.touched ?? 0, runs: entry?.runs ?? 0, clean: entry?.clean ?? 0, status: lineStatus(snapshot, key, policy, loaded, info.text),
     });
   }
   return out;
@@ -59,13 +66,14 @@ export function pathsOf(snapshot, lines, policy) {
 /**
  * Whether the candidate has earned serving customers, with every reason it has not.
  *
- * The policy is { epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lineKeys?, known? }. Ready needs all of:
+ * The policy is { epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lines?, known? }, where `lines` is the manifest's
+ * Map of changed lines (line key → { text, ... }). Ready needs all of:
  * - no unexplained difference;
  * - in every listed segment, at least ceil(3/ε) clean comparisons (same or stated);
  * - in every listed segment, at most maxUncovered of its requests left uncompared, since the bound says nothing about requests it
  *   never saw;
  * - minHours since the first comparison;
- * - with lineKeys, every changed line 'proven', 'at load' or 'accepted'. The others are listed in `waiting`.
+ * - with lines, every changed line 'proven', 'at load', 'accepted' or 'no code'. The others are listed in `waiting`.
  * - with known cases (Phase 5), every case checked: none still showing a difference, none waiting for a person, every file read.
  */
 export function decide(snapshot, policy, now) {
@@ -96,9 +104,9 @@ export function decide(snapshot, policy, now) {
   const hours = snapshot.since ? Math.max(0, now - snapshot.since) / 3600000 : 0;
   if (hours < policy.minHours) reasons.push(`${hours.toFixed(1)} of ${policy.minHours} hours watched`);
   const result = { ready: false, reasons, needed: need, bound };
-  if (policy.lineKeys?.length) {
+  if (policy.lines?.size) {
     const loaded = new Set(snapshot.loadLines ?? []);
-    const waiting = policy.lineKeys.filter((key) => !['accepted', 'at load', 'proven'].includes(lineStatus(snapshot, key, policy, loaded)));
+    const waiting = [...policy.lines].filter(([key, info]) => !SATISFIED.includes(lineStatus(snapshot, key, policy, loaded, info.text))).map(([key]) => key);
     result.waiting = waiting;
     if (waiting.length) {
       const list = `${waiting.slice(0, 5).join(', ')}${waiting.length > 5 ? ', ...' : ''}`;
