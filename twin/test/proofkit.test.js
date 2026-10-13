@@ -17,6 +17,11 @@ test('percentiles are exact, by nearest rank, and the share compared counts same
   assert.deepEqual(comparedShare({ same: 90, stated: 3, different: 2, notCompared: 4, skipped: 1 }), { compared: 95, judged: 100, share: 0.95 });
 });
 
+test('a request the twin dropped because it was busy counts as not compared in the share', () => {
+  // Dropped requests were sampled and never judged: leaving them out would make a run that shed load look better covered than it was.
+  assert.deepEqual(comparedShare({ same: 45, stated: 0, different: 0, notCompared: 5, skipped: 0, dropped: 50 }), { compared: 45, judged: 100, share: 0.45 });
+});
+
 test('the driver sends the same requests for the same seed at any concurrency, times only the steps, and counts a failing step', async () => {
   const seen = [];
   const server = await listen((req, res) => {

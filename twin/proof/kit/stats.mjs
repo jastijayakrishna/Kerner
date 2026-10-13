@@ -15,9 +15,12 @@ export function summarize(ms) {
   return { count: ms.length, p50: round(percentile(ms, 50)), p90: round(percentile(ms, 90)), p99: round(percentile(ms, 99)), max: round(percentile(ms, 100)) };
 }
 
-/** Of the sampled requests the twin judged, how many it compared (same, stated or different), and that share to 4 places. */
+/**
+ * Of the requests the twin sampled, how many it compared (same, stated or different), and that share to 4 places. A request it dropped
+ * because it was busy was sampled and never judged: it counts as not compared, so a run that shed load never looks better covered.
+ */
 export function comparedShare(stats) {
   const compared = stats.same + stats.stated + stats.different;
-  const judged = compared + stats.notCompared + stats.skipped;
+  const judged = compared + stats.notCompared + stats.skipped + (stats.dropped ?? 0);
   return { compared, judged, share: judged ? Math.round((compared / judged) * 10000) / 10000 : null };
 }
