@@ -216,7 +216,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 | `timeoutMs` | `5000` | How long a ghost may take for one request |
 | `startMs` | `20000` | How long a ghost may take to load the app |
 | `queueLimit` | `100` | Copies waiting to be compared; beyond it, requests are counted as dropped |
-| `maxBodyBytes` | `1048576` | Largest body copied each way; larger requests are skipped |
+| `maxBodyBytes` | `1048576` | Largest body copied each way; larger requests are skipped. A ghost's answer past it is compared by its size and sha256 |
 | `ghostMemoryMb` | `512` | Memory limit of each ghost |
 | `maxRestarts` | `20` | Ghost restarts before the twin switches itself off |
 | `log` | none | File that gets one JSON line per difference |

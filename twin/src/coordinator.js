@@ -17,6 +17,7 @@ export function toRun(result) {
     status: result.status,
     headers: result.headers ?? {},
     body: asBuffer(result.body),
+    large: result.large,
     effects: result.effects ?? [],
     events: result.events ?? [],
     error: result.error,

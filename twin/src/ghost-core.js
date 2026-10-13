@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { installWorld, resetWorld } from './world.js';
@@ -58,11 +59,15 @@ function startProblems(events, recorded) {
  * 3. loads one version of the app;
  * 4. answers jobs.
  *
- * `side`: { module, export, addons, coverage, adapters, overlay, realReads, load, pgReads }.
+ * `side`: { module, export, addons, coverage, adapters, overlay, realReads, load, pgReads, maxBodyBytes }.
  * `transport`: { send(message), onMessage(listener), beforeSeal() }.
  */
 export async function runGhost(side, transport) {
   const realRequest = http.request;
+  // The most of an answer the ghost hands to the twin's thread. Past it the rest is only hashed, and the twin gets the answer's size and
+  // sha256 (`large`), never its bytes: an answer that dumps a whole table cannot fill the twin's memory (R7). With no limit (a case
+  // replayed on its own), all of it is kept.
+  const cap = Number.isFinite(side.maxBodyBytes) ? side.maxBodyBytes : Infinity;
   let handler = null;
   let jobId = 0;
   let askId = 0;
@@ -152,9 +157,23 @@ export async function runGhost(side, transport) {
       const body = Buffer.from(sent.buffer, sent.byteOffset, sent.byteLength);
       const headers = { ...job.request.headers, 'content-length': String(body.length) };
       const req = realRequest({ host: '127.0.0.1', port, method: job.request.method, path: job.request.url, headers, agent: false }, (res) => {
-        const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: exactBytes(chunks) }));
+        let chunks = [];
+        let size = 0;
+        let hash = null;
+        res.on('data', (chunk) => {
+          size += chunk.length;
+          if (!hash && size > cap) {
+            hash = createHash('sha256');
+            for (const part of chunks) hash.update(part);
+            chunks = [];
+          }
+          if (hash) hash.update(chunk);
+          else chunks.push(chunk);
+        });
+        res.on('end', () => resolve({
+          status: res.statusCode, headers: res.headers,
+          ...(hash ? { body: null, large: { size, digest: hash.digest('hex') } } : { body: exactBytes(chunks) }),
+        }));
         res.on('error', (error) => resolve({ error: `the answer broke off: ${error.message}` }));
       });
       req.on('error', (error) => resolve({ error: `no answer: ${error.message}` }));
@@ -168,7 +187,7 @@ export async function runGhost(side, transport) {
     const lines = job.coverage && coverage ? await takeLines(coverage) : undefined;
     transport.send({
       type: 'result', id,
-      result: { status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, effects: io.effects, events: io.events, lines },
+      result: { status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, large: result.large, effects: io.effects, events: io.events, lines },
     });
   }
 

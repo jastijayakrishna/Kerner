@@ -77,8 +77,9 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 
 **Ghost → twin thread (a result):**
 ```js
-{ type: 'result', id, result: { status, headers, body: Uint8Array | null, error?, timedOut?, effects: string[], events: [{ type, detail }], lines? } }
+{ type: 'result', id, result: { status, headers, body: Uint8Array | null, large?: { size, digest }, error?, timedOut?, effects: string[], events: [{ type, detail }], lines? } }
 ```
+- A ghost hands over at most `maxBodyBytes` of its answer (given to both kinds of ghost at start). Past it the rest is only hashed: `body` is null and `large` holds the answer's size and its sha256 (hex). `compareRuns` compares such a body by size and digest, with any other body measured the same way, so an answer over the cap against a smaller one is a `body` difference, and two equal ones are the same.
 - `lines` arrives in Phase 3, and only when `job.coverage` is true.
 - Its shape is `{ [lineKey]: mask }`, for example `{ 'new:src/app.js:17': '111…10000' }`.
 - A mask has one character per code character of the line: `1` ran, `0` did not.

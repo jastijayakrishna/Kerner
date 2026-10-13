@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { wrapListener } from '../src/capture.js';
-import { production, post, listen } from './helpers.js';
+import { app, production, post, listen } from './helpers.js';
 
 test('if the twin\'s own recording fails, the request is served as always and the twin is told', async () => {
   const problems = [];
@@ -128,6 +128,26 @@ test('a ghost that ran out of memory after answering is still named on the next 
   assert.deepEqual(shop.twin.differences()[0]?.details[0], { kind: 'crash', path: 'result', old: 'status 200', new: 'the ghost had stopped before this request' }, JSON.stringify(stats));
   assert.equal(stats.disabled, null);
   await shop.close();
+});
+
+test('a new version that answers more than maxBodyBytes is compared by size and sha256, and the twin stays on', async () => {
+  const shop = await production('big-answer', { maxBodyBytes: 1 << 20 });
+  assert.deepEqual(await (await fetch(shop.url)).json(), { count: 70000 });
+  await shop.twin.idle();
+  const stats = shop.twin.stats();
+  assert.equal(stats.disabled, null, stats.disabled);
+  const [found] = shop.twin.differences();
+  assert.deepEqual(found?.kinds, ['body'], JSON.stringify(stats));
+  assert.equal(found.details[0].path, 'body', JSON.stringify(found.details[0]));
+  const size = Number(/^(\d+) bytes, sha256 [0-9a-f]{16}$/.exec(found.details[0].new)?.[1]);
+  assert.ok(size > 2 * (1 << 20), found.details[0].new);
+  await shop.close();
+  // Both ghosts answer the same table, each over the cap: the same.
+  const both = await production('big-answer', { maxBodyBytes: 1 << 20, old: app('big-answer', 'new') });
+  await (await fetch(both.url)).arrayBuffer();
+  await both.twin.idle();
+  assert.equal(both.twin.stats().same, 1, JSON.stringify(both.twin.stats()));
+  await both.close();
 });
 
 test('a request too large to copy is served and counted as skipped', async () => {

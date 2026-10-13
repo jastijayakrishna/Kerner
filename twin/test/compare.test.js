@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compareRuns, explain, faithful } from '../src/compare.js';
+import { digest } from '../src/keys.js';
 
 const run = (status, value, more = {}) => ({
   status,
@@ -40,6 +41,23 @@ test('two ghosts that both ran out of time are not compared: neither answered, s
   // Two versions that fail the same way on the same request behave alike: that was compared, and it is the same.
   const crashed = run(0, null, { error: 'uncaught TypeError: x' });
   assert.equal(compareRuns(crashed, crashed).outcome, 'same');
+});
+
+test('a body over the cap is compared by its size and its sha256: against a smaller body it differs, and two alike are the same', () => {
+  // A ghost hands over at most maxBodyBytes of its answer; past it, only `large`: the size and the sha256 of all of it.
+  const big = (size, hash) => ({ ...run(200, null), body: Buffer.alloc(0), large: { size, digest: hash } });
+  const small = run(200, { count: 70000 });
+  const [x, y] = ['a'.repeat(64), 'b'.repeat(64)];
+  assert.deepEqual(compareRuns(small, big(2097152, x)), {
+    outcome: 'different',
+    kinds: ['body'],
+    details: [{ kind: 'body', path: 'body', old: `${small.body.length} bytes, sha256 ${digest(small.body).slice(0, 16)}`, new: `2097152 bytes, sha256 ${'a'.repeat(16)}` }],
+  });
+  assert.equal(compareRuns(big(2097152, x), big(2097152, x)).outcome, 'same');
+  assert.deepEqual(compareRuns(big(2097152, x), big(2097152, y)).kinds, ['body']);
+  // A ghost that kept the whole body (a case replayed alone, with no limit) is measured the same way.
+  const whole = Buffer.from('z'.repeat(2048));
+  assert.equal(compareRuns({ ...run(200, null), body: whole }, big(whole.length, digest(whole))).outcome, 'same');
 });
 
 test('a refused request that now succeeds is a door that opened', () => {

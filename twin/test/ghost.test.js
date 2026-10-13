@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,5 +52,22 @@ test('a ghost reports, per request, which characters of each changed line ran', 
     assert.deepEqual(blank.lines, { 'old:src/app.js:17': `${'1'.repeat(19)}${'0'.repeat(18)}1111` }, 'now only that branch ran');
   } finally {
     await ghost.terminate();
+  }
+});
+
+test('a ghost keeps at most maxBodyBytes of its answer: past it, only the size and the sha256 cross to the twin\'s thread', async () => {
+  const { table } = await import(new URL('./apps/big-answer/new.js', import.meta.url).href);
+  const bytes = Buffer.from(JSON.stringify(table()));
+  const job = { start: 1760000000000, seed: 1, request: { method: 'GET', url: '/', headers: {}, body: new Uint8Array() }, io: [] };
+  for (const kind of ['thread', 'process']) {
+    const ghost = await startGhost(app('big-answer', 'new'), { kind, startMs: 20000, memoryMb: 256, maxBodyBytes: 1 << 20 });
+    try {
+      const result = await ghost.ask(1, job, 5000);
+      // Never handed to assert's diff: it would write out all two million bytes.
+      assert.ok(result.body === null, `${kind}: the ghost handed over ${result.body?.byteLength} bytes`);
+      assert.deepEqual(result.large, { size: bytes.length, digest: createHash('sha256').update(bytes).digest('hex') }, kind);
+    } finally {
+      await ghost.terminate();
+    }
   }
 });

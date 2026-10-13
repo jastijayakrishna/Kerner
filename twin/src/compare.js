@@ -1,5 +1,5 @@
 import { diffValues, readBody } from './serialize.js';
-import { shapeOf } from './keys.js';
+import { digest, shapeOf } from './keys.js';
 
 /** Headers that change on every answer and say nothing about behaviour. */
 export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing', 'set-cookie']);
@@ -22,10 +22,14 @@ const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'un
 const refusals = (run) => new Set(run.events.filter((e) => e.type === 'denied').map((e) => e.detail));
 // A ghost that gave this request no answer of its own: it ran out of time, or it had stopped before the request came (`gone`).
 const silent = (run) => Boolean(run.timedOut || run.gone);
+// An answer over maxBodyBytes crossed from its ghost only as its size and sha256 (`large`); a body that crossed whole is measured the same
+// way when it is compared with one.
+const measured = (run) => run.large ?? { size: run.body.length, digest: digest(run.body) };
+const sized = (body) => `${body.size} bytes, sha256 ${body.digest.slice(0, 16)}`;
 
 /**
  * Compares two runs of one request: `a` from the old code, `b` from the new.
- * A run is { status, headers, body: Buffer, effects: string[], events: [{ type, detail }], error?, timedOut?, gone? }.
+ * A run is { status, headers, body: Buffer, large?: { size, digest }, effects: string[], events: [{ type, detail }], error?, timedOut?, gone? }.
  * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ kind, path, old, new }] }, at most 20 details.
  */
 export function compareRuns(a, b) {
@@ -97,13 +101,19 @@ export function compareRuns(a, b) {
       const y = b.headers[name] === undefined ? 'missing' : String(b.headers[name]);
       if (x !== y) add('headers', `header ${name}`, x, y);
     }
-    const x = readBody(a.body, a.headers);
-    const y = readBody(b.body, b.headers);
-    if (x.kind !== y.kind) add('body', 'body', x.kind, y.kind);
-    else if (x.kind === 'bytes') {
-      if (x.digest !== y.digest) add('body', 'body', `sha256 ${x.digest.slice(0, 16)}`, `sha256 ${y.digest.slice(0, 16)}`);
+    if (a.large || b.large) {
+      const x = measured(a);
+      const y = measured(b);
+      if (x.size !== y.size || x.digest !== y.digest) add('body', 'body', sized(x), sized(y));
     } else {
-      for (const d of diffValues(x.value, y.value)) add('body', d.path, d.old, d.new);
+      const x = readBody(a.body, a.headers);
+      const y = readBody(b.body, b.headers);
+      if (x.kind !== y.kind) add('body', 'body', x.kind, y.kind);
+      else if (x.kind === 'bytes') {
+        if (x.digest !== y.digest) add('body', 'body', `sha256 ${x.digest.slice(0, 16)}`, `sha256 ${y.digest.slice(0, 16)}`);
+      } else {
+        for (const d of diffValues(x.value, y.value)) add('body', d.path, d.old, d.new);
+      }
     }
   }
   return kinds.size ? { outcome: 'different', kinds: [...kinds], details } : { outcome: 'same', kinds: [], details: [] };

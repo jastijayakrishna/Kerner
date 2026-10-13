@@ -55,7 +55,7 @@ Later phases add three things:
 | R4. Both ghosts live in the same world | `world.js` resets clock and seed per request; both get the same recording; they process the same requests in the same order and always restart together | The timestamps scenario: time and random values never show up as differences |
 | R5. Nothing is called "same" without being compared | Every request ends as same, stated, different, not compared or skipped, and aborted requests are skipped too. A read the recording cannot answer makes a request not compared, and so do two ghosts that both run out of time. Not compared and skipped requests are counted with reasons, never folded into "same", and too many of them hold switch-on back (`maxUncovered`) | The compare tests (`unsupported`, `unanswered`, `no-answer`); `capture.test.js` (aborted); the fail-safe tests (`skipped`, `dropped`); `decide.test.js` |
 | R6. Every difference names its request | Recorded with method, URL, kinds and the exact paths | Scenario tests check paths such as `$.total` |
-| R7. The cost is bounded | Sampling; a queue limit that sheds load; a body cap; a memory cap per ghost and for the twin's thread; one request at a time per ghost pair; judging in the twin's own thread, never on the app's | The queue-limit test; `bench/overhead.js` measures the cost |
+| R7. The cost is bounded | Sampling; a queue limit that sheds load; a body cap, on the copies and on the ghosts' answers (past it, a size and a sha256); a memory cap per ghost and for the twin's thread; one request at a time per ghost pair; judging in the twin's own thread, never on the app's | The queue-limit test; `bench/overhead.js` measures the cost |
 | R8. Recordings stay in the process | Ghosts have no network. Bytes cross threads as exact copies, never as slices of Node's shared buffer pool. The differences log and the state folder are local files. Cases, the differences log and the evidence's examples are scrubbed; only `differences()` in memory keeps real values | `ghost-io.test.js` (no network); `bytes.test.js`; `scrub.test.js`; `casefiles.test.js` (nothing private reaches the disk) |
 
 ## 4. The pieces
@@ -217,7 +217,7 @@ Everything lives in `twin/`, a TypeScript-free Node 22 ESM package with no depen
   - copying fetch answers, also capped;
   - after the answer: one `setImmediate`, then one `postMessage` of exact bytes to the twin's thread.
 - **The twin's thread:** at most 512 MiB of heap; all comparing, counting and deciding.
-- **Ghosts:** two threads, each capped at `ghostMemoryMb`, one request at a time.
+- **Ghosts:** two threads, each capped at `ghostMemoryMb`, one request at a time. Each hands over at most `maxBodyBytes` of an answer; past it, only the answer's size and sha256, so a candidate that dumps a table cannot fill the twin's thread.
 - **Memory held:** at most `queueLimit` × (two bodies plus recordings).
 - **Measured cost:** recorded by Phase 1 Task 9 in `twin/README.md`, measured, not guessed.
 

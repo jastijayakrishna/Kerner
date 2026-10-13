@@ -10,7 +10,7 @@ const THREAD = new URL('./worker.js', import.meta.url);
  * Starts one ghost (one version of the app, sealed, waiting for requests) and resolves once that version has loaded. It answers
  * { kind, loadLines, ask(id, job, timeoutMs), terminate(), onDirty(listener), stopped() }.
  * `settings.kind` picks a thread ('thread', the default) or a process of its own ('process'). The other settings are
- * { startMs, memoryMb, ghostExecArgv, addons, coverage, adapters, overlay, realReads, sandbox, onRealRead }.
+ * { startMs, memoryMb, ghostExecArgv, addons, coverage, adapters, overlay, realReads, sandbox, onRealRead, maxBodyBytes }.
  */
 export function startGhost(side, settings) {
   if (settings.kind === 'process') return startProcessGhost(side, settings);
@@ -22,7 +22,7 @@ export function startGhost(side, settings) {
       workerData: {
         module: side.module, export: side.export, addons: settings.addons ?? [], coverage: settings.coverage ?? null,
         adapters: settings.adapters ?? [], overlay: Boolean(settings.overlay), realReads: settings.realReads ?? [],
-        load: settings.load ?? null, pgReads: Boolean(settings.pgReads),
+        load: settings.load ?? null, pgReads: Boolean(settings.pgReads), maxBodyBytes: settings.maxBodyBytes ?? null,
       },
       execArgv: settings.ghostExecArgv ?? [],
       env: ghostEnv(),
