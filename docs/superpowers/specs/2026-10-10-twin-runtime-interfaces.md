@@ -308,7 +308,7 @@ The policy is `{ epsilon, minHours, segments, maxUncovered, minLineRuns?, accept
 |---|---|
 | `listener()` | Async. Loads the old version in the app's thread and answers a routing listener that also records. From Phase 2 on, this is the normal way to run |
 | `wrap(listener)` | The Phase 1 way: records around the app's own listener, and the old version always serves |
-| `stats()` | Counters for this run: `sampled`, `skipped`, `dropped`, `same`, `stated`, `different`, `notCompared`, `restarts`, `logErrors`, `evidenceErrors`, `queued`, `disabled`, `reasons`, `serving`; `adapters` (Phase 4); `cases` and `caseErrors` (Phase 5). Synchronous |
+| `stats()` | Counters for this run: `sampled`, `skipped`, `dropped`, `same`, `stated`, `different`, `notCompared`, `restarts`, `logErrors`, `evidenceErrors`, `queued`, `disabled`, `reasons`, `serving`; `adapters` (Phase 4); `cases` and `caseErrors` (Phase 5); `hold` and `servingReason` (the router's hold and reason, from the 2026-10-12 hardening). Synchronous |
 | `differences()` | The first 100 unexplained differences of this run, with real values; the `log` file holds them all, scrubbed from Phase 5 on. Synchronous |
 | `decision()` | The latest `decide()` result, or null before the first snapshot. Synchronous |
 | `evidence()` | The candidate's evidence across restarts: `{ candidate, since, note, totals: { [segment or '*']: counts }, unexplained }`, and `known` (Phase 5). Synchronous |

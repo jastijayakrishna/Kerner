@@ -130,3 +130,17 @@ test('a person who switches the new version off keeps it off, even where it woul
   assert.equal(shop.twin.stats().serving, 'old');
   await shop.close();
 });
+
+test('without a state folder, the twin still says why the new version does not serve, and that switching on is held', async () => {
+  globalThis.kernTwinMainThreadLoads = 0;
+  const shop = await routed('ghost-only');
+  try {
+    assert.deepEqual([shop.twin.stats().serving, shop.twin.stats().hold], ['old', false]);
+    assert.equal(await shop.twin.serve('candidate', 'a person tries'), false);
+    const stats = shop.twin.stats();
+    assert.deepEqual([stats.serving, stats.hold], ['old', true]);
+    assert.match(stats.servingReason, /the new version could not load in the app's thread/);
+  } finally {
+    await shop.close();
+  }
+});

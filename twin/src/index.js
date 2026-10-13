@@ -424,6 +424,9 @@ class Twin {
       disabled: this.#disabled,
       reasons: { ...(latest?.reasons ?? {}) },
       serving: this.#router?.serving ?? 'old',
+      // Whether switching on by itself is held (after any switch back, or a new version that could not load), and why serving is as it is.
+      hold: this.#router?.hold ?? false,
+      servingReason: this.#router?.reason ?? null,
       adapters: { ...this.#adapters },
     };
   }
@@ -440,7 +443,7 @@ class Twin {
     return this.#latest?.evidence ? structuredClone(this.#latest.evidence) : null;
   }
 
-  /** Every changed line of the manifest with its status: never run, partly run, run, proven, at load or accepted. */
+  /** Every changed line of the manifest with its status: never run, partly run, run, proven, at load, accepted or no code. */
   paths() {
     return [...(this.#latest?.paths ?? [])];
   }

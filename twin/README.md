@@ -196,7 +196,7 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
   - the serving version's ghost did not reproduce the real run.
 - **`skipped`:** too large to copy, or aborted by the client.
 - **`dropped`:** the twin was busy.
-- **The rest:** `restarts`, `logErrors`, `evidenceErrors`, `cases` and `caseErrors` (cases written, and cases that could not be written), `queued`, `disabled`, `serving`, and `adapters` (whether each client library is being recorded).
+- **The rest:** `restarts`, `logErrors`, `evidenceErrors`, `cases` and `caseErrors` (cases written, and cases that could not be written), `queued`, `disabled`, `serving`, `hold` (switching on by itself is held: after any switch back, or a new version that could not load) and `servingReason` (why serving is as it is), and `adapters` (whether each client library is being recorded).
 
 `twin.differences()` holds the first 100 unexplained differences of this run, with their real values. The `log` file holds all of them, scrubbed, one JSON line each:
 - `n`, `at`, `route`, `segment`, `serving`, `method` and `url`;
