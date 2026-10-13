@@ -65,6 +65,8 @@ export function startProcessGhost(side, settings) {
       cleanup();
       const dirty = [];
       child.on('error', (error) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost failed: ${error?.message ?? error}` })));
+      // A ghost that ends between requests is a failure too: the coordinator names it on the request it last answered.
+      child.on('exit', (code, signal) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost stopped (exit ${code ?? signal})` })));
       child.on('message', (m) => {
         if (m?.type === 'dirty') dirty.forEach((listener) => listener(m));
         else if (m?.type === 'real-read') answer((reply) => child.connected && child.send(reply), m, settings);

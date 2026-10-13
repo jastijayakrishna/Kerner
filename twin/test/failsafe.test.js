@@ -96,7 +96,7 @@ test('a new version that ends its own process only ends its ghost', async () => 
   await shop.close();
 });
 
-test('a ghost that ended its own process after answering is named at once on the next request, not after the whole time limit as a hang', async () => {
+test('a ghost that ended its own process after answering is named on the request that left that work running, and the next one is judged on a fresh pair', async () => {
   for (const ghosts of ['thread', 'process']) {
     const shop = await production('quits', { ghosts, timeoutMs: 8000 });
     assert.equal((await fetch(`${shop.url}/?n=2`)).status, 200);
@@ -108,15 +108,17 @@ test('a ghost that ended its own process after answering is named at once on the
     await shop.twin.idle();
     const took = Date.now() - asked;
     const stats = shop.twin.stats();
-    assert.equal(stats.same, 1, `${ghosts}: ${JSON.stringify(stats)}`);
-    assert.deepEqual(shop.twin.differences()[0]?.details[0], { kind: 'crash', path: 'result', old: 'status 200', new: 'the ghost had stopped before this request' }, ghosts);
+    assert.equal(stats.same, 2, `${ghosts}: ${JSON.stringify(stats)}`);
+    const [found] = shop.twin.differences();
+    assert.equal(found?.url, '/?n=2', `${ghosts}: ${JSON.stringify(found)}`);
+    assert.deepEqual(found.details[0], { kind: 'crash', path: 'after the answer', old: 'none', new: 'the ghost stopped (exit 0)' }, ghosts);
     assert.ok(took < 4000, `${ghosts}: judged ${took} ms after it was asked, with a time limit of 8000 ms`);
     assert.equal(stats.disabled, null);
     await shop.close();
   }
 });
 
-test('a ghost that ran out of memory after answering is still named on the next request', async () => {
+test('a ghost that ran out of memory after answering is named on the request that left that work running', async () => {
   const shop = await production('late-hog', { ghostMemoryMb: 64 });
   assert.equal((await fetch(`${shop.url}/?n=2`)).status, 200);
   await shop.twin.idle();
@@ -125,7 +127,11 @@ test('a ghost that ran out of memory after answering is still named on the next 
   assert.equal((await fetch(`${shop.url}/?n=3`)).status, 200);
   await shop.twin.idle();
   const stats = shop.twin.stats();
-  assert.deepEqual(shop.twin.differences()[0]?.details[0], { kind: 'crash', path: 'result', old: 'status 200', new: 'the ghost had stopped before this request' }, JSON.stringify(stats));
+  const [found] = shop.twin.differences();
+  assert.equal(found?.url, '/?n=2', JSON.stringify({ stats, found }));
+  assert.equal(found.details[0].path, 'after the answer');
+  assert.match(found.details[0].new, /the ghost (failed|stopped)/);
+  assert.equal(stats.same, 2, JSON.stringify(stats));
   assert.equal(stats.disabled, null);
   await shop.close();
 });

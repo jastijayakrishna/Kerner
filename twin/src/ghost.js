@@ -49,6 +49,9 @@ export function startGhost(side, settings) {
       // From here on an error (running out of memory, say) ends only this ghost. Without a listener, Node would throw the worker's
       // 'error' event in the thread that started it: one must always be attached.
       worker.on('error', (error) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost failed: ${error?.message ?? error}` })));
+      // A ghost that ends between requests (its own process.exit in work a request left running, say) is a failure too: the coordinator
+      // names it on the request it last answered. Its own terminate() ends a ghost no pair holds any more, which nothing names.
+      worker.on('exit', (code) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost stopped (exit ${code})` })));
       worker.on('message', (m) => {
         if (m?.type === 'dirty') dirty.forEach((listener) => listener(m));
         else if (m?.type === 'real-read') answer((reply) => worker.postMessage(reply), m, settings);

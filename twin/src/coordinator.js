@@ -67,6 +67,9 @@ export class Coordinator {
   // The last real request compared, and the failures each ghost reported after its result for it (in work it left running).
   #last = null;
   #late = { old: null, candidate: null };
+  // Whether a request is being asked (a failure then belongs to it), and whether this pair's failure was already named on a request.
+  #asking = false;
+  #named = false;
   disabled = null;
   counts = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0 };
   reasons = {};
@@ -110,6 +113,7 @@ export class Coordinator {
       throw old.status === 'rejected' ? old.reason : candidate.reason;
     }
     this.#dirty = false;
+    this.#named = false;
     const pair = { old: old.value, candidate: candidate.value };
     // A process ghost's last messages are read after it has stopped, so a pair already replaced can still report itself broken: only
     // the current pair's own ghosts mark it for a restart.
@@ -117,8 +121,10 @@ export class Coordinator {
       ghost.onDirty((message) => {
         if (this.#pair !== pair) return;
         this.#dirty = true;
-        // A failure after the last request's result, in work that request left running: judged on that request, at once.
-        if (message?.error && message.job !== undefined && message.job === this.#last?.n && !this.#late[side]) {
+        // A failure after the last request's result, in work that request left running: judged on that request, at once. A failure that
+        // names no request (a ghost that stopped) is the last request's, unless one is being asked, which then sees it for itself.
+        const job = message?.job ?? (this.#asking ? undefined : this.#last?.n);
+        if (message?.error && job !== undefined && job === this.#last?.n && !this.#late[side]) {
           this.#late[side] = String(message.error);
           if (!this.#queue.some((item) => item.late)) {
             this.#queue.push({ late: true });
@@ -178,15 +184,18 @@ export class Coordinator {
 
   /**
    * Readies the pair before it is asked, and answers whether there is one.
-   * - A ghost that failed after its last answer (an uncaught error in work that request left running) may have left its app's state
-   *   broken: the pair restarts first, so no request is judged on that state.
-   * - A ghost that has stopped is asked all the same: it answers at once that it had stopped (ghost-common.js ask), the request's verdict
-   *   names that, and the pair restarts after. Restarting first would hide a version whose process ends after it answers.
+   * - A failure a ghost reported after the last request's result (an uncaught error, or its stop, in work that request left running) is
+   *   judged on that request first (#judgeLate).
+   * - A ghost that failed may have left its app's state broken: the pair restarts first, so no request is judged on that state.
+   * - A ghost that stopped while no request it answered could be named for it is asked all the same: it answers at once that it had
+   *   stopped (ghost-common.js ask), the request's verdict names that, and the pair restarts after. Restarting first would then hide a
+   *   version whose process ends by itself.
    */
   async #ready() {
     await this.#judgeLate();
     const pair = this.#pair;
-    if (pair && this.#dirty && !pair.old.stopped() && !pair.candidate.stopped()) await this.#restart();
+    const stopped = pair && (pair.old.stopped() || pair.candidate.stopped());
+    if (pair && this.#dirty && (this.#named || !stopped)) await this.#restart();
     return Boolean(this.#pair) && !this.disabled;
   }
 
@@ -202,6 +211,7 @@ export class Coordinator {
     const { old, candidate } = this.#late;
     this.#late = { old: null, candidate: null };
     this.#last = null;
+    this.#named = true;
     if (!last.compared || old === candidate) return;
     await this.#judge({ ...last.verdict, outcome: 'different', kinds: ['crash'], details: [{ kind: 'crash', path: 'after the answer', old: old ?? 'none', new: candidate ?? 'none' }] });
   }
@@ -214,7 +224,10 @@ export class Coordinator {
     // request is not credited with lines only this copy ran.
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
     const timeout = this.#options.timeoutMs;
-    const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
+    this.#asking = true;
+    const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]).finally(() => {
+      this.#asking = false;
+    });
     this.#reads.clear();
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
     return { old: toRun(old), candidate: toRun(candidate) };
@@ -282,7 +295,10 @@ export class Coordinator {
     const n = ++this.#seq;
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
     const timeout = this.#options.timeoutMs;
-    const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]);
+    this.#asking = true;
+    const [old, candidate] = await Promise.all([this.#pair.old.ask(n, job, timeout), this.#pair.candidate.ask(n, job, timeout)]).finally(() => {
+      this.#asking = false;
+    });
     this.#reads.clear();
     if (this.disabled) return;
     const place = placeOf(capture);
