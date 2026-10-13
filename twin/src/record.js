@@ -75,6 +75,10 @@ async function recorded(record, realFetch, input, init, maxBodyBytes) {
   }
   call.status = response.status;
   call.headers = Object.fromEntries(response.headers);
+  // Each cookie an answer sets is a Set-Cookie header of its own, and Object.fromEntries keeps only the last: they are kept as a list,
+  // as node:http gives them.
+  const cookies = response.headers.getSetCookie();
+  if (cookies.length) call.headers['set-cookie'] = cookies;
   readCapped(response.clone().body, maxBodyBytes).then(
     (copy) => {
       if (copy === null) record.problem ??= 'an outgoing call answered with a body over the limit';

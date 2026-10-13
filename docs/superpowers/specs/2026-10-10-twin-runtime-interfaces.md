@@ -111,7 +111,7 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 
 | Kind | Fields | Since |
 |---|---|---|
-| `fetch` | `method, url, sent: Uint8Array, status, headers, body: Uint8Array \| null, error` | Phase 1 (base64 then); Phase 2 adds binary fields and `sent` |
+| `fetch` | `method, url, sent: Uint8Array, status, headers, body: Uint8Array \| null, error`. `headers['set-cookie']` is a list, one entry per cookie, as `node:http` gives it, and a ghost's replayed answer sets each one | Phase 1 (base64 then); Phase 2 adds binary fields and `sent` |
 | `http` | The same fields as `fetch`, for `node:http`/`https` client requests. `url` is named by the Host header Node sends: the app's own when it set one (a virtual host, a signed request), else the host (an IPv6 address in brackets) with the port when it is not the scheme's own; the bare host when Node sends none. A ghost's call is named the same way | Phase 4 |
 | `pg` | `text, values, result: { command, rowCount, rows, fields }, error` | Phase 4 |
 | `redis` | `command, args, reply, error` | Phase 4 |

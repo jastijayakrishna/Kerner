@@ -6,7 +6,28 @@ import { join } from 'node:path';
 import { caseName, readCase, runOf, writeCase } from '../src/cases.js';
 import { replayCase } from '../src/replay.js';
 import { compareRuns } from '../src/compare.js';
+import { scrubCapture } from '../src/scrub.js';
 import { app } from './helpers.js';
+
+test('a recorded answer that set several cookies keeps them as a list: scrubbed one by one, and so in the case file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-cases-'));
+  try {
+    const call = {
+      kind: 'fetch', key: 'GET https://auth.example/session -', method: 'GET', url: 'https://auth.example/session', write: false, sent: new Uint8Array(),
+      status: 200, headers: { 'content-type': 'application/json', 'set-cookie': ['session=s1; HttpOnly', 'csrf=c1'] }, body: new Uint8Array(Buffer.from('{}')), error: null,
+    };
+    const capture = {
+      start: 1, seed: 2, route: 'GET /', segment: 'all', serving: 'old', io: [call], effects: [],
+      request: { method: 'GET', url: '/', headers: {}, body: new Uint8Array() }, response: { status: 200, headers: {}, body: new Uint8Array() },
+    };
+    const { capture: scrubbed } = scrubCapture(capture, {});
+    assert.deepEqual(scrubbed.io[0].headers['set-cookie'], ['[scrubbed]', '[scrubbed]']);
+    const file = await writeCase(dir, { version: 1, n: 1, time: 1, route: 'GET /', io: scrubbed.io });
+    assert.deepEqual((await readCase(file)).io[0].headers['set-cookie'], ['[scrubbed]', '[scrubbed]']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('a case keeps bytes and dates as they were, and replays a version in a fresh sealed ghost', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-cases-'));

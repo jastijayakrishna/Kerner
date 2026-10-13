@@ -71,6 +71,26 @@ test('without the http adapter, a node:http call leaves the request not compared
   }
 });
 
+test('a fetch answer that sets several cookies is replayed with every one of them', async () => {
+  const auth = await listen((req, res) => {
+    res.setHeader('set-cookie', ['session=s1; HttpOnly', 'csrf=c1']);
+    res.setHeader('content-type', 'application/json');
+    res.end('{}');
+  });
+  process.env.KERN_TEST_AUTH_URL = auth.url;
+  try {
+    const shop = await production('cookies');
+    assert.deepEqual(await (await fetch(shop.url)).json(), { cookies: 2 });
+    await shop.twin.idle();
+    const stats = shop.twin.stats();
+    assert.deepEqual([stats.same, stats.notCompared], [1, 0], JSON.stringify(stats.reasons));
+    await shop.close();
+  } finally {
+    delete process.env.KERN_TEST_AUTH_URL;
+    await auth.close();
+  }
+});
+
 test('a node:http call to an address, with a Host header of its own (a virtual host), is replayed under the name it was recorded by', async () => {
   const counts = {};
   const server = await upstream(counts);

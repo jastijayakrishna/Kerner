@@ -132,7 +132,10 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
       throw new TypeError('fetch failed');
     }
     if (recorded.error) throw new TypeError('fetch failed');
-    const headers = Object.entries(recorded.headers ?? {}).filter(([name]) => !['content-encoding', 'content-length', 'transfer-encoding'].includes(name));
+    // A header recorded as a list (every cookie a Set-Cookie of its own) is answered as one header per value.
+    const headers = Object.entries(recorded.headers ?? {})
+      .filter(([name]) => !['content-encoding', 'content-length', 'transfer-encoding'].includes(name))
+      .flatMap(([name, value]) => (Array.isArray(value) ? value.map((one) => [name, one]) : [[name, value]]));
     const answer = NULL_BODY.has(recorded.status) || recorded.body == null ? null : recorded.body;
     return new Response(answer, { status: recorded.status, headers });
   };
