@@ -33,34 +33,61 @@ export function readBody(body, headers) {
   return { kind: 'bytes', digest: digest(bytes) };
 }
 
-/** A value as one short line, for showing a difference. */
+/** A value as one short line, for showing a difference. A value nested too deeply for JSON.stringify is shown by its kind. */
 export function preview(value) {
-  const text = value === undefined ? 'undefined' : (JSON.stringify(value) ?? String(value));
+  let text;
+  try {
+    text = value === undefined ? 'undefined' : (JSON.stringify(value) ?? String(value));
+  } catch {
+    text = Array.isArray(value) ? `an array of ${value.length}, nested too deeply to show` : `an object of ${Object.keys(value).length} keys, nested too deeply to show`;
+  }
   return text.length > 120 ? `${text.slice(0, 117)}...` : text;
 }
 
 const kindOf = (value) => (value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value);
+// A path as shown: one that runs deeper than this many characters keeps its start and its end.
+const MOST_PATH = 200;
+const shown = (path) => (path.length > MOST_PATH ? `${path.slice(0, 100)}...${path.slice(-97)}` : path);
 
-/** Where two values differ, as paths such as $.items[2].price; at most `limit` of them. */
+/**
+ * Where two values differ, as paths such as $.items[2].price, in the order of the values; at most `limit` of them. The values are walked
+ * with a stack of their own, one frame per array or object being compared, not by recursion: JSON.parse reads a body nested a hundred
+ * thousand deep, and comparing it must not run out of stack. A frame hands out one child at a time, so a wide array costs no more memory
+ * than a narrow one.
+ */
 export function diffValues(a, b, path = '$', out = [], limit = 20) {
-  if (out.length >= limit || Object.is(a, b)) return out;
-  const kind = kindOf(a);
-  if (kind !== kindOf(b) || (kind !== 'object' && kind !== 'array')) {
-    out.push({ path, old: preview(a), new: preview(b) });
-    return out;
-  }
-  if (kind === 'array') {
-    if (a.length !== b.length) out.push({ path: `${path}.length`, old: String(a.length), new: String(b.length) });
-    for (let i = 0; i < Math.min(a.length, b.length) && out.length < limit; i++) diffValues(a[i], b[i], `${path}[${i}]`, out, limit);
-    return out;
-  }
-  const names = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
-  for (const name of names) {
-    if (out.length >= limit) break;
-    const child = /^[A-Za-z_$][\w$]*$/.test(name) ? `${path}.${name}` : `${path}[${JSON.stringify(name)}]`;
-    if (!Object.hasOwn(b, name)) out.push({ path: child, old: preview(a[name]), new: 'missing' });
-    else if (!Object.hasOwn(a, name)) out.push({ path: child, old: 'missing', new: preview(b[name]) });
-    else diffValues(a[name], b[name], child, out, limit);
+  const frames = [];
+  const visit = (x, y, at) => {
+    if (Object.is(x, y)) return;
+    const kind = kindOf(x);
+    if (kind !== kindOf(y) || (kind !== 'object' && kind !== 'array')) {
+      out.push({ path: shown(at), old: preview(x), new: preview(y) });
+    } else if (kind === 'array') {
+      if (x.length !== y.length) out.push({ path: shown(`${at}.length`), old: String(x.length), new: String(y.length) });
+      frames.push({ x, y, at, names: null, next: 0, size: Math.min(x.length, y.length) });
+    } else {
+      const names = [...new Set([...Object.keys(x), ...Object.keys(y)])].sort();
+      frames.push({ x, y, at, names, next: 0, size: names.length });
+    }
+  };
+  visit(a, b, path);
+  while (frames.length && out.length < limit) {
+    const frame = frames.at(-1);
+    if (frame.next >= frame.size) {
+      frames.pop();
+      continue;
+    }
+    const i = frame.next++;
+    const { x, y, at, names } = frame;
+    if (!names) {
+      visit(x[i], y[i], `${at}[${i}]`);
+      continue;
+    }
+    const name = names[i];
+    const child = /^[A-Za-z_$][\w$]*$/.test(name) ? `${at}.${name}` : `${at}[${JSON.stringify(name)}]`;
+    if (!Object.hasOwn(y, name)) out.push({ path: shown(child), old: preview(x[name]), new: 'missing' });
+    else if (!Object.hasOwn(x, name)) out.push({ path: shown(child), old: 'missing', new: preview(y[name]) });
+    else visit(x[name], y[name], child);
   }
   return out;
 }

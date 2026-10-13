@@ -128,3 +128,15 @@ test('KERN_TWIN=off keeps the twin from starting at all', async () => {
     delete process.env.KERN_TWIN;
   }
 });
+
+test('an answer nested fifty thousand levels deep is judged like any other, and the twin stays on', async () => {
+  const shop = await production('echo');
+  const deep = `${'['.repeat(50000)}1${']'.repeat(50000)}`;
+  const answer = await fetch(shop.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: deep });
+  assert.equal(await answer.text(), deep);
+  await shop.twin.idle();
+  const stats = shop.twin.stats();
+  assert.equal(stats.disabled, null, stats.disabled);
+  assert.equal(stats.same, 1, JSON.stringify(stats));
+  await shop.close();
+});
