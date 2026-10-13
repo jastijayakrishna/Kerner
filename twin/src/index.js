@@ -491,7 +491,7 @@ class Twin {
  * wrong inside the twin, it switches itself off, says why, and the old version serves.
  */
 export async function createTwin(options = {}) {
-  const twin = new Twin(settingsOf(options));
+  const twin = new Twin(settingsOf(options ?? {}));
   await twin.start();
   return {
     listener: () => twin.listener(),

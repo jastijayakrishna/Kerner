@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, relative as relativePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, production } from './helpers.js';
+import { createTwin } from '../src/index.js';
 
 test('a running twin never keeps the app\'s process alive', () => {
   // An app that closes its server expects its process to end; the twin's thread and its ghosts must not hold it open.
@@ -163,4 +164,8 @@ test('a version named by a path relative to the working folder, or by a file URL
     assert.equal(shop.twin.stats().same, 1, JSON.stringify(shop.twin.stats()));
     await shop.close();
   }
+});
+
+test('createTwin without options, or with null, says which option is missing', async () => {
+  for (const options of [undefined, null, {}]) await assert.rejects(createTwin(options), /old must be \{ module/);
 });
