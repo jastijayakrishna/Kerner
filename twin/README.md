@@ -63,7 +63,7 @@ http.createServer(await twin.listener()).listen(3000);
 - **Switching back.** The first unexplained difference while the new version serves switches serving back to the old version before the next request. After any switch back, the twin does not switch on by itself again until a person switches the new version on.
 - **Allowed differences.** A difference the team means is stated with `allow`, for example `{ route: 'GET /user', paths: ['$.user_name', '$.username'] }`:
   - every detail must be covered;
-  - a crash, a hang, an opened door or another write can only be stated by naming its kind (`kinds: ['crash']`).
+  - a crash, a hang, an opened door, another write or a reach for something a ghost may not use (`refused`) can only be stated by naming its kind (`kinds: ['crash']`).
 
 ## The state folder
 
