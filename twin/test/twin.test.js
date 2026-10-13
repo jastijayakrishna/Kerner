@@ -30,6 +30,72 @@ console.log(JSON.stringify(twin.stats()));
   }
 });
 
+test('a copy the twin cannot hand to its thread at all never ends the app: the twin switches itself off', () => {
+  // Handing a copy over failed twice (the copy, then the skip that replaces it). That must never become an unhandled rejection in the
+  // app's process, which Node ends by default.
+  const file = join(tmpdir(), `kern-twin-handover-${process.pid}.mjs`);
+  writeFileSync(file, `
+import http from 'node:http';
+import { Worker } from 'node:worker_threads';
+import { createTwin } from ${JSON.stringify(new URL('../src/index.js', import.meta.url).href)};
+import { createApp } from ${JSON.stringify(new URL('./apps/refactor/old.js', import.meta.url).href)};
+const twin = await createTwin(${JSON.stringify({ old: app('refactor', 'old'), candidate: app('refactor', 'new') })});
+const server = http.createServer(twin.wrap(createApp()));
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+const post = Worker.prototype.postMessage;
+Worker.prototype.postMessage = function () { throw new Error('the port is closed'); };
+const status = (await fetch('http://127.0.0.1:' + server.address().port + '/?n=2')).status;
+await new Promise((resolve) => setTimeout(resolve, 300));
+Worker.prototype.postMessage = post;
+const after = (await fetch('http://127.0.0.1:' + server.address().port + '/?n=3')).status;
+server.closeAllConnections();
+server.close();
+console.log(JSON.stringify({ status, after, disabled: twin.stats().disabled }));
+await twin.close();
+`);
+  try {
+    const out = execFileSync(process.execPath, [file], { encoding: 'utf8', timeout: 20000 });
+    const seen = JSON.parse(out);
+    assert.deepEqual([seen.status, seen.after], [200, 200], out);
+    assert.match(String(seen.disabled), /could not be handed to the twin's thread/, out);
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
+
+test('a switch the twin\'s thread cannot be told about never leaves the new version serving unwatched', () => {
+  // The router has switched; telling the twin's thread fails. Serving the candidate without a thread that knows would mean nothing switches
+  // it back at the next unexplained difference: the twin switches itself off instead, and the old version serves.
+  const file = join(tmpdir(), `kern-twin-unwatched-${process.pid}.mjs`);
+  writeFileSync(file, `
+import { Worker } from 'node:worker_threads';
+import { createTwin } from ${JSON.stringify(new URL('../src/index.js', import.meta.url).href)};
+const twin = await createTwin(${JSON.stringify({ old: app('refactor', 'old'), candidate: app('refactor', 'new') })});
+await twin.listener();
+const post = Worker.prototype.postMessage;
+Worker.prototype.postMessage = function () { throw new Error('the port is closed'); };
+let answer;
+try {
+  answer = await twin.serve('candidate', 'by hand');
+} catch (error) {
+  answer = 'threw: ' + error.message;
+}
+Worker.prototype.postMessage = post;
+await twin.idle();
+console.log(JSON.stringify({ answer, serving: twin.stats().serving, disabled: twin.stats().disabled }));
+await twin.close();
+`);
+  try {
+    const out = execFileSync(process.execPath, [file], { encoding: 'utf8', timeout: 20000 });
+    const seen = JSON.parse(out);
+    assert.equal(seen.serving, 'old', out);
+    assert.match(String(seen.disabled), /twin's thread/, out);
+    assert.equal(typeof seen.answer, 'boolean', out);
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
+
 test('counts, differences, the decision and the evidence all come from the twin\'s own thread', async () => {
   const shop = await production('renamed-field', { epsilon: 0.5, minHours: 0 });
   await (await fetch(`${shop.url}/user`)).arrayBuffer();

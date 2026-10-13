@@ -292,11 +292,14 @@ class Twin {
 
   #deliver(copy) {
     this.#inflight.add(copy);
-    copy.then((capture) => this.#post(capture), (error) => this.#fail(`recording failed: ${error?.message ?? error}`)).finally(() => {
-      this.#open--;
-      this.#inflight.delete(copy);
-      this.#settle();
-    });
+    // Nothing in handing a copy over may reject unhandled: in the app's process, Node would end the app for it.
+    copy.then((capture) => this.#post(capture), (error) => this.#fail(`recording failed: ${error?.message ?? error}`))
+      .catch((error) => this.#fail(`a copy could not be handed to the twin's thread: ${error?.message ?? error}`))
+      .finally(() => {
+        this.#open--;
+        this.#inflight.delete(copy);
+        this.#settle();
+      });
   }
 
   #post(capture) {
@@ -306,8 +309,14 @@ class Twin {
     try {
       thread.postMessage(capture.skipped ? skip(capture.skipped) : { type: 'capture', capture });
     } catch (error) {
-      // A copy that cannot cross to the twin's thread is counted as skipped, never lost.
-      thread.postMessage(skip(`a copy that could not be handed over (${error.name})`));
+      // A copy that cannot cross to the twin's thread is counted as skipped, never lost. If even the skip cannot cross, the twin's thread
+      // takes nothing at all: the twin switches itself off, and the app carries on.
+      try {
+        thread.postMessage(skip(`a copy that could not be handed over (${error.name})`));
+      } catch (again) {
+        this.#fail(`a copy could not be handed to the twin's thread: ${again?.message ?? again}`);
+        return;
+      }
     }
     this.#sent++;
   }
@@ -322,11 +331,23 @@ class Twin {
     for (const resolve of this.#waiters.splice(0)) resolve();
   }
 
+  /**
+   * Tells the twin's thread something. A thread that cannot be told is a twin that cannot watch: it switches itself off (and the old version
+   * serves again), never throws into the app.
+   */
+  #tell(message) {
+    try {
+      this.#thread?.postMessage(message);
+    } catch (error) {
+      this.#fail(`the twin's thread could not be told (${message.type}): ${error?.message ?? error}`);
+    }
+  }
+
   /** With load 'record', the ghosts start once they have the record of the app's start; the first record sent is the one used. */
   #sendLoad(load) {
     if (this.#settings.load !== 'record' || this.#loadSent) return;
     this.#loadSent = true;
-    this.#thread?.postMessage({ type: 'load', load: load ?? { start: Date.now(), seed: 1, io: [] } });
+    this.#tell({ type: 'load', load: load ?? { start: Date.now(), seed: 1, io: [] } });
   }
 
   wrap(listener) {
@@ -350,14 +371,14 @@ class Twin {
         candidate: this.#settings.candidate,
         candidateId: this.#candidateId,
         stateDir: this.#disabled ? null : this.#settings.stateDir,
-        onSwitch: (side, reason, hold) => this.#thread?.postMessage({ type: 'serving', side, reason, hold, router: true }),
+        onSwitch: (side, reason, hold) => this.#tell({ type: 'serving', side, reason, hold, router: true }),
       });
       // With load 'record', the old version starts inside a record of its own: every call it makes while starting is written down,
       // and the ghosts start from those answers.
       const record = this.#settings.load === 'record' && this.#thread && !this.#disabled ? loadRecord() : null;
       this.#router = record ? await current.run(record, open) : await open();
       if (record) this.#sendLoad(await settleLoad(record));
-      this.#thread?.postMessage({ type: 'serving', side: this.#router.serving, reason: this.#router.reason, hold: this.#router.hold, router: true });
+      this.#tell({ type: 'serving', side: this.#router.serving, reason: this.#router.reason, hold: this.#router.hold, router: true });
       return this.wrap(this.#router.listener());
     })();
     return this.#routed;
