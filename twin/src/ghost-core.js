@@ -187,7 +187,10 @@ export async function runGhost(side, transport) {
     const lines = job.coverage && coverage ? await takeLines(coverage) : undefined;
     transport.send({
       type: 'result', id,
-      result: { status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, large: result.large, effects: io.effects, events: io.events, lines },
+      result: {
+        status: result.status, headers: result.headers, error: result.error, body: result.body ?? null, large: result.large,
+        effects: io.effects, writes: io.writes, tooMany: io.tooMany, events: io.events, lines,
+      },
     });
   }
 

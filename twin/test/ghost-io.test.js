@@ -195,6 +195,28 @@ console.log(JSON.stringify(out));
   }
 });
 
+test('a ghost counts every write it makes, by key, and says when it made more different ones than it counts', () => {
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+import { installGhostIO, beginJob, endJob, wrote } from ${source('ghost-io.js')};
+installGhostIO({ ports: [1] });
+beginJob([]);
+for (let i = 0; i < 300; i++) wrote('POST https://rows.example/ a');
+wrote('POST https://rows.example/ b');
+const some = endJob();
+beginJob([]);
+for (let i = 0; i <= 10000; i++) wrote('POST https://rows.example/ ' + i);
+const many = endJob();
+console.log(JSON.stringify({ listed: some.effects.length, writes: some.writes, tooMany: some.tooMany, counted: many.writes.length, overflow: many.tooMany }));
+`], { encoding: 'utf8' }));
+  assert.deepEqual(out, {
+    listed: 200,
+    writes: [['POST https://rows.example/ a', 300], ['POST https://rows.example/ b', 1]],
+    tooMany: false,
+    counted: 10000,
+    overflow: true,
+  });
+});
+
 test('a call whose payload carried the clock gets the recorded call of the same shape, once', () => {
   const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
 import { installGhostIO, beginJob, endJob } from ${source('ghost-io.js')};

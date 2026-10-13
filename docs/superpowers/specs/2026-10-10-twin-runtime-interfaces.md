@@ -77,8 +77,9 @@ The twin thread is `unref()`ed: it never keeps the app's process alive by itself
 
 **Ghost → twin thread (a result):**
 ```js
-{ type: 'result', id, result: { status, headers, body: Uint8Array | null, large?: { size, digest }, error?, timedOut?, effects: string[], events: [{ type, detail }], lines? } }
+{ type: 'result', id, result: { status, headers, body: Uint8Array | null, large?: { size, digest }, error?, timedOut?, effects: string[], writes: [key, count][], tooMany: boolean, events: [{ type, detail }], lines? } }
 ```
+- A ghost counts every write it makes, by key, in `writes`; `effects` lists only the first 200, in order, to show and to keep in case files. Past 10,000 different keys it counts no new one and sets `tooMany`. `faithful` compares the counted writes by shape with the real run's (whose capture lists every write), and `compareRuns` compares them by key between the ghosts, how often included. When only one ghost is `tooMany`, their writes differ; when both are, the request is `not-compared` with kind `too-many-writes`, unless something else differs.
 - A ghost hands over at most `maxBodyBytes` of its answer (given to both kinds of ghost at start). Past it the rest is only hashed: `body` is null and `large` holds the answer's size and its sha256 (hex). `compareRuns` compares such a body by size and digest, with any other body measured the same way, so an answer over the cap against a smaller one is a `body` difference, and two equal ones are the same.
 - `lines` arrives in Phase 3, and only when `job.coverage` is true.
 - Its shape is `{ [lineKey]: mask }`, for example `{ 'new:src/app.js:17': '111…10000' }`.
@@ -359,13 +360,14 @@ The fields:
   "world": { "start": 1760000000000, "seed": 42 },
   "request": { "method": "POST", "url": "/policy", "headers": {}, "body": { "$bytes": "<base64>" } },
   "io": [],
-  "old": { "status": 200, "headers": {}, "body": { "$bytes": "<base64>" }, "effects": [], "events": [] },
-  "new": { "status": 500, "headers": {}, "body": { "$bytes": "<base64>" }, "effects": [], "events": [], "error": "uncaught TypeError: ..." },
+  "old": { "status": 200, "headers": {}, "body": { "$bytes": "<base64>" }, "effects": [], "writes": [], "events": [] },
+  "new": { "status": 500, "headers": {}, "body": { "$bytes": "<base64>" }, "effects": [], "writes": [], "events": [], "error": "uncaught TypeError: ..." },
   "verdict": { "kinds": ["crash"], "details": [] }
 }
 ```
 
 - **Bytes** anywhere in a case are `{ "$bytes": "<base64>" }`, and dates are `{ "$date": "<ISO>" }`.
+- **`writes`** holds every write a ghost made, as `[key, how often]`, so a run with more than the 200 writes `effects` lists reads back whole.
 - **`adapters` and `overlay`** are the twin settings the case was recorded under; a replay uses them.
 - **`opaque`** names bodies the scrubber could not read (binary, or broken compression). They are kept as they were, so a person must look before the case is shared.
 - **`reproduces`** says whether the difference was seen again on the scrubbed copy. A case with `reproduces: true` must hold `world` (`start` and `seed`, numbers), `request` (`method`, `url`, a `headers` object and body bytes), `io` (a list) and both answers, `old` and `new`; `readCase` refuses one that does not.

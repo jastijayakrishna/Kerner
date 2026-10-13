@@ -82,6 +82,6 @@ export function runOf(saved) {
   return {
     status: saved?.status, headers: saved?.headers ?? {},
     body: body ? Buffer.from(body.buffer, body.byteOffset, body.byteLength) : Buffer.alloc(0),
-    effects: saved?.effects ?? [], events: saved?.events ?? [], error: saved?.error, timedOut: saved?.timedOut,
+    effects: saved?.effects ?? [], writes: saved?.writes, tooMany: saved?.tooMany, events: saved?.events ?? [], error: saved?.error, timedOut: saved?.timedOut,
   };
 }

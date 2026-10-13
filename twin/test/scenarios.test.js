@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { production, post, listen } from './helpers.js';
+import { app, production, post, listen } from './helpers.js';
 
 test('a change that behaves the same is reported as the same', async () => {
   const shop = await production('refactor');
@@ -92,6 +92,39 @@ test('a change that would charge twice is caught without charging anyone twice',
   } finally {
     delete process.env.KERN_TEST_PAY_URL;
     await pay.close();
+  }
+});
+
+test('a bulk import of 300 writes is compared in full, and one extra write in it is caught', async () => {
+  const rows = { written: 0 };
+  const store = await listen((req, res) => {
+    rows.written++;
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  process.env.KERN_TEST_ROWS_URL = store.url;
+  try {
+    // The same import in both versions: the same, and the serving ghost made every one of the real run's writes.
+    const same = await production('bulk', { candidate: app('bulk', 'old') });
+    assert.deepEqual(await (await fetch(same.url)).json(), { imported: 300 });
+    await same.twin.idle();
+    assert.deepEqual([same.twin.stats().same, same.twin.stats().notCompared], [1, 0], JSON.stringify(same.twin.stats().reasons));
+    await same.close();
+    // The new version writes the last row twice.
+    const twice = await production('bulk');
+    assert.deepEqual(await (await fetch(twice.url)).json(), { imported: 300 });
+    await twice.twin.idle();
+    const [found] = twice.twin.differences();
+    assert.deepEqual(found?.kinds, ['effects'], JSON.stringify(twice.twin.stats()));
+    assert.match(found.details[0].new, /\(2 times\)$/);
+    assert.equal(rows.written, 600, 'only the real app wrote');
+    await twice.close();
+  } finally {
+    delete process.env.KERN_TEST_ROWS_URL;
+    await store.close();
   }
 });
 

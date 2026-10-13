@@ -20,6 +20,10 @@ let job = null;
 // these. Data never carries over from one job to another.
 const session = new Map();
 const MOST_SESSION = 1000;
+// A ghost counts every write it makes, by key, as the real run's record keeps every one: a request with hundreds of writes (a bulk
+// import, a batch endpoint) is compared in full. The first 200 are also listed in order, to show and to keep in case files. Past this many
+// different keys it counts no new one and says so (`tooMany`), and the request is not compared in full.
+const MOST_WRITES = 10000;
 
 /** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once, but session calls. */
 export function beginJob(io) {
@@ -30,12 +34,15 @@ export function beginJob(io) {
     session.set(call.key, call);
     if (session.size > MOST_SESSION) session.delete(session.keys().next().value);
   }
-  job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], events: [], weighty: 0 };
+  job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], writes: new Map(), tooMany: false, events: [], weighty: 0 };
 }
 
-/** Ends a request: what the ghost tried to write, and what it was refused or could not find. */
+/**
+ * Ends a request: what the ghost tried to write (`effects`, the first 200 in order; `writes`, every one as [key, how often]; `tooMany`,
+ * whether it made more different writes than it counts), and what it was refused or could not find.
+ */
 export function endJob() {
-  const out = job ? { effects: job.effects, events: job.events } : { effects: [], events: [] };
+  const out = job ? { effects: job.effects, writes: [...job.writes], tooMany: job.tooMany, events: job.events } : { effects: [], writes: [], tooMany: false, events: [] };
   job = null;
   return out;
 }
@@ -74,8 +81,10 @@ export function note(type, detail) {
 
 /** A write the ghost made: written down, never done. */
 export function wrote(effect) {
-  if (!mine()) return;
-  if (job && job.effects.length < 200) job.effects.push(effect);
+  if (!mine() || !job) return;
+  if (job.effects.length < 200) job.effects.push(effect);
+  if (job.writes.has(effect) || job.writes.size < MOST_WRITES) job.writes.set(effect, (job.writes.get(effect) ?? 0) + 1);
+  else job.tooMany = true;
 }
 
 const NULL_BODY = new Set([101, 204, 205, 304]);

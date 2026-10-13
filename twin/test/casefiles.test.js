@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readCase } from '../src/cases.js';
-import { post, production, threePrs } from './helpers.js';
+import { readCase, runOf } from '../src/cases.js';
+import { compareRuns } from '../src/compare.js';
+import { listen, post, production, threePrs } from './helpers.js';
 
 const SECRETS = ['ada@corp.com', '4111 1111 1111 1111', 'sk_live_0123456789abcdefghij0123456789ab'];
 
@@ -31,6 +32,35 @@ test('an unexplained difference becomes a scrubbed case that still shows it, and
     assert.ok(value.verdict.kinds.includes('crash'), JSON.stringify(value.verdict));
     assert.match(value.new.error, /cannot charge 4\d{3} \d{4} \d{4} \d{4}/, 'the case shows the stand-in card number');
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a case keeps every write its ghosts counted, so a request with hundreds of writes reads back with the difference it had', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kern-casefiles-'));
+  const store = await listen((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  process.env.KERN_TEST_ROWS_URL = store.url;
+  try {
+    // The new version writes the last of 300 rows twice: its 301st write, past the 200 a run lists.
+    const shop = await production('bulk', { cases: dir });
+    await (await fetch(shop.url)).arrayBuffer();
+    await shop.twin.idle();
+    await shop.close();
+    const [file] = readdirSync(dir);
+    const value = await readCase(join(dir, file));
+    assert.equal(value.reproduces, true);
+    const verdict = compareRuns(runOf(value.old), runOf(value.new));
+    assert.deepEqual(verdict.kinds, ['effects'], JSON.stringify(verdict.details.slice(0, 2)));
+    assert.match(verdict.details[0].new, /\(2 times\)$/);
+  } finally {
+    delete process.env.KERN_TEST_ROWS_URL;
+    await store.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

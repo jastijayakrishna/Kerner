@@ -190,10 +190,11 @@ npx kern-twin comment --cases .kern-twin/cases --head "$HEAD_SHA"           # th
 
 `twin.stats()` counts, for this run:
 - **`same`, `stated` and `different`.** `stated` means different only where `allow` says it may be.
-- **`notCompared`,** with its reasons in `reasons`. It covers four cases:
+- **`notCompared`,** with its reasons in `reasons`. It covers five cases:
   - both versions needed something a ghost may not use (when only the new code reaches for it, that is a difference of kind `refused`);
   - one ghost read something the recording cannot answer (`unanswered`);
   - neither ghost answered in time (`no-answer`). Two versions that fail alike on a request (the same uncaught error, say) are the same: that was compared;
+  - both ghosts made more than 10,000 different writes, more than a ghost counts (`too-many-writes`). Every write below that is compared, by key and how often, however many a request makes;
   - the serving version's ghost did not reproduce the real run.
 - **`skipped`:** too large to copy, or aborted by the client.
 - **`dropped`:** the twin was busy.

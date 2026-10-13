@@ -69,6 +69,32 @@ test('a changed field is named by its path', () => {
   assert.deepEqual(verdict, { outcome: 'different', kinds: ['body'], details: [{ kind: 'body', path: '$.total', old: '4051', new: '4050.9' }] });
 });
 
+test('every write a ghost made is compared, by key and how often, not only the first 200 it lists', () => {
+  // A ghost lists its first 200 writes in `effects`, and counts every one of them in `writes`.
+  const row = 'POST https://rows.example/ 0123456789abcdef';
+  const many = (n) => ({ ...run(200, {}), effects: Array(Math.min(n, 200)).fill(row), writes: [[row, n]] });
+  const verdict = compareRuns(many(300), many(301));
+  assert.deepEqual(verdict.kinds, ['effects']);
+  assert.deepEqual(verdict.details[0], { kind: 'effects', path: 'writes', old: `${row} (300 times)`, new: `${row} (301 times)` });
+  assert.equal(compareRuns(many(300), many(300)).outcome, 'same');
+  // The real run's record lists every write: the serving ghost must have made all of them, by shape.
+  const real = run(200, {}, { effects: Array.from({ length: 300 }, (_, i) => `POST https://rows.example/ ${String(i).padStart(16, '0')}`) });
+  assert.equal(faithful(real, many(300)), null);
+  assert.match(faithful(real, many(299)), /wrote other things/);
+});
+
+test('a ghost that made more different writes than it counts is never called the same', () => {
+  const over = { ...run(200, {}), effects: [], writes: [], tooMany: true };
+  assert.deepEqual(compareRuns(over, over), {
+    outcome: 'not-compared',
+    kinds: ['too-many-writes'],
+    details: [{ kind: 'too-many-writes', path: 'writes', old: 'more different writes than a ghost counts', new: 'more different writes than a ghost counts' }],
+  });
+  assert.equal(compareRuns(over, { ...over, status: 500 }).outcome, 'different', 'what else differs is still a difference');
+  assert.deepEqual(compareRuns(run(200, {}), over).kinds, ['effects'], 'only one of them made that many: their writes differ');
+  assert.match(faithful(run(200, {}), over), /more different writes than a ghost counts/);
+});
+
 test('an extra write is a difference in effects', () => {
   const once = ['POST https://pay.example/charge abc'];
   assert.deepEqual(compareRuns(run(200, {}, { effects: once }), run(200, {}, { effects: [...once, ...once] })).kinds, ['effects']);

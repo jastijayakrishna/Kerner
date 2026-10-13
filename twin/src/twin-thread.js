@@ -91,7 +91,7 @@ function redact(verdict) {
   return { ...verdict, url: verdict.url && s.url(verdict.url), details: verdict.details.map((d) => ({ ...d, old: s.text(d.old), new: s.text(d.new) })) };
 }
 
-const saved = (run) => ({ status: run.status, headers: run.headers, body: exactBytes([run.body]), effects: run.effects, events: run.events, error: run.error, timedOut: run.timedOut });
+const saved = (run) => ({ status: run.status, headers: run.headers, body: exactBytes([run.body]), effects: run.effects, writes: run.writes, tooMany: run.tooMany, events: run.events, error: run.error, timedOut: run.timedOut });
 
 /**
  * Turns an unexplained difference into a case: the capture is scrubbed and both ghosts run on the scrubbed copy again.

@@ -13,10 +13,41 @@ const KEPT = 20;
 
 const refused = (status) => status === 401 || status === 403 || status === 404 || status === 405 || (status >= 300 && status < 400);
 const succeeded = (status) => status >= 200 && status < 300;
-const writes = (list) => [...(list ?? [])].sort().join('\n');
+const MANY = 'more different writes than a ghost counts';
+
+/**
+ * Every write of a run by key, with how often it was made. A ghost counts all of its writes (`writes`, [key, how often] pairs); a run
+ * without counts (the real run, whose record lists every write, or a run kept in an older case) is counted from its list.
+ */
+function tally(run) {
+  if (run.writes) return new Map(run.writes);
+  const out = new Map();
+  for (const key of run.effects ?? []) out.set(key, (out.get(key) ?? 0) + 1);
+  return out;
+}
+
 // The real run records calls (fetch, http, Postgres, Redis), not file writes, and its payloads carry the real clock: what it wrote is
-// compared with the serving ghost by shape, and file writes are compared between the two ghosts only.
-const recordedShapes = (list) => [...(list ?? [])].filter((effect) => !effect.startsWith('FS ')).map(shapeOf).sort().join('\n');
+// compared with the serving ghost by shape, every write counted, and file writes are compared between the two ghosts only.
+function shapes(run) {
+  const out = new Map();
+  for (const [key, n] of tally(run)) if (!key.startsWith('FS ')) out.set(shapeOf(key), (out.get(shapeOf(key)) ?? 0) + n);
+  return out;
+}
+
+const sameTally = (x, y) => x.size === y.size && [...x].every(([key, n]) => y.get(key) === n);
+
+/** The writes two tallies differ in, as each run made them, a key with how often: at most 200 a side, so a person sees them all. */
+function differing(x, y) {
+  const keys = [...new Set([...x.keys(), ...y.keys()])].filter((key) => x.get(key) !== y.get(key)).sort();
+  if (!keys.length) return null;
+  const side = (made) => {
+    const list = keys.filter((key) => made.has(key)).map((key) => (made.get(key) > 1 ? `${key} (${made.get(key)} times)` : key));
+    if (!list.length) return 'none';
+    return `${list.slice(0, 200).join('\n')}${list.length > 200 ? `\nand ${list.length - 200} more` : ''}`;
+  };
+  return { old: side(x), new: side(y) };
+}
+
 const strayCalls = (run) => run.events.filter((e) => e.type === 'unmatched-read' || e.type === 'unmatched-write');
 const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail));
 const refusals = (run) => new Set(run.events.filter((e) => e.type === 'denied').map((e) => e.detail));
@@ -29,7 +60,8 @@ const sized = (body) => `${body.size} bytes, sha256 ${body.digest.slice(0, 16)}`
 
 /**
  * Compares two runs of one request: `a` from the old code, `b` from the new.
- * A run is { status, headers, body: Buffer, large?: { size, digest }, effects: string[], events: [{ type, detail }], error?, timedOut?, gone? }.
+ * A run is { status, headers, body: Buffer, large?: { size, digest }, effects: string[], writes?: [key, count][], tooMany?, events: [{ type, detail }],
+ * error?, timedOut?, gone? }.
  * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ kind, path, old, new }] }, at most 20 details.
  */
 export function compareRuns(a, b) {
@@ -39,11 +71,17 @@ export function compareRuns(a, b) {
     kinds.add(kind);
     if (details.length < KEPT) details.push({ kind, path, old, new: now });
   };
-  // A write one version would make and the other would not is a difference whatever else happened: a double charge is caught even
-  // when the new code then fails on a call the recording cannot answer, or reaches for something a ghost may not use.
-  const before = writes(a.effects);
-  const after = writes(b.effects);
-  if (before !== after) add('effects', 'writes', before || 'none', after || 'none');
+  // A write one version would make and the other would not, or would make more often, is a difference whatever else happened: a double
+  // charge is caught even when the new code then fails on a call the recording cannot answer, or reaches for something a ghost may not
+  // use. Every write counts, by key. A ghost that made more different writes than it counts (`tooMany`) cannot be compared in full: when
+  // only one did, the two certainly differ; when both did, the request is not compared, unless something else differs.
+  const uncounted = Boolean(a.tooMany && b.tooMany);
+  if (!uncounted && (a.tooMany || b.tooMany)) {
+    add('effects', 'writes', a.tooMany ? MANY : `${tally(a).size} different writes`, b.tooMany ? MANY : `${tally(b).size} different writes`);
+  } else if (!uncounted) {
+    const writes = differing(tally(a), tally(b));
+    if (writes) add('effects', 'writes', writes.old, writes.new);
+  }
   // Something a ghost may not use (a program, a connection no recording answers) is refused, so what it would have answered is unknown,
   // and nothing after it can be compared. Reached for by the new code alone, on the same request in the same world, it is a difference
   // in itself: left "not compared", a rare path could switch on with it unseen. Reached for by both versions, or by the old one alone
@@ -116,7 +154,9 @@ export function compareRuns(a, b) {
       }
     }
   }
-  return kinds.size ? { outcome: 'different', kinds: [...kinds], details } : { outcome: 'same', kinds: [], details: [] };
+  if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
+  if (uncounted) return { outcome: 'not-compared', kinds: ['too-many-writes'], details: [{ kind: 'too-many-writes', path: 'writes', old: MANY, new: MANY }] };
+  return { outcome: 'same', kinds: [], details: [] };
 }
 
 const matches = (pattern, path) => (pattern.endsWith('*') ? path.startsWith(pattern.slice(0, -1)) : pattern === path);
@@ -150,6 +190,7 @@ export function faithful(real, ghost, who = 'old') {
   const stray = strayCalls(ghost);
   if (stray.length) return `the ${code} code's ghost made a call the real run did not: ${stray[0].detail}`;
   if (real.status !== ghost.status) return `the ${code} code's ghost answered ${ghost.status}, the real run ${real.status}`;
-  if (recordedShapes(real.effects) !== recordedShapes(ghost.effects)) return `the ${code} code's ghost wrote other things than the real run`;
+  if (ghost.tooMany) return `the ${code} code's ghost made ${MANY}, so its writes cannot be checked against the real run`;
+  if (!sameTally(shapes(real), shapes(ghost))) return `the ${code} code's ghost wrote other things than the real run`;
   return null;
 }
