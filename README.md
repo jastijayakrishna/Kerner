@@ -170,6 +170,8 @@ Next steps:
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so
   Kern cannot comment or set its status there. The job fails unless the answer is ✅. If you require the `Kern` status, merge such a
   pull request after reading that summary.
+- Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
+  could in any CI; Kern flags new test-runner settings and hooks, and the sandbox keeps such code away from everything else.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, never as passed or failed.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).

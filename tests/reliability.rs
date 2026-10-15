@@ -388,3 +388,30 @@ fn a_package_json_change_says_what_changed_in_it() {
     let items = look(base, bump);
     assert!(items.len() == 1 && items[0].contains("vitest 3.2.0") && items[0].contains("main"), "{items:?}");
 }
+
+#[test]
+fn a_failure_the_old_code_also_shows_when_its_file_runs_alone_never_blocks() {
+    let before = report(&[("packages/cli/build.test.ts > builds", 1, 0, 0), ("packages/core/merge.test.ts > merges", 1, 0, 0)], &[]);
+    let after = report(&[("packages/core/merge.test.ts > merges", 0, 1, 0)], &["packages/cli/build.test.ts"]);
+    let alone_new = report(&[("packages/core/merge.test.ts > merges", 0, 1, 0)], &["packages/cli/build.test.ts"]);
+    let alone_old = report(&[("packages/core/merge.test.ts > merges", 1, 0, 0)], &["packages/cli/build.test.ts"]);
+    let c = suite::judged(&before, &after, Some(&alone_new), Some(&alone_old));
+    assert_eq!(c["new_problems"], json!([]), "the file fails alone on the old code too (it needs a sibling package built), so the full run passing it was luck: {c}");
+    assert_eq!(c["broke"], json!(["packages/core/merge.test.ts > merges"]), "this test fails alone on the new code and passes alone on the old code: {c}");
+    assert!(c["flaky"].as_array().unwrap().iter().any(|f| f == "packages/cli/build.test.ts"), "{c}");
+    let shaky_old = report(&[("packages/core/merge.test.ts > merges", 0, 1, 0)], &[]);
+    let c = suite::judged(&before, &after, Some(&alone_new), Some(&shaky_old));
+    assert_eq!(c["broke"], json!([]), "a test that fails alone on the old code is not broken by the change: {c}");
+}
+
+#[test]
+fn suspect_test_files_are_run_again_alone_with_the_project_s_own_options() {
+    let files: std::collections::BTreeSet<String> = ["packages/cli/src/a.test.ts".to_string(), "packages/cli/src/[id].test.ts".to_string()].into();
+    let tests = |runner: policy::Runner, command: &[&str]| policy::Tests { paths: Vec::new(), kind: policy::Kind::Feature, runner, command: command.iter().map(|s| s.to_string()).collect(), edits: policy::Edits::Checked };
+    let jest = suite::focused(&tests(policy::Runner::Jest, &["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js"]), &files, "packages/cli").unwrap();
+    assert_eq!(jest.command, ["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js", "--runTestsByPath", "/workspace/packages/cli/src/[id].test.ts", "/workspace/packages/cli/src/a.test.ts"]);
+    let vitest = suite::focused(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "--maxWorkers=2"]), &files, "packages/cli").unwrap();
+    assert_eq!(vitest.command, ["/workspace/node_modules/.bin/vitest", "run", "--maxWorkers=2", "src/[id].test.ts", "src/a.test.ts"]);
+    assert!(suite::focused(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "tests/unit"]), &files, "packages/cli").is_none(), "a script that already filters files cannot be narrowed by adding more filters");
+    assert!(suite::focused(&tests(policy::Runner::Mocha, &["/workspace/node_modules/.bin/mocha"]), &files, "").is_none());
+}
