@@ -21,4 +21,5 @@ pub mod reverify;
 pub mod drive;
 pub mod suite;
 pub mod rules;
+pub mod receipt;
 pub mod twin;

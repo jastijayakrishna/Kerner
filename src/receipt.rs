@@ -1,0 +1,265 @@
+//! The receipt: the one thing a customer reads about a pull request. One answer first (nothing unexpected, needs a look, or blocked), then
+//! every item behind it, then what stayed the same, then what Kern could not check. It is built from the parts `kern check` runs (the
+//! static rules, the project's tests on the old and the new code, and, with an AI key, every changed line run both ways), posted as one
+//! comment that is edited in place, with one commit status, `Kern`. A maintainer approves a "needs a look" receipt with `/kern approve`;
+//! nothing approves a blocked one.
+use crate::github::Api;
+use crate::ensure;
+use crate::util::*;
+use serde_json::{Value, json};
+use std::path::Path;
+
+/// Marks Kern's receipt comment, so a later run edits it instead of adding another.
+pub const MARK: &str = "<!-- kern-receipt -->";
+/// Starts the hidden line that carries the seal and GitHub's signature over it.
+pub const SEAL_MARK: &str = "<!-- kern-seal ";
+/// Only a comment this account wrote counts as Kern's: anyone can paste the mark into a comment of their own.
+fn author() -> String { crate::github::env("KERN_COMMENT_AUTHOR").unwrap_or_else(|| "github-actions[bot]".into()) }
+/// At most this many items of one kind are listed; the rest are counted. The receipt.json artifact has them all.
+const SHOWN: usize = 15;
+
+/// Untrusted text (a test name, a path, a value from the code) as an inline code span that nothing in it can break out of.
+fn code(s: &str, n: usize) -> String {
+    let flat: String = s.chars().map(|c| match c { '`' => '\'', '<' => '‹', c if c.is_control() => ' ', c => c }).collect();
+    let flat = flat.trim();
+    let clipped: String = if flat.chars().count() > n { format!("{}…", flat.chars().take(n).collect::<String>()) } else { flat.to_string() };
+    format!("`{clipped}`")
+}
+fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() }
+fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
+
+/// What the behaviour runs found, sorted by whether the pull request describes it: (described, not mentioned). Kern's own record of calls
+/// and behaviour is what counts; what the driver printed counts only when there is no record, as in drive's own comment.
+fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
+    if !report.is_object() { return (Vec::new(), Vec::new()); }
+    let items = crate::drive::difference_items(report);
+    let has_record = items.iter().any(|(_, rec)| *rec);
+    let sorted = &report["sorted"];
+    let (mut described, mut surprises) = (Vec::new(), Vec::new());
+    for (i, (line, rec)) in items.iter().enumerate() {
+        if has_record && !*rec { continue; }
+        let says = sorted[format!("D{}", i + 1)]["says"].as_str();
+        if says == Some("yes") { described.push(line.clone()) } else { surprises.push(line.clone()) }
+    }
+    (described, surprises)
+}
+
+/// Builds the receipt from drive.json (the commits and what could not be measured), the static rules, the tests' comparison and what the
+/// behaviour runs did (`status`: RAN, NO_DRIVER, NOTHING_TO_RUN, OFF or FAILED; `report`: drive's merged report when they ran).
+pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
+    let (mut blocked, mut look) = (Vec::new(), Vec::new());
+    // Blocked: something that worked before is broken, or the tests were made to pass instead of the code. A fix clears these, never a vote.
+    for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
+    for t in strings(&tests["new_problems"]) { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}", code(&t, 200)))); }
+    for x in rules["tricks"].as_array().into_iter().flatten() { blocked.push(item("trick", format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))))); }
+    // Needs a look: behaviour nobody mentioned, new powers, tests that stopped running, and the files that steer builds, secrets and agents.
+    let (described, surprises) = behaviour_items(&behaviour["report"]);
+    let sorted = behaviour["report"]["sorted"].is_object();
+    for s in &surprises { look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
+    for p in rules["powers"].as_array().into_iter().flatten() {
+        let caps: Vec<String> = strings(&p["added"]).iter().map(|c| code(c, 80)).collect();
+        look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
+    }
+    for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
+    for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
+    for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run"), ("protected", "protected", "is a CI, secret or configuration file"),
+        ("dependencies", "dependencies", "changes the project's dependencies"), ("agent_notes", "agent-notes", "changes what coding agents are told")] {
+        for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    }
+    let decision = if !blocked.is_empty() { "blocked" } else if !look.is_empty() { "look" } else { "clear" };
+    let report = &behaviour["report"];
+    let lines = json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
+        "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) });
+    let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) }))
+        .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) }))).collect();
+    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "base": d["base"], "head": d["head"], "decision": decision, "blocked": blocked, "look": look, "tests": tests,
+        "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": report["coverage"]["percent"], "lines": lines, "described": described, "not_mentioned": surprises },
+        "rules": rules, "not_checked": not_checked })
+}
+/// Kern's own words (a check's reason) with anything that could act as markup made inert.
+fn plain(s: &str) -> String { s.chars().map(|c| match c { '<' => '‹', '`' => '\'', c if c.is_control() => ' ', c => c }).take(400).collect() }
+
+fn plural(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
+fn list(md: &mut String, items: &[Value]) {
+    for x in items.iter().take(SHOWN) { md.push_str(&format!("- {}\n", x["what"].as_str().unwrap_or(""))); }
+    if items.len() > SHOWN { md.push_str(&format!("- … and {} more in Kern's receipt.json\n", items.len() - SHOWN)); }
+}
+
+/// The receipt as the pull request shows it. `drive_comment` is kern drive's own comment, folded away under the answer.
+pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
+    let blocked = r["blocked"].as_array().cloned().unwrap_or_default();
+    let look = r["look"].as_array().cloned().unwrap_or_default();
+    let tests = &r["tests"];
+    let behaviour = &r["behaviour"];
+    let tests_ran = tests["status"] == "RAN";
+    let behaviour_ran = behaviour["status"] == "RAN";
+    let mut md = String::from(MARK);
+    md.push('\n');
+    md += &match r["decision"].as_str() {
+        Some("blocked") => format!("### ❌ Kern: Blocked — {}\n\n", plural(blocked.len(), "problem to fix", "problems to fix")),
+        Some("look") => format!("### ⚠️ Kern: {} a look\n\n", plural(look.len(), "thing needs", "things need")),
+        _ if tests_ran || behaviour_ran => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
+        _ => "### ✅ Kern: Nothing unexpected in the rules it checked\n\nNot run: the project's tests and its changed code (see below), so this receipt covers the rules only.\n\n".to_string(),
+    };
+    if !blocked.is_empty() {
+        md += "**Blocked: fix these.** An approval cannot clear them.\n\n";
+        list(&mut md, &blocked);
+        md += "\n";
+    }
+    if !look.is_empty() {
+        md += "**Needs a look.** If each one is meant, a maintainer comments `/kern approve`.\n\n";
+        list(&mut md, &look);
+        md += "\n";
+    }
+    md += "**What stayed the same**\n\n";
+    if tests_ran {
+        let kept = tests["kept"].as_u64().unwrap_or(0) as usize;
+        let mut line = format!("- {} Tests: {} before and still pass ({})", if blocked.iter().any(|b| b["kind"] == "test-broke") { "⚠️" } else { "✅" },
+            plural(kept, "test passed", "tests passed"), tests["runner"].as_str().unwrap_or("tests"));
+        let added = tests["added"].as_array().map_or(0, Vec::len);
+        let failing = tests["already_failing"].as_array().map_or(0, Vec::len);
+        let flaky = tests["flaky"].as_array().map_or(0, Vec::len);
+        if added > 0 { line += &format!(" · {} new", added); }
+        if flaky > 0 { line += &format!(" · {} failed once and passed when run again (flaky)", flaky); }
+        if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }
+        md += &line;
+        md += "\n";
+    } else {
+        md += &format!("- ⏭️ Tests: Not run — {}\n", plain(tests["why"].as_str().unwrap_or("Kern found no tests it can run")));
+    }
+    let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
+    if powers == 0 { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
+    if r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && tests["gone"].as_array().is_none_or(Vec::is_empty) && tests["newly_skipped"].as_array().is_none_or(Vec::is_empty) {
+        md += "- ✅ No skipped, focused or removed tests\n";
+    }
+    match behaviour["status"].as_str() {
+        Some("RAN") => md += &format!("- {} {}% of the changed lines ran, on the old and the new code\n", if behaviour["percent"].as_u64().unwrap_or(0) >= 80 { "✅" } else { "⚠️" }, behaviour["percent"].as_u64().unwrap_or(0)),
+        Some("NOTHING_TO_RUN") => md += "- ✅ No changed line of code to run: only tests, docs, configuration or types changed\n",
+        Some("OFF") => md += "- ⏭️ Changed lines: Not run. Add an AI key (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) and Kern runs every changed line on the old and the new code\n",
+        _ => md += &format!("- ⏭️ Changed lines: Not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the run did not finish"))),
+    }
+    let described = behaviour["described"].as_array().map_or(0, Vec::len);
+    if described > 0 { md += &format!("- ✅ {} the pull request describes\n", plural(described, "behaviour change", "behaviour changes")); }
+    md += "\n";
+    if let Some(c) = drive_comment.filter(|c| !c.trim().is_empty()) {
+        let body = c.lines().skip_while(|l| l.starts_with("### ") || l.trim().is_empty()).collect::<Vec<_>>().join("\n");
+        md += &format!("<details><summary>What this change does when it runs, line by line</summary>\n\n{body}\n\n</details>\n\n");
+    }
+    let not_checked = r["not_checked"].as_array().cloned().unwrap_or_default();
+    if !not_checked.is_empty() {
+        md += "**Not checked**\n\n";
+        list(&mut md, &not_checked);
+        md += "\n";
+    }
+    let short = |k: &str| r[k].as_str().filter(|h| h.len() >= 7).map(|h| h[..7].to_string()).unwrap_or_default();
+    md += &format!("<sub>Kern {} checked `{}` against `{}` in a sealed sandbox with the network off. Approve with `/kern approve`. The proof below is signed by GitHub for Kern's own workflow; check it with `kern receipt verify`.</sub>\n",
+        r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
+    if md.len() > 60_000 {
+        let mut cut = 60_000;
+        while !md.is_char_boundary(cut) { cut -= 1; }
+        md.truncate(md[..cut].rfind('\n').unwrap_or(cut));
+        md += "\n… (cut short; the full receipt is in the job's receipt.json)\n";
+    }
+    md
+}
+
+/// Writes receipt.json and receipt.md into `out`, replacing earlier ones.
+pub fn write(out: &Path, r: &Value, drive_comment: Option<&str>) -> R<()> {
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join("receipt.json"), format!("{}\n", serde_json::to_string_pretty(r)?))?;
+    std::fs::write(out.join("receipt.md"), markdown(r, drive_comment))?;
+    Ok(())
+}
+
+/// What GitHub signs: the pull request, both commits, the answer, and the fingerprint of the whole receipt.
+pub fn seal(r: &Value, repository: &str, number: u64) -> R<Value> {
+    Ok(json!({ "v": 1, "repository": repository, "pull": number, "base": r["base"], "head": r["head"], "decision": r["decision"], "receipt_sha256": digest(r)? }))
+}
+/// The hidden line that carries a seal and its token in the comment.
+pub fn seal_line(seal: &Value, token: &str) -> String { format!("{SEAL_MARK}{} -->", json!({ "seal": seal, "token": token })) }
+fn read_seal_line(body: &str) -> Option<(Value, String)> {
+    let line = body.lines().rev().find(|l| l.starts_with(SEAL_MARK))?;
+    let v: Value = serde_json::from_str(line.strip_prefix(SEAL_MARK)?.strip_suffix(" -->")?).ok()?;
+    Some((v["seal"].clone(), v["token"].as_str()?.to_string()))
+}
+
+fn kern_comment(api: &Api, repository: &str, number: u64) -> R<Option<Value>> {
+    let who = author();
+    for page in 1..=10 {
+        let items = api.get(&format!("/repos/{repository}/issues/{number}/comments?per_page=100&page={page}"))?.as_array().cloned().unwrap_or_default();
+        if let Some(c) = items.iter().find(|c| c["body"].as_str().is_some_and(|b| b.starts_with(MARK)) && c["user"]["login"] == who.as_str()) { return Ok(Some(c.clone())); }
+        if items.len() < 100 { break; }
+    }
+    Ok(None)
+}
+fn head_of(api: &Api, repository: &str, number: u64) -> R<String> {
+    Ok(api.get(&format!("/repos/{repository}/pulls/{number}"))?["head"]["sha"].as_str().unwrap_or("").to_string())
+}
+fn status(api: &Api, repository: &str, sha: &str, state: &str, description: &str, url: Option<&str>) -> R<()> {
+    let description: String = description.chars().take(140).collect();
+    let mut body = json!({ "state": state, "context": "Kern", "description": description });
+    if let Some(u) = url { body["target_url"] = json!(u); }
+    api.post(&format!("/repos/{repository}/statuses/{sha}"), &body)?;
+    Ok(())
+}
+fn description(r: &Value) -> String {
+    let n = |k: &str| r[k].as_array().map_or(0, Vec::len);
+    match r["decision"].as_str() {
+        Some("blocked") => format!("Blocked: {}", r["blocked"][0]["what"].as_str().unwrap_or("a problem to fix").replace('`', "")),
+        Some("look") => format!("{} — approve with /kern approve", plural(n("look"), "thing needs a look", "things need a look")),
+        _ => "Nothing unexpected".to_string(),
+    }
+}
+
+/// Posts the receipt in `out` on the pull request, or edits Kern's earlier comment there, and sets the `Kern` status on its head. A
+/// receipt for a commit that is no longer the pull request's head is never posted (a re-run, or a newer push that overtook it).
+pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
+    ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
+    let r = read_json(out.join("receipt.json"))?;
+    let head = r["head"].as_str().unwrap_or("").to_string();
+    let now = head_of(api, repository, number)?;
+    if now != head { return Ok(json!({ "status": "STALE", "checked": head, "head": now })); }
+    let mut body = std::fs::read_to_string(out.join("receipt.md"))?;
+    if let Ok(s) = read_json(out.join("seal.json")) { body += &format!("{}\n", seal_line(&s["seal"], s["token"].as_str().unwrap_or(""))); }
+    let (posted, url) = match kern_comment(api, repository, number)? {
+        Some(c) => { api.patch(&format!("/repos/{repository}/issues/comments/{}", c["id"]), &json!({ "body": body }))?; ("UPDATED", c["html_url"].as_str().map(str::to_string)) }
+        None => { let c = api.post(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": body }))?; ("POSTED", c["html_url"].as_str().map(str::to_string)) }
+    };
+    let state = if r["decision"] == "clear" { "success" } else { "failure" };
+    status(api, repository, &head, state, &description(&r), url.as_deref())?;
+    Ok(json!({ "status": posted, "state": state, "decision": r["decision"] }))
+}
+
+/// `/kern approve` from `login`: allowed for people who can merge (write, maintain or admin), for the receipt of the current head, when it is
+/// Kern's (GitHub's signature over its seal holds: `check`) and says "needs a look". Sets the status to success and notes who approved.
+pub fn approve(api: &Api, repository: &str, number: u64, login: &str, check: &dyn Fn(&Value, &str) -> R<()>) -> R<Value> {
+    ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
+    ensure!(!login.is_empty() && login.len() <= 100 && login.chars().all(|c| c.is_ascii_alphanumeric() || "-_[]".contains(c)), "Expected a GitHub login");
+    let say = |text: &str| -> R<()> { api.post(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": text }))?; Ok(()) };
+    let permission = api.get(&format!("/repos/{repository}/collaborators/{login}/permission"))?;
+    if !["admin", "maintain", "write"].contains(&permission["permission"].as_str().unwrap_or("")) {
+        say(&format!("Kern: only people who can merge into this repository can approve its receipt; @{login} cannot."))?;
+        return Ok(json!({ "status": "NOT_ALLOWED" }));
+    }
+    let head = head_of(api, repository, number)?;
+    let Some(c) = kern_comment(api, repository, number)? else { say("Kern: there is no receipt to approve yet.")?; return Ok(json!({ "status": "NO_RECEIPT" })) };
+    let body = c["body"].as_str().unwrap_or("").to_string();
+    let Some((seal, token)) = read_seal_line(&body) else { say("Kern: this receipt carries no signature, so it cannot be approved.")?; return Ok(json!({ "status": "UNVERIFIED" })) };
+    if check(&seal, &token).is_err() || seal["repository"] != repository || seal["pull"] != number {
+        say("Kern: this receipt's signature does not check out, so it is not approved.")?;
+        return Ok(json!({ "status": "UNVERIFIED" }));
+    }
+    if seal["head"] != head.as_str() { say("Kern: the receipt is for an older commit. Wait for Kern to check the newest one, then approve.")?; return Ok(json!({ "status": "STALE" })); }
+    match seal["decision"].as_str() {
+        Some("blocked") => { say("Kern: blocked items need a fix; an approval cannot clear them.")?; Ok(json!({ "status": "BLOCKED" })) }
+        Some("look") => {
+            status(api, repository, &head, "success", &format!("Approved by @{login}"), c["html_url"].as_str())?;
+            let note = format!("\n\n**Approved by @{login}** on {}: every item above was looked at.\n", iso8601(now_ms()));
+            let updated = match body.rfind(SEAL_MARK) { Some(at) => format!("{}{note}
+{}", body[..at].trim_end(), &body[at..]), None => format!("{body}{note}") };
+            api.patch(&format!("/repos/{repository}/issues/comments/{}", c["id"]), &json!({ "body": updated }))?;
+            Ok(json!({ "status": "APPROVED", "by": login, "head": head }))
+        }
+        _ => Ok(json!({ "status": "NOTHING_TO_APPROVE" })),
+    }
+}

@@ -198,3 +198,167 @@ fn a_change_with_no_code_has_no_powers_or_tricks() {
     for k in ["powers", "tricks", "settings", "protected", "dependencies", "agent_notes", "not_checked"] { assert!(r[k].as_array().unwrap().is_empty(), "{k}: {r}"); }
     assert_eq!(r["changed"].as_array().unwrap().len(), 1);
 }
+
+// ---- The receipt: one answer, every item, posted once, approved only by people who can merge ----------------------------------------
+use kern::receipt;
+use serde_json::{Value, json};
+
+fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
+fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
+fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 1, "skipped": 0 }, "after": { "passed": 13, "failed": 1, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": ["t > new"], "already_failing": ["t > needs the internet"], "new_problems": [] }) }
+fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
+fn kinds(r: &Value, list: &str) -> Vec<String> { r[list].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect() }
+
+#[test]
+fn decision_table() {
+    let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off());
+    assert_eq!(r["decision"], "clear", "{r}");
+    // A test that passed before and fails now blocks; so does a test trick. An approval cannot clear them.
+    let mut t = clean_tests();
+    t["broke"] = json!(["t > rounds to cents"]);
+    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    assert_eq!((r["decision"].as_str().unwrap(), kinds(&r, "blocked")), ("blocked", vec!["test-broke".to_string()]), "{r}");
+    let mut rules = clean_rules();
+    rules["tricks"] = json!([{ "path": "test/a.test.js", "why": "A test file skips or focuses tests: test/a.test.js uses only. Every test must run, so remove it" }]);
+    assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests(), &off())["decision"], "blocked");
+    // Everything else that is unexpected needs a look: new powers, tests that no longer run, settings, CI, secret and dependency files.
+    let mut rules = clean_rules();
+    rules["powers"] = json!([{ "path": "src/total.js", "added": ["node:child_process"] }]);
+    rules["protected"] = json!([{ "path": ".github/workflows/ci.yml", "operation": "modify" }]);
+    let mut t = clean_tests();
+    t["gone"] = json!(["t > old"]);
+    let r = receipt::build(&drive_json(), &rules, &t, &off());
+    assert_eq!(r["decision"], "look");
+    assert_eq!(kinds(&r, "look"), ["power", "test-gone", "protected"], "behaviour first, then powers, then tests, then the files that steer builds: {r}");
+    // Behaviour the pull request does not mention needs a look; what it describes does not.
+    let behaviour = json!({ "status": "RAN", "percent": 100, "report": { "coverage": { "percent": 100 }, "call_differences": [
+        { "call": "src/total.js#total", "args": "[[1,2]]", "old": "3", "new": "4" },
+        { "call": "src/total.js#total", "args": "[[]]", "old": "0", "new": "null" }], "sorted": { "D1": { "says": "yes", "why": "the PR says totals change" }, "D2": { "says": "no", "why": "" } } } });
+    let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &behaviour);
+    assert_eq!(r["decision"], "look");
+    assert_eq!(kinds(&r, "look"), ["not-mentioned"], "{r}");
+    assert_eq!(r["behaviour"]["described"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn markdown_leads_with_the_answer_and_lists_every_item() {
+    let mut t = clean_tests();
+    t["broke"] = json!(["t > rounds to cents"]);
+    let mut rules = clean_rules();
+    rules["dependencies"] = json!([{ "path": "package.json", "operation": "modify" }]);
+    let r = receipt::build(&drive_json(), &rules, &t, &off());
+    let md = receipt::markdown(&r, None);
+    let first = md.lines().find(|l| !l.trim().is_empty() && !l.starts_with("<!--")).unwrap();
+    assert!(first.contains("Blocked") && first.contains("Kern"), "the first line is the answer: {first}");
+    for want in ["t > rounds to cents", "package.json", "12 tests passed before and still pass", "vitest", "set aside", "/kern approve", "Add an AI key"] {
+        assert!(md.contains(want), "{want}:\n{md}");
+    }
+    // A clear receipt says what it checked, and so never reads as more than it is.
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
+    assert!(md.contains("Nothing unexpected") && md.contains("no test runner Kern can read") && md.contains("Not run"), "{md}");
+    // Hostile names from a pull request cannot break out of their code spans.
+    let mut t = clean_tests();
+    t["broke"] = json!(["a `b` <script>"]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
+    assert!(!md.contains("<script>"), "{md}");
+}
+
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+fn stub_github(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> (String, Seen) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen: Seen = Default::default();
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut reader = std::io::BufReader::new(s.try_clone().unwrap());
+            let mut request = String::new();
+            if std::io::BufRead::read_line(&mut reader, &mut request).is_err() { continue; }
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 || line == "\r\n" { break; }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = v.trim().parse().unwrap_or(0); }
+            }
+            let mut body = vec![0u8; length];
+            let _ = std::io::Read::read_exact(&mut reader, &mut body);
+            let parts: Vec<&str> = request.split_whitespace().collect();
+            let (method, path) = (parts.first().copied().unwrap_or("").to_string(), parts.get(1).copied().unwrap_or("").to_string());
+            log.lock().unwrap().push((method.clone(), path.clone(), String::from_utf8_lossy(&body).to_string()));
+            let (status, reply) = route(&method, &path);
+            let _ = std::io::Write::write_all(&mut s, format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes());
+        }
+    });
+    (url, seen)
+}
+fn receipt_dir(decision_tests: Value) -> Temp {
+    let t = Temp::new();
+    let r = receipt::build(&drive_json(), &clean_rules(), &decision_tests, &off());
+    receipt::write(&t.0, &r, None).unwrap();
+    t
+}
+
+#[test]
+fn a_receipt_is_posted_once_with_its_status_and_never_over_a_newer_head() {
+    let dir = receipt_dir(clean_tests());
+    let (url, seen) = stub_github(|m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[]".into()),
+        ("POST", "/repos/acme/shop/issues/7/comments") => (201, r#"{"id":5,"html_url":"https://github.com/acme/shop/pull/7#c5"}"#.into()),
+        ("POST", p) if p.starts_with("/repos/acme/shop/statuses/") => (201, "{}".into()),
+        _ => (404, "{}".into()),
+    });
+    let api = kern::github::Api::new(&url, "t").unwrap();
+    let out = receipt::post(&api, &dir.0, "acme/shop", 7).unwrap();
+    assert_eq!(out["status"], "POSTED", "{out}");
+    let log = seen.lock().unwrap().clone();
+    let status = log.iter().find(|(m, p, _)| m == "POST" && p.contains("/statuses/2222222222222222222222222222222222222222")).expect("a status on the head");
+    assert!(status.2.contains("\"context\":\"Kern\"") && status.2.contains("\"state\":\"success\""), "{}", status.2);
+    let comment = log.iter().find(|(m, p, _)| m == "POST" && p.ends_with("/comments")).unwrap();
+    assert!(comment.2.contains("kern-receipt"), "{}", comment.2);
+    // A run of an older commit never replaces what Kern said about the newer one.
+    let (url, seen) = stub_github(|m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"3333333333333333333333333333333333333333"}}"#.into()),
+        _ => (404, "{}".into()),
+    });
+    let out = receipt::post(&kern::github::Api::new(&url, "t").unwrap(), &dir.0, "acme/shop", 7).unwrap();
+    assert_eq!(out["status"], "STALE");
+    assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "POST"), "nothing was written");
+}
+
+#[test]
+fn approval_needs_write_access_a_signed_receipt_and_never_unblocks() {
+    let comment_for = |decision: &str| -> String {
+        let seal = json!({ "v": 1, "repository": "acme/shop", "pull": 7, "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "decision": decision, "receipt_sha256": "ab" });
+        let body = format!("<!-- kern-receipt -->\n### Kern\n{}", receipt::seal_line(&seal, "TOKEN"));
+        json!([{ "id": 9, "user": { "login": "github-actions[bot]" }, "body": body }]).to_string()
+    };
+    let run = |permission: &'static str, decision: &'static str, token_ok: bool| -> (Value, Vec<(String, String, String)>) {
+        let comments = comment_for(decision);
+        let (url, seen) = stub_github(move |m, p| match (m, p) {
+            ("GET", p) if p.starts_with("/repos/acme/shop/collaborators/mallory/permission") => (200, format!(r#"{{"permission":"{permission}"}}"#)),
+            ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
+            ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, comments.clone()),
+            ("POST", _) | ("PATCH", _) => (201, "{}".into()),
+            _ => (404, "{}".into()),
+        });
+        let check = move |_seal: &Value, token: &str| -> R<()> { if token_ok && token == "TOKEN" { Ok(()) } else { Err(Denied("signature".into())) } };
+        let r = receipt::approve(&kern::github::Api::new(&url, "t").unwrap(), "acme/shop", 7, "mallory", &check).unwrap();
+        let log = seen.lock().unwrap().clone();
+        (r, log)
+    };
+    let success = |log: &[(String, String, String)]| log.iter().any(|(m, p, b)| m == "POST" && p.contains("/statuses/") && b.contains("\"state\":\"success\""));
+    let (r, log) = run("read", "look", true);
+    assert_eq!(r["status"], "NOT_ALLOWED", "{r}");
+    assert!(!success(&log));
+    let (r, log) = run("write", "blocked", true);
+    assert_eq!(r["status"], "BLOCKED", "{r}");
+    assert!(!success(&log), "an approval never clears a block");
+    let (r, log) = run("write", "look", false);
+    assert_eq!(r["status"], "UNVERIFIED", "a receipt without GitHub's signature for Kern's workflow is not Kern's: {r}");
+    assert!(!success(&log));
+    let (r, log) = run("maintain", "look", true);
+    assert_eq!(r["status"], "APPROVED", "{r}");
+    assert!(success(&log), "{log:?}");
+}
