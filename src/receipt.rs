@@ -139,6 +139,9 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }
         md += &line;
         md += "\n";
+        for n in tests["not_run"].as_array().into_iter().flatten() {
+            md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
+        }
     } else if nothing {
         md += "- ✅ Tests: nothing to run — this change touches no code, tests or package.json\n";
     } else {

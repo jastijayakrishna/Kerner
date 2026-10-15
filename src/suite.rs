@@ -95,11 +95,12 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     s
 }
 
-/// One run of a side's tests in its sandbox: the runner's report, or why there is none.
-fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, label: &str) -> R<Result<Report, String>> {
+/// One run of a side's tests in its sandbox, from `dir` (the root, or a workspace package's folder): the runner's report, or why there is
+/// none.
+fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str) -> R<Result<Report, String>> {
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": proof::command(tests), "timeout_seconds": TIMEOUT_SECONDS }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": proof::command(tests), "timeout_seconds": TIMEOUT_SECONDS, "cwd": dir }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: TIMEOUT_SECONDS + 120, memory_mb: 4096, pids: 1024 };
@@ -118,38 +119,103 @@ fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, label: &str)
     Ok(proof::read_report(tests.runner, &parts["output"]).map_err(|why| no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])))
 }
 
+/// At most this many workspace packages' tests run for one change; the others are named as not run.
+const MAX_PACKAGES: usize = 5;
+
+/// The workspace packages a change touches: for each changed path, the nearest folder above it, below the root, that has a package.json
+/// (`has_manifest`). Sorted; files in no package, and anything under node_modules, belong to none.
+pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for p in changed.iter().filter(|p| !p.split('/').any(|c| c == "node_modules")) {
+        let mut dir = p.rsplit_once('/').map(|(d, _)| d);
+        while let Some(d) = dir {
+            if has_manifest(d) { out.insert(d.to_string()); break; }
+            dir = d.rsplit_once('/').map(|(x, _)| x);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// One set of tests to run on both sides: the root's, or one workspace package's.
+struct Suite { dir: String, old: Option<Tests>, new: Tests }
+
+/// Adds one suite's results to the whole: test names from `node --test` carry no file, so they get the package's folder in front.
+fn absorb(into: &mut Report, from: Report, dir: &str, runner: Runner) {
+    let name = |k: String| if runner == Runner::Node && !dir.is_empty() { format!("{dir}: {k}") } else { k };
+    for (k, c) in from.tests {
+        let e = into.tests.entry(name(k)).or_default();
+        e.passed += c.passed;
+        e.failed += c.failed;
+        e.skipped += c.skipped;
+    }
+    into.problems.extend(from.problems.into_iter().map(name));
+}
+
 /// Runs the project's tests on the old and the new code, each on its installed tree (`drive::setup` first if needed), and compares them.
-/// The runner comes from each side's package.json; a side without one, or a run without a readable report, is named in the result.
+/// The runner comes from the root's package.json; without one there (a monorepo whose root runs turbo, nx or pnpm -r), from each
+/// workspace package the change touches, each run from its own folder. A side or package without a readable report is named.
 pub fn run(out: &Path, op: &Operator) -> R<Value> {
     let d = read_json(out.join("drive.json"))?;
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
-    let package = |commit: &str| -> Option<Vec<u8>> { crate::git::git(repo, &["show", &format!("{commit}:package.json")], None).ok() };
-    let (old_tests, new_tests) = (detect(package(d["base"].as_str().unwrap_or("")).as_deref()), detect(package(d["head"].as_str().unwrap_or("")).as_deref()));
-    let Some(new_tests) = new_tests else {
-        return Ok(json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json (Kern runs vitest, jest, mocha and node --test)" }));
+    let (base, head) = (d["base"].as_str().unwrap_or(""), d["head"].as_str().unwrap_or(""));
+    let manifest = |commit: &str, dir: &str| -> Option<Vec<u8>> {
+        let path = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
+        crate::git::git(repo, &["show", &format!("{commit}:{path}")], None).ok()
     };
+    let mut not_run = Vec::new();
+    let suites: Vec<Suite> = match detect(manifest(head, "").as_deref()) {
+        Some(new) => vec![Suite { dir: String::new(), old: detect(manifest(base, "").as_deref()), new }],
+        None => {
+            let changed = crate::rules::changed(repo, base, head)?;
+            let paths: Vec<&str> = changed.iter().map(|(p, _)| p.as_str()).collect();
+            let mut list = Vec::new();
+            for dir in packages(&paths, |dir| manifest(head, dir).is_some() || manifest(base, dir).is_some()) {
+                let Some(new) = detect(manifest(head, &dir).as_deref()) else { continue };
+                if list.len() == MAX_PACKAGES { not_run.push(json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") })); continue; }
+                list.push(Suite { old: detect(manifest(base, &dir).as_deref()), dir, new });
+            }
+            list
+        }
+    };
+    if suites.is_empty() {
+        return Ok(json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json, at the root or in a package this change touches (Kern runs vitest, jest, mocha and node --test)" }));
+    }
     if !out.join("setup.json").exists() { crate::drive::setup(out, op)?; }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
-    let after = match run_side(out, op, &volume("new"), &new_tests, "new")? {
-        Ok(r) => r,
-        Err(why) => return Ok(json!({ "status": "NOT_RUN", "runner": new_tests.runner.name(), "why": format!("the tests on the new code gave no results: {why}") })),
-    };
-    let Some(old_tests) = old_tests else {
-        // Tests the change itself brings: nothing to compare against, so they are all new.
-        let mut c = compare(&Report::default(), &after, None);
-        c["runner"] = json!(new_tests.runner.name());
-        c["note"] = json!("the old code had no test runner Kern can read, so every test is new");
-        return Ok(c);
-    };
-    let before = match run_side(out, op, &volume("old"), &old_tests, "old")? {
-        Ok(r) => r,
-        Err(why) => return Ok(json!({ "status": "NOT_RUN", "runner": new_tests.runner.name(), "why": format!("the tests on the old code gave no results: {why}") })),
-    };
-    // A failure the old code did not have is run once more before it counts, so a flaky test is told apart from a broken one.
-    let fails_new = after.tests.iter().any(|(k, c)| c.failed > 0 && passing(&before, k)) || after.problems.iter().any(|p| !before.problems.contains(p));
-    let again = if fails_new { run_side(out, op, &volume("new"), &new_tests, "new-again")?.ok() } else { None };
-    let mut c = compare(&before, &after, again.as_ref());
-    c["runner"] = json!(new_tests.runner.name());
+    let (mut before, mut after, mut again) = (Report::default(), Report::default(), Report::default());
+    let (mut ran, mut rerun, mut all_new) = (Vec::new(), false, Vec::new());
+    for suite in &suites {
+        let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
+        let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
+        let new = match run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"))? {
+            Ok(r) => r,
+            Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") })); continue; }
+        };
+        // Tests the change itself brings (no runner on the old side): nothing to compare against, so they are all new.
+        let old = match &suite.old {
+            None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
+            Some(t) => match run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))? {
+                Ok(r) => r,
+                Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+            },
+        };
+        // A failure the old code did not have is run once more before it counts, so a flaky test is told apart from a broken one.
+        let fails_new = new.tests.iter().any(|(k, c)| c.failed > 0 && passing(&old, k)) || new.problems.iter().any(|p| !old.problems.contains(p));
+        let second = if fails_new { run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))?.ok() } else { None };
+        rerun |= second.is_some();
+        absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);
+        absorb(&mut before, old, &suite.dir, suite.new.runner);
+        absorb(&mut after, new, &suite.dir, suite.new.runner);
+        ran.push(if suite.dir.is_empty() { suite.new.runner.name().to_string() } else { format!("{} in {}", suite.new.runner.name(), suite.dir) });
+    }
+    if ran.is_empty() {
+        let why = not_run.first().and_then(|n| n["why"].as_str()).unwrap_or("no test run gave results").to_string();
+        return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.runner.name(), "why": why, "not_run": not_run }));
+    }
+    let mut c = compare(&before, &after, rerun.then_some(&again));
+    c["runner"] = json!(ran.join(", "));
+    c["not_run"] = json!(not_run);
+    if !all_new.is_empty() { c["note"] = json!(format!("the old code had no test runner Kern can read in {}, so those tests are all new", all_new.join(", "))); }
     Ok(c)
 }

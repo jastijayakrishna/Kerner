@@ -27,6 +27,24 @@ pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "be
 /// The parts of a test run's report, in order: what the test command printed (the runner's report among it), its error output, what the
 /// code did, and how the command ended (`exit <code>`, or `timeout`).
 pub const TEST_PARTS: [&str; 4] = ["output", "errors", "behavior", "ending"];
+/// The folder a test run starts in: the tree's root, or a workspace package's folder inside it, never anywhere else.
+pub fn test_dir(cwd: &str) -> R<String> {
+    if cwd.is_empty() { return Ok("/workspace".into()); }
+    ensure!(cwd.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', '\0'])), "A test run starts in a folder inside the tree");
+    Ok(format!("/workspace/{cwd}"))
+}
+/// A workspace package's test runner: the root's `node_modules/.bin/<runner>` as the command names it, or the nearest one up the tree from
+/// the package's folder (pnpm gives each package its own; npm and yarn hoist them to the root). Any other command stays as it is.
+pub fn runner_in(cwd: &str, command: &str, exists: impl Fn(&str) -> bool) -> String {
+    let Some(name) = command.strip_prefix("/workspace/node_modules/.bin/") else { return command.to_string() };
+    let mut dir = cwd.trim_matches('/').to_string();
+    loop {
+        let candidate = if dir.is_empty() { format!("/workspace/node_modules/.bin/{name}") } else { format!("/workspace/{dir}/node_modules/.bin/{name}") };
+        if exists(&candidate) { return candidate; }
+        if dir.is_empty() { return command.to_string(); }
+        dir = dir.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
+    }
+}
 pub fn drive_parts(stdout: &[u8]) -> R<std::collections::BTreeMap<String, Vec<u8>>> { parts(stdout, &DRIVE_PARTS) }
 /// Reads a run's report part by part, each by its stated length, in exactly the given order and nothing after them.
 pub fn parts(stdout: &[u8], names: &[&str]) -> R<std::collections::BTreeMap<String, Vec<u8>>> {
@@ -732,11 +750,14 @@ mod inside {
     /// The report says how the command ended, so a run that failed is told apart from one that was stopped for time.
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd"], "test run")?;
         ensure!(c["version"] == 1, "Unsupported test run");
-        let command = argv(&c["command"])?;
+        let mut command = argv(&c["command"])?;
+        let cwd = text(&c, "cwd")?;
+        let dir = super::test_dir(cwd)?;
+        command[0] = super::runner_in(cwd, &command[0], |p| Path::new(p).exists());
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
-        let mut child = Command::new(&command[0]).args(&command[1..]).current_dir("/workspace").env_clear().envs(TEST_ENV).env("TZ", "UTC")
+        let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC")
             .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior")
             .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
         let started = std::time::Instant::now();

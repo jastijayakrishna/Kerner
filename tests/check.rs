@@ -122,6 +122,30 @@ Error: Failed to load url @cloudflare/workers-shared (resolved id: @cloudflare/w
 }
 
 #[test]
+fn in_a_monorepo_the_tests_are_those_of_the_packages_a_change_touches() {
+    let manifests = ["apps/web/package.json", "packages/kit/package.json", "packages/kit/fixtures/app/package.json"];
+    let has = |dir: &str| manifests.contains(&format!("{dir}/package.json").as_str());
+    let changed = ["packages/kit/src/runtime/a.js", "packages/kit/test/a.test.js", "apps/web/src/page.tsx", "README.md", "scripts/release.js",
+        "packages/kit/fixtures/app/src/x.js", "node_modules/x/index.js"];
+    assert_eq!(kern::suite::packages(&changed, has), ["apps/web", "packages/kit", "packages/kit/fixtures/app"]);
+    assert!(kern::suite::packages(&["src/a.js"], has).is_empty(), "a file outside every package belongs to the root");
+}
+
+#[test]
+fn a_package_s_test_run_finds_its_runner_up_the_tree() {
+    // pnpm gives each package its own node_modules/.bin; npm and yarn hoist the runner to the root.
+    let at = |p: &str| ["/workspace/packages/kit/node_modules/.bin/vitest", "/workspace/node_modules/.bin/jest"].contains(&p);
+    assert_eq!(kern::sandbox::runner_in("packages/kit", "/workspace/node_modules/.bin/vitest", at), "/workspace/packages/kit/node_modules/.bin/vitest");
+    assert_eq!(kern::sandbox::runner_in("packages/kit", "/workspace/node_modules/.bin/jest", at), "/workspace/node_modules/.bin/jest");
+    assert_eq!(kern::sandbox::runner_in("", "/workspace/node_modules/.bin/mocha", at), "/workspace/node_modules/.bin/mocha", "nothing found: the command as it was");
+    assert_eq!(kern::sandbox::runner_in("packages/kit", "/usr/local/bin/node", at), "/usr/local/bin/node");
+    // The folder a run starts in stays inside the tree.
+    for bad in ["../x", "/etc", "a/../../b", "a//b", "a/./b", "a\\b", "a\0b"] { assert!(kern::sandbox::test_dir(bad).is_err(), "{bad}"); }
+    assert_eq!(kern::sandbox::test_dir("packages/kit").unwrap(), "/workspace/packages/kit");
+    assert_eq!(kern::sandbox::test_dir("").unwrap(), "/workspace");
+}
+
+#[test]
 fn detect_finds_vitest_jest_mocha_and_node_test() {
     let runner = |pkg: &str| suite::detect(Some(pkg.as_bytes())).map(|t| (t.runner.name(), t.command));
     assert_eq!(runner(r#"{"devDependencies":{"vitest":"3"}}"#).unwrap(), ("vitest", vec!["/workspace/node_modules/.bin/vitest".to_string(), "run".into()]));
@@ -312,6 +336,12 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");
     assert!(!md.contains("sandbox"), "nothing ran, so the receipt does not speak of a sandbox: {md}");
+    // In a monorepo, a package whose tests gave no results is named with the reason, beside the packages that ran.
+    let mut t = clean_tests();
+    t["runner"] = json!("vitest in packages/kit");
+    t["not_run"] = json!([{ "dir": "apps/web", "why": "the tests in apps/web on the new code gave no results: the output contains no jest report (exit 1)" }]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
+    assert!(md.contains("vitest in packages/kit") && md.contains("apps/web") && md.contains("no jest report (exit 1)"), "{md}");
     // Hostile names from a pull request cannot break out of their code spans.
     let mut t = clean_tests();
     t["broke"] = json!(["a `b` <script>"]);

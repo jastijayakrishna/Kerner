@@ -6,6 +6,7 @@
 #   power      the code starts a program                             -> needs a look (a new power)
 #   docs       only the README changes                               -> clear, and nothing is installed or run
 #   writes     a test writes into the project, before and after      -> clear: a test that failed before is set aside, never blamed
+#   mono       a monorepo whose root runs no tests; a package's test breaks -> blocked: the package's own tests ran, from its folder
 # The AI part is off (KERN_CHECK_AI=0); scripts/e2e-drive.sh covers it. Needs Docker with runsc, jq and git; installs from npm.
 # Usage: KERN_BIN=/path/to/static/linux/kern scripts/e2e-check.sh
 set -eu
@@ -92,11 +93,11 @@ sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.pric
 change writes "Shorter names, with a test that writes"
 cd "$W"
 
-# check NAME BASE: runs kern check on the change and keeps its summary in NAME.json.
+# check NAME BASE [REPO]: runs kern check on the change (in calc, or REPO) and keeps its summary in NAME.json.
 check() {
   printf '# %s\n' "$1" > "$1.md"
   started=$(date +%s)
-  "$K" --control verifier.json check "$W/calc" "$2" "$(cat "$1.head")" "$W/$1" operator.json "$1.md" > "$1.json" 2> "$1.err" || { cat "$1.err"; fail "$1: kern check failed"; }
+  "$K" --control verifier.json check "$W/${3:-calc}" "$2" "$(cat "$1.head")" "$W/$1" operator.json "$1.md" > "$1.json" 2> "$1.err" || { cat "$1.err"; fail "$1: kern check failed"; }
   echo "$1: $(jq -c '{decision, blocked, look, tests, behaviour}' "$1.json") in $(( $(date +%s) - started )) s"
 }
 decision() { [ "$(jq -r .decision "$1.json")" = "$2" ] || { cat "$1/receipt.md"; fail "$1: expected $2, got $(jq -r .decision "$1.json")"; }; }
@@ -140,8 +141,25 @@ check writes "$writes_base"
 decision writes clear
 jq -e '.tests.already_failing | length == 1' writes/receipt.json > /dev/null || { jq .tests writes/receipt.json; fail "writes: the test that cannot write was not set aside"; }
 
+say "In a monorepo whose root runs no tests, the tests of the package the change touches run"
+git init -q monorepo && cd monorepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/calc/src packages/calc/test
+printf '%s\n' '{"name":"mono","private":true,"workspaces":["packages/*"]}' > package.json
+printf '%s\n' '{"name":"@mono/calc","version":"1.0.0","private":true,"type":"module","devDependencies":{"vitest":"3.2.4"}}' > packages/calc/package.json
+git -C "$W/calc" show "$base:src/total.js" > packages/calc/src/total.js
+git -C "$W/calc" show "$base:test/total.test.js" > packages/calc/test/total.test.js
+git add -A && git commit -qm base && mono_base=$(git rev-parse HEAD)
+sed -i 's/amount >= 100/amount > 100/' packages/calc/src/total.js
+git commit -qam "Discount above 100" && git rev-parse HEAD > "$W/mono.head"
+cd "$W"
+check mono "$mono_base" monorepo
+decision mono blocked
+[ "$(kinds mono test-broke blocked)" = 1 ] || { jq .tests mono/receipt.json; fail "mono: expected one broken test in the package"; }
+grep -q 'packages/calc/test/total.test.js' mono/receipt.md && grep -q 'vitest in packages/calc' mono/receipt.md || { cat mono/receipt.md; fail "mono: the package's test and runner are not named"; }
+
 say "The sandbox volumes are removed"
-for c in harmless breaks only power writes; do "$K" --control verifier.json drive clean "$W/$c" > /dev/null; done
+for c in harmless breaks only power writes mono; do "$K" --control verifier.json drive clean "$W/$c" > /dev/null; done
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
 
