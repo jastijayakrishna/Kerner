@@ -105,6 +105,22 @@ pub fn focused(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
     Some(t)
 }
 fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
+pub fn worse(a: &Report, b: &Report) -> Report {
+    let mut out = a.clone();
+    for (k, c) in &b.tests {
+        let e = out.tests.entry(k.clone()).or_insert(*c);
+        e.passed = e.passed.min(c.passed);
+        e.failed = e.failed.max(c.failed);
+        e.skipped = e.skipped.max(c.skipped);
+    }
+    for p in &b.problems { if !out.problems.contains(p) { out.problems.push(p.clone()); } }
+    for (k, w) in &b.why { out.why.entry(k.clone()).or_insert_with(|| w.clone()); }
+    out
+}
+fn repeats(old: &Report, new: &Report, again: &Report) -> bool {
+    new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).all(|(k, _)| count(again, k).failed > count(old, k).failed)
+        && new.problems.iter().filter(|p| !old.problems.contains(p)).all(|p| again.problems.contains(p))
+}
 fn suspects(old: &Report, new: &Report) -> BTreeSet<String> {
     let broke = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).map(|(k, _)| file_of(k));
     let gone = old.tests.iter().filter(|(k, b)| b.passed > 0 && count(new, k).total() < b.total()).map(|(k, _)| file_of(k));
@@ -358,6 +374,16 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Side::Ran(r, created) if *side == "new" => { wrote_code.extend(created); second = Some(r); }
                 Side::Ran(r, _) => second_old = Some(r),
                 Side::Late => { late = true; break; }
+                Side::Nothing(_) | Side::Slow(_) => {}
+            }
+        }
+        if !late && plan.first().is_some_and(|p| p.0 == "new-alone") && second.as_ref().is_some_and(|g| !repeats(&old, &new, g)) {
+            let at = now_ms();
+            let r = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until)?;
+            timed(format!("new-again{label}"), at);
+            match r {
+                Side::Ran(r, created) => { wrote_code.extend(created); second = second.map(|g| worse(&g, &r)); }
+                Side::Late => late = true,
                 Side::Nothing(_) | Side::Slow(_) => {}
             }
         }

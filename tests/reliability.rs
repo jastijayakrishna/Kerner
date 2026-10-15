@@ -415,3 +415,16 @@ fn suspect_test_files_are_run_again_alone_with_the_project_s_own_options() {
     assert!(suite::focused(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "tests/unit"]), &files, "packages/cli").is_none(), "a script that already filters files cannot be narrowed by adding more filters");
     assert!(suite::focused(&tests(policy::Runner::Mocha, &["/workspace/node_modules/.bin/mocha"]), &files, "").is_none());
 }
+
+#[test]
+fn a_failure_that_shows_only_when_files_run_together_still_blocks() {
+    let before = report(&[("a.test.ts > shares state", 1, 0, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
+    let after = report(&[("a.test.ts > shares state", 0, 1, 0), ("b.test.ts > flakes", 0, 1, 0)], &[]);
+    let alone_new = report(&[("a.test.ts > shares state", 1, 0, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
+    let whole_again = report(&[("a.test.ts > shares state", 0, 1, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
+    let alone_old = report(&[("a.test.ts > shares state", 1, 0, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
+    let again = suite::worse(&alone_new, &whole_again);
+    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
+    assert_eq!(c["broke"], json!(["a.test.ts > shares state"]), "it passes alone but fails again in the whole suite: the change broke it through state the files share: {c}");
+    assert_eq!(c["flaky"], json!(["b.test.ts > flakes"]), "{c}");
+}
