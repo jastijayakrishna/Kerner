@@ -1,6 +1,7 @@
 use crate::policy::Operator;
 use crate::util::*;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub struct Ai<'a> { pub agent: &'a [String], pub rounds: usize }
@@ -14,14 +15,14 @@ const DOC_NAMES: [&str; 7] = ["license", "licence", "changelog", "authors", "con
 fn documentation(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
-    DOCS.contains(&ext) || DOC_NAMES.contains(&stem)
+    DOCS.contains(&ext) || (DOC_NAMES.contains(&stem) && ext.is_empty())
 }
 fn runnable(repo: &Path, head: &str, rules: &Value) -> bool {
     let paths: Vec<&str> = rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();
-    paths.iter().any(|p| !documentation(p)) || paths.iter().any(|p| {
-        let name = p.rsplit('/').next().unwrap_or(p);
-        crate::git::mentions(repo, head, name).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
-    })
+    if paths.iter().any(|p| !documentation(p)) { return true; }
+    let names: BTreeSet<&str> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).filter(|n| !n.is_empty()).collect();
+    if names.is_empty() { return false; }
+    crate::git::mentions(repo, head, &names.into_iter().collect::<Vec<_>>()).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
 }
 
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {

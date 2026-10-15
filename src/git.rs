@@ -64,12 +64,14 @@ pub fn remote(repo: &Path, args: &[&str], server: &str, token: &str) -> R<Vec<u8
     run(&git_exe()?, &full, Run { cwd: Some(&repo), env, input: None, timeout: Duration::from_secs(300), max_output: 1 << 20 })
 }
 pub fn trimmed(bytes: Vec<u8>) -> String { String::from_utf8_lossy(&bytes).trim().to_string() }
-pub fn mentions(repo: &Path, commit: &str, needle: &str) -> R<Vec<String>> {
+pub fn mentions(repo: &Path, commit: &str, needles: &[&str]) -> R<Vec<String>> {
+    ensure!(!needles.is_empty() && needles.iter().all(|n| !n.is_empty() && !n.contains('\n')), "Kern searches only for whole file names");
     let repo = std::path::absolute(repo)?;
     let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"].map(String::from).to_vec();
     full.push(repo.display().to_string());
-    full.extend(["grep", "-l", "-I", "-F", "-e", needle, commit].map(String::from));
-    let (status, out, _) = run_full(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input: None, timeout: Duration::from_secs(300), max_output: 16 << 20 })?;
+    full.extend(["grep", "-l", "-I", "-F", "-f", "-", commit].map(String::from));
+    let patterns = needles.join("\n") + "\n";
+    let (status, out, _) = run_full(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input: Some(patterns.as_bytes()), timeout: Duration::from_secs(300), max_output: 16 << 20 })?;
     match status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&out).lines().filter_map(|l| l.split_once(':').map(|(_, p)| p.to_string())).collect()),
         Some(1) => Ok(Vec::new()),

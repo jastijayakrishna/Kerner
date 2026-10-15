@@ -352,3 +352,14 @@ fn a_blocked_test_file_says_why_it_no_longer_runs() {
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &tests, &off()), None);
     assert!(md.contains("test/cart.test.js") && md.contains("Cannot find module") && !md.contains("\u{1b}"), "a block names the error, without terminal colours:\n{md}");
 }
+
+#[test]
+fn a_test_counts_as_gone_only_when_it_passed_before_and_stays_gone() {
+    let before = report(&[("a > passes", 1, 0, 0), ("a > needs a database", 0, 1, 0), ("b > flaky file", 1, 0, 0)], &[]);
+    let after = report(&[], &[]);
+    let again = report(&[("b > flaky file", 1, 0, 0)], &[]);
+    let c = suite::compare(&before, &after, Some(&again));
+    assert_eq!(c["gone"], json!(["a > passes"]), "a test that already failed before is set aside, and one that came back on the rerun did not go: {c}");
+    let c = suite::compare(&before, &after, None);
+    assert_eq!(c["gone"], json!(["a > passes", "b > flaky file"]), "{c}");
+}

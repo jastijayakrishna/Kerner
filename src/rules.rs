@@ -14,6 +14,7 @@ const LARGEST: u64 = 1 << 20;
 const LARGEST_LOCKFILE: u64 = 64 << 20;
 const SIBLINGS: usize = 200;
 const LARGEST_CODE: u64 = 16 << 20;
+const MANIFESTS: usize = 5000;
 fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
 const RISKY_BUILTINS: [&str; 15] = ["child_process", "cluster", "worker_threads", "vm", "net", "tls", "dgram", "dns", "http", "https", "http2", "inspector", "wasi", "module", "repl"];
 const RISKY_PACKAGES: [&str; 46] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
@@ -97,10 +98,9 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         wanted.extend(base_listing.iter().filter(|i| is_code(&i.path) && i.size <= LARGEST && i.path.rsplit_once('/').map_or("", |(d, _)| d) == dir)
             .take(SIBLINGS).map(|i| i.path.clone()));
     }
-    let manifests: BTreeSet<String> = std::iter::once("package.json".to_string()).chain(paths.iter().flat_map(|p| {
-        let parts: Vec<&str> = p.split('/').collect();
-        (1..parts.len()).map(move |n| format!("{}/package.json", parts[..n].join("/")))
-    })).collect();
+    let head_listing = crate::drive::listing(repo, head)?;
+    let manifests: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.as_str())
+        .filter(|p| base_name(p) == "package.json" && !p.split('/').any(|c| c == "node_modules")).take(MANIFESTS).map(str::to_string).collect();
     wanted.extend(manifests.iter().cloned());
     let (old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);
     let (mut powers, mut tricks, mut settings, mut not_checked) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());

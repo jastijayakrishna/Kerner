@@ -112,7 +112,7 @@ pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value
             }
         } else if b.passed > 0 && a.skipped > b.skipped {
             newly_skipped.push(k.clone());
-        } else if b.ran() > 0 && a.total() < b.total() {
+        } else if b.passed > 0 && a.total() < b.total() && again.is_none_or(|g| count(g, k).total() < b.total()) {
             gone.push(k.clone());
         }
     }
@@ -300,7 +300,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             Some(Side::Nothing(why) | Side::Slow(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
             Some(Side::Late) => continue,
         };
-        let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
+        let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p))
+            || old.tests.iter().any(|(k, b)| b.passed > 0 && count(&new, k).total() < b.total());
         let second = if fails_new {
             let at = now_ms();
             let r = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until)?;
