@@ -198,8 +198,8 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let drive_test = spec.entry.first().is_some_and(|e| e == "__drive_test");
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
     if drive_test {
-        ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
-            "A test run reads an installed tree read-only, as an unprivileged user without a network or another volume");
+        ensure!(spec.workspace.is_some() && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
+            "A test run uses one installed tree, as an unprivileged user without a network or another volume");
     }
     ensure!(spec.volumes.iter().all(|(v, t, ro)| v.starts_with("kern-deps-") && (*t == "/workspace/node_modules" || (*t == "/kern-tools/node_modules" && *ro && drive))), "Unexpected volume");
     if drive { ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch, "A drive run reads an installed tree read-only, as an unprivileged user without a network"); }
@@ -576,6 +576,12 @@ mod inside {
         }
         Ok(originals)
     }
+    fn own(path: &Path) {
+        let _ = std::os::unix::fs::lchown(path, Some(1000), Some(1000));
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) && let Ok(entries) = std::fs::read_dir(path) {
+            for e in entries.flatten() { own(&e.path()); }
+        }
+    }
     pub fn drive_setup() -> R<()> {
         let c = config("drive-setup.json")?;
         exact(&c, &["version", "dirs", "timeout_seconds"], "drive setup")?;
@@ -624,6 +630,7 @@ mod inside {
         }
         let _ = std::fs::remove_dir_all(scratch);
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
+        own(Path::new("/workspace"));
         println!("{}", json!({ "version": 1, "installs": records }));
         Ok(())
     }

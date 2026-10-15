@@ -162,7 +162,8 @@ Next steps:
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. For other projects the receipt
   covers the rules only and says so; changed code in other languages is listed as "not checked", never passed quietly.
-- Kern runs the tests read-only. A test that writes into the project fails before and after the change, so it is set aside, not blamed.
+- Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
+  change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).

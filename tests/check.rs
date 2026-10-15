@@ -20,22 +20,22 @@ fn denied<T>(r: R<T>, needle: &str) {
 fn limits() -> Limits { Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: 900, memory_mb: 4096, pids: 1024 } }
 
 #[test]
-fn a_test_run_reads_its_tree_read_only_without_network() {
+fn a_test_run_writes_only_its_own_tree_without_network() {
     let t = Temp::new();
     let l = limits();
     let run = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &l, entry: vec!["__drive_test".into()], network: "none", volumes: vec![], root: false,
-        home_mb: 0, scratch: false, workspace: Some(("kern-deps-tree", true)) };
+        home_mb: 0, scratch: false, workspace: Some(("kern-deps-tree", false)) };
     let a = sandbox::container_args(&run, "kern-x").unwrap().join(" ");
-    for want in ["type=volume,source=kern-deps-tree,target=/workspace,readonly", "--network=none", "--user=1000:1000", "--runtime=runsc", "--read-only", "nofile=65536"] {
+    for want in ["type=volume,source=kern-deps-tree,target=/workspace", "--network=none", "--user=1000:1000", "--runtime=runsc", "--read-only", "nofile=65536"] {
         assert!(a.contains(want), "{want}: {a}");
     }
-    for dir in [".cache", ".vite", ".vite-temp"] { assert!(a.contains(&format!("--tmpfs /workspace/node_modules/{dir}:rw")), "{dir}: {a}"); }
+    assert!(!a.contains("target=/workspace,readonly"), "vite, vitest and jest write next to their configs and into node_modules: {a}");
     assert!(a.matches("type=bind").count() == 2, "only /input and /kern are bound: {a}");
     let write = vec!["src/".to_string()];
     let tools = vec![("kern-deps-tools", "/kern-tools/node_modules", true)];
     denied(sandbox::container_args(&Spec { network: "bridge", ..run.clone() }, "kern-x"), "network");
-    for bad in [Spec { root: true, ..run.clone() }, Spec { writable: &write, ..run.clone() }, Spec { workspace: Some(("kern-deps-tree", false)), ..run.clone() },
-        Spec { workspace: None, ..run.clone() }, Spec { scratch: true, ..run.clone() }, Spec { volumes: tools.clone(), ..run.clone() }] {
+    for bad in [Spec { root: true, ..run.clone() }, Spec { writable: &write, ..run.clone() }, Spec { workspace: None, ..run.clone() }, Spec { scratch: true, ..run.clone() },
+        Spec { volumes: tools.clone(), ..run.clone() }] {
         denied(sandbox::container_args(&bad, "kern-x"), "test run");
     }
 }

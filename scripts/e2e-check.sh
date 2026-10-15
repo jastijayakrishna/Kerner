@@ -77,7 +77,8 @@ import { writeFileSync } from 'node:fs';
 
 test('a test that writes into the project', () => { writeFileSync(new URL('./out.txt', import.meta.url), 'x'); expect(1).toBe(1); });
 EOF
-git add -A && git commit -qm "A test that writes a file" && writes_base=$(git rev-parse HEAD)
+printf '%s\n' "import { defineConfig } from 'vitest/config';" 'export default defineConfig({ test: {} });' > vitest.config.mts
+git add -A && git commit -qm "A test that writes a file, and a TypeScript config vite bundles next to itself" && writes_base=$(git rev-parse HEAD)
 sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
 change writes "Shorter names, with a test that writes"
 cd "$W"
@@ -124,10 +125,10 @@ decision docs clear
 [ ! -f docs/setup.json ] || fail "docs: Kern installed the project for a README change"
 grep -q '^### ✅ Kern: Nothing unexpected$' docs/receipt.md && grep -q 'nothing to run' docs/receipt.md || { cat docs/receipt.md; fail "docs: the receipt must say there was nothing to run"; }
 
-say "A test that fails before and after is set aside, never blamed on the change"
+say "Tests run on their own side's tree, so a test that writes into the project, and vite's bundled TypeScript config, work"
 check writes "$writes_base"
 decision writes clear
-jq -e '.tests.already_failing | length == 1' writes/receipt.json > /dev/null || { jq .tests writes/receipt.json; fail "writes: the test that cannot write was not set aside"; }
+jq -e '.tests.status == "RAN" and .tests.kept == 4 and (.tests.already_failing | length == 0)' writes/receipt.json > /dev/null || { jq .tests writes/receipt.json; fail "writes: the tests that write did not run as they do in CI"; }
 
 say "In a monorepo whose root runs no tests, the tests of the package the change touches run"
 git init -q monorepo && cd monorepo
