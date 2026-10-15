@@ -438,3 +438,13 @@ fn tests_that_cannot_load_on_either_side_are_named_as_such_with_the_first_error(
     let why = c["why"].as_str().unwrap();
     assert!(why.contains("2 test files") && why.contains("components/form.test.tsx") && why.contains("Cannot find module"), "the tests did not go missing: none of them could load, and the receipt says why: {why}");
 }
+
+#[test]
+fn a_test_counts_as_newly_skipped_only_when_the_rerun_skips_it_too_and_the_old_code_alone_does_not() {
+    let before = report(&[("t/a.test.ts > hook guarded", 1, 0, 0), ("t/b.test.ts > really skipped", 1, 0, 0), ("t/c.test.ts > skips alone on old", 1, 0, 0)], &[]);
+    let after = report(&[("t/a.test.ts > hook guarded", 0, 0, 1), ("t/b.test.ts > really skipped", 0, 0, 1), ("t/c.test.ts > skips alone on old", 0, 0, 1)], &[]);
+    let again = report(&[("t/a.test.ts > hook guarded", 1, 0, 0), ("t/b.test.ts > really skipped", 0, 0, 1), ("t/c.test.ts > skips alone on old", 0, 0, 1)], &[]);
+    let alone_old = report(&[("t/a.test.ts > hook guarded", 1, 0, 0), ("t/b.test.ts > really skipped", 1, 0, 0), ("t/c.test.ts > skips alone on old", 0, 0, 1)], &[]);
+    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
+    assert_eq!(c["newly_skipped"], json!(["t/b.test.ts > really skipped"]), "a hook that fails at random makes vitest skip a suite's tests: {c}");
+}

@@ -127,10 +127,11 @@ fn repeats(old: &Report, new: &Report, again: &Report) -> bool {
     let failed = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).all(|(k, _)| count(&again, k).failed > count(old, k).failed);
     let loaded = new.problems.iter().filter(|p| !old.problems.contains(p)).all(|p| again.problems.contains(p));
     let missing = old.tests.iter().filter(|(k, b)| b.passed > 0 && count(&new, k).total() < b.total()).all(|(k, b)| count(&again, k).total() < b.total());
-    failed && loaded && missing
+    let skipped = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.skipped > b.skipped }).all(|(k, _)| count(&again, k).skipped > count(old, k).skipped);
+    failed && loaded && missing && skipped
 }
 fn suspects(old: &Report, new: &Report) -> BTreeSet<String> {
-    let broke = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).map(|(k, _)| file_of(k));
+    let broke = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && (c.failed > b.failed || c.skipped > b.skipped) }).map(|(k, _)| file_of(k));
     let gone = old.tests.iter().filter(|(k, b)| b.passed > 0 && count(new, k).total() < b.total()).map(|(k, _)| file_of(k));
     let problems = new.problems.iter().filter(|p| !old.problems.contains(p)).map(|p| p.as_str());
     broke.chain(gone).chain(problems).map(str::to_string).collect()
@@ -161,7 +162,8 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
                 _ => broke.push(k.clone()),
             }
         } else if b.passed > 0 && a.skipped > b.skipped {
-            newly_skipped.push(k.clone());
+            let repeated = again.is_none_or(|g| count(g, k).skipped > b.skipped) && alone_old.is_none_or(|o| count(o, k).skipped <= b.skipped);
+            if repeated { newly_skipped.push(k.clone()); } else { flaky.push(k.clone()); }
         } else if b.passed > 0 && a.total() < b.total() && again.is_none_or(|g| count(g, k).total() < b.total()) && alone_old.is_none_or(|o| count(o, k).total() >= b.total()) {
             gone.push(k.clone());
         }
@@ -365,7 +367,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             Some(Side::Late) => continue,
         };
         let new_named = renamed(&new, &paired(&old, &new));
-        let fails_new = new_named.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p))
+        let fails_new = new_named.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && (c.failed > b.failed || c.skipped > b.skipped) }) || new.problems.iter().any(|p| !old.problems.contains(p))
             || old.tests.iter().any(|(k, b)| b.passed > 0 && count(&new_named, k).total() < b.total());
         let suspect = suspects(&old, &new_named);
         let present = |r: &Report, f: &String| r.problems.contains(f) || r.tests.keys().any(|k| file_of(k) == f.as_str());
