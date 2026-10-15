@@ -24,19 +24,24 @@ pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 /// The parts of a drive run's report, in order: what the driver printed, its error output, line coverage (c8's JSON), the calls Kern
 /// recorded into the changed modules, and what the code did (the behaviour recorder).
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
-pub fn drive_parts(stdout: &[u8]) -> R<std::collections::BTreeMap<String, Vec<u8>>> {
+/// The parts of a test run's report, in order: what the test command printed (the runner's report among it), its error output, what the
+/// code did, and how the command ended (`exit <code>`, or `timeout`).
+pub const TEST_PARTS: [&str; 4] = ["output", "errors", "behavior", "ending"];
+pub fn drive_parts(stdout: &[u8]) -> R<std::collections::BTreeMap<String, Vec<u8>>> { parts(stdout, &DRIVE_PARTS) }
+/// Reads a run's report part by part, each by its stated length, in exactly the given order and nothing after them.
+pub fn parts(stdout: &[u8], names: &[&str]) -> R<std::collections::BTreeMap<String, Vec<u8>>> {
     let (mut parts, mut at) = (std::collections::BTreeMap::new(), 0usize);
-    for name in DRIVE_PARTS {
+    for name in names {
         let head = format!("{DRIVE_MARK}{name} ");
-        ensure!(stdout.get(at..at + head.len()) == Some(head.as_bytes()), "The drive run's report is incomplete");
+        ensure!(stdout.get(at..at + head.len()) == Some(head.as_bytes()), "The run's report is incomplete");
         at += head.len();
-        let nl = stdout[at..].iter().position(|b| *b == b'\n').map(|p| p + at).ok_or_else(|| Denied("The drive run's report is incomplete".into()))?;
-        let len: usize = std::str::from_utf8(&stdout[at..nl]).ok().and_then(|s| s.parse().ok()).ok_or_else(|| Denied("The drive run's report is malformed".into()))?;
-        let body = stdout.get(nl + 1..nl + 1 + len).ok_or_else(|| Denied("The drive run's report is incomplete".into()))?;
+        let nl = stdout[at..].iter().position(|b| *b == b'\n').map(|p| p + at).ok_or_else(|| Denied("The run's report is incomplete".into()))?;
+        let len: usize = std::str::from_utf8(&stdout[at..nl]).ok().and_then(|s| s.parse().ok()).ok_or_else(|| Denied("The run's report is malformed".into()))?;
+        let body = stdout.get(nl + 1..nl + 1 + len).ok_or_else(|| Denied("The run's report is incomplete".into()))?;
         parts.insert(name.to_string(), body.to_vec());
         at = nl + 1 + len;
     }
-    ensure!(at == stdout.len(), "The drive run's report has unexpected data");
+    ensure!(at == stdout.len(), "The run's report has unexpected data");
     Ok(parts)
 }
 pub const BEHAVIOR: &str = "\n\u{1e}kern-behavior\u{1e}\n";
@@ -193,16 +198,22 @@ fn mount(source: &Path, target: &str) -> R<[String; 2]> {
 /// The CPUs a sandbox gets. Installing a large project's dependencies is CPU-bound under gVisor: a drive setup gets up to 4, never more
 /// than the machine has; everything else runs on one.
 fn cpus(spec: &Spec) -> usize {
-    if spec.entry.first().is_some_and(|e| e == "__drive_setup") { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4) } else { 1 }
+    if spec.entry.first().is_some_and(|e| e == "__drive_setup" || e == "__drive_test") { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4) } else { 1 }
 }
 pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let (drive, drive_setup) = (spec.entry.first().is_some_and(|e| e == "__drive"), spec.entry.first().is_some_and(|e| e == "__drive_setup"));
+    let drive_test = spec.entry.first().is_some_and(|e| e == "__drive_test");
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
+    // A test run reads one side's installed tree exactly as a drive run does, and nothing else: no write grants, no other volume.
+    if drive_test {
+        ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
+            "A test run reads an installed tree read-only, as an unprivileged user without a network or another volume");
+    }
     // Kern's driver tools are mounted read-only, at /kern-tools/node_modules, and only into drive runs.
     ensure!(spec.volumes.iter().all(|(v, t, ro)| v.starts_with("kern-deps-") && (*t == "/workspace/node_modules" || (*t == "/kern-tools/node_modules" && *ro && drive))), "Unexpected volume");
     if drive { ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch, "A drive run reads an installed tree read-only, as an unprivileged user without a network"); }
     if drive_setup { ensure!(matches!(spec.workspace, Some((_, false))) && spec.network == "bridge" && spec.root && spec.volumes.is_empty() && spec.writable.is_empty() && !spec.scratch, "A drive setup installs into its own tree volume as root with a network, and mounts nothing else"); }
-    ensure!(spec.workspace.is_none_or(|(v, _)| (drive || drive_setup) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive || drive_setup)), "Only drive runs and their setup mount a tree volume, and only one Kern made");
+    ensure!(spec.workspace.is_none_or(|(v, _)| (drive || drive_setup || drive_test) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive || drive_setup || drive_test)), "Only drive runs, their test runs and their setup mount a tree volume, and only one Kern made");
     ensure!(spec.entry.first().is_some_and(|e| e.starts_with("__")), "Sandbox entry must be a Kern entry point");
     ensure!(!spec.scratch || (spec.writable.is_empty() && !spec.root && spec.network == "none"), "A scratch workspace is only for an unprivileged run without write grants or network");
     ensure!(spec.scratch || !matches!(spec.entry[0].as_str(), "__exec" | "__mutate"), "Tests run only on a throwaway copy of the workspace");
@@ -211,7 +222,7 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let cpus = cpus(spec);
     // A large project's module graph opens more than 1,024 files at once as it loads, and so does its install: drive runs and their
     // setup may hold 65,536.
-    let files = if drive || drive_setup { "nofile=65536:65536" } else { "nofile=1024:1024" };
+    let files = if drive || drive_setup || drive_test { "nofile=65536:65536" } else { "nofile=1024:1024" };
     let mut a: Vec<String> = [
         "create", "--name", name, "--pull=never", "--runtime=runsc", &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
@@ -717,6 +728,31 @@ mod inside {
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())
     }
+    /// A test run: the project's test command on one side's installed tree, as in CI (CI=true, no network), with the behaviour recorder.
+    /// The report says how the command ended, so a run that failed is told apart from one that was stopped for time.
+    pub fn drive_test() -> R<()> {
+        let c = config("drive-test.json")?;
+        exact(&c, &["version", "command", "timeout_seconds"], "test run")?;
+        ensure!(c["version"] == 1, "Unsupported test run");
+        let command = argv(&c["command"])?;
+        let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
+        let mut child = Command::new(&command[0]).args(&command[1..]).current_dir("/workspace").env_clear().envs(TEST_ENV).env("TZ", "UTC")
+            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior")
+            .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
+        let started = std::time::Instant::now();
+        let ending = loop {
+            if let Some(s) = child.try_wait()? { break format!("exit {}", s.code().unwrap_or(-1)); }
+            if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); break "timeout".to_string(); }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        quiesce()?;
+        part("output", &some_of("/tmp/.kern-test-out", 32 << 20, false))?;
+        part("errors", &some_of("/tmp/.kern-test-err", 64 << 10, true))?;
+        part("behavior", &some_of("/tmp/.kern-behavior", 4 << 20, false))?;
+        part("ending", ending.as_bytes())?;
+        std::io::Write::flush(&mut std::io::stdout())?;
+        Ok(())
+    }
     pub fn exec(command: &[String]) -> R<()> {
         let c = argv(&json!(command))?;
         // The tests get their own writable copy of the read-only snapshot, as in a CI checkout; the copy is gone when the sandbox is.
@@ -740,5 +776,6 @@ mod inside {
     pub fn mutate() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive_setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
+    pub fn drive_test() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
 }
-pub use inside::{drive, drive_setup, exec, mutate, runner, setup};
+pub use inside::{drive, drive_setup, drive_test, exec, mutate, runner, setup};
