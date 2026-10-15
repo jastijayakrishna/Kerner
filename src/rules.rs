@@ -32,6 +32,14 @@ pub fn risky(capability: &str) -> bool {
 }
 
 fn base_name(p: &str) -> &str { p.rsplit('/').next().unwrap_or(p) }
+fn joined(dir: &str, path: &str) -> Option<String> {
+    if path.starts_with('/') || path.contains('\\') || path.contains('*') { return None; }
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for c in path.split('/') {
+        match c { "" | "." => {} ".." => { parts.pop()?; } c => parts.push(c) }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
 fn dependency_file(p: &str) -> bool {
     let b = base_name(p).to_ascii_lowercase();
     DEPENDENCY_FILES.contains(&b.as_str()) || (b.starts_with("requirements") && b.ends_with(".txt"))
@@ -89,7 +97,11 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         wanted.extend(base_listing.iter().filter(|i| is_code(&i.path) && i.size <= LARGEST && i.path.rsplit_once('/').map_or("", |(d, _)| d) == dir)
             .take(SIBLINGS).map(|i| i.path.clone()));
     }
-    wanted.insert("package.json".into());
+    let manifests: BTreeSet<String> = std::iter::once("package.json".to_string()).chain(paths.iter().flat_map(|p| {
+        let parts: Vec<&str> = p.split('/').collect();
+        (1..parts.len()).map(move |n| format!("{}/package.json", parts[..n].join("/")))
+    })).collect();
+    wanted.extend(manifests.iter().cloned());
     let (old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);
     let (mut powers, mut tricks, mut settings, mut not_checked) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let none = BTreeMap::new();
@@ -132,6 +144,20 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
             && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
             settings.push(json!({ "path": p, "operation": op, "why": "the test script or the test settings in package.json change" }));
+        }
+    }
+    let mut named = BTreeSet::new();
+    for m in &manifests {
+        let dir = m.strip_suffix("package.json").unwrap_or("");
+        for files in [&old, &new] {
+            if let Some(v) = json_of(files, m) && let crate::script::Found::Run(i) = crate::script::found(&v) {
+                named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f)));
+            }
+        }
+    }
+    for (p, op) in &changes {
+        if named.contains(p) && !settings.iter().any(|s| s["path"] == p.as_str()) {
+            settings.push(json!({ "path": p, "operation": op, "why": "the test script names this file as the test runner's config or setup" }));
         }
     }
     let mut lockfile = Vec::new();

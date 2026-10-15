@@ -79,7 +79,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
-    for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run"), ("protected", "protected", "is a CI, secret or configuration file")] {
+    for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run and how their results are read"), ("protected", "protected", "is a CI, secret or configuration file")] {
         for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", path_of(x)))); }
     }
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();

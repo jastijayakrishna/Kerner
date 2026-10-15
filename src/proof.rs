@@ -389,6 +389,10 @@ fn markers(path: &str, source: &str, test: bool) -> R<BTreeMap<String, usize>> {
     deny!("Changed code cannot be parsed for the test proof: {path}. Fix its syntax")
 }
 fn text_of<'f>(files: &'f Files, path: &str) -> Option<&'f str> { files.get(path).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) }
+fn runner_config(name: &str) -> bool {
+    RUNNER_CONFIG.iter().any(|c| name.starts_with(c))
+        || (["vitest.", "jest.", "vite.", "playwright.", "karma.", "mocha."].iter().any(|p| name.starts_with(p)) && [".config.", ".setup.", ".workspace.", ".conf."].iter().any(|m| name.contains(m)))
+}
 fn helper(path: &str) -> bool { path.split('/').map(str::to_ascii_lowercase).any(|d| HELPERS.contains(&d.as_str())) }
 
 pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -> R<Value> {
@@ -396,7 +400,7 @@ pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -
     for f in changed["files"].as_array().into_iter().flatten() {
         let (path, op) = (f["path"].as_str().unwrap_or(""), f["operation"].as_str().unwrap_or(""));
         let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-        ensure!(!RUNNER_CONFIG.iter().any(|c| name.starts_with(c)), "Test runner configuration cannot change under the test proof: {path}. It decides which tests run and how they check results; leave it unchanged");
+        ensure!(!runner_config(&name), "Test runner configuration cannot change under the test proof: {path}. It decides which tests run and how they check results; leave it unchanged");
         let inside = allowed(&tests.paths, path);
         if inside && op != "add" {
             if tests.edits == Edits::Locked {
