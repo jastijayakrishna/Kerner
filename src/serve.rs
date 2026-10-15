@@ -138,7 +138,6 @@ fn verify(s: &Service, r: &mut Request) -> (u16, Value) {
     let outcome = verification(s, tenant, &run, &bundle);
     let summary = outcome.as_ref().map(|(env, task, _)| json!({ "status": "VERIFIED", "task": task, "repository": repo, "commit": run["commit"], "attestation_sha256": digest(env).unwrap_or_default() }));
     if let Err(e) = crate::audit::append(&s.audit, &crate::audit::event("serve", &summary.map_err(|e| Denied(e.0.clone())))) { eprintln!("{}", json!({ "warning": format!("Audit log not written: {e}") })); }
-    // A client that asks for it also gets the comparison of the old and the new code; the attestation covers it by its digest.
     match outcome { Ok((env, _, evidence)) => (200, if with_evidence { json!({ "attestation": env, "evidence": evidence }) } else { env }), Err(e) => (422, denial(&e.0)) }
 }
 fn verification(s: &Service, tenant: &Tenant, run: &Value, bundle: &str) -> R<(Value, String, Value)> {

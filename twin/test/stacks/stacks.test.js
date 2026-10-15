@@ -5,7 +5,6 @@ import { createTwin } from '../../src/index.js';
 import { pgReader } from '../../src/real-reads.js';
 import { listen, post } from '../helpers.js';
 
-// Against real Postgres and Redis: run by scripts/test-stacks.sh, which starts both and sets these.
 const PG = process.env.KERN_TWIN_PG_URL;
 const REDIS = process.env.KERN_TWIN_REDIS_URL;
 const stackApp = (name, version) => ({ module: fileURLToPath(new URL(`./apps/${name}/${version}.js`, import.meta.url)), export: 'createApp' });
@@ -31,7 +30,6 @@ test('Postgres queries are replayed to the ghosts, a transaction and a clock-sta
     CREATE TABLE products (id serial PRIMARY KEY, name text, price_cents int, stock int);
     CREATE TABLE orders (id serial PRIMARY KEY, product_id int, quantity int, total_cents int, created_at timestamptz);
     INSERT INTO products (name, price_cents, stock) VALUES ('tea', 450, 10), ('cake', 300, 2);`);
-  // Started inside the try: a twin that fails to start must still let the admin connection close, or the run never ends.
   let shop = null;
   try {
     shop = await stack('pg-shop', { adapters: ['pg'] });
@@ -63,13 +61,11 @@ test('with pgReads, a read the new code makes and the old never did is answered 
     INSERT INTO plans VALUES (1, 'pro'); INSERT INTO plan_features VALUES (1, 'sso'), (1, 'audit');`);
   let shop = null;
   try {
-    // Without pgReads, the new code's extra read has no answer: the request is not compared.
     shop = await stack('pg-extra-read', { adapters: ['pg'] });
     assert.deepEqual(await (await fetch(`${shop.url}/plan`)).json(), { plan: 'pro' });
     await shop.twin.idle();
     assert.equal(shop.twin.stats().notCompared, 1, JSON.stringify(shop.twin.stats()));
     await shop.close();
-    // With pgReads, the twin's thread answers it for real, read-only, for both ghosts.
     shop = await stack('pg-extra-read', { adapters: ['pg'], pgReads: PG });
     assert.deepEqual(await (await fetch(`${shop.url}/plan`)).json(), { plan: 'pro' });
     assert.deepEqual(await (await fetch(`${shop.url}/health`)).json(), { ok: true });

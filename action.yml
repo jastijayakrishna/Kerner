@@ -50,7 +50,6 @@ runs:
     - name: Install Kern
       id: install
       shell: bash
-      # Never the pull request's directory: cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory.
       working-directory: ${{ github.action_path }}
       env:
         KERN_VERSION: ""

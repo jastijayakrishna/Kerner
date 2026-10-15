@@ -7,9 +7,7 @@ use std::sync::OnceLock;
 
 pub const BUILTIN_CHECKS: [&str; 4] = ["artifact", "behavior", "capabilities", "path-and-budget"];
 pub const HONEST_FIX: &str = "honest-fix";
-/// The comparison of the old and the new code that every version 5 proof carries.
 pub const COMPARE: &str = "compare";
-/// What a delta may allow besides behaviour: slower code, more paid API calls, new code that deletes files, and routes that answer differently.
 pub const LENSES: [&str; 4] = ["access", "cost", "delete", "speed"];
 
 fn identifier(s: &str, digit_first: bool) -> bool {
@@ -35,7 +33,6 @@ pub enum Kind { Bugfix, Feature, Refactor, Change }
 impl Kind {
     pub fn name(self) -> &'static str { match self { Kind::Bugfix => "bugfix", Kind::Feature => "feature", Kind::Refactor => "refactor", Kind::Change => "change" } }
 }
-/// What may happen to existing tests: rewritten or removed when the verifier proves the old behaviour and the safety net intact, or not at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edits { Checked, Locked }
 impl Edits {
@@ -49,25 +46,18 @@ impl Runner {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tests { pub paths: Vec<String>, pub kind: Kind, pub runner: Runner, pub command: Vec<String>, pub edits: Edits }
-/// One answer a stated change gives on the new code: these arguments return `returns` (a JavaScript expression) or throw `throws` (an error
-/// name; empty: any error). Both are JavaScript, evaluated only inside the verifier's sandbox.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Example { pub args: String, pub returns: Option<String>, pub throws: Option<String> }
-/// A function whose behaviour the task changes (`path#name`, or `path#*` for every export), everywhere or only where `when` holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change { pub function: String, pub when: Option<String>, pub examples: Vec<Example> }
-/// What a task says will change, written before the code (contract version 5). Everything else must behave as the old code does: the old code
-/// is the rulebook. `removes` names files, folders and exports the task deletes; `allow` names lenses whose findings the task expects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delta { pub intent: String, pub changes: Vec<Change>, pub removes: Vec<String>, pub allow: Vec<String> }
-/// How to start the app inside the sandbox, so the access lens can ask every route as every role, on the old and on the new code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct App { pub setup: Option<Vec<String>>, pub start: Vec<String>, pub port: u64, pub ready: String, pub routes: Vec<String>, pub roles: BTreeMap<String, BTreeMap<String, String>>, pub env: BTreeMap<String, String> }
 #[derive(Clone, Debug)]
 pub struct Contract {
     pub value: Value, pub task: String, pub read: Vec<String>, pub write: Vec<String>, pub dependencies: bool, pub approved: Vec<String>, pub limits: Limits, pub checks: Vec<String>,
     pub behaviors: Vec<String>, pub tests: Option<Tests>,
-    /// Version 5: the verifier compares the old and the new code, against `delta` when the task states one.
     pub compare: bool, pub delta: Option<Delta>, pub app: Option<App>,
 }
 
@@ -79,7 +69,6 @@ fn js_name(s: &str) -> bool {
     let part = |p: &str| p.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
     s == "*" || (s.split('.').count() <= 2 && s.split('.').all(part))
 }
-/// `path#name`: an export of a module (`default`, `default.add`, `*` for all of them).
 pub fn function_ref(s: &str, code_only: bool) -> R<()> {
     let bad = || Denied(format!("delta functions must be path#name, such as src/money.js#add: {s}"));
     let (path, name) = s.split_once('#').ok_or_else(bad)?;
@@ -89,7 +78,6 @@ pub fn function_ref(s: &str, code_only: bool) -> R<()> {
 }
 fn delta(v: &Value) -> R<Option<Delta>> {
     if v.is_null() { return Ok(None); }
-    // A boxed agent gets the delta in one environment variable, and a stated change is a few plain words and examples.
     ensure!(v.to_string().len() <= 32 * 1024, "delta must be at most 32 KiB: state the change in plain words and a few examples");
     let optional = |v: &Value, required: &[&'static str], extra: &[&'static str]| -> Vec<&'static str> { required.iter().chain(extra.iter().filter(|k| v.get(**k).is_some())).copied().collect() };
     exact(v, &optional(v, &["intent", "changes"], &["removes", "allow"]), "delta")?;
@@ -192,7 +180,6 @@ pub fn contract(input: &Value) -> R<Contract> {
     ensure!(input["network"].as_array().is_some_and(Vec::is_empty), "Contracts grant no network");
     ensure!(input["secrets"].as_array().is_some_and(Vec::is_empty), "Contracts grant no secrets");
     ensure!(input["publish"] == json!(false), "Agent publication is prohibited");
-    // A task may approve packages an agent can add or update; then package.json and the lockfile may change, but only for those packages.
     let (dependencies, approved) = match input.get("dependencies") {
         None | Some(Value::Null) => (false, Vec::new()),
         Some(d) => {
@@ -203,7 +190,6 @@ pub fn contract(input: &Value) -> R<Contract> {
             approved.sort();
             approved.dedup();
             ensure!(approved.len() == given, "dependencies.allow must not repeat a package");
-            // ["*"] lets any package the project already uses move (an upgrade task); it is checked against the stated change below.
             if approved.iter().any(|p| p == crate::deps::ANY) { ensure!(approved.len() == 1, "dependencies.allow is either [\"*\"] or a list of package names, not both"); }
             else if d.get("allow").is_some() { crate::deps::validate(&approved)?; }
             (true, approved)
@@ -406,7 +392,6 @@ pub fn git_exe() -> R<PathBuf> {
     }
 }
 
-/// `run_id` continues an earlier run (re-verifying its pull request after a push); otherwise every run gets a new one.
 pub struct Job { pub repo: PathBuf, pub base: String, pub contract: Contract, pub operator: Operator, pub command: Option<Vec<String>>, pub verification_key: PathBuf, pub output: PathBuf, pub run_id: Option<String> }
 pub fn job(path: &Path) -> R<Job> {
     let file = std::path::absolute(path)?;

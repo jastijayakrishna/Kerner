@@ -14,10 +14,7 @@ use std::path::{Path, PathBuf};
 const SETUP: Limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1048576, total_bytes: 16777216, timeout_seconds: 900, memory_mb: 3072, pids: 512 };
 
 pub struct Dependencies { pub volume: Volume, pub record: Value }
-/// Finished dependency installs, kept as read-only volumes and reused when the manifests, registry and image are the same. The index lives on
-/// the verifier host (KERN_CACHE_DIR, or ~/.cache/kern); KERN_DEPS_CACHE=off turns it off.
 pub struct DepsCache { dir: PathBuf, max: usize }
-/// Version of what an install volume holds besides the packages; 2 added the mount points for sandbox::CACHE_DIRS.
 const LAYOUT: u64 = 2;
 impl DepsCache {
     pub fn at(dir: PathBuf, max: usize) -> DepsCache { DepsCache { dir, max: max.max(1) } }
@@ -31,7 +28,6 @@ impl DepsCache {
         digest(&json!({ "kern": env!("CARGO_PKG_VERSION"), "layout": LAYOUT, "registry": registry, "image": image, "package_json": hash("package.json"), "lockfile": hash("package-lock.json") }))
     }
     fn entry(&self, key: &str) -> Option<PathBuf> { is_hex64(key).then(|| self.dir.join(format!("{key}.json"))) }
-    /// A well-formed entry's volume, record and whether its install has the current layout.
     fn read(&self, key: &str) -> Option<(String, Value, bool)> {
         let v: Value = serde_json::from_slice(&std::fs::read(self.entry(key)?).ok()?).ok()?;
         let volume = v["volume"].as_str().filter(|n| n.strip_prefix("kern-deps-").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')))?;
@@ -39,21 +35,17 @@ impl DepsCache {
         (record["sha256"].as_str().is_some_and(is_hex64) && record["entries"].is_u64() && record["bytes"].is_u64()).then(|| (volume.to_string(), record, v["layout"] == LAYOUT))
     }
     pub fn get(&self, key: &str) -> Option<(String, Value)> { self.read(key).filter(|e| e.2).map(|(volume, record, _)| (volume, record)) }
-    /// Drops an entry, one whose volume is gone.
     pub fn forget(&self, key: &str) { if let Some(path) = self.entry(key) { let _ = std::fs::remove_file(path); } }
-    /// True when this install became the cached one; an entry that already exists is never replaced.
     pub fn put(&self, key: &str, volume: &str, record: &Value) -> R<bool> {
         let Some(path) = self.entry(key) else { return Ok(false) };
         std::fs::create_dir_all(&self.dir)?;
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
         Ok(create_new(&path, json!({ "volume": volume, "record": record, "created_ns": at, "layout": LAYOUT }).to_string().as_bytes(), 0o600).is_ok())
     }
-    /// Drops entries of an older layout, then the oldest beyond the limit, and returns their volumes for the caller to remove.
     pub fn evict(&self) -> Vec<String> {
         let mut entries: Vec<(bool, u64, String, PathBuf, String)> = std::fs::read_dir(&self.dir).into_iter().flatten().flatten().filter_map(|e| {
             let path = e.path();
             let key = path.file_stem()?.to_str()?.to_string();
-            // A damaged entry is dropped, and never names a volume to remove.
             let Some((volume, _, current)) = self.read(&key) else { let _ = std::fs::remove_file(&path); return None };
             let created = serde_json::from_slice::<Value>(&std::fs::read(&path).ok()?).ok()?["created_ns"].as_u64().unwrap_or(0);
             Some((current, created, key, path, volume))
@@ -95,7 +87,6 @@ pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &s
     let key = DepsCache::key(files, registry, image)?;
     if let Some(c) = &cache && let Some((name, record)) = c.get(&key) {
         if sandbox::volume_exists(&name) { return Ok(Dependencies { volume: Volume::cached(name), record }); }
-        // Its volume was removed by hand: the entry goes too, so this install becomes the cached one.
         c.forget(&key);
     }
     let control = root.join("dependency-control");
@@ -117,7 +108,6 @@ pub fn install_dependencies(files: &Files, op: &Operator, root: &Path, image: &s
 fn candidate_files(base: &Files, wire: &Value, policy: &Contract) -> R<Files> {
     exact(wire, &["version", "files"], "candidate")?;
     let Some(items) = wire["files"].as_array().filter(|f| wire["version"] == 1 && f.len() <= 10000) else { deny!("Invalid candidate format") };
-    // The agent never saw symlinks or submodules (no snapshot holds them), so they stay as they were unless the agent wrote a file there.
     let mut result: Files = base.iter().filter(|(n, e)| e.link() || !allowed(&policy.write, n)).map(|(k, v)| (k.clone(), v.clone())).collect();
     let (mut seen, mut total) = (std::collections::HashSet::new(), 0u64);
     for item in items {
@@ -252,7 +242,6 @@ pub fn task(job: &Job, source: Source) -> R<Value> {
         create_new(root.join("changes.patch"), &git::git(&store, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", base, commit, "--"], None)?, 0o600)?;
         let handoff = git::handoff(&store, &run, &root.join("handoff"))?;
         let mut out = json!({ "commit": commit, "run_id": run["run_id"], "executor": run["executor"]["kind"], "changes": changed, "handoff": handoff });
-        // Who added the code this change removes, from the source repository's own history, so the reviewer can ask why it was there.
         if job.contract.compare {
             let removed = json!({ "removals": crate::compare::removed_code(&before, &after, &out["changes"], &job.contract) });
             if removed["removals"].as_array().is_some_and(|r| !r.is_empty()) { out["removed_code"] = json!(crate::compare::history(&job.repo, base, &removed)); }
@@ -291,9 +280,7 @@ fn read_check(spec: &CheckSpec) -> R<Vec<(Vec<String>, Option<String>)>> {
         Ok((argv(&c["command"])?, stdout))
     }).collect()
 }
-/// One operator check's evidence digest, the behaviour it saw, and how often it tried to reach each host.
 type Checked = R<(String, BTreeSet<String>, BTreeMap<String, u64>)>;
-/// One probe run of the comparison: the probe's report, the behaviour it saw, and how often it tried to reach each host.
 type Probed = R<(Value, BTreeSet<String>, BTreeMap<String, u64>)>;
 fn merge(into: &mut BTreeMap<String, u64>, from: BTreeMap<String, u64>) { for (k, n) in from { *into.entry(k).or_insert(0) += n; } }
 fn behavioral(spec: &CheckSpec, root: &Path, image: &str, snapshot: &Path, limits: &Limits, volume: Option<&str>, judge: bool) -> Checked {
@@ -369,8 +356,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         Some(install_dependencies(&candidate, op, &root, &op.image)?)
     } else { None };
     let volume = deps.as_ref().map(|d| d.volume.0.as_str());
-    // When the dependencies moved (an upgrade), the old code runs on the old install and the new code on the new one, so a package that now
-    // behaves differently, or newly reaches out, shows as a difference instead of hiding on both sides.
     let moved = policy.dependencies && [crate::deps::MANIFEST, crate::deps::LOCKFILE].iter().any(|m| original.get(*m).map(|e| &e.oid) != candidate.get(*m).map(|e| &e.oid));
     let base_deps = if moved { Some(install_dependencies(&original, op, &fresh_dir(root.join("base-dependencies"))?, &op.image)?) } else { None };
     let base_volume = base_deps.as_ref().map(|d| d.volume.0.as_str()).or(volume);
@@ -378,7 +363,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     let baseline_snapshot = root.join("baseline");
     git::materialize(Some(&store), &original, &baseline_snapshot, None)?;
     if policy.dependencies { std::fs::create_dir(baseline_snapshot.join("node_modules"))?; }
-    // Version 5 compares the old and the new code: the plan, its own control directory, and the old code without what the change removed.
     let probing = if policy.compare {
         let plan = compare::plan(&original, &candidate, &changed, policy, &sha256(format!("{base}{commit}")), l.timeout_seconds)?;
         let control = root.join("compare-control");
@@ -390,9 +374,7 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         }
         Some((plan, control, removed))
     } else { None };
-    // Each check runs on the new and the old code at the same time, and so do the probe runs, at most as many sandboxes at once as the gate allows.
     let gate = Gate::new(parallelism());
-    // A probe report can outgrow a small repository's output allowance (each call's answer, up to 20,000 calls); it gets at least 33 MiB.
     let probe_limits = Limits { total_bytes: l.total_bytes.max(16 << 20), ..l.clone() };
     let probe = |at: &Path, vol: Option<&str>, control: &Path| -> Probed {
         gate.run(|| {
@@ -431,8 +413,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     }
     for old in olds { let (_, seen, n) = old?; baseline.extend(seen); merge(&mut counts[0], n); }
     let tested = behavior.clone();
-    // What the probes saw joins the behaviour diff: a function that newly deletes a file of the repository, reaches a host or starts a
-    // program when Kern calls it is new behaviour like any other.
     let compared = match &probing {
         Some((plan, _, removed)) => {
             let mut runs = probed.into_iter();
@@ -445,7 +425,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
             merge(&mut counts[1], na.2);
             let runs = compare::Runs { old: [oa.0, ob.0], new: [na.0, nb.0], removed: gone, counts };
             let (evidence, block) = compare::evaluate(plan, &runs, &original, &candidate, &changed, policy);
-            // Written before anything is refused, so the comparison is there to read whatever stops the change.
             write_json(root.join("compare.json"), &evidence)?;
             Some((evidence, block))
         }
@@ -454,7 +433,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
     let (new, blocking) = behavior_diff(&baseline, &behavior, &policy.behaviors);
     let observed = json!({ "base": baseline, "candidate": behavior, "new": new, "blocking": blocking });
     write_json(root.join("behavior.json"), &observed)?;
-    // What the checks show is the tests'; what only calling the new code shows is the code's own, and the agent is told which.
     ensure!(blocking.iter().all(|b| tested.contains(b)), "Calling the new code shows new runtime behavior: {}. If this is intended, allow it in the task contract: \"behaviors\": {}", blocking.join(", "), serde_json::to_string(&blocking)?);
     ensure!(blocking.is_empty(), "Tests show new runtime behavior: {}. If this is intended, allow it in the task contract (version 3): \"behaviors\": {}", blocking.join(", "), serde_json::to_string(&blocking)?);
     checks.push(json!({ "id": "behavior", "status": "PASS", "evidence_sha256": digest(&observed)? }));
@@ -467,7 +445,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         std::fs::create_dir(&proof_root)?;
         let control = proof_root.join("control");
         sandbox::control_dir(&control, None)?;
-        // The old code with the change's tests, and (when tests were rewritten or removed) the new code with the old tests.
         let swap = |code: &Files, tests_from: &Files| -> Files {
             code.iter().filter(|(k, _)| !allowed(&tests.paths, k)).chain(tests_from.iter().filter(|(k, _)| allowed(&tests.paths, k))).map(|(k, v)| (k.clone(), v.clone())).collect()
         };
@@ -482,7 +459,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
         let entry: Vec<String> = std::iter::once("__exec".to_string()).chain(proof::command(tests)).collect();
         let run_tests = |which: proof::Run, files: &[String]| -> R<proof::Output> {
             gate.run(|| {
-                // The old code runs on the old install, the new code on the new one (they differ only when the dependencies moved).
                 let vol = if matches!(which, proof::Run::Base | proof::Run::Old) { base_volume } else { volume };
                 let volumes = vol.map(|v| vec![(v, "/workspace/node_modules", true)]).unwrap_or_default();
                 let at = match which { proof::Run::Base => &baseline_snapshot, proof::Run::New => &snapshot, proof::Run::Kept => &kept_snapshot, proof::Run::Old => &old_snapshot };
@@ -493,8 +469,6 @@ pub fn verify(run_dir: &Path, policy: &Contract, op: &Operator, output: &Path, s
                 Ok(proof::Output { stdout: report.to_vec(), exit_code: out.exit_code })
             })
         };
-        // Planting bugs runs in one sandbox: the new code is its read-only input, the old tests travel in its control directory.
-        // The planted bugs are shared out over sandboxes that run side by side, as many as the gate allows; each reports its part.
         let mut plant = |plan: &proof::Plan| -> R<Value> {
             let old_tests: Files = original.iter().filter(|(k, _)| allowed(&tests.paths, k)).map(|(k, v)| (k.clone(), v.clone())).collect();
             let parts = proof::split_planting(plan, parallelism());

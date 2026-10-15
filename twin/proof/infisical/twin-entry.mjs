@@ -1,6 +1,3 @@
-// Infisical's backend as a request listener, for the Kern twin: its own start (src/main.ts), without what must not repeat in every
-// copy of the app: telemetry instrumentation, removing its temporary folder, migrations (run once, by the proof's prepare step), signal
-// handlers and listen(). The imports are its own build's files (tsup writes one .mjs per source file).
 import { initializeHsmModule } from './dist/ee/services/hsm/hsm-fns.mjs';
 import { hsmServiceFactory } from './dist/ee/services/hsm/hsm-service.mjs';
 import { initDbConnection } from './dist/db/index.mjs';

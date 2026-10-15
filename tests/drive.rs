@@ -1,5 +1,3 @@
-// Kern drive: every changed line run on the old and on the new code. These tests cover the static half: which lines changed, which of them
-// hold code, which exports are functions Kern records, and the task folder the driver's author reads.
 use kern::drive;
 use kern::util::*;
 use serde_json::Value;
@@ -44,26 +42,26 @@ fn changed_lines_on_each_side() {
 #[test]
 fn code_lines_skip_comments_imports_types_and_lone_brackets() {
     let source = [
-        "// a comment",                                 // 1
-        "import { x } from './x';",                     // 2
-        "export interface Opts {",                      // 3
-        "  rate: number;",                              // 4
-        "}",                                            // 5
-        "export function tax(",                         // 6
-        "  amount: number,",                            // 7
-        "  opts: {",                                    // 8
-        "    rate: number;",                            // 9
-        "  },",                                         // 10
-        "): number {",                                  // 11
-        "  /* block",                                   // 12
-        "     comment */",                              // 13
-        "  return Math.round(amount * opts.rate + x);", // 14
-        "}",                                            // 15
-        "export type Mode = 'a' | 'b';",                // 16
-        "export { tax as default2 };",                  // 17
-        "declare const g: number;",                     // 18
-        "const y = 1; // trailing comment",             // 19
-        "",                                             // 20
+        "// a comment",
+        "import { x } from './x';",
+        "export interface Opts {",
+        "  rate: number;",
+        "}",
+        "export function tax(",
+        "  amount: number,",
+        "  opts: {",
+        "    rate: number;",
+        "  },",
+        "): number {",
+        "  /* block",
+        "     comment */",
+        "  return Math.round(amount * opts.rate + x);",
+        "}",
+        "export type Mode = 'a' | 'b';",
+        "export { tax as default2 };",
+        "declare const g: number;",
+        "const y = 1; // trailing comment",
+        "",
     ].join("\n");
     let lines: Vec<u32> = drive::measured("src/tax.ts", &source).into_keys().collect();
     assert_eq!(lines, vec![6, 7, 8, 11, 14, 19]);
@@ -96,7 +94,6 @@ fn exported_functions_are_found() {
     let cjs = drive::exported("src/c.js", "function f() {}\nmodule.exports = { f, g: () => 2 };\n");
     assert!(cjs.cjs, "CommonJS exports are wrapped when the module is required, by name at run time");
     assert!(drive::exported("src/d.js", "exports.h = function () {};\n").cjs);
-    // Any default export is known, so the recording wrapper hands it on even when it is no function (`memo(Page)`, a reducer, a class).
     for (src, has) in [("export function a() {}\nexport default memo(Page);\n", true), ("export function a() {}\nexport default class K {}\n", true),
         ("export function a() {}\nconst x = 1;\nexport { x as default };\n", true), ("export function a() {}\nexport { default } from './y';\n", true),
         ("export function a() {}\nexport * from './z';\n", false)] {
@@ -105,7 +102,6 @@ fn exported_functions_are_found() {
     }
 }
 
-/// A repository with a base and a head commit: a changed TypeScript module, a new helper, a changed test, docs and a minified bundle.
 fn project() -> (Temp, String, String) {
     let t = Temp::new();
     let r = t.join("repo");
@@ -150,7 +146,6 @@ fn prepare_writes_the_task_for_a_commit_pair() {
     let price_mod = modules.iter().find(|m| m["path"] == "src/price.ts").unwrap();
     assert_eq!(price_mod["new"]["functions"], serde_json::json!(["free", "priceFor"]));
     assert_eq!(price_mod["old"]["functions"], serde_json::json!(["priceFor"]));
-    // What the driver's author reads.
     assert!(read(&out, "task/task.md").contains("driver.mjs"));
     assert!(read(&out, "task/pr.md").contains("Ten or more items"));
     assert!(read(&out, "task/diff.patch").contains("src/price.ts") && !read(&out, "task/diff.patch").contains("bundle.min.js"));
@@ -192,7 +187,6 @@ fn a_huge_comment_is_cut_on_a_character_and_keeps_its_notices() {
 #[cfg(unix)]
 #[test]
 fn file_names_are_never_read_as_git_patterns() {
-    // `:(zz)` is git's pattern syntax: read as a pattern, it fails git and its text ends up in Kern's output.
     let (t, base, _) = project();
     let r = t.join("repo");
     write(&r, ":(zz)evil.js", "export const evil = () => 1;\n");
@@ -213,7 +207,6 @@ fn the_comment_warns_of_installs_without_the_lockfile_and_of_code_that_touches_k
     let comment = drive::comment(&d, &report);
     assert!(comment.contains("without the project's lockfile") && comment.contains("`.` (new code: the lockfile is out of date)")
         && comment.contains("`app` (old code: Kern does not read Bun's lockfile)"), "{comment}");
-    // A change that reads or writes what Kern measures with is named: code can fake its own coverage from inside.
     let (t, base, _) = project();
     let r = t.join("repo");
     write(&r, "src/report.ts", "export const out = () => process.env.NODE_V8_COVERAGE;\n");
@@ -229,7 +222,6 @@ fn the_comment_warns_of_installs_without_the_lockfile_and_of_code_that_touches_k
 
 #[test]
 fn a_yarnrc_loses_the_code_it_would_run_and_keeps_its_settings() {
-    // yarnPath and plugins are JavaScript from the repository that Yarn would run during the install, with the network on.
     let rc = "yarnPath: .yarn/releases/evil.cjs\nnodeLinker: node-modules\nplugins:\n  - path: .yarn/plugins/evil.cjs\n    spec: evil\n- path: .yarn/plugins/b.cjs\nnpmRegistryServer: \"https://registry.npmjs.org\"\n";
     let clean = kern::sandbox::yarnrc_without_code(rc);
     assert!(!clean.contains("yarnPath") && !clean.contains("plugins") && !clean.contains("evil") && !clean.contains("b.cjs"), "{clean}");
@@ -238,8 +230,6 @@ fn a_yarnrc_loses_the_code_it_would_run_and_keeps_its_settings() {
 
 #[test]
 fn a_changed_file_with_its_own_source_map_is_named_as_touching_kern_s_measurement() {
-    // A file's own sourceMappingURL comment tells coverage which line each piece of code is on: a crafted map could put code that never
-    // ran anywhere. Kern blanks such comments when it loads the code, and names the changed file on the pull request too.
     let (t, base, _) = project();
     let r = t.join("repo");
     write(&r, "src/mapped.js", "export const f = () => 1;\n//# sourceMappingURL=data:application/json;base64,e30=\n");
@@ -253,9 +243,6 @@ fn a_changed_file_with_its_own_source_map_is_named_as_touching_kern_s_measuremen
 
 #[test]
 fn a_bun_package_json_names_only_what_npm_can_install() {
-    // npm installs a Bun project (Kern does not read bun.lock): Bun's workspace: and catalog: versions, which npm refuses, become what they
-    // mean (the project's own package, which npm links from the workspaces, and the catalog's version), and the object form of
-    // workspaces becomes the list npm reads. Catalogs live at the top or inside workspaces.
     let root = r#"{ "name": "root", "workspaces": { "packages": ["apps/*", "packages/*"], "catalog": { "zod": "3.25.0" } },
         "catalogs": { "ui": { "react": "19.1.0" } },
         "dependencies": { "@acme/lib": "workspace:*", "zod": "catalog:", "react": "catalog:ui", "left-pad": "1.3.0", "gone": "catalog:nope" },
@@ -267,13 +254,11 @@ fn a_bun_package_json_names_only_what_npm_can_install() {
     let member = r#"{ "name": "@acme/web", "dependencies": { "@acme/lib": "workspace:^1.0.0" }, "peerDependencies": { "zod": "catalog:" } }"#;
     let out: Value = serde_json::from_str(&kern::sandbox::bun_for_npm(member, root).expect("rewritten")).unwrap();
     assert_eq!((out["dependencies"]["@acme/lib"].as_str(), out["peerDependencies"]["zod"].as_str()), (Some("*"), Some("3.25.0")));
-    // A package.json with nothing npm would refuse stays as it is.
     assert!(kern::sandbox::bun_for_npm(r#"{ "name": "a", "workspaces": ["x/*"], "dependencies": { "left-pad": "1.3.0" } }"#, root).is_none());
 }
 
 #[test]
 fn a_change_to_many_files_fits_any_command_line() {
-    // 600 changed paths of 70 characters: one git command naming them all passes the 32,767 characters a Windows command line holds.
     let (t, base, _) = project();
     let r = t.join("repo");
     for i in 0..600 { write(&r, &format!("docs/a-rather-long-folder-name-for-guides/page-number-{i:04}-of-the-guide.md"), "# Page\n"); }
@@ -287,8 +272,6 @@ fn a_change_to_many_files_fits_any_command_line() {
 
 #[test]
 fn a_change_that_only_reformats_code_is_known_without_running_it() {
-    // The old and the new code parse to the same program (line breaks, spaces, comments, redundant parentheses): nothing can behave
-    // differently, so nothing needs to run.
     let (t, base, _) = project();
     let r = t.join("repo");
     git(&r, &["checkout", "-q", &base]);
@@ -307,7 +290,6 @@ fn a_change_that_only_reformats_code_is_known_without_running_it() {
 fn prepare_names_what_it_cannot_measure() {
     let (t, base, before) = project();
     let r = t.join("repo");
-    // A change that touches only things that are not code still gets a task, with nothing to run.
     write(&r, "README.md", "# Shop\n\nOnly docs.\n");
     git(&r, &["commit", "-qam", "docs"]);
     let head = git(&r, &["rev-parse", "HEAD"]);
@@ -315,7 +297,6 @@ fn prepare_names_what_it_cannot_measure() {
     let summary = drive::prepare(&r, &before, &head, &out, None).unwrap();
     assert_eq!(summary["totals"], serde_json::json!({ "new": 0, "old": 0 }));
     assert!(read(&out, "task/pr.md").contains("docs"), "without a description the commit message stands in");
-    // Unknown commits are refused, not guessed.
     assert!(drive::prepare(&r, &base, "0000000000000000000000000000000000000000", &t.join("bad"), None).is_err());
     assert!(drive::prepare(&r, &base, "HEAD", &t.join("ref"), None).is_err(), "only full commit IDs: a branch name could move");
 }
@@ -386,13 +367,11 @@ fn the_comment_is_honest_when_nothing_ran_and_safe_with_hostile_values() {
     assert_eq!(report["coverage"]["percent"], 0);
     let comment = drive::comment(&d, &report);
     assert!(comment.contains("0%") && comment.contains("not run"), "{comment}");
-    // A value from the code under test can never break out of its code span or the comment's size.
     let evil = "`</details><img src=x onerror=alert(1)>\n# heading";
     let old = run(&[(evil, serde_json::json!(evil.repeat(5000)))], covered("src/price.ts", &[(3, 1), (4, 1)]), &[], &[], "");
     let new = run(&[(evil, serde_json::json!(1))], covered("src/price.ts", &[(4, 1), (5, 1), (9, 1)]), &[], &[], "");
     let report = drive::score(&d, &[old.clone(), old, new.clone(), new], 1);
     let comment = drive::comment(&d, &report);
-    // Untrusted text stays inside code spans, where GitHub shows markup literally: outside them, none of it remains.
     let outside: String = comment.split('`').step_by(2).collect();
     assert!(!outside.contains("<img") && !outside.contains("</details>") && !comment.lines().any(|l| l.starts_with("# heading")) && comment.len() < 60_000, "{}", &comment[..comment.len().min(2000)]);
 }
@@ -416,7 +395,6 @@ fn kern_s_driver_tools_pass_its_own_install_rules() {
     kern::flow::validate_lockfile(&tools, "registry.npmjs.org").expect("every tool is pinned and comes from the public registry");
     let pkg: Value = serde_json::from_slice(tools["package.json"].bytes.as_ref().unwrap()).unwrap();
     for name in ["tsx", "c8", "jsdom"] { assert!(pkg["dependencies"][name].as_str().is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.')), "{name} is pinned exactly"); }
-    // tsx applies a tsconfig only to the files it includes; Kern's sits outside the project, so it names the project's files itself.
     for (has, extends) in [(true, true), (false, false)] {
         let t: Value = serde_json::from_str(&drive::tsconfig(has)).unwrap();
         assert_eq!(t["extends"] == "/workspace/tsconfig.json", extends);
@@ -484,7 +462,6 @@ fn the_comment_is_posted_once_and_then_updated_in_place() {
     let out = t.join("out");
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("comment.md"), "### Kern: what this change does when it runs\n\nKern ran **100%**\n").unwrap();
-    // No comment of Kern's yet: one is created, marked so later runs can find it.
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[{\"id\":1,\"body\":\"looks good\"}]".into()),
         ("POST", "/repos/acme/shop/issues/7/comments") => (201, "{\"id\":2}".into()),
@@ -495,7 +472,6 @@ fn the_comment_is_posted_once_and_then_updated_in_place() {
     let posted = seen.lock().unwrap().iter().find(|(m, _, _)| m == "POST").cloned().unwrap();
     let body: Value = serde_json::from_str(&posted.2).unwrap();
     assert!(body["body"].as_str().unwrap().contains("<!-- kern-drive -->") && body["body"].as_str().unwrap().contains("100%"));
-    // With Kern's comment there, it is edited in place: one comment per pull request, however often Kern runs.
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, concat!("[{\"id\":1,\"body\":\"looks good\",\"user\":{\"login\":\"dev\"}},",
             "{\"id\":5,\"body\":\"<!-- kern-drive -->\\nfake\",\"user\":{\"login\":\"mallory\"}},",
@@ -512,7 +488,6 @@ fn the_comment_is_posted_once_and_then_updated_in_place() {
 
 #[test]
 fn a_run_of_an_older_commit_never_replaces_the_comment() {
-    // A re-run of an old workflow run, or one that finished after a newer push, checked a commit that is no longer the pull request's head.
     let t = Temp::new();
     let out = t.join("out");
     write(&out, "comment.md", "### Kern\n\nKern ran **100%**\n");
@@ -525,7 +500,6 @@ fn a_run_of_an_older_commit_never_replaces_the_comment() {
     });
     assert_eq!(drive::post_with(&out, "acme/shop", 7, &url, "t0k3n", false).unwrap()["status"], "STALE");
     assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "POST" || m == "PATCH"), "nothing written");
-    // The comment says which commit it is about.
     let d = serde_json::json!({ "head": "1111111111111111111111111111111111111111", "files": [], "skipped": [], "totals": { "new": 0, "old": 0 } });
     let r = run(&[], Value::Null, &[], &[], "");
     assert!(drive::comment(&d, &drive::score(&d, &[r.clone(), r.clone(), r.clone(), r], 1)).contains("1111111"), "the comment names the commit");
@@ -537,14 +511,12 @@ fn a_change_with_nothing_to_run_only_updates_an_earlier_comment() {
     let out = t.join("out");
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("comment.md"), "### Kern: what this change does when it runs\n\nThis change touches no line of code Kern can run.\n").unwrap();
-    // A pull request that only changes documentation stays quiet.
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[]".into()),
         _ => (404, "{}".into()),
     });
     assert_eq!(drive::post_with(&out, "acme/shop", 7, &url, "t0k3n", true).unwrap()["status"], "SKIPPED");
     assert!(!seen.lock().unwrap().iter().any(|(m, _, _)| m == "POST"), "nothing posted");
-    // One whose code changes were pushed away has Kern's earlier comment brought up to date, so it never shows a stale report.
     let (url, _) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[{\"id\":9,\"body\":\"<!-- kern-drive -->\\nold\",\"user\":{\"login\":\"github-actions[bot]\"}}]".into()),
         ("PATCH", "/repos/acme/shop/issues/comments/9") => (200, "{\"id\":9}".into()),
@@ -566,7 +538,6 @@ fn the_agent_writes_the_driver_in_the_task_folder() {
     let slow: Vec<String> = ["sh", "-c", "sleep 30"].iter().map(|s| s.to_string()).collect();
     let r = drive::agent_round(&task, &slow, "x", std::time::Duration::from_secs(1)).unwrap();
     assert_eq!(r["timed_out"], true, "an agent that runs too long is stopped");
-    // An agent that prints more than Kern keeps still finishes: its output is read to the end, the rest dropped.
     let loud: Vec<String> = ["sh", "-c", "head -c 3000000 /dev/zero | tr '\\0' x; echo; echo done > loud.txt"].iter().map(|s| s.to_string()).collect();
     let r = drive::agent_round(&task, &loud, "x", std::time::Duration::from_secs(20)).unwrap();
     assert!(r["timed_out"] == false && task.join("loud.txt").exists(), "{r}");
@@ -586,7 +557,6 @@ fn stand_ins_replace_packages_only_and_within_limits() {
     let (used, refused) = drive::stubs(&t.0).unwrap();
     let names: Vec<&str> = used.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["@expo/vector-icons", "expo-router/stack", "react-native"]);
-    // A project alias (`@/lib/price`) is the project's own code, never a package: a stand-in can only replace what lives in node_modules.
     for p in ["stubs/notes.md", "stubs/@/lib/price.mjs", "stubs/.hidden.mjs", "stubs/big.mjs"] { assert!(refused.iter().any(|r| r["path"] == p && r["why"].is_string()), "{p} not refused: {refused:?}"); }
     assert!(drive::stubs(&t.join("none")).unwrap().0.is_empty(), "no stubs folder, no stand-ins");
 }
@@ -604,7 +574,6 @@ fn the_comment_names_the_stand_ins_the_driver_used() {
     assert!(feedback.contains("stubs/notes.md") && feedback.contains("a stand-in is an .mjs file"), "{feedback}");
     assert!(feedback.contains("stubs/<package>.mjs"), "a package that failed to load points the author to stand-ins: {feedback}");
     assert!(feedback.contains("import (old and new code): Transform failed"), "a step that throws the same on both sides is still shown: {feedback}");
-    // Load failures that never name node_modules point to stand-ins too; a project file missing from one side does not.
     let hint = |error: &str| {
         let mut r = run(&[], covered("src/price.ts", &[(3, 1)]), &[], &[], "");
         r.output = serde_json::json!({ "step": "load", "error": error }).to_string() + "\n";
@@ -624,7 +593,6 @@ fn differences_are_sorted_by_what_the_pull_request_says() {
     let old = || run(&[("receipt", serde_json::json!("10 items"))], lines.clone(), &[call("r 100")], &[], "");
     let new = || run(&[("receipt", serde_json::json!("10 items, bulk"))], lines.clone(), &[call("r 85")], &["net:api.example.com:443"], "");
     let mut report = drive::score(&d, &[old(), old(), new(), new()], 1);
-    // Every difference the comment shows is numbered for the agent that reads the pull request.
     let md = drive::differences_md(&report);
     assert!(md.contains("D1") && md.contains("D2") && md.contains("D3") && !md.contains("D4"), "{md}");
     let t = Temp::new();
@@ -635,13 +603,11 @@ fn differences_are_sorted_by_what_the_pull_request_says() {
     let described = comment.find("Described by the pull request").unwrap_or_else(|| panic!("{comment}"));
     let net = comment.find("api.example.com").unwrap();
     assert!(surprises < net && net < described, "the network call nobody asked for comes first: {comment}");
-    // What the driver printed repeats Kern's own record: it stays folded away, each line with its verdict.
     let folded = comment.find("<details>").unwrap_or_else(|| panic!("{comment}"));
     let receipt = comment.find("receipt").unwrap();
     assert!(described < folded && folded < receipt && comment[receipt..].contains("unclear"), "{comment}");
     assert!(comment.contains("Ten or more items cost 8.5 each"), "{comment}");
     assert!(!comment.split('`').step_by(2).any(|s| s.contains("<img")), "the agent's words stay in code spans: {comment}");
-    // An answer that does not fit sorts nothing: every difference is still listed, as before.
     for bad in [r#"{"D9":{"says":"yes","why":"x"}}"#, r#"{"D1":{"says":"maybe","why":"x"}}"#, "not json", r#"["D1"]"#] {
         std::fs::write(t.join("verdicts.json"), bad).unwrap();
         report["sorted"] = drive::read_verdicts(&t.join("verdicts.json"), &report);
@@ -652,8 +618,6 @@ fn differences_are_sorted_by_what_the_pull_request_says() {
 
 #[test]
 fn a_line_runs_only_when_none_of_its_code_was_left_out() {
-    // V8 counts a line as run when anything on it ran. Kern counts it only when no code on it was left out: a block that merely opens
-    // at the end of the line (`if (cond) {`) leaves the condition run.
     let lines = ["export const price = (n) => n * 1.5;", "  if (isAdmin) wipe();", "  if (items >= 10) {", "    return 1;"];
     let d = serde_json::json!({ "files": [{ "path": "src/a.js", "status": "modified", "old": [], "new": [1, 2, 3, 4], "old_text": [],
         "new_text": lines.iter().enumerate().map(|(i, t)| serde_json::json!([i + 1, t])).collect::<Vec<_>>() }], "skipped": [], "totals": { "new": 4, "old": 0 } });
@@ -669,11 +633,8 @@ fn a_line_runs_only_when_none_of_its_code_was_left_out() {
     let report = drive::score(&d, &[r.clone(), r.clone(), r.clone(), r], 1);
     let missed: Vec<u64> = report["files"][0]["new"]["missed"].as_array().unwrap().iter().map(|x| x[0].as_u64().unwrap()).collect();
     assert_eq!(missed, vec![1, 2, 4], "{}", report["files"]);
-    // The author is told which part of a line did not run, so it knows which input is missing.
     let feedback = drive::feedback(&d, &report);
     assert!(feedback.contains("not run: `wipe();`") && feedback.contains("not run: `(n) => n * 1.5`"), "{feedback}");
-    // A file tsx rewrote (ES module syntax in a CommonJS package) gets helpers whose coverage maps onto its first line: `export` and the
-    // `() =>` of the function that did run. Those are no code of the project's left out.
     let d = serde_json::json!({ "files": [{ "path": "src/x.js", "status": "modified", "old": [], "new": [1], "old_text": [], "new_text": [[1, "export const x = () => 2;"]] }],
         "skipped": [], "totals": { "new": 1, "old": 0 } });
     let span = |a: u32, b: u32| serde_json::json!({ "start": at(1, a), "end": at(1, b) });
@@ -690,8 +651,6 @@ fn a_line_runs_only_when_none_of_its_code_was_left_out() {
 
 #[test]
 fn a_branch_left_out_counts_where_its_span_starts_at_its_operator() {
-    // A source map can start a branch V8 left out at its operator rather than after it: the else of `a ? b + 1 : 0` at ` : 0`, the then
-    // of `ok ? 'yes' : 'no'` at ` ? 'yes'`, the right of `x || fallback()` at ` || fallback()`. Each line has code that did not run.
     let lines = ["  return isNumber(n) ? twice(Number(n)) + 1 : 0;", "  const label = ok ? 'yes' : 'no';", "  const v = x || fallback();"];
     let d = serde_json::json!({ "files": [{ "path": "src/b.ts", "status": "modified", "old": [], "new": [1, 2, 3], "old_text": [],
         "new_text": lines.iter().enumerate().map(|(i, t)| serde_json::json!([i + 1, t])).collect::<Vec<_>>() }], "skipped": [], "totals": { "new": 3, "old": 0 } });
@@ -711,8 +670,6 @@ fn a_branch_left_out_counts_where_its_span_starts_at_its_operator() {
 
 #[test]
 fn the_comment_keeps_what_every_round_saw() {
-    // Round 1 saw the new code throw for an input the agent then dropped; round 2 ran the other lines. Both are real runs of the same
-    // code: the comment counts every line any round ran and every difference any round saw.
     let d = priced();
     let call = |o: &str| serde_json::json!({ "k": "src/price.ts#priceFor", "n": 1, "a": "[-1]", "o": o });
     let one_old = run(&[], covered("src/price.ts", &[(3, 1), (4, 1)]), &[call("r 0")], &[], "");
@@ -728,7 +685,6 @@ fn the_comment_keeps_what_every_round_saw() {
 
 #[test]
 fn a_run_that_ends_early_on_one_side_is_never_reported_as_the_same() {
-    // The new code throws partway: its later steps never print. That is a difference, and the comment says how the runs ended.
     let d = priced();
     let lines = covered("src/price.ts", &[(3, 1), (4, 1), (5, 1), (9, 1)]);
     let old = || run(&[("load", serde_json::json!(1)), ("priceFor(10)", serde_json::json!(100))], lines.clone(), &[], &[], "");
@@ -744,7 +700,6 @@ fn a_run_that_ends_early_on_one_side_is_never_reported_as_the_same() {
 fn lines_a_coverage_ignore_comment_hides_never_count_as_run() {
     let src = "a();\n/* c8 ignore next 2 */\nif (x) {\n  b();\n}\n// v8 ignore start\nc();\nd();\n// v8 ignore stop\ne(); /* c8 ignore next */\nf();\n";
     assert_eq!(drive::hinted(src).into_iter().collect::<Vec<_>>(), vec![3, 4, 6, 7, 8, 9, 11]);
-    // Coverage reports such lines as run whatever happened; Kern cannot tell, so they stay unrun.
     let d = serde_json::json!({ "files": [{ "path": "src/a.js", "status": "modified", "old": [], "new": [3, 4], "old_text": [],
         "new_text": [[3, "if (x) {"], [4, "  b();"]], "new_hinted": [3, 4] }], "skipped": [], "totals": { "new": 2, "old": 0 } });
     let r = run(&[], covered("src/a.js", &[(3, 1), (4, 1)]), &[], &[], "");
@@ -754,7 +709,6 @@ fn lines_a_coverage_ignore_comment_hides_never_count_as_run() {
 
 #[test]
 fn a_long_value_is_shown_where_it_differs() {
-    // Two 600-character documents that differ only near their end: the comment shows the part that differs, not their equal beginnings.
     let d = priced();
     let lines = covered("src/price.ts", &[(3, 1), (4, 1), (5, 1), (9, 1)]);
     let doc = |level: &str| format!("# Schema\n\n{}\n\n{level} Properties\n\n| Property | Type |", "Lorem ipsum dolor sit amet. ".repeat(20));
@@ -793,7 +747,6 @@ fn sorting_uses_every_round_and_rewrites_the_comment() {
         let new = run(&[], cov, &[call(n)], &[], "");
         drive::score(&d, &[old.clone(), old, new.clone(), new], 1)
     };
-    // Round 1 ran little and saw no difference; round 2 ran everything and saw the new price: the comment has both rounds' findings.
     write(&out, "rounds/1/report.json", &round(covered("src/price.ts", &[(3, 1)]), "r 100", "r 100").to_string());
     write(&out, "rounds/2/report.json", &round(covered("src/price.ts", &[(3, 1), (4, 1), (5, 1), (9, 1)]), "r 100", "r 85").to_string());
     let asked = drive::sort(&out, None).unwrap();
@@ -807,7 +760,6 @@ fn sorting_uses_every_round_and_rewrites_the_comment() {
 
 #[test]
 fn the_comment_names_what_it_could_not_compare() {
-    // Calls that answer differently on two runs of the same code (a server on a random port) are set aside, never reported as equal.
     let d = priced();
     let call = |port: u32| serde_json::json!({ "k": "src/price.ts#priceFor", "n": 1, "a": format!("[{{\"host\":\"127.0.0.1:{port}\"}}]"), "o": "r 100" });
     let side = |port: u32| run(&[("GET /price", serde_json::json!(port))], covered("src/price.ts", &[(3, 1), (4, 1), (5, 1), (9, 1)]), &[call(port)], &[], "");
@@ -819,8 +771,6 @@ fn the_comment_names_what_it_could_not_compare() {
 
 #[test]
 fn feedback_shows_what_the_steps_printed_even_when_both_sides_agree() {
-    // A driver whose every request is turned away at the login check prints the same on both sides: no difference, yet the author must
-    // see the 401s to know why the changed lines never ran.
     let d = priced();
     let r = run(&[("PATCH /api/processes/1", serde_json::json!({ "status": 401, "body": "unauthenticated" }))], covered("src/price.ts", &[(3, 1)]), &[], &[], "");
     let feedback = drive::feedback(&d, &drive::score(&d, &[r.clone(), r.clone(), r.clone(), r], 1));
@@ -829,7 +779,6 @@ fn feedback_shows_what_the_steps_printed_even_when_both_sides_agree() {
 
 #[test]
 fn clean_never_claims_volumes_it_could_not_remove() {
-    // Without --control Kern cannot reach Docker: clean must fail and keep setup.json for a retry, not report the volumes removed.
     let t = Temp::new();
     let out = t.join("out");
     write(&out, "setup.json", r#"{"old":{"volume":"kern-deps-old1"},"new":{"volume":"kern-deps-new1"},"tools":{"volume":"kern-deps-tools1","cached":false}}"#);
@@ -839,7 +788,6 @@ fn clean_never_claims_volumes_it_could_not_remove() {
 
 #[test]
 fn each_round_starts_from_a_task_folder_holding_only_what_kern_expects() {
-    // A round the code steered (prompt injection) may leave settings, instructions or other files for the next one: they are removed.
     let t = Temp::new();
     for f in ["task.md", "pr.md", "diff.patch", "lines.md", "feedback.md", "driver.mjs", "notes.md", "stubs/react-native.mjs", "old/src/a.ts", "new/src/a.ts",
         "CLAUDE.md", ".claude/settings.json", ".mcp.json", "evil.sh"] { write(&t.0, f, "x"); }
@@ -861,7 +809,6 @@ fn the_default_agent_is_restricted_and_takes_only_a_model_name() {
 #[cfg(unix)]
 #[test]
 fn the_agent_sees_no_ci_token() {
-    // The agent reads untrusted code, and what its driver prints reaches a public comment: CI tokens are never in its environment.
     let (t, base, head) = project();
     let op = serde_json::json!({ "version": 3, "repository": "acme/shop", "deployment": "single-vm", "executors": ["external"], "image": format!("sha256:{}", "a".repeat(64)),
         "builders": { "executor": null, "verifier": "e".repeat(64) }, "checks": [{ "id": "test-suite", "file": t.join("checks.json"), "sha256": "b".repeat(64) }],
@@ -873,7 +820,6 @@ fn the_agent_sees_no_ci_token() {
         .env("ANTHROPIC_API_KEY", "sk-ant-kept").env("DATABASE_URL", "postgres://secret5").env("STRIPE_SECRET", "secret6").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let seen = read(&t.join("out"), "task/seen.txt");
-    // Only what an agent needs passes: its own key, PATH, HOME and the like; every other job secret stays behind.
     for secret in ["ghs_secret1", "ghs_secret2", "secret3", "secret4", "secret5", "secret6"] { assert!(!seen.contains(secret), "{secret} reached the agent"); }
     assert!(seen.lines().any(|l| l.starts_with("PATH=")), "the agent can still find its programs");
     assert!(seen.contains("ANTHROPIC_API_KEY=sk-ant-kept"), "the agent keeps its own key");
@@ -884,23 +830,18 @@ fn the_agent_sees_no_ci_token() {
 #[test]
 fn the_drive_action_builds_a_static_kern_from_its_own_source_and_keeps_tokens_from_the_agent() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // A Windows checkout may give the file \r\n line endings.
     let action = std::fs::read_to_string(root.join("drive/action.yml")).unwrap().replace("\r\n", "\n");
     let step = |name: &str| action.split(&format!("- name: {name}\n")).nth(1).unwrap_or_else(|| panic!("no step {name}")).split("\n    - name:").next().unwrap().to_string();
-    // cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory, which holds the pull request's files.
     let install = step("Install Kern");
     for want in ["working-directory: ${{ github.action_path }}/..", "KERN_SOURCE: ${{ github.action_path }}/..", "KERN_STATIC: \"true\""] { assert!(install.contains(want), "{want}: {install}"); }
-    // A release pins this action as it pins the merge gate: pin-release.sh writes the digests into both.
     for key in ["KERN_VERSION", "KERN_SHA256_LINUX_X64", "KERN_SHA256_LINUX_ARM64"] { assert!(install.contains(&format!("{key}: \"\"")), "{key}: {install}"); }
     assert!(std::fs::read_to_string(root.join("scripts/pin-release.sh")).unwrap().contains("drive/action.yml"));
     let script = std::fs::read_to_string(root.join("scripts/install-kern.sh")).unwrap();
     assert!(script.contains("KERN_SOURCE") && script.contains("unknown-linux-musl"), "the sandbox runs Kern inside Debian: only the static build works there");
-    // The agent's step has no GitHub token and picks only the model; Kern adds the restrictions itself.
     let drive_step = step("Drive");
     assert!(!drive_step.contains("github.token") && !drive_step.contains("GITHUB_TOKEN") && !drive_step.contains("KERN_DRIVE_AGENT"), "{drive_step}");
     assert!(drive_step.contains("KERN_DRIVE_MODEL: ${{ inputs.model }}"), "{drive_step}");
     assert!(step("Comment").contains("GITHUB_TOKEN: ${{ github.token }}"));
-    // Inputs and event fields reach scripts only through the environment: an expression pasted into a script is code anyone can inject.
     let mut block = None;
     for line in action.lines() {
         let indent = line.len() - line.trim_start().len();
@@ -915,7 +856,6 @@ fn typescript_declarations_that_emit_no_code_are_not_measured() {
     let source = "export class Cart {\n  items: string[];\n  declare owner: string;\n  count = 0;\n  constructor(items: string[]) {\n    this.items = items;\n  }\n}\n";
     let lines: Vec<u32> = drive::measured("src/cart.ts", source).into_keys().collect();
     assert_eq!(lines, vec![1, 4, 5, 6], "a field with no value is a type only; one with a value runs");
-    // A decorator runs when the class is defined, value or not, and so does a computed key.
     let dto = "export class User {\n  @MaxLength(255)\n  email: string;\n  [key()]: string;\n}\n";
     let lines: Vec<u32> = drive::measured("src/user.dto.ts", dto).into_keys().collect();
     assert_eq!(lines, vec![1, 2, 3, 4], "{lines:?}");

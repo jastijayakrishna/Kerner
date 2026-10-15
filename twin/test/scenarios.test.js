@@ -107,13 +107,11 @@ test('a bulk import of 300 writes is compared in full, and one extra write in it
   });
   process.env.KERN_TEST_ROWS_URL = store.url;
   try {
-    // The same import in both versions: the same, and the serving ghost made every one of the real run's writes.
     const same = await production('bulk', { candidate: app('bulk', 'old') });
     assert.deepEqual(await (await fetch(same.url)).json(), { imported: 300 });
     await same.twin.idle();
     assert.deepEqual([same.twin.stats().same, same.twin.stats().notCompared], [1, 0], JSON.stringify(same.twin.stats().reasons));
     await same.close();
-    // The new version writes the last row twice.
     const twice = await production('bulk');
     assert.deepEqual(await (await fetch(twice.url)).json(), { imported: 300 });
     await twice.twin.idle();

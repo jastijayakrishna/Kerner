@@ -1,7 +1,3 @@
-//! Re-verifying a Kern pull request after a push to its branch. The branch's content becomes one Kern commit on the base branch's current
-//! tip, the hosted verifier checks it under that tip's trusted configuration, and only then does the branch move to it, with the new proof in
-//! the description and the required check reported for the new commit. The invariant of every Kern pull request holds throughout: its head is
-//! exactly the commit a verifier signed, one commit on a commit of the base branch.
 use crate::attest;
 use crate::capability;
 use crate::flow::{self, Source};
@@ -16,10 +12,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// How far the hosted verifier's clock may run ahead of the runner's for a proof it has just signed.
 const CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 
-/// The hosted verifier that re-verifies pushes, from KERN_VERIFIER_URL and KERN_VERIFIER_TOKEN; None when re-verification is off.
 pub struct Hosted { url: String, token: String }
 impl Hosted {
     pub fn from_env() -> Option<R<Hosted>> {
@@ -33,11 +27,8 @@ impl Hosted {
     }
 }
 
-/// The pull request as the event describes it.
 pub struct Pr<'a> { pub repository: &'a str, pub number: u64, pub head: &'a str, pub head_ref: &'a str, pub base_ref: &'a str, pub task: &'a str, pub run_id: &'a str, pub body: &'a str }
 
-/// The pushed change moved onto `onto`: each file as the push left it, unless only the base branch changed it since `from`. A file both
-/// changed is a conflict for the agent to resolve; Kern never merges inside a file.
 pub fn merge(from: &Files, onto: &Files, pushed: &Files, base_ref: &str) -> R<Files> {
     let same = |a: Option<&Entry>, b: Option<&Entry>| a.map(|e| (&e.mode, &e.oid)) == b.map(|e| (&e.mode, &e.oid));
     let names: BTreeSet<&String> = from.keys().chain(onto.keys()).chain(pushed.keys()).collect();
@@ -66,7 +57,6 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
     let base_ref = pr.base_ref;
     ensure!(github::repository(pr.repository), "Invalid repository");
     ensure!(!base_ref.is_empty() && base_ref.len() <= 255 && !base_ref.contains("..") && base_ref.bytes().all(|c| c.is_ascii_alphanumeric() || b"._/-".contains(&c)), "Invalid base branch");
-    // The base branch's tip right now is the trust root: its configuration decides, and the change lands on it.
     let tip = text(&api.get(&format!("/repos/{}/git/ref/heads/{}", pr.repository, github::ref_path(base_ref)))?["object"], "sha")?.to_string();
     git::oid(&tip)?;
     fetch(checkout, &server, pr.repository, api.token(), &[&tip])?;
@@ -76,10 +66,8 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
     let key_pem = String::from_utf8(trusted("verifier.pub")?).map_err(|_| Denied("Invalid verifier key".into()))?;
     ensure!(policy.task == pr.task && op.repository == pr.repository, "Trusted configuration does not match this repository and task");
     let key = attest::public_key(&key_pem)?;
-    // Only a pull request that carries a proof Kern's verifier signed for this very run is re-verified; anything else keeps its first answer.
     let Some((old, k)) = promote::extract_attestation(pr.body).ok().and_then(|e| attest::signed(&e, &key).ok().map(|k| (e, k))) else { return Err(stale) };
     if k["run_id"] != pr.run_id || k["task"] != pr.task || k["repository"] != pr.repository { return Err(stale); }
-    // Where the branch forked from the base branch, as GitHub sees it, and the push moved onto the tip from there.
     let compare = api.get(&format!("/repos/{}/compare/{tip}...{}?per_page=1", pr.repository, pr.head))?;
     ensure!(matches!(compare["status"].as_str(), Some("ahead" | "diverged")), "The pull request has nothing to merge into {base_ref}: everything on its branch is already there");
     let fork = text(&compare["merge_base_commit"], "sha")?.to_string();
@@ -92,23 +80,18 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
     let commit = git::write_commit(checkout, &merged, Some(&tip), &policy.task)?;
     let reused = k["commit"] == commit.as_str() && k["base"] == tip.as_str();
     let (envelope, evidence) = if reused { (old, promote::extract_evidence(pr.body).unwrap_or(Value::Null)) } else { verified(pr.run_id, checkout, &tip, &commit, &policy, &op, &key_pem, hosted)? };
-    // The comparison the verifier made travels with the new proof, when the proof covers it.
     let evidence = Some(evidence).filter(|e| crate::compare::attested(&envelope, e));
-    // The same check every Kern pull request passes at the gate, at the time the proof arrived: the verifier signed it moments ago, so its
-    // clock and the runner's may differ by a little.
     let at = if reused { now } else { now_ms() + CLOCK_SKEW_MS };
     let k = promote::verify_against(checkout, &envelope, &key, &policy, &op, Claim { run_id: pr.run_id, base: &tip, commit: &commit, now: at, enforce_expiry: false })?;
     let candidate = read(&commit)?;
     let changed = git::changes(&onto, &candidate, &policy)?;
     let capabilities = capability::check(&onto, &candidate, &changed, &op.permissions)?;
     let moved = commit != pr.head;
-    // The branch moves only if it still holds the pushed commit; a newer push gets its own run.
     if moved {
         let url = format!("{server}/{}.git", pr.repository);
         let lease = format!("--force-with-lease=refs/heads/{}:{}", pr.head_ref, pr.head);
         let target = format!("{commit}:refs/heads/{}", pr.head_ref);
         if let Err(e) = git::remote(checkout, &["push", "--porcelain", "--no-verify", &lease, &url, &target], &server, api.token()) {
-            // Only a branch GitHub shows at another commit was superseded; anything else is a failed push, said as such.
             let now_at = api.get(&format!("/repos/{}/git/ref/heads/{}", pr.repository, github::ref_path(pr.head_ref))).ok().and_then(|r| r["object"]["sha"].as_str().map(str::to_string));
             match now_at.as_deref() {
                 Some(at) if at == commit => {}
@@ -119,7 +102,6 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
     }
     let d = Decision { repository: pr.repository.into(), branch: pr.head_ref.into(), base: tip.clone(), commit: commit.clone(), run_id: pr.run_id.into(), attestation: Value::Null };
     if !reused { api.patch(&format!("/repos/{}/pulls/{}", pr.repository, pr.number), &json!({ "body": promote::with_attestation(pr.body, pr.task, &d, &envelope, evidence.as_ref())? }))?; }
-    // A push made with the workflow's own token starts no workflow, so the required check for the new commit comes from here.
     if moved {
         let name = github::env("KERN_CHECK_NAME").unwrap_or_else(|| "kern-verified".into());
         ensure!(name.len() <= 100 && !name.chars().any(char::is_control), "KERN_CHECK_NAME must be a short check name");
@@ -133,9 +115,6 @@ pub fn reverify(pr: &Pr, checkout: &Path, config: &str, now: u64, hosted: &Hoste
     Ok(result)
 }
 
-/// A merge-queue group for a Kern pull request passes when it lands exactly the tree Kern verified, on the base Kern verified it on. With a
-/// hosted verifier, a group on a newer base is verified again under the same run, and the new proof goes on the pull request, so the merge
-/// audit finds a proof for exactly what lands. A group that holds anything more is refused; ordinary pull requests are not Kern's to gate.
 pub fn check_merge_group(event: &Value, config: &str, now: u64) -> R<Value> {
     let g = &event["merge_group"];
     let (head, base) = (text(g, "head_sha")?, text(g, "base_sha")?);
@@ -157,7 +136,6 @@ pub fn check_merge_group(event: &Value, config: &str, now: u64) -> R<Value> {
     let pushed = text(&pr["head"], "sha")?;
     git::oid(pushed)?;
     let body = pr["body"].as_str().unwrap_or("");
-    // The queue runs without a checkout: Kern fetches the three commits it reads into a repository of its own.
     let work = fresh_dir(std::env::temp_dir().join(format!("kern-queue-{}", short_id()?)))?;
     let outcome = (|| -> R<Value> {
         let store = git::init_store(&work.join("objects.git"))?;
@@ -200,13 +178,10 @@ pub fn check_merge_group(event: &Value, config: &str, now: u64) -> R<Value> {
     outcome
 }
 
-/// A new proof from the hosted verifier for `commit`, under the same run, after the handoff the executor side always prepares, and the
-/// comparison the verifier sent with it (null when there is none; callers show it only when the proof covers it).
 #[allow(clippy::too_many_arguments)]
 fn verified(run_id: &str, checkout: &Path, tip: &str, commit: &str, policy: &crate::policy::Contract, op: &crate::policy::Operator, key_pem: &str, hosted: &Hosted) -> R<(Value, Value)> {
     let work = fresh_dir(std::env::temp_dir().join(format!("kern-reverify-{}", short_id()?)))?;
     let outcome = (|| -> R<(Value, Value)> {
-        // The key and the task output live apart, as preflight requires.
         let key_file = fresh_dir(work.join("key"))?.join("verifier.pub");
         create_new(&key_file, key_pem.as_bytes(), 0o600)?;
         let job = Job { repo: checkout.to_path_buf(), base: tip.into(), contract: policy.clone(), operator: op.clone(), command: None, verification_key: key_file.clone(), output: work.join("out"), run_id: Some(run_id.into()) };
@@ -222,9 +197,6 @@ fn verified(run_id: &str, checkout: &Path, tip: &str, commit: &str, policy: &cra
     outcome
 }
 
-/// A dependency upgrade from a bot (Dependabot, Renovate): when the protected base branch holds an upgrade task (`tasks/upgrade.json`, whose
-/// delta states that nothing changes) and the workflow has a hosted verifier, Kern verifies the upgrade itself, so the check passes only when
-/// the old code on the old packages and the old code on the new packages behave the same. None: not an upgrade Kern takes on.
 pub fn upgrade(event: &Value, checkout: &Path, config: &str, now: u64) -> Option<R<Value>> {
     let pr = &event["pull_request"];
     let head_ref = pr["head"]["ref"].as_str()?;
@@ -254,7 +226,6 @@ pub fn upgrade(event: &Value, checkout: &Path, config: &str, now: u64) -> Option
         let (original, pushed) = (git::read_commit(checkout, base, l.file_bytes, l.total_bytes)?, git::read_commit(checkout, head, l.file_bytes, l.total_bytes)?);
         let changed = git::changes(&original, &pushed, &policy)?;
         let capabilities = capability::check(&original, &pushed, &changed, &op.permissions)?;
-        // The bot's commit becomes a Kern commit with the same tree on the same base: that is what the verifier signs and what merges.
         let commit = git::write_commit(checkout, &pushed, Some(base), &policy.task)?;
         let run_id = uuid4()?;
         let (envelope, evidence) = verified(&run_id, checkout, base, &commit, &policy, &op, &key_pem, &hosted)?;

@@ -124,7 +124,6 @@ pub fn read_workspace(root: &Path, base: &Files, file_bytes: u64, total_bytes: u
     let dirs = base.keys().flat_map(|k| k.match_indices('/').map(move |(i, _)| &k[..i])).collect();
     let mut r = WorkspaceReader { base, dirs, file_bytes, total_bytes, total: 0, files: Files::new() };
     r.read(root, "", false)?;
-    // Symlinks and submodules never reach a workspace, so whatever is at their place now is a change only if it is there at all.
     for (k, e) in base.iter().filter(|(_, e)| e.link()) { r.files.entry(k.clone()).or_insert_with(|| e.clone()); }
     Ok(r.files)
 }
@@ -216,8 +215,6 @@ pub fn run_job(path: &Path) -> R<RunJob> {
         promote: flag(&raw, "promote")?, attempts: if raw.get("attempts").is_some() { int(&raw, "attempts", 1, 10)? } else { 1 }, repo, base, contract, output, verifier })
 }
 
-/// Sends the handoff to the independent verifier and returns its attestation and, when it sent one, its comparison of the old and the new
-/// code (null otherwise). The comparison is never trusted on its own: callers show it only when the attestation covers it.
 pub fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) -> R<(Value, Value)> {
     let _ = std::fs::remove_file(out);
     let beside = out.with_file_name("compare.json");
@@ -250,7 +247,6 @@ pub fn invoke_transport(v: &Verifier, handoff: &Path, out: &Path, commit: &str) 
     run(&exe, &args, Run { cwd: None, env: safe_env(&std::env::temp_dir()), input: None, timeout: Duration::from_secs(1200), max_output: 1048576 })
         .map_err(|e| Denied(format!("independent verifier unreachable or rejected the change: {}", e.0)))?;
     ensure!(std::fs::symlink_metadata(out).is_ok_and(|m| m.is_file()), "the independent verifier returned no attestation");
-    // A transport script may leave the verifier's comparison beside the attestation, as compare.json.
     let evidence = if std::fs::symlink_metadata(&beside).is_ok_and(|m| m.is_file()) { read_json(&beside)? } else { Value::Null };
     Ok((read_json(out)?, evidence))
 }
@@ -344,7 +340,6 @@ pub fn local_run(job: &RunJob) -> R<Value> {
 fn run_attempt(job: &RunJob, dir: &Path, ws: &Path, base_files: &Files, feedback: Option<&str>) -> R<Value> {
     let l = &job.contract.limits;
     let task = job.contract.task.clone();
-    // The agent is told what the task states will change (KERN_DELTA), so it can keep everything else exactly as it was.
     let delta = job.contract.delta.as_ref().map(|_| job.contract.value["delta"].to_string());
     let spec = BoxSpec { image: &job.image, command: &job.command, workspace: ws, mounts: &job.mounts, env: &job.env, network: job.network,
         timeout_seconds: l.timeout_seconds, memory_mb: l.memory_mb, pids: l.pids, feedback, delta: delta.as_deref() };
@@ -387,7 +382,6 @@ fn run_attempt(job: &RunJob, dir: &Path, ws: &Path, base_files: &Files, feedback
             Ok((c, envelope, evidence)) => {
                 let mut r = json!({ "status": "VERIFIED", "ux": ["Isolated", "Verified independently", "Tests passed", "Signed"],
                     "task": task, "base": job.base, "commit": c, "files_changed": files_changed, "attestation_sha256": digest(&envelope).unwrap_or_default(), "checks": checks, "box": boxed });
-                // What the verifier saw comparing the old and the new code, when the signed proof covers exactly that comparison.
                 if crate::compare::attested(&envelope, &evidence) { r["what_changed"] = json!(crate::compare::summary(&evidence)); }
                 r
             }

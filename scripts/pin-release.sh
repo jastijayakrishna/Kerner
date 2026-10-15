@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Pins the GitHub Actions (action.yml and drive/action.yml) to a published release's binaries: scripts/pin-release.sh v0.4.0 [owner/repo]
 set -euo pipefail
 tag=$1
 repo=${2:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}

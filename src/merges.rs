@@ -79,7 +79,6 @@ fn change(c: &Context, sha: &str, parent: Option<&str>, date: &str, author: &str
     let touched = String::from_utf8_lossy(&git::git(c.checkout, &range, None)?).to_string();
     if touched.lines().any(|f| f.starts_with(".github/kern/") || f.starts_with(".github/workflows/")) { flags.push("gate-config"); }
     let pulls = c.api.get(&format!("/repos/{}/commits/{sha}/pulls?per_page=100", c.repository))?;
-    // Only a pull request into this branch can cover a change to it; one merged elsewhere does not.
     let merged: Vec<&Value> = pulls.as_array().into_iter().flatten().filter(|p| p["merged_at"].is_string() && p["base"]["ref"] == c.branch).collect();
     let pr = merged.iter().find(|p| p["merge_commit_sha"] == sha).or(merged.first()).copied();
     let (category, proof, reason) = match pr {
@@ -109,7 +108,6 @@ pub fn audit(checkout: &Path, git_ref: &str, range: &str, auditor_key: Option<&s
     let key_id = match auditor_key { Some(k) => Some(crate::attest::key_id(&crate::attest::public_key(k)?)?), None => None };
     let api = Api::from_env("read the repository's pull requests and check runs")?;
     let c = Context { checkout, api: &api, repository: &repository, branch: &branch, auditor_key, now };
-    // The whole first-parent history, not a date-filtered walk: git stops a --since walk at the first commit that claims to be older.
     let log = git::git(checkout, &["log", "--first-parent", "--format=%H%x1f%P%x1f%ct%x1f%cI%x1f%an <%ae>%x1f%s%x1e", git_ref, "--"], None)?;
     let text = String::from_utf8_lossy(&log);
     let mut records = Vec::new();

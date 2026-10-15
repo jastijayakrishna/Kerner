@@ -2,25 +2,14 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-// Writes the proof's report from one results folder (reports/twin-proof-<date>/):
-// - <app>-off.json, <app>-sample-0.1.json and <app>-sample-1.json: what traffic.mjs wrote for each run;
-// - <app>-sample-1-differences.jsonl: every unexplained difference of the run with everything copied (the twin's log, scrubbed);
-// - triage.json, adoption.json and gaps.md: written by hand, from the evidence.
-// A missing piece shows as '–'. Nothing is guessed.
-
 const MODES = [['off', 'without the twin'], ['sample-0.1', '10% copied'], ['sample-1', 'all copied'], ['sample-1-pgreads', 'all copied + Postgres real reads']];
 const DASH = '–';
 const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x.toFixed(1) : DASH);
 const pct = (x) => (typeof x === 'number' && Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : DASH);
 const signed = (x) => (typeof x === 'number' && Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${x.toFixed(1)}` : DASH);
 
-// Files that are there but could not be read: the report names them, so nothing drops out of it unseen.
 let unreadable = [];
 
-/**
- * A JSON file, or `fallback` when it is not there. A byte order mark (PowerShell 5.1 writes one) is skipped. A file that is there but is
- * not JSON is named in the report.
- */
 async function readJson(file, fallback) {
   let text;
   try {
@@ -44,12 +33,10 @@ async function readText(file) {
   }
 }
 
-/** Lines of code in a glue file: not blank, not a // comment. */
 async function codeLines(file) {
   return (await readText(file)).split('\n').filter((line) => line.trim() && !line.trim().startsWith('//')).length;
 }
 
-/** Each run, by app and mode. */
 async function runsIn(dir) {
   const runs = {};
   for (const name of await readdir(dir)) {
@@ -59,12 +46,10 @@ async function runsIn(dir) {
   return runs;
 }
 
-/** The headline run's differences (all copied, without pgReads): one object per line of its log. */
 async function headlineDiffs(dir, app) {
   return (await readText(join(dir, `${app}-sample-1-differences.jsonl`))).split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
-/** Differences grouped by route and kinds, with how many there were and the pull requests behind them. */
 function groups(differences) {
   const out = new Map();
   for (const d of differences) {
@@ -78,7 +63,6 @@ function groups(differences) {
   return [...out.values()].sort((a, b) => b.count - a.count);
 }
 
-/** The report, as markdown, for the results folder `dir`. */
 export async function report(dir) {
   unreadable = [];
   const runs = await runsIn(dir);
@@ -93,13 +77,10 @@ export async function report(dir) {
   for (const app of apps) {
     const t = runs[app]['sample-1']?.twin;
     const verdicts = triage[app] ?? [];
-    // Only groups the headline run (no pgReads) actually found are counted here, so "Meant" lines up with "Unexplained differences". A
-    // group a pgReads run surfaces (triaged but not in the headline) is shown in the real-reads section instead.
     const headline = groups(await headlineDiffs(dir, app));
     const found = (g) => headline.some((h) => h.route === g.route && [...g.kinds].sort().join(',') === h.kinds.join(','));
     const count = (verdict) => verdicts.filter((g) => g.verdict === verdict && found(g)).reduce((sum, g) => sum + (g.count ?? 0), 0);
     const lines = runs[app]['sample-1']?.lines ?? {};
-    // Lines a person accepted (code this process does not serve, say) are shown apart: they are not proven.
     const accepted = lines.accepted ?? 0;
     const total = Object.values(lines).reduce((a, b) => a + b, 0) - accepted;
     const proven = total || accepted ? `${lines.proven ?? 0} of ${total}${accepted ? ` (${accepted} accepted)` : ''}` : DASH;
@@ -142,8 +123,6 @@ export async function report(dir) {
     out.push(`### ${app}`, '', reasons.length ? reasons.map(([why, n]) => `- ${n} × ${why}`).join('\n') : 'Nothing.', '');
   }
 
-  // Opt-in Postgres real reads were run a second time, labeled, for the apps that have such a run. The report shows both numbers side by
-  // side: a read the new code makes that the old never did is answered read-only, so a request that would be not compared can be compared.
   const withReads = apps.filter((app) => runs[app]['sample-1']?.twin && runs[app]['sample-1-pgreads']?.twin);
   if (withReads.length) {
     out.push('## What Postgres real reads changed', '', 'A second, labeled run turned on opt-in Postgres real reads (off by default). The columns are without them → with them.', '');
@@ -170,7 +149,6 @@ export async function report(dir) {
   return `${out.join('\n')}\n`;
 }
 
-// As a program: node twin/proof/kit/report.mjs <results folder> writes <results folder>.md beside it.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const dir = process.argv[2];
   if (!dir) throw new Error('usage: node twin/proof/kit/report.mjs <results folder>');

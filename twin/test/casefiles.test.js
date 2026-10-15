@@ -13,7 +13,6 @@ test('an unexplained difference becomes a scrubbed case that still shows it, and
   const dir = mkdtempSync(join(tmpdir(), 'kern-casefiles-'));
   try {
     const shop = await production('checkout', { cases: join(dir, 'cases'), log: join(dir, 'differences.jsonl'), stateDir: join(dir, 'state') });
-    // The email is in the address too, where a route name could carry it to the disk.
     const answer = await fetch(`${shop.url}/orders/${SECRETS[0]}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${SECRETS[2]}`, 'content-type': 'application/json' },
@@ -47,7 +46,6 @@ test('a case keeps every write its ghosts counted, so a request with hundreds of
   });
   process.env.KERN_TEST_ROWS_URL = store.url;
   try {
-    // The new version writes the last of 300 rows twice: its 301st write, past the 200 a run lists.
     const shop = await production('bulk', { cases: dir });
     await (await fetch(shop.url)).arrayBuffer();
     await shop.twin.idle();
@@ -94,7 +92,6 @@ test('a scrubbed copy the app answers with another status, such as a sign-in it 
     await shop.close();
     const [file] = readdirSync(dir);
     const value = await readCase(join(dir, file));
-    // The scrubbed copies differ too (their refusals are worded differently), but they are refusals, not the plans that differed.
     assert.equal(value.reproduces, false, JSON.stringify(value.verdict ?? value.why));
     assert.match(value.why, /another status/);
   } finally {
@@ -106,8 +103,6 @@ test('a scrubbed copy the app answers with another status, such as a sign-in it 
 test('running both ghosts again for a case leaves no changed-line counts behind for the next request', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-casefiles-'));
   try {
-    // With the manifest, each ghost counts the changed lines it runs. The profile change renames a field: a difference without a crash,
-    // so the ghosts are not restarted after it.
     const shop = await threePrs({ cases: dir });
     await (await post(`${shop.url}/profile`, { name: 'Ada', plan: 'pro' })).arrayBuffer();
     await (await post(`${shop.url}/total`, { items: [{ price: 2, count: 3 }] })).arrayBuffer();

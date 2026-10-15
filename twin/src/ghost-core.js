@@ -9,7 +9,6 @@ import { startCoverage, takeLines, targetsOf } from './coverage.js';
 import { ADAPTERS } from './adapters/index.js';
 import { begin, end, keepTurn, within } from './turn.js';
 
-// The real setImmediate, taken before the world is installed: the ghost's own steps run outside any turn, and must never wait.
 const tick = setImmediate;
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
@@ -21,7 +20,6 @@ async function openCoverage(plan) {
   return { session, side: plan.side, targets: targetsOf(plan), cache: new Map() };
 }
 
-/** Each distinct detail once, in the order first seen, with how often it came (a queue's poll repeats), at most 8 of them. */
 function listed(details) {
   const counts = new Map();
   for (const detail of details) counts.set(detail, (counts.get(detail) ?? 0) + 1);
@@ -29,10 +27,6 @@ function listed(details) {
   return `${shown.join('; ')}${counts.size > 8 ? `; and ${counts.size - 8} more` : ''}`;
 }
 
-/**
- * Why a version could not start in a ghost, and what would help: what the seal refused it (a native add-on that only computes can be
- * allowed by its package), and the calls it made that no answer was recorded for.
- */
 function startProblems(events, recorded) {
   const refused = events.filter((event) => event.type === 'denied').map((event) => event.detail);
   const calls = events.filter((event) => event.type.startsWith('unmatched')).map((event) => event.detail);
@@ -51,35 +45,19 @@ function startProblems(events, recorded) {
   return text;
 }
 
-/**
- * One ghost, whatever carries its messages: a worker thread (worker.js) or a child process (process-ghost-main.js). It works in this
- * order:
- * 1. opens its loopback servers;
- * 2. seals the world;
- * 3. loads one version of the app;
- * 4. answers jobs.
- *
- * `side`: { module, export, addons, coverage, adapters, overlay, realReads, load, pgReads, maxBodyBytes }.
- * `transport`: { send(message), onMessage(listener), beforeSeal() }.
- */
 export async function runGhost(side, transport) {
   const realRequest = http.request;
-  // The most of an answer the ghost hands to the twin's thread. Past it the rest is only hashed, and the twin gets the answer's size and
-  // sha256 (`large`), never its bytes: an answer that dumps a whole table cannot fill the twin's memory (R7). With no limit (a case
-  // replayed on its own), all of it is kept.
   const cap = Number.isFinite(side.maxBodyBytes) ? side.maxBodyBytes : Infinity;
   let handler = null;
   let jobId = 0;
   let askId = 0;
   const asks = new Map();
-  /** Asks the twin's thread something (a real read, Task 5): answered by { type: 'answer', id, answer }. */
   const ask = (message) => new Promise((resolve) => {
     const id = ++askId;
     asks.set(id, resolve);
     transport.send({ ...message, id, job: jobId });
   });
 
-  // Each request belongs to the job being run. Its body's events would otherwise run outside that turn (turn.js).
   const harness = http.createServer((req, res) => {
     const id = jobId;
     keepTurn(req, id);
@@ -90,7 +68,6 @@ export async function runGhost(side, transport) {
   const port = harness.address().port;
   const names = (side.adapters ?? []).filter((name) => ADAPTERS[name]);
   const appRequire = createRequire(side.module);
-  // An adapter that needs a loopback server of its own (the node:http replay) opens it now: once sealed, nothing can listen.
   const ports = [port];
   const prepared = {};
   for (const name of names) {
@@ -102,16 +79,10 @@ export async function runGhost(side, transport) {
   transport.beforeSeal?.();
   installGhostIO({ ports, addons: side.addons ?? [], overlay: Boolean(side.overlay), realReads: side.realReads ?? [], ask });
   for (const name of names) ADAPTERS[name].replay({ appRequire, take, wrote, note, ask, pgReads: Boolean(side.pgReads), ...prepared[name] });
-  // The changed lines this version runs, per request, when the twin has a manifest (Phase 3). Coverage starts before the app loads, so
-  // every function the app compiles is counted precisely.
   const coverage = side.coverage ? await openCoverage(side.coverage) : null;
-  // The app's start: a job of its own, at the real start's clock and seed, its calls answered from the record of that start when the
-  // twin has one (load 'record'). A start that fails names the calls it could not have answered.
   if (side.load) resetWorld(side.load.start, side.load.seed);
   beginJob(side.load?.io ?? []);
   begin('start');
-  // An app may end its own process when its start fails (it logs why, then calls process.exit). In a ghost that ends the thread without
-  // a word, and with it what the ghost could not give the app: while it starts, the exit becomes an error, so all of it is reported.
   const exit = process.exit;
   process.exit = function ghostStartExit(code) {
     throw new Error(`the app ended itself with process.exit(${code ?? ''}) while starting`);
@@ -133,16 +104,11 @@ export async function runGhost(side, transport) {
   endJob();
 
   let finish = null;
-  // Between a request's answer and its result (its one more tick): a failure then is the request's own, sent with its result (`after`).
   let tail = false;
   let after = null;
-  // The last request this ghost sent a result for: a failure that comes later, in work that request left running (a thread-pool callback,
-  // which no turn holds), is named after it.
   let answered = null;
   function crashed(error) {
     const message = `uncaught ${error?.name ?? 'error'}: ${String(error?.message ?? error).slice(0, 300)}`;
-    // The app's state may now be broken: the coordinator restarts both ghosts before the next request, and judges a failure that came
-    // after a request's result on that request.
     transport.send({ type: 'dirty', error: message, job: finish || tail ? jobId : answered });
     if (finish) {
       const done = finish;
@@ -188,7 +154,6 @@ export async function runGhost(side, transport) {
       req.end(body);
     });
     finish = null;
-    // As in the real run's record, calls the app starts right after answering still belong to this request: they get one more tick.
     tail = true;
     await new Promise((resolve) => tick(resolve));
     tail = false;
@@ -212,7 +177,6 @@ export async function runGhost(side, transport) {
       asks.delete(message.id);
     }
   });
-  // The changed lines that ran while the app loaded (top-level code): they ran before every request.
   if (coverage) transport.send({ type: 'load-lines', lines: Object.keys(await takeLines(coverage)) });
   transport.send({ type: 'ready' });
 }

@@ -1,6 +1,6 @@
 import { send } from '../http.js';
 
-// The same answer, written another way.
+
 export function createApp() {
   return (req, res) => {
     const n = Number(new URL(req.url, 'http://app').searchParams.get('n') ?? 10);

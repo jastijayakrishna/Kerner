@@ -1,7 +1,7 @@
 name: kern-audit
 on:
   schedule:
-    - cron: "0 6 1 1,4,7,10 *" # the first day of each quarter audits the quarter that just ended
+    - cron: "0 6 1 1,4,7,10 *"
   workflow_dispatch:
     inputs:
       period:
@@ -15,7 +15,7 @@ jobs:
   audit:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - name: Fetch pull request heads
@@ -41,7 +41,7 @@ jobs:
           set +e
           "$KERN_BIN" audit-merges . HEAD "$PERIOD" kern-audit
           echo "code=$?" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kern-audit
           path: kern-audit/

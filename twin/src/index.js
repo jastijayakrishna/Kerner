@@ -16,11 +16,6 @@ const THREAD = new URL('./twin-thread.js', import.meta.url);
 const SIDES = ['old', 'candidate'];
 const NO_COUNTS = { sampled: 0, skipped: 0, dropped: 0, same: 0, stated: 0, different: 0, notCompared: 0, restarts: 0, logErrors: 0, evidenceErrors: 0, cases: 0, caseErrors: 0 };
 
-/**
- * A file or folder as an absolute path: the app's thread imports a version by its path, but a ghost also requires the version's packages
- * relative to it (createRequire), which takes only an absolute path or a file URL. A relative path is read from the working folder, as
- * import() reads it.
- */
 function absolute(path, name) {
   if (!path.startsWith('file:')) return resolve(path);
   try {
@@ -60,7 +55,6 @@ function fn(value, name) {
   return value ?? null;
 }
 
-/** pgReads: where the twin's thread makes the ghosts' Postgres reads, read-only (a read replica or a read-only role, ideally). */
 function connection(value) {
   if (typeof value !== 'string' || !value) throw new TypeError('pgReads must be a Postgres connection string, such as postgres://reader@replica/app');
   return value;
@@ -83,7 +77,6 @@ function allowRules(value) {
   });
 }
 
-/** Checks every option and fills in the defaults: a wrong option fails here, before anything starts. */
 function settingsOf(options) {
   if (options.stateDir != null && (typeof options.stateDir !== 'string' || !options.stateDir)) throw new TypeError('stateDir must be a folder path');
   if (options.log != null && typeof options.log !== 'string') throw new TypeError('log must be a file path');
@@ -113,7 +106,6 @@ function settingsOf(options) {
     manifest: options.manifest ?? null,
     minLineRuns: number(options.minLineRuns, 3, 1, 9, 'minLineRuns'),
     accept: acceptList(options.accept),
-    // fetch is always recorded: every ghost replays it.
     adapters: [...new Set(['fetch', ...names(options.adapters, ['fetch'], 'adapters')])],
     realReads: readPatterns(options.realReads),
     overlay: options.overlay === true,
@@ -137,14 +129,12 @@ function settingsOf(options) {
   return settings;
 }
 
-/** `accept` entries, checked here: 'old:src/x.js:12' or 'new:src/x.js:20-24'. */
 function acceptList(value) {
   const list = names(value, [], 'accept');
   acceptMatcher(list);
   return list;
 }
 
-/** Allow-listed real reads, checked here: 'GET https://rates.example/*' or 'HEAD https://status.example/ping'. */
 function readPatterns(value) {
   const list = names(value, [], 'realReads');
   for (const pattern of list) {
@@ -155,16 +145,11 @@ function readPatterns(value) {
   return list;
 }
 
-/** What the twin's thread needs: everything but the app's own functions, which cannot cross threads. */
 function forThread(settings) {
   const { route, segment, ...rest } = settings;
   return rest;
 }
 
-/**
- * The twin as the app's thread sees it: it copies sampled requests and hands them to the twin's own thread, which does the rest, and
- * it routes each request to the version serving now.
- */
 class Twin {
   #settings;
   #thread = null;
@@ -193,22 +178,17 @@ class Twin {
       this.#disabled = 'switched off with KERN_TWIN=off';
       return;
     }
-    // The ghosts' seal needs process.getBuiltinModule (Node 22.3): on an older Node the twin stays off and says so, rather than failing in
-    // every ghost with Node's own message.
     if (typeof process.getBuiltinModule !== 'function') {
       this.#disabled = `the twin needs Node 22.3 or newer; this is Node ${process.versions.node}`;
       return;
     }
-    // A sandbox that was asked for and does not work is never quietly dropped: the twin stays off and says why.
     if (this.#settings.sandbox === 'bwrap') {
-      // With the ghosts' own arguments: inside a container that masks parts of /proc, bwrap starts but cannot mount a fresh /proc.
       const probe = spawnSync('bwrap', [...BWRAP, 'true'], { encoding: 'utf8', timeout: 10000 });
       if (probe.status !== 0) {
         this.#disabled = `the bwrap sandbox does not work here: ${String(probe.error?.message ?? probe.stderr ?? '').trim().slice(0, 200)}`;
         return;
       }
     }
-    // No Node flags and no NODE_OPTIONS from the app: its preloads have no business in the twin's thread or in the ghosts it starts.
     const thread = new Worker(THREAD, { workerData: forThread(this.#settings), execArgv: [], env: ghostEnv(), resourceLimits: { maxOldGenerationSizeMb: 512 } });
     const first = await new Promise((resolve) => {
       const done = (message) => {
@@ -235,18 +215,15 @@ class Twin {
     this.#candidateId = first.candidateId;
     this.#latest = first.snapshot;
     this.#thread = thread;
-    // These stay attached for good: without an 'error' listener, a failure in the twin's thread would be thrown in the app's thread.
     thread.on('error', (error) => this.#fail(`the twin's thread failed: ${error.message}`));
     thread.on('exit', (code) => {
       if (!this.#closing) this.#fail(`the twin's thread stopped (exit ${code})`);
     });
     thread.on('message', (message) => this.#receive(message));
-    // The twin never keeps the app's process alive. This comes after the 'message' listener: adding the first one refs a worker again.
     thread.unref();
     this.#adapters = this.#record();
   }
 
-  /** Records each listed client library, for both versions' copy of it (one patch when they share a copy). Answers how each went. */
   #record() {
     const report = {};
     for (const name of this.#settings.adapters) {
@@ -282,10 +259,6 @@ class Twin {
     }
   }
 
-  /**
-   * The twin stops for good and keeps its first reason. The app carries on as if there were no twin; if the new version was serving,
-   * the old one serves again, because nothing would switch it back any more.
-   */
   #fail(reason) {
     if (this.#disabled) return;
     this.#disabled = reason;
@@ -303,7 +276,6 @@ class Twin {
     return step;
   }
 
-  /** Whether to copy this request. A full queue sheds load: the customer is served as always, the request is only counted as dropped. */
   #sample() {
     if (this.#disabled || !this.#thread || Math.random() >= this.#settings.sampleRate) return false;
     if (this.#sent - this.#judged + this.#open >= this.#settings.queueLimit) {
@@ -316,7 +288,6 @@ class Twin {
 
   #deliver(copy) {
     this.#inflight.add(copy);
-    // Nothing in handing a copy over may reject unhandled: in the app's process, Node would end the app for it.
     copy.then((capture) => this.#post(capture), (error) => this.#fail(`recording failed: ${error?.message ?? error}`))
       .catch((error) => this.#fail(`a copy could not be handed to the twin's thread: ${error?.message ?? error}`))
       .finally(() => {
@@ -333,8 +304,6 @@ class Twin {
     try {
       thread.postMessage(capture.skipped ? skip(capture.skipped) : { type: 'capture', capture });
     } catch (error) {
-      // A copy that cannot cross to the twin's thread is counted as skipped, never lost. If even the skip cannot cross, the twin's thread
-      // takes nothing at all: the twin switches itself off, and the app carries on.
       try {
         thread.postMessage(skip(`a copy that could not be handed over (${error.name})`));
       } catch (again) {
@@ -345,7 +314,6 @@ class Twin {
     this.#sent++;
   }
 
-  /** Work the twin's thread still has: copies not yet judged, or known cases it is still checking. */
   #busy() {
     return !this.#disabled && (this.#judged < this.#sent || Boolean(this.#latest?.checking));
   }
@@ -355,10 +323,6 @@ class Twin {
     for (const resolve of this.#waiters.splice(0)) resolve();
   }
 
-  /**
-   * Tells the twin's thread something. A thread that cannot be told is a twin that cannot watch: it switches itself off (and the old version
-   * serves again), never throws into the app.
-   */
   #tell(message) {
     try {
       this.#thread?.postMessage(message);
@@ -367,7 +331,6 @@ class Twin {
     }
   }
 
-  /** With load 'record', the ghosts start once they have the record of the app's start; the first record sent is the one used. */
   #sendLoad(load) {
     if (this.#settings.load !== 'record' || this.#loadSent) return;
     this.#loadSent = true;
@@ -375,7 +338,6 @@ class Twin {
   }
 
   wrap(listener) {
-    // Wrapping the app's own listener, the twin did not see the app start: its ghosts start with no record.
     this.#sendLoad(null);
     const settings = this.#settings;
     return wrapListener(listener, {
@@ -387,7 +349,6 @@ class Twin {
     });
   }
 
-  /** The routing listener: it loads the old version in this thread, and records around whichever version serves each request. */
   listener() {
     this.#routed ??= (async () => {
       const open = () => Router.open({
@@ -397,8 +358,6 @@ class Twin {
         stateDir: this.#disabled ? null : this.#settings.stateDir,
         onSwitch: (side, reason, hold) => this.#tell({ type: 'serving', side, reason, hold, router: true }),
       });
-      // With load 'record', the old version starts inside a record of its own: every call it makes while starting is written down,
-      // and the ghosts start from those answers.
       const record = this.#settings.load === 'record' && this.#thread && !this.#disabled ? loadRecord(this.#settings.maxBodyBytes) : null;
       this.#router = record ? await current.run(record, open) : await open();
       if (record) this.#sendLoad(await settleLoad(record));
@@ -411,7 +370,6 @@ class Twin {
   async serve(side, reason = 'switched by a person') {
     if (!SIDES.includes(side)) throw new TypeError("serve takes 'old' or 'candidate'");
     if (!this.#router) throw new Error("switching needs the twin's own listener: use twin.listener()");
-    // With the twin off, nothing would switch the new version back: it may not serve.
     if (side === 'candidate' && this.#disabled) return false;
     return this.#switch(side, reason);
   }
@@ -426,7 +384,6 @@ class Twin {
       disabled: this.#disabled,
       reasons: { ...(latest?.reasons ?? {}) },
       serving: this.#router?.serving ?? 'old',
-      // Whether switching on by itself is held (after any switch back, or a new version that could not load), and why serving is as it is.
       hold: this.#router?.hold ?? false,
       servingReason: this.#router?.reason ?? null,
       adapters: { ...this.#adapters },
@@ -445,20 +402,13 @@ class Twin {
     return this.#latest?.evidence ? structuredClone(this.#latest.evidence) : null;
   }
 
-  /** Every changed line of the manifest with its status: never run, partly run, run, proven, at load, accepted or no code. */
   paths() {
     return [...(this.#latest?.paths ?? [])];
   }
 
-  /**
-   * Resolves once every copy handed over so far has been judged, the known cases have been checked, and every switch that caused has
-   * been applied.
-   */
   async idle() {
     while (this.#inflight.size) await Promise.allSettled([...this.#inflight]);
     if (this.#busy()) {
-      // The twin's thread never keeps the process alive by itself, but someone is waiting for it now: an app that has closed its
-      // server and awaits idle() would otherwise end before the twin answers, with the work half done.
       const thread = this.#thread;
       thread?.ref();
       try {
@@ -470,7 +420,6 @@ class Twin {
     await this.#switching;
   }
 
-  /** Writes the evidence and stops the twin's thread and its ghosts. It switches nothing, so a restart keeps what serves. */
   close() {
     this.#closing ??= (async () => {
       this.#router?.close();
@@ -496,11 +445,6 @@ class Twin {
   }
 }
 
-/**
- * Starts a twin: the old and the new version of the app run as ghosts in the twin's own thread and answer copies of sampled real
- * requests. Customers get the answers of the version serving, which is the old one until the new one has earned it; if anything goes
- * wrong inside the twin, it switches itself off, says why, and the old version serves.
- */
 export async function createTwin(options = {}) {
   const twin = new Twin(settingsOf(options ?? {}));
   await twin.start();

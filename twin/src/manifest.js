@@ -2,14 +2,10 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-// The manifest `kern twin plan` writes: every changed line of code of a change, with the commit and pull request behind it. Line keys
-// are '<side>:<path>:<line>', for example 'old:src/app.js:17'.
 const SIDES = ['old', 'new'];
 
-/** A short hash of a line's text: the evidence keeps it beside each line's counts, so they can be matched to the text they belong to. */
 export const lineHash = (text) => createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
 
-/** Reads a manifest and checks its shape. Answers it with `lines`: a Map from each line key to { side, path, line, text, hash, commit, pull }. */
 export async function loadManifest(file) {
   let manifest;
   try {
@@ -25,7 +21,6 @@ export function checkManifest(manifest) {
   const lines = new Map();
   for (const file of manifest.files) {
     const path = file?.path;
-    // On Windows a backslash separates folders too: '..\\x.js' climbs out, and '\\x.js' or '\\\\server\\share' starts outside.
     const outside = typeof path !== 'string' || !path || /^[\\/]/.test(path) || /^[A-Za-z]:/.test(path) || path.split(/[\\/]/).includes('..');
     if (outside) throw new Error(`a manifest path must stay inside the repository: ${path}`);
     for (const side of SIDES) {
@@ -41,7 +36,6 @@ export function checkManifest(manifest) {
   return { ...manifest, lines };
 }
 
-/** What the ghost of one side measures: { side, root, files: [{ path, lines }] }. */
 export function coveragePlan(manifest, side, root) {
   const files = [];
   for (const file of manifest.files) {
@@ -51,10 +45,6 @@ export function coveragePlan(manifest, side, root) {
   return { side, root, files };
 }
 
-/**
- * Checks that the code under each root ({ old, new }) is the code the manifest describes: every changed line's text is at its line.
- * kern clips lines over 200 characters and ends them with '...'. Throws, naming the first line that is not there.
- */
 export async function checkRoots(manifest, roots) {
   for (const file of manifest.files) {
     for (const side of SIDES) {
@@ -76,10 +66,6 @@ export async function checkRoots(manifest, roots) {
   }
 }
 
-/**
- * The pull requests whose changed lines a request ran (keys of either side). `cause` is that pull request when exactly one ran and every
- * line run has a known one; otherwise null.
- */
 export function attribute(keys, manifest) {
   const pulls = new Set();
   let unknown = false;
@@ -93,7 +79,6 @@ export function attribute(keys, manifest) {
   return { pulls: list, cause: list.length === 1 && !unknown ? list[0] : null };
 }
 
-/** A test for `accept` entries, which look like 'old:src/x.js:12' or 'new:src/x.js:20-24'. Throws a TypeError on another shape. */
 export function acceptMatcher(patterns) {
   const rules = patterns.map((pattern) => {
     const m = /^(old|new):(.+):(\d+)(?:-(\d+))?$/.exec(String(pattern));

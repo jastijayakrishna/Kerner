@@ -29,7 +29,6 @@ const CODE_GLOBALS: [&str; 3] = ["eval", "Function", "WebAssembly"];
 fn extension(name: &str) -> &str { name.rsplit_once('.').map_or("", |(_, e)| e) }
 fn declaration(name: &str) -> bool { [".d.ts", ".d.mts", ".d.cts"].iter().any(|s| name.ends_with(s)) }
 pub fn is_code(name: &str) -> bool { CODE.contains(&extension(name)) && !declaration(name) }
-/// Contributor lists and change logs that often have no extension: text, inspected like the other data files.
 const TEXT_NAMES: [&str; 8] = ["AUTHORS", "CONTRIBUTORS", "MAINTAINERS", "CHANGELOG", "CHANGES", "HISTORY", "THANKS", "CREDITS"];
 pub fn text_name(name: &str) -> bool { TEXT_NAMES.contains(&name.rsplit('/').next().unwrap_or(name)) }
 pub fn is_data(name: &str) -> bool { DATA.contains(&extension(name)) || declaration(name) || text_name(name) }
@@ -228,8 +227,6 @@ fn parse(name: &str, source: &str, st: SourceType) -> Option<BTreeSet<String>> {
     v.visit_program(&parsed.program);
     Some(v.caps)
 }
-/// The ways Kern reads a code file, in order: as its extension says, then for .js and .jsx as a script, and only then, for .js, with JSX,
-/// which React projects write in plain .js files. Plain JavaScript that parses keeps its meaning.
 pub fn source_types(name: &str) -> Option<Vec<SourceType>> {
     let st = SourceType::from_path(name).ok()?;
     Some(match extension(name) {
@@ -252,7 +249,6 @@ fn inspectable(files: &Files, name: &str) -> Option<BTreeSet<String>> {
 pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTreeMap<String, Vec<String>>) -> R<Value> {
     let (mut report, mut siblings) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
     let (mut widened, mut grant) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
-    // Packages the task approved and the change added may be imported.
     let approved = crate::deps::imports(changed);
     for f in changed["files"].as_array().into_iter().flatten() {
         let (name, op) = (f["path"].as_str().unwrap_or(""), f["operation"].as_str().unwrap_or(""));

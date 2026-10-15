@@ -24,12 +24,9 @@ test("a savepoint's name is a label the client library numbers itself: it does n
 });
 
 test('transaction control is a session call: a new code path may open a transaction the recording never began', () => {
-  // BEGIN/COMMIT/ROLLBACK carry no data; when the new code runs a transaction the old (recorded) code never did, the twin answers
-  // these from any recorded one instead of calling the request not comparable. The writes inside are still used once and compared.
   for (const query of ['BEGIN', 'begin;', 'BEGIN TRANSACTION', 'BEGIN ISOLATION LEVEL SERIALIZABLE', 'START TRANSACTION', 'COMMIT', 'commit;', 'END', 'ROLLBACK', 'ABORT']) {
     assert.ok(isSession(pgKey(query, [])), query);
   }
-  // Session server calls stay session; data reads and writes, and savepoint rollbacks, are still used once.
   assert.ok(isSession(pgKey('select version()', [])) && isSession(pgKey('SET search_path = x', [])));
   for (const query of ['SELECT * FROM users WHERE id = $1', 'INSERT INTO t VALUES (1)', 'ROLLBACK TO SAVEPOINT trx9']) {
     assert.ok(!isSession(pgKey(query, [1])), query);
@@ -53,7 +50,6 @@ test('values are named alike in every thread, and real reads are matched by meth
 });
 
 test("a JSON payload is named by its value: the order of an object's keys and the spacing do not change a call's name", () => {
-  // JSON objects have no order (RFC 8259): a refactor that builds the same body another way sends the same write.
   const url = 'https://pay.example/charge';
   const a = callKey('POST', url, Buffer.from('{"amount":5,"currency":"usd","meta":{"b":1,"a":2}}'));
   assert.equal(a, callKey('POST', url, Buffer.from('{ "currency": "usd", "meta": {"a": 2, "b": 1}, "amount": 5 }')));

@@ -1,4 +1,3 @@
-# The Phase 4 acceptance run. No port is opened on the host: the services talk on the project's own network.
 name: kern-twin-shop
 services:
   db:

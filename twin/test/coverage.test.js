@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { decodeMappings, lineMasks, mappedMasks, plausible, sourceMapOf, targetsOf } from '../src/coverage.js';
 
-// What V8 reported for this source (Node 22, precise coverage, one take per call), measured on 2026-10-10.
 const source = 'export function limitOf(policy) {\n  return policy.limits ? policy.limits.max : 100;\n}\n';
 const limitsGiven = [{ functionName: 'limitOf', ranges: [{ startOffset: 7, endOffset: 85, count: 1 }, { startOffset: 77, endOffset: 82, count: 0 }] }];
 const limitsBlank = [{ functionName: 'limitOf', ranges: [{ startOffset: 7, endOffset: 85, count: 1 }, { startOffset: 57, endOffset: 76, count: 0 }] }];

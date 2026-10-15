@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { send } from '../http.js';
 
-// Writes on every channel it can: console, process.stdout, a warning, and straight to file descriptors 1 and 2, as pino does.
+
 export function createApp() {
   console.log('ghost output at load');
   return (req, res) => {

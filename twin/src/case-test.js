@@ -1,6 +1,3 @@
-// The cases a twin wrote, as node:test tests. Each one runs the candidate on one case in a fresh sealed ghost, and expects the old
-// version's answer. kern-twin test runs this file, with the cases folder in KERN_TWIN_CASES and the candidate's module and export in
-// KERN_TWIN_CANDIDATE and KERN_TWIN_EXPORT.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
@@ -17,7 +14,6 @@ for (const name of readdirSync(dir).filter((file) => file.endsWith('.json')).sor
   try {
     value = await readCase(join(dir, name));
   } catch (error) {
-    // A case that cannot be read fails as a test of its own, by name: it never passes quietly, and every other case still runs.
     test(`${name}: could not be read`, () => {
       throw error;
     });

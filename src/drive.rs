@@ -1,7 +1,3 @@
-//! Every changed line, run on the old and on the new code. A driver (written by the agent that made the change, or by one the operator
-//! runs) makes the changed code run; Kern runs it twice on each version in its sandbox with the network off, counts which changed lines
-//! of code actually ran, records the calls into the changed modules itself, and says what behaves differently and which lines nobody
-//! ran. A line counts only when it holds code: not a comment, an import, an export list, a type, or a lone closing bracket.
 use crate::capability::source_types;
 use crate::git::{git, git_with, trimmed};
 use crate::policy::Limits;
@@ -17,19 +13,16 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// The lines a change touches, 1-based: the old lines it deletes or replaces and the new lines it inserts or puts in their place.
 pub fn changed(old: &str, new: &str) -> (Vec<u32>, Vec<u32>) {
     fn split(s: &str) -> Vec<&str> { if s.is_empty() { Vec::new() } else { s.split('\n').collect() } }
     let (a, b) = (split(old), split(new));
     let number = |v: Vec<usize>| v.into_iter().map(|i| i as u32 + 1).collect();
-    // A change too large for an exact diff counts every line of both versions as changed.
     match crate::compare::changed_lines(&a, &b) {
         Some((x, y)) => (number(x), number(y)),
         None => (number((0..a.len()).collect()), number((0..b.len()).collect())),
     }
 }
 
-/// Spans (byte ranges) of what never runs: imports, export lists, types, declarations of what exists elsewhere, and JSX comments.
 struct Inert { spans: Vec<(u32, u32)>, inner: Vec<(u32, u32)> }
 impl<'a> Visit<'a> for Inert {
     fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) { self.spans.push((it.span.start, it.span.end)); }
@@ -44,15 +37,12 @@ impl<'a> Visit<'a> for Inert {
         if it.declare { self.spans.push((it.span.start, it.span.end)); } else { walk::walk_variable_declaration(self, it); }
     }
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
-        // An overload signature or a declared function has no body that could run.
         if it.declare || it.body.is_none() { self.spans.push((it.span.start, it.span.end)); } else { walk::walk_function(self, it, flags); }
     }
     fn visit_class(&mut self, it: &Class<'a>) {
         if it.declare { self.spans.push((it.span.start, it.span.end)); } else { walk::walk_class(self, it); }
     }
     fn visit_property_definition(&mut self, it: &PropertyDefinition<'a>) {
-        // A field with no value (`items: string[];`, `declare owner: string;`) only declares a type; TypeScript emits no code for it. A
-        // decorator (`@MaxLength(255)`) or a computed key runs when the class is defined, value or not.
         if it.declare || (it.value.is_none() && it.decorators.is_empty() && !it.computed) { self.spans.push((it.span.start, it.span.end)); }
         else { walk::walk_property_definition(self, it); }
     }
@@ -72,10 +62,8 @@ impl<'a> Visit<'a> for Inert {
 fn clip(line: &str) -> String { if line.chars().count() > 200 { format!("{}...", line.chars().take(200).collect::<String>()) } else { line.to_string() } }
 fn closing(t: &str) -> bool { !t.is_empty() && t.trim_start_matches([')', ']', '}']).len() < t.len() && t.trim_start_matches([')', ']', '}']).chars().all(|c| matches!(c, ';' | ',' | ')')) }
 
-/// The lines of a file that hold code that can run, 1-based, with their text.
 pub fn measured(path: &str, text: &str) -> BTreeMap<u32, String> {
     let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
-    // Where each line starts, in bytes.
     let mut starts = Vec::with_capacity(lines.len());
     let mut at = 0u32;
     for l in text.split('\n') { starts.push(at); at += l.len() as u32 + 1; }
@@ -93,7 +81,6 @@ pub fn measured(path: &str, text: &str) -> BTreeMap<u32, String> {
         })
     });
     if let Some((v, comments)) = &parsed {
-        // Comments and JSX comments are quiet bytes: a line with nothing else on it is not code.
         for (s, e) in comments.iter().chain(v.spans.iter().filter(|(s, e)| text.get(*s as usize..*e as usize).is_some_and(|x| x.starts_with('{')))) {
             for b in &mut quiet[*s as usize..(*e as usize).min(text.len())] { *b = true; }
         }
@@ -106,14 +93,12 @@ pub fn measured(path: &str, text: &str) -> BTreeMap<u32, String> {
         if t.is_empty() || skip.contains(&i) || closing(t) { continue; }
         let start = starts[i] as usize;
         let code = line.char_indices().any(|(o, c)| !c.is_whitespace() && !quiet.get(start + o).copied().unwrap_or(false));
-        // A file Kern cannot parse still has comment lines; the common markers are enough there.
         let comment_only = parsed.is_none() && (t.starts_with("//") || t.starts_with("/*") || t.starts_with('*'));
         if code && !comment_only { out.insert(i as u32 + 1, clip(line)); }
     }
     out
 }
 
-/// The exported functions of a module Kern records calls to, by export name. CommonJS modules are recorded by name when they are required.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Exports { pub functions: Vec<String>, pub cjs: bool, pub default: bool }
 fn function_value(e: &Expression) -> bool {
@@ -140,7 +125,6 @@ pub fn exported(path: &str, text: &str) -> Exports {
         let p = Parser::new(&alloc, text, st).parse();
         if p.fatal_error || !p.diagnostics.is_empty() { continue; }
         let body = &p.program.body;
-        // Top-level names bound to functions.
         let mut local: BTreeSet<String> = BTreeSet::new();
         for s in body {
             let decl = match s { Statement::ExportDeclaration(d) => Some(&d.declaration), other => other.as_declaration() };
@@ -179,7 +163,6 @@ pub fn exported(path: &str, text: &str) -> Exports {
                         if local.contains(sp.local.name().as_str()) { names.insert(sp.exported.name().to_string()); }
                     }
                 }
-                // `export { default } from './page'` hands on another module's default.
                 Statement::ExportFromDeclaration(d) if d.export_kind != ImportOrExportKind::Type => {
                     if d.specifiers.iter().any(|sp| sp.export_kind != ImportOrExportKind::Type && sp.exported.name() == "default") { default = true; }
                 }
@@ -194,11 +177,6 @@ pub fn exported(path: &str, text: &str) -> Exports {
     Exports::default()
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------------
-// Preparing a task: what changed, which lines Kern measures, and what the driver's author reads.
-
-/// Whether the old and the new text of a module are the same program: they parse alike once spaces, line breaks, comments and redundant
-/// parentheses are set aside, so nothing in them can behave differently (short of code that reads its own source).
 pub fn same_program(path: &str, old: &str, new: &str) -> bool {
     let Some(types) = source_types(path) else { return false };
     types.into_iter().any(|st| {
@@ -208,8 +186,6 @@ pub fn same_program(path: &str, old: &str, new: &str) -> bool {
         !po.fatal_error && !pn.fatal_error && po.diagnostics.is_empty() && pn.diagnostics.is_empty() && oxc_span::ContentEq::content_eq(&po.program, &pn.program)
     })
 }
-/// Lines a coverage-ignore comment hides (`/* c8 ignore next 2 */`, `// v8 ignore start` ... `stop`): coverage reports them as run whatever
-/// happened, so Kern never counts them. An ignore that is not stopped reaches the end of the file.
 pub fn hinted(text: &str) -> BTreeSet<u32> {
     let (mut out, mut start) = (BTreeSet::new(), None::<u32>);
     let total = text.lines().count() as u32;
@@ -228,27 +204,18 @@ pub fn hinted(text: &str) -> BTreeSet<u32> {
     out
 }
 
-/// The driver contract the author of a driver reads.
 pub const TASK: &str = include_str!("drive-task.md");
-/// Binary formats: never measured, never copied for the author.
 const BINARY: [&str; 52] = ["png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "bmp", "tif", "tiff", "psd", "heic", "mp3", "mp4", "m4a", "mov", "webm",
     "wav", "ogg", "flac", "avi", "mkv", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "jar", "war", "woff", "woff2", "ttf", "otf", "eot", "glb", "gltf",
     "fbx", "blend", "wasm", "bin", "exe", "dll", "so", "dylib", "node", "db", "sqlite", "pyc", "class"];
 const LOCKFILES: [&str; 6] = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"];
-/// Code Kern does not run yet: single-file components and other languages.
 const OTHER_CODE: [&str; 30] = ["vue", "svelte", "astro", "mdx", "marko", "py", "rb", "go", "java", "kt", "kts", "rs", "php", "cs", "fs", "swift", "scala", "c", "cc", "cpp",
     "h", "hpp", "m", "mm", "dart", "ex", "exs", "lua", "pl", "sh"];
-/// Above this a file is not measured (generated code, data) and not copied for the author.
 const LARGEST: u64 = 1 << 20;
-/// At most this many changed modules, and this much of their text, are measured.
 const MOST_FILES: usize = 2000;
 const MOST_TEXT: u64 = 128 << 20;
-/// Names in changed code that reach Kern's own measurement: V8's coverage folder, Kern's call record and its files.
-// A file's own source map would tell the coverage where its code is (the loader blanks such comments; the comment names them anyway).
 const MEASUREMENT: [&str; 6] = ["NODE_V8_COVERAGE", "__kernDriveRecord", "KERN_DRIVE_CALLS", "/tmp/.kern", "kern-wrap:", "sourceMappingURL"];
 fn extension(path: &str) -> String { path.rsplit('/').next().and_then(|n| n.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default() }
-/// What a changed file Kern does not run is, in a word, for the comment: tests, configuration, documentation, data and schemas, styles,
-/// dependencies, assets or other files.
 fn unmeasured_kind(path: &str) -> &'static str {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let dirs: Vec<String> = path.split('/').map(str::to_ascii_lowercase).collect();
@@ -264,7 +231,6 @@ fn unmeasured_kind(path: &str) -> &'static str {
     if binary(path) || ["svg", "html"].contains(&ext.as_str()) { return "assets and markup"; }
     "other files"
 }
-/// Kern's own files (drive.json, setup.json, reports), which a large change makes larger than inputs are allowed to be.
 fn read_own(path: impl AsRef<Path>) -> R<Value> {
     let path = path.as_ref();
     let bytes = std::fs::read(path).map_err(|e| Denied(format!("{}: {e}", path.display())))?;
@@ -273,13 +239,10 @@ fn read_own(path: impl AsRef<Path>) -> R<Value> {
 }
 fn binary(path: &str) -> bool { BINARY.contains(&extension(path).as_str()) }
 fn lockfile(path: &str) -> bool { LOCKFILES.contains(&path.rsplit('/').next().unwrap_or(path)) }
-/// Generated or minified code: a very long line, or long lines on average.
 pub fn minified(text: &str) -> bool { let n = text.lines().count().max(1); text.lines().any(|l| l.len() > 5000) || text.len() / n > 300 }
 
-/// One file of a commit.
 #[derive(Clone)]
 pub struct Item { pub path: String, pub mode: String, pub oid: String, pub size: u64 }
-/// Every file of a commit (submodules and names that are not UTF-8 left out). Unlike the verifier, drive reads repositories of any size.
 pub fn listing(repo: &Path, commit: &str) -> R<Vec<Item>> {
     let out = git_with(repo, &["ls-tree", "-rlz", "--full-tree", commit], None, 256 << 20)?;
     let mut items = Vec::new();
@@ -294,7 +257,6 @@ pub fn listing(repo: &Path, commit: &str) -> R<Vec<Item>> {
     }
     Ok(items)
 }
-/// The contents of these files, read from Git in batches of about 32 MiB so memory stays bounded; `each` gets them in order.
 pub fn blobs(repo: &Path, items: &[&Item], mut each: impl FnMut(&Item, &[u8]) -> R<()>) -> R<()> {
     let mut start = 0;
     while start < items.len() {
@@ -321,8 +283,6 @@ pub(crate) fn commit_check(repo: &Path, c: &str) -> R<()> {
     ensure!(git(repo, &["cat-file", "-t", c], None).map(trimmed).ok().as_deref() == Some("commit"), "Not a commit in this repository: {c}");
     Ok(())
 }
-/// Writes the author's read-only copy of a tree: text files up to 1 MiB, no dependencies, lockfiles or binaries, names this machine can
-/// hold. A repository too large to copy whole is copied around the change: the folders of the changed files and every top-level file.
 fn copy_for_author(repo: &Path, items: &[Item], changed: &[String], dest: &Path) -> R<&'static str> {
     let fits = |i: &&Item| matches!(i.mode.as_str(), "100644" | "100755") && i.size <= LARGEST && !binary(&i.path) && !lockfile(&i.path)
         && !i.path.split('/').any(|d| d == "node_modules") && file_path(&i.path).is_ok() && std::path::absolute(dest.join(&i.path)).is_ok_and(|p| p.as_os_str().len() < 250);
@@ -344,7 +304,6 @@ fn copy_for_author(repo: &Path, items: &[Item], changed: &[String], dest: &Path)
     blobs(repo, &chosen, |item, bytes| {
         let target = item.path.split('/').fold(dest.to_path_buf(), |p, part| p.join(part));
         if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
-        // Generated bundles help no reader; a name the file system refuses is left out. The sandbox gets every file regardless.
         if !minified(&String::from_utf8_lossy(bytes)) { let _ = std::fs::write(&target, bytes); }
         Ok(())
     })?;
@@ -368,7 +327,6 @@ fn lines_md(files: &[Value]) -> String {
     md
 }
 
-/// Prepares a drive task for the change from `base` to `head`: drive.json (what Kern measures and records) and the author's task folder.
 pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path, pr: Option<&str>) -> R<Value> {
     commit_check(repo, base)?;
     commit_check(repo, head)?;
@@ -378,13 +336,9 @@ pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path, pr: Option<&str>
     let (old_at, new_at) = (index(&old), index(&new));
     let names = git_with(repo, &["diff", "--no-renames", "--name-only", "-z", base, head], None, 64 << 20)?;
     let paths: Vec<String> = names.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).to_string()).collect();
-    // The code Kern would call: changed modules that are not tests, tool configuration or dependencies.
     let code: Vec<&String> = paths.iter().filter(|p| crate::compare::probeable(p, None)).collect();
-    // Code in other languages is named, so nobody reads silence as "checked".
     let mut skipped: Vec<Value> = paths.iter().filter(|p| OTHER_CODE.contains(&extension(p).as_str()) && !p.split('/').any(|d| d == "node_modules"))
         .map(|p| json!({ "path": p, "why": format!("a .{} file; Kern does not run .{} code yet", extension(p), extension(p)) })).collect();
-    // At most MOST_FILES changed modules and MOST_TEXT bytes of their text are measured: git stores a repeated file once, so a small push can
-    // name a huge amount of code. The rest is named as not measured.
     let (mut room, mut kept) = (MOST_TEXT, BTreeSet::new());
     for p in &code {
         let size = old_at.get(*p).map_or(0, |i| i.size.min(LARGEST)) + new_at.get(*p).map_or(0, |i| i.size.min(LARGEST));
@@ -427,17 +381,14 @@ pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path, pr: Option<&str>
     }
     let count = |side: &str| files.iter().map(|f| f[side].as_array().map_or(0, Vec::len)).sum::<usize>();
     let totals = json!({ "new": count("new"), "old": count("old") });
-    // Every other changed file is named too, by kind, so "every changed line ran" never hides a changed SQL file or test.
     let unmeasured: Vec<Value> = paths.iter().filter(|p| !files.iter().any(|f| f["path"] == p.as_str()) && !skipped.iter().any(|s| s["path"] == p.as_str()))
         .map(|p| json!({ "path": p, "why": unmeasured_kind(p) })).collect();
-    // The author's task folder.
     let task = out.join("task");
     std::fs::create_dir(&task)?;
     create_new(task.join("task.md"), TASK.as_bytes(), 0o644)?;
     let pr = match pr { Some(t) => t.to_string(), None => format!("# {}\n", String::from_utf8_lossy(&git(repo, &["log", "-1", "--format=%B", head], None)?).trim()) };
     create_new(task.join("pr.md"), pr.as_bytes(), 0o644)?;
     let shown: Vec<&str> = paths.iter().map(String::as_str).filter(|p| !lockfile(p) && !binary(p) && !skipped.iter().any(|s| s["path"] == *p)).collect();
-    // The paths go to git in groups of at most 12,000 characters: a Windows command line holds 32,767, and a change can name thousands.
     let mut patch = Vec::new();
     let mut group: Vec<&str> = Vec::new();
     for (i, p) in shown.iter().enumerate() {
@@ -465,10 +416,6 @@ pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path, pr: Option<&str>
     Ok(json!({ "status": "PREPARED", "totals": totals, "files": files.len(), "skipped": skipped.len(), "task": task.display().to_string() }))
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------------
-// Scoring a round: which measured lines ran, what the driver printed, what Kern recorded, what the code did.
-
-/// What one drive run left behind, read from its report (see sandbox::DRIVE_PARTS).
 #[derive(Clone, Debug, Default)]
 pub struct Run { pub output: String, pub errors: String, pub coverage: Value, pub calls: Vec<Value>, pub behavior: BTreeSet<String> }
 impl Run {
@@ -483,7 +430,6 @@ impl Run {
         })
     }
 }
-/// Lines that ran, per file (repository path), from c8's JSON.
 fn ran_lines(coverage: &Value) -> BTreeMap<String, BTreeSet<u32>> {
     let mut out: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
     for (file, d) in coverage.as_object().into_iter().flatten() {
@@ -497,13 +443,9 @@ fn ran_lines(coverage: &Value) -> BTreeMap<String, BTreeSet<u32>> {
     }
     out
 }
-/// A span of source V8 counted zero times: (line, column) to (line, column), columns in UTF-16 units as V8 counts them, and whether it
-/// is a whole function (else a block or branch).
 type Span = ((u32, u32), (u32, u32), bool);
-/// Helpers tsx (esbuild) adds when it rewrites a module: their coverage maps onto the file's first line, but they are no project code.
 const HELPERS: [&str; 22] = ["__name", "__export", "__copyProps", "__toCommonJS", "__toESM", "__reExport", "__commonJS", "__esm", "__require", "__defProp",
     "__defNormalProp", "__publicField", "__decorateClass", "__decorateParam", "__async", "__await", "__spreadValues", "__spreadProps", "__objRest", "__template", "__using", "get"];
-/// The code each file left out in a run: the functions and blocks V8 counted zero times, but tsx's own helpers.
 fn left_out(coverage: &Value) -> BTreeMap<String, Vec<Span>> {
     let at = |p: &Value| (p["line"].as_u64().unwrap_or(0) as u32, p["column"].as_u64().unwrap_or(0) as u32);
     let mut out: BTreeMap<String, Vec<Span>> = BTreeMap::new();
@@ -521,8 +463,6 @@ fn left_out(coverage: &Value) -> BTreeMap<String, Vec<Span>> {
     }
     out
 }
-/// Whether a span that starts at column `col` of a line (its text `text`) starts where the language lets a function or a block start. A
-/// span that starts anywhere else (`export`, the middle of `x = () =>`) is a rewrite's helper mapped onto the line, not code left out.
 fn plausible(text: &str, col: u32, function: bool) -> bool {
     let mut unit = 0u32;
     let at_byte = text.char_indices().find(|(_, c)| { let here = unit >= col; unit += c.len_utf16() as u32; here }).map_or(text.len(), |(i, _)| i);
@@ -535,13 +475,9 @@ fn plausible(text: &str, col: u32, function: bool) -> bool {
             || (!name.is_empty() && !["const", "let", "var", "return", "if", "for", "while", "switch", "new", "await", "typeof"].contains(&name.as_str())
                 && (rest.starts_with("=>") || rest.starts_with('(')));
     }
-    // A branch starts after its operator, or (as a source map can place it) at it: the ` : 0` of `a ? b + 1 : 0`.
     before.is_empty() || at.starts_with('{') || ["?", ":", "&&", "||", "??", ")", "else", "=>", "{", ";"].iter().any(|t| before.ends_with(t))
         || [":", "&&", "||", "??"].iter().any(|t| at.starts_with(t)) || (at.starts_with('?') && !at.starts_with("?."))
 }
-/// Whether code on line `line` (its text `text`) was left out: a span counted zero times covers something on it other than blanks and
-/// brackets. V8 counts a line as run when anything on it ran; `if (admin) wipe();` with wipe never called did not run, while
-/// `if (cond) {` with its block skipped did (its condition was evaluated).
 fn line_left_out(spans: &[Span], line: u32, text: &str) -> bool {
     spans.iter().any(|&((sl, sc), (el, ec), function)| {
         if line < sl || line > el || (line == sl && !plausible(text, sc, function)) { return false; }
@@ -554,7 +490,6 @@ fn line_left_out(spans: &[Span], line: u32, text: &str) -> bool {
         })
     })
 }
-/// The code on line `line` that was left out, as the line's own text (`wipe();`), for the author to see which input is missing.
 fn left_out_text(spans: &[Span], line: u32, text: &str) -> Option<String> {
     let mut part = String::new();
     for &((sl, sc), (el, ec), function) in spans.iter().filter(|((sl, _), (el, _), _)| line >= *sl && line <= *el) {
@@ -569,7 +504,6 @@ fn left_out_text(spans: &[Span], line: u32, text: &str) -> Option<String> {
     }
     (!part.is_empty()).then(|| clip_str(&part, 120))
 }
-/// The driver's steps, by name (a repeated name gets " #2", " #3"), with everything else it printed for that step.
 fn steps(output: &str) -> BTreeMap<String, String> {
     let (mut out, mut count) = (BTreeMap::new(), BTreeMap::<String, u32>::new());
     for line in output.lines() {
@@ -582,9 +516,6 @@ fn steps(output: &str) -> BTreeMap<String, String> {
     }
     out
 }
-/// Kern's own record of the calls into the changed modules: what each function did with each input (the nth call with the same input,
-/// when it gets that input more than once). Matching calls by their input, not their order, keeps a changed caller from looking like a
-/// changed callee: a helper that now receives other values has not changed what it does.
 fn calls(run: &Run) -> BTreeMap<(String, String, u32), String> {
     let (mut seen, mut out) = (BTreeMap::<(String, String), u32>::new(), BTreeMap::new());
     for c in &run.calls {
@@ -595,9 +526,6 @@ fn calls(run: &Run) -> BTreeMap<(String, String, u32), String> {
     }
     out
 }
-/// What the two runs of each side agree on, and where the sides differ: counts (same, different, unstable, only on the old side, only
-/// on the new side), the differences, and the unstable keys (the first 200). With `one_sided`, a key only one side has is a difference
-/// too: a step the new code never printed because its run ended early.
 type Compared<K, V> = (u64, u64, u64, u64, u64, Vec<(K, Option<V>, Option<V>)>, Vec<K>);
 fn compare<K: Ord + Clone, V: PartialEq + Clone>(o1: &BTreeMap<K, V>, o2: &BTreeMap<K, V>, n1: &BTreeMap<K, V>, n2: &BTreeMap<K, V>, one_sided: bool) -> Compared<K, V> {
     let keys: BTreeSet<&K> = o1.keys().chain(n1.keys()).collect();
@@ -620,7 +548,6 @@ fn compare<K: Ord + Clone, V: PartialEq + Clone>(o1: &BTreeMap<K, V>, o2: &BTree
 }
 fn clip_str(s: &str, n: usize) -> String { if s.chars().count() > n { format!("{}...", s.chars().take(n).collect::<String>()) } else { s.to_string() } }
 
-/// Scores one round from its four runs: the old code twice, then the new code twice.
 pub fn score(d: &Value, runs: &[Run; 4], round: u32) -> Value {
     let [o1, o2, n1, n2] = runs;
     let mut files = Vec::new();
@@ -630,12 +557,10 @@ pub fn score(d: &Value, runs: &[Run; 4], round: u32) -> Value {
         for f in d["files"].as_array().into_iter().flatten() {
             let path = f["path"].as_str().unwrap_or("");
             let wanted: Vec<(u64, String)> = f[&format!("{side}_text")].as_array().into_iter().flatten().filter_map(|x| Some((x[0].as_u64()?, x[1].as_str()?.to_string()))).collect();
-            // A line under a coverage-ignore comment reads as run whatever happened: Kern cannot tell, so it never counts.
             let hinted: BTreeSet<u64> = f[&format!("{side}_hinted")].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
             let text_of = |l: u64| wanted.iter().find(|(n, _)| *n == l).map_or("", |(_, t)| t.as_str());
             let hit = |l: u64| !hinted.contains(&l) && runs.iter().any(|(ran, out)| ran.get(path).is_some_and(|s| s.contains(&(l as u32)))
                 && !out.get(path).is_some_and(|spans| line_left_out(spans, l as u32, text_of(l))));
-            // A line that ran in part says which part did not.
             let part = |l: u64| runs.iter().filter(|(ran, _)| ran.get(path).is_some_and(|s| s.contains(&(l as u32))))
                 .find_map(|(_, out)| out.get(path).and_then(|spans| left_out_text(spans, l as u32, text_of(l))));
             let missed: Vec<Value> = wanted.iter().filter(|(l, _)| !hit(*l)).map(|(l, t)| match part(*l) { Some(p) => json!([l, t, p]), None => json!([l, t]) }).collect();
@@ -651,15 +576,12 @@ pub fn score(d: &Value, runs: &[Run; 4], round: u32) -> Value {
     let percent = (ran * 100).checked_div(total).unwrap_or(100);
     let (s_same, s_diff, s_unstable, _, _, step_diffs, shaky_steps) = compare(&steps(&o1.output), &steps(&o2.output), &steps(&n1.output), &steps(&n2.output), true);
     let (c_same, c_diff, c_unstable, c_old, c_new, call_diffs, shaky_calls) = compare(&calls(o1), &calls(o2), &calls(n1), &calls(n2), false);
-    // What answered differently on two runs of the same side could not be compared: named, per function, never counted as the same.
     let mut shaky_functions: BTreeMap<String, u64> = BTreeMap::new();
     for (k, _, _) in &shaky_calls { *shaky_functions.entry(k.clone()).or_insert(0) += 1; }
     let stable = |a: &Run, b: &Run| -> BTreeSet<String> { a.behavior.intersection(&b.behavior).cloned().collect() };
     let seen = |a: &Run, b: &Run| -> BTreeSet<String> { a.behavior.union(&b.behavior).cloned().collect() };
     let new_behavior: Vec<String> = stable(n1, n2).difference(&seen(o1, o2)).cloned().collect();
     let gone: Vec<String> = stable(o1, o2).difference(&seen(n1, n2)).cloned().collect();
-    // Every step that threw, on either side: one that throws the same on both is no difference, yet it is what the driver's author most
-    // needs to see.
     let (sn, so) = (steps(&n1.output), steps(&o1.output));
     let error_of = |v: &String| serde_json::from_str::<Value>(v).ok().and_then(|o| o.get("error").map(|e| e.as_str().map_or_else(|| e.to_string(), str::to_string)));
     let mut threw = Vec::new();
@@ -680,7 +602,6 @@ pub fn score(d: &Value, runs: &[Run; 4], round: u32) -> Value {
             "old": a.as_deref().map(|x| clip_str(x, 600)), "new": b.as_deref().map(|x| clip_str(x, 600)) })).collect::<Vec<_>>(),
         "behavior": { "new": new_behavior, "gone": gone },
         "threw": threw,
-        // How each side's runs ended, in Kern's own words: an uncaught error, a run stopped for time or memory.
         "endings": { "old": endings(&[o1, o2]), "new": endings(&[n1, n2]) },
         "unstable": { "steps": shaky_steps.iter().take(30).map(|s| clip_str(s, 200)).collect::<Vec<_>>(),
             "calls": shaky_functions.iter().take(30).map(|(f, n)| json!({ "call": f, "count": n })).collect::<Vec<_>>() },
@@ -688,8 +609,6 @@ pub fn score(d: &Value, runs: &[Run; 4], round: u32) -> Value {
         "errors": { "old": clip_tail(&o1.errors, 4000), "new": clip_tail(&n1.errors, 4000) },
     })
 }
-/// How one side's runs ended, in Kern's own words (the `kern:` lines of their error output): an uncaught error, a driver that did not
-/// finish, a run stopped for time or memory. Empty when they ended normally.
 fn endings(runs: &[&Run]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for r in runs {
@@ -700,15 +619,12 @@ fn endings(runs: &[&Run]) -> Vec<String> {
     }
     out
 }
-/// The first `n` steps a run printed, in the order it printed them: what the driver's author needs to see when both sides agree (every
-/// request turned away at a login check prints the same on both).
 fn first_steps(output: &str, n: usize) -> Vec<Value> {
     output.lines().filter_map(|l| match serde_json::from_str::<Value>(l) { Ok(Value::Object(mut o)) => o.remove("step").map(|s| (s, o)), _ => None }).take(n)
         .map(|(s, rest)| json!({ "step": clip_str(&s.as_str().map_or_else(|| s.to_string(), str::to_string), 200), "printed": clip_str(&Value::Object(rest).to_string(), 300) })).collect()
 }
 fn clip_tail(s: &str, n: usize) -> String { let c: Vec<char> = s.chars().collect(); if c.len() > n { format!("...{}", c[c.len() - n..].iter().collect::<String>()) } else { s.to_string() } }
 
-/// What the driver's author reads before the next round: the lines that did not run, the errors, what threw, what differs.
 pub fn feedback(_d: &Value, r: &Value) -> String {
     let c = &r["coverage"];
     let side = |s: &str| format!("{}/{}", c[s]["ran"], c[s]["total"]);
@@ -748,7 +664,6 @@ pub fn feedback(_d: &Value, r: &Value) -> String {
     if !printed.is_empty() { md += &format!("\n## What your steps printed on the new code (the first {}, in order)\n\n{}\n", printed.len(), printed.join("\n")); }
     let diffs: Vec<String> = r["differences"].as_array().into_iter().flatten().take(20).map(|d| format!("- {}\n  old: {}\n  new: {}", d["step"].as_str().unwrap_or(""), d["old"].as_str().unwrap_or("(no such step)"), d["new"].as_str().unwrap_or("(no such step)"))).collect();
     if !diffs.is_empty() { md += &format!("\n## What differs between the old and the new code (first 20)\n\n{}\n", diffs.join("\n")); }
-    // A package that cannot load here (React Native's Flow sources, a native add-on whose install script never ran) stops every line behind it.
     let errors_text = format!("{}{}{}", r["errors"]["old"].as_str().unwrap_or(""), r["errors"]["new"].as_str().unwrap_or(""), r["threw"]);
     if package_failed(&errors_text) {
         md += "\n## A package failed to load\n\nThe errors above look like a package that cannot load here. If the changed code only needs it to exist (a UI kit, a \
@@ -761,11 +676,8 @@ pub fn feedback(_d: &Value, r: &Value) -> String {
     md
 }
 
-/// Whether error text looks like a package that cannot load under Node here: an error from inside node_modules, a native add-on without
-/// its binary, a package Node cannot find or transform. A project file missing from one tree (a new file, on the old side) is not one.
 fn package_failed(text: &str) -> bool {
     const MARKS: [&str; 8] = ["node_modules", "bindings file", "NODE_MODULE_VERSION", ".node'", "invalid ELF header", "Transform failed", "ERR_REQUIRE_ESM", "ERR_UNKNOWN_FILE_EXTENSION"];
-    // A package name starts with a letter or digit, or is scoped (`@scope/name`); `@/x`, `~/x` and `#x` are the project's own aliases.
     let package_name = |s: &str| {
         let mut c = s.chars();
         match c.next() { Some('@') => c.next().is_some_and(|x| x.is_ascii_alphanumeric()), Some(x) => x.is_ascii_alphanumeric() && !s.starts_with("file:"), None => false }
@@ -773,13 +685,10 @@ fn package_failed(text: &str) -> bool {
     let missing_package = ["Cannot find module '", "Cannot find package '"].iter().any(|m| text.match_indices(m).any(|(i, _)| package_name(&text[i + m.len()..])));
     missing_package || MARKS.iter().any(|m| text.contains(m))
 }
-/// Text from the code under test, as an inline code span that cannot break out: one line, no backticks, at most `n` characters.
 fn span(s: &str, n: usize) -> String {
     let flat: String = s.chars().map(|c| if c == '`' { '\'' } else if c.is_control() { ' ' } else { c }).collect();
     format!("`{}`", clip_str(flat.trim(), n))
 }
-/// Two long values as the parts a reader must compare: from a little before their first difference, at most `n` characters each, cut
-/// ends marked `…`. Values that fit are left whole.
 fn windows(a: &str, b: &str, n: usize) -> (String, String) {
     let (ca, cb): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     if ca.len() <= n && cb.len() <= n { return (a.to_string(), b.to_string()); }
@@ -791,7 +700,6 @@ fn windows(a: &str, b: &str, n: usize) -> (String, String) {
     };
     (cut(&ca), cut(&cb))
 }
-/// What two recorded calls did, side by side and in words, long values shown where they differ.
 fn outcomes(old: Option<&str>, new: Option<&str>) -> (String, String) {
     match (old, new) {
         (Some(a), Some(b)) => match (a.split_once(' '), b.split_once(' ')) {
@@ -804,7 +712,6 @@ fn outcomes(old: Option<&str>, new: Option<&str>) -> (String, String) {
         (a, b) => (a.map_or("was not called".to_string(), outcome), b.map_or("is not called".to_string(), outcome)),
     }
 }
-/// What a recorded call did, in words: "returned `x`", "threw `TypeError: ...`".
 fn outcome(o: &str) -> String {
     match o.split_once(' ') {
         Some(("r", v)) => format!("returned {}", span(v, 160)),
@@ -813,7 +720,6 @@ fn outcome(o: &str) -> String {
         _ => span(o, 160),
     }
 }
-/// Line numbers as short ranges: 3, 7-9, 12.
 fn ranges(lines: &[u64]) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -825,11 +731,7 @@ fn ranges(lines: &[u64]) -> String {
     }
     out.join(", ")
 }
-/// What behaves differently, in the order the comment lists it: Kern's own record first (each distinct change once, with how many calls
-/// showed it), then what the driver printed differently. Each item is the line and whether it comes from Kern's own record. The numbers
-/// D1, D2, ... in differences.md and verdicts.json follow this order.
 pub fn difference_items(r: &Value) -> Vec<(String, bool)> {
-    // The calls of one function that now give the same answer are one line: their inputs, and what they gave before.
     struct Group { call: String, now: Option<String>, inputs: Vec<String>, before: Vec<Option<String>>, calls: usize }
     let mut groups: Vec<Group> = Vec::new();
     for x in r["call_differences"].as_array().into_iter().flatten() {
@@ -845,7 +747,6 @@ pub fn difference_items(r: &Value) -> Vec<(String, bool)> {
     }
     let mut items: Vec<(String, bool)> = groups.iter().map(|g| {
         let inputs = match g.inputs.len() { 0..=2 => g.inputs.join(", "), n => format!("{}, {} and {} more input{}", g.inputs[0], g.inputs[1], n - 2, if n == 3 { "" } else { "s" }) };
-        // Long answers are shown where they differ from the new one.
         let now = outcomes(g.before.first().and_then(|b| b.as_deref()), g.now.as_deref()).1;
         let shown: Vec<String> = g.before.iter().map(|b| outcomes(b.as_deref(), g.now.as_deref()).0).collect();
         let before = if shown.len() <= 3 { shown.join(" or ") } else { format!("{} or {} other answers", shown[..2].join(" or "), shown.len() - 2) };
@@ -864,17 +765,13 @@ pub fn difference_items(r: &Value) -> Vec<(String, bool)> {
     }));
     items
 }
-/// At most this many differences are sorted by what the pull request says; the rest are listed unsorted.
 const SORTED_MAX: usize = 60;
-/// What the sorting agent reads: every difference the comment lists, numbered.
 pub fn differences_md(r: &Value) -> String {
     let mut md = String::from("# What behaves differently between the old and the new code\n\nKern ran the driver on both and saw these differences. \
         \"printed\" ones are what the driver printed; the others are Kern's own record of calls and behaviour.\n\n");
     for (i, (line, recorded)) in difference_items(r).iter().take(SORTED_MAX).enumerate() { md += &format!("- D{}: {line}{}\n", i + 1, if *recorded { "" } else { " (printed)" }); }
     md
 }
-/// The sorting agent's answer, if it fits: an object whose keys are numbers of listed differences (D1, D2, ...) and whose values say
-/// yes, no or unclear, with a short reason. Anything else sorts nothing (null): every difference is then listed unsorted.
 pub fn read_verdicts(path: &Path, r: &Value) -> Value {
     let count = difference_items(r).len().min(SORTED_MAX);
     let Ok(text) = std::fs::read_to_string(path) else { return Value::Null };
@@ -889,21 +786,18 @@ pub fn read_verdicts(path: &Path, r: &Value) -> Value {
     }
     if out.is_empty() { Value::Null } else { Value::Object(out) }
 }
-/// The pull request comment: what Kern ran, what behaves differently, and the lines a person must still read.
 pub fn comment(d: &Value, r: &Value) -> String {
     let c = &r["coverage"];
     let n = |v: &Value| v.as_u64().unwrap_or(0);
     let mut md = String::from("### Kern: what this change does when it runs\n\n");
     md += &format!("Kern ran **{}%** of the changed lines on both the old and the new code (new code: {} of {} lines, old code: {} of {}), twice each, in a sealed sandbox with the network off.\n\n",
         n(&c["percent"]), n(&c["new"]["ran"]), n(&c["new"]["total"]), n(&c["old"]["ran"]), n(&c["old"]["total"]));
-    // Runs that ended differently come first: the new code crashing partway explains everything below.
     let ending = |side: &str| -> Vec<String> { r["endings"][side].as_array().into_iter().flatten().filter_map(Value::as_str).map(|l| span(l, 300)).collect() };
     let (eo, en) = (ending("old"), ending("new"));
     if eo != en {
         let say = |e: &[String]| if e.is_empty() { "ended normally".to_string() } else { e.join("; ") };
         md += &format!("**The old and the new code's runs ended differently.** Old code: {}. New code: {}.\n\n", say(&eo), say(&en));
     }
-    // Kern's own record comes first: it does not depend on what the driver chose to print. The same change seen several times is one line.
     let items = difference_items(r);
     let lines: Vec<String> = items.iter().filter(|(_, rec)| *rec).map(|(l, _)| format!("- {l}")).collect();
     let printed: Vec<String> = items.iter().filter(|(_, rec)| !*rec).map(|(l, _)| format!("- {l}")).collect();
@@ -919,10 +813,7 @@ pub fn comment(d: &Value, r: &Value) -> String {
         (true, true) if !shaky.is_empty() => md += "**No difference** in what Kern could compare.\n\n",
         (true, true) if n(&c["new"]["ran"]) + n(&c["old"]["ran"]) == 0 => md += "**None of the changed code ran**, so Kern saw none of its behaviour.\n\n",
         (true, true) => md += "**Nothing behaves differently** in what Kern ran.\n\n",
-        // Sorted by what the pull request says: what it does not mention comes first, since that is what a reviewer must check.
         _ if sorted.is_object() => {
-            // Kern's own record is sorted; what the driver printed repeats it, so it stays folded away with each line's verdict. With no
-            // record, the printed differences are what gets sorted.
             let has_record = items.iter().any(|(_, rec)| *rec);
             let (mut surprises, mut described, mut folded) = (Vec::new(), Vec::new(), Vec::new());
             for (i, (line, rec)) in items.iter().enumerate() {
@@ -977,13 +868,11 @@ pub fn comment(d: &Value, r: &Value) -> String {
         if shaky.len() > 20 { md += &format!("- ... and {} more in Kern's report\n", shaky.len() - 20); }
         md += "\n";
     }
-    // What limits the evidence comes before the long list of lines, so a cut never drops it.
     let failed: Vec<String> = ["new", "old"].iter().flat_map(|side| r["installs"][*side].as_array().into_iter().flatten().filter(|i| i["result"].as_str().is_some_and(|x| x.starts_with("failed") || x.starts_with("out of time")))
         .map(move |i| format!("- {} ({side} code): {}", span(i["dir"].as_str().unwrap_or("."), 120), span(i["result"].as_str().unwrap_or(""), 300)))).collect();
     if !failed.is_empty() { md += &format!("**Dependencies that could not be installed** — code that needs them could not run:\n\n{}\n\n", failed.join("\n")); }
     let loose: Vec<String> = ["new", "old"].iter().flat_map(|side| r["installs"][*side].as_array().into_iter().flatten().filter_map(move |i| {
         let why = i["result"].as_str()?.strip_prefix("installed from package.json (")?.strip_suffix(')')?;
-        // Kern's own words (the lockfile is out of date; Kern does not read Bun's lockfile) read as words; anything else as code.
         let why = if why.chars().all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '\'') { why.to_string() } else { span(why, 120) };
         Some(format!("{} ({side} code: {why})", span(i["dir"].as_str().unwrap_or("."), 120)))
     })).collect();
@@ -1006,7 +895,6 @@ pub fn comment(d: &Value, r: &Value) -> String {
         for which in ["new", "old"] {
             let lines: Vec<u64> = f[which]["missed"].as_array().into_iter().flatten().filter_map(|x| x[0].as_u64()).collect();
             if lines.is_empty() { continue; }
-            // At most 40 ranges per file: the rest are counted, not listed.
             let all = ranges(&lines);
             let shown: Vec<&str> = all.split(", ").take(40).collect();
             let more = all.split(", ").count().saturating_sub(40);
@@ -1033,8 +921,6 @@ pub fn comment(d: &Value, r: &Value) -> String {
     md
 }
 
-/// Where dependencies are installed: the root, and each folder whose package.json owns a changed module and is not a workspace package
-/// the root installs anyway. At most 16 folders.
 pub fn install_dirs(paths: &BTreeSet<String>, code: &[String], root_package: Option<&str>, pnpm_workspace: Option<&str>) -> Vec<String> {
     let mut patterns: Vec<String> = Vec::new();
     if let Some(p) = root_package.and_then(|t| serde_json::from_str::<Value>(t).ok()) {
@@ -1063,9 +949,7 @@ pub fn install_dirs(paths: &BTreeSet<String>, code: &[String], root_package: Opt
     dirs
 }
 fn regex_quote(s: &str) -> String { s.chars().map(|c| if "\\.+?()[]{}|^$".contains(c) { format!("\\{c}") } else { c.to_string() }).collect() }
-/// Matches `dir` against a pattern made by install_dirs (literal text, `[^/]*` and `.*` only), anchored at both ends.
 fn glob_match(pattern: &str, dir: &str) -> bool {
-    // Tokens: literal characters (an escaped one counts as literal), `[^/]*` and `.*`.
     let mut tokens: Vec<(u8, char)> = Vec::new();
     let b: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -1086,24 +970,15 @@ fn glob_match(pattern: &str, dir: &str) -> bool {
 }
 fn byte_at(chars: &[char], i: usize) -> usize { chars[..i].iter().map(|c| c.len_utf8()).sum() }
 
-/// Kern's driver tools, as the manifests the strict installer takes: tsx, c8 and jsdom, every package pinned to the public registry.
 pub fn tools() -> crate::git::Files {
     let entry = |text: &str| { let b = text.as_bytes().to_vec(); crate::git::Entry { mode: "100644".into(), oid: crate::git::object_id("blob", &b), size: b.len() as u64, bytes: Some(b) } };
     [("package.json", include_str!("drive-tools/package.json")), ("package-lock.json", include_str!("drive-tools/package-lock.json"))].iter().map(|(p, t)| (p.to_string(), entry(t))).collect()
 }
-/// The tsconfig a drive run loads code with: the project's own (its paths and settings), with React's automatic JSX runtime, which plain
-/// Node needs where the project leaves JSX to its bundler (Next.js keeps it). The file sits outside the project, and tsx applies a
-/// tsconfig only to the files it includes, so it includes every file of the project explicitly.
 pub fn tsconfig(project_has_one: bool) -> String {
     let extends = if project_has_one { "\"extends\":\"/workspace/tsconfig.json\"," } else { "" };
     format!("{{{extends}\"compilerOptions\":{{\"jsx\":\"react-jsx\"}},\"include\":[\"/workspace/**/*\"]}}\n")
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------------
-// Running a round in the sandbox. The verifier's control plane (`--control verifier.json`) and the operator's image are required: drive
-// runs code the same way verification does, in gVisor, as an unprivileged user, with the network off.
-
-/// The loader and the run wrapper that go into every drive run's control folder.
 pub const LOADER: &str = include_str!("drive-loader.mjs");
 pub const HOOKS: &str = include_str!("drive-hooks.mjs");
 pub const SUPPORT: &str = include_str!("drive-support.mjs");
@@ -1113,13 +988,9 @@ pub const RUNNER: &str = include_str!("drive-run.mjs");
 fn run_limits() -> Limits { Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: 300, memory_mb: 2048, pids: 512 } }
 fn setup_limits() -> Limits { Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 1 << 20, timeout_seconds: 1800, memory_mb: 4096, pids: 1024 } }
 
-/// A repository path that is safe to write under a folder on Linux, where the sandbox runs: relative, no empty, `.` or `..` part, no `.git`,
-/// no NUL. Names only Windows reserves (`aux`, `con`, `a:b`) are fine there, and projects use them.
 pub fn linux_path(p: &str) -> bool {
     !p.is_empty() && p.len() <= 4096 && !p.starts_with('/') && !p.contains('\0') && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c != ".git")
 }
-/// Writes every file of a commit to `dest` for the sandbox to copy into its tree volume: regular files only (no symlinks or submodules),
-/// paths safe on Linux, at most 4 GiB in all.
 fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     let items = listing(repo, commit)?;
     let files: Vec<&Item> = items.iter().filter(|i| matches!(i.mode.as_str(), "100644" | "100755") && linux_path(&i.path)).collect();
@@ -1136,8 +1007,6 @@ fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     Ok(files.iter().map(|i| i.path.clone()).collect())
 }
 
-/// Installs both trees (each with its own dependencies, install scripts off) and Kern's driver tools, once per task. The volumes are
-/// named in setup.json and kept for later rounds until `drive clean`.
 pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
@@ -1146,7 +1015,6 @@ pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
     std::fs::create_dir(&root)?;
     let code: Vec<String> = d["files"].as_array().into_iter().flatten().filter_map(|f| f["path"].as_str().map(str::to_string)).collect();
     let mut sides = serde_json::Map::new();
-    // Every volume is removed again if any part of the setup fails; they are kept only once all of it has worked.
     let mut volumes = Vec::new();
     for (side, commit) in [("old", d["base"].as_str().unwrap_or("")), ("new", d["head"].as_str().unwrap_or(""))] {
         let tree = root.join(side);
@@ -1165,14 +1033,12 @@ pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
         let _ = std::fs::remove_dir_all(&tree);
         let _ = std::fs::remove_dir_all(&control);
     }
-    // The tools come through the strict installer: every package pinned, from the public registry, checked by integrity, cached.
     let mut public = op.clone();
     public.registry = Some("registry.npmjs.org".into());
     let tools_root = root.join("tools");
     std::fs::create_dir(&tools_root)?;
     let deps = crate::flow::install_dependencies(&tools(), &public, &tools_root, &op.image)?;
     let mut volume = deps.volume;
-    // The tools stay after the task only when their volume is the dependency cache's; one of their own goes with the task (clean).
     let cached = volume.kept();
     volume.keep();
     for v in &mut volumes { v.keep(); }
@@ -1181,8 +1047,6 @@ pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
     Ok(s)
 }
 
-/// One round: the driver runs twice on the old tree and twice on the new one; the round is scored, the author gets feedback.md and the
-/// pull request comment is rewritten.
 pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
     let driver_bytes = std::fs::read(driver)?;
@@ -1197,7 +1061,6 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> 
     let dir = rounds.join(round.to_string());
     std::fs::create_dir(&dir)?;
     create_new(dir.join("driver.mjs"), &driver_bytes, 0o644)?;
-    // The stand-ins go with the round's record and into every run, at /kern/stubs.
     let put_stubs = |root: &Path, mode: u32| -> R<()> {
         for (name, bytes) in &stand_ins {
             let p = root.join("stubs").join(format!("{name}.mjs"));
@@ -1217,14 +1080,12 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> 
         let modules: Vec<Value> = d["modules"].as_array().into_iter().flatten().map(|m| json!({ "path": m["path"], "functions": m[side]["functions"], "cjs": m[side]["cjs"], "default": m[side]["default"] })).collect();
         create_new(control.join("drive.json"), json!({ "modules": modules, "stubs": stub_names }).to_string().as_bytes(), 0o444)?;
         put_stubs(&control, 0o444)?;
-        // A stand-in's own imports (React, say) resolve from the project's node_modules on every path Node takes, hooks or none.
         #[cfg(unix)]
         if !stand_ins.is_empty() { std::os::unix::fs::symlink("/workspace/node_modules", control.join("node_modules"))?; }
         create_new(control.join("drive-loader.mjs"), LOADER.as_bytes(), 0o444)?;
         create_new(control.join("drive-hooks.mjs"), HOOKS.as_bytes(), 0o444)?;
         create_new(control.join("drive-support.mjs"), SUPPORT.as_bytes(), 0o444)?;
         create_new(control.join("drive-browser.mjs"), BROWSER.as_bytes(), 0o444)?;
-        // What Next.js's server-only and client-only become (drive-support.mjs): an empty module.
         create_new(control.join("empty-marker.js"), b"", 0o444)?;
         create_new(control.join("drive-c8.mjs"), C8.as_bytes(), 0o444)?;
         create_new(control.join("drive-run.mjs"), RUNNER.as_bytes(), 0o444)?;
@@ -1234,7 +1095,6 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> 
         let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive".into()],
             network: "none", volumes: vec![(&tools_volume, "/kern-tools/node_modules", true)], root: false, home_mb: 0, scratch: false, workspace: Some((volume, true)) });
         let _ = std::fs::remove_dir_all(&control);
-        // Code that exhausts the sandbox's memory or time ends its own run, not the round: the report says so.
         let run = match run {
             Err(e) if e.0.contains("exceeded limits") || e.0.contains("timed out") => return Ok(Run { errors: format!("kern: this run was stopped: {} (the sandbox allows 2 GiB of memory and 5 minutes)", e.0), ..Run::default() }),
             other => other?,
@@ -1242,7 +1102,6 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> 
         if run.exit_code != 0 { return Ok(Run { errors: format!("kern: this run failed in the sandbox (exit code {})", run.exit_code), ..Run::default() }); }
         Run::parse(&run.stdout)
     };
-    // Two sandboxes at a time: both runs of one side, then both of the other.
     let pair = |side: &str| -> R<(Run, Run)> {
         std::thread::scope(|sc| {
             let (a, b) = (sc.spawn(|| one(side, 1)), sc.spawn(|| one(side, 2)));
@@ -1252,7 +1111,6 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> 
     };
     let (o1, o2) = pair("old")?;
     let (n1, n2) = pair("new")?;
-    // What each run left, kept with the round: the evidence behind the report.
     let raw = dir.join("runs");
     std::fs::create_dir(&raw)?;
     for (name, r) in [("old-1", &o1), ("old-2", &o2), ("new-1", &n1), ("new-2", &n2)] {
@@ -1271,12 +1129,7 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> 
         "report": dir.join("report.json").display().to_string(), "comment": out.join("comment.md").display().to_string() }))
 }
 
-/// Usable stand-ins as (package, source), and refused ones as { path, why }.
 pub type StandIns = (Vec<(String, Vec<u8>)>, Vec<Value>);
-/// The stand-ins the driver's author wrote for packages that cannot load under Node here (React Native's Flow sources, a native add-on
-/// whose install script never ran): `stubs/<package>.mjs` next to the driver, `stubs/@scope/name.mjs` for a scoped one. Inside the sandbox
-/// an import or require of that package gets the stand-in, unless it resolves to the project's own code. Returns the usable ones, sorted,
-/// and the refused ones with the reason; at most 64, each at most 256 KiB, 2 MiB in all.
 pub fn stubs(driver_dir: &Path) -> R<StandIns> {
     let root = driver_dir.join("stubs");
     let (mut used, mut refused) = (Vec::new(), Vec::new());
@@ -1307,7 +1160,6 @@ pub fn stubs(driver_dir: &Path) -> R<StandIns> {
     used.sort();
     Ok((used, refused))
 }
-/// A bare import specifier naming a package or a file inside one: `react-native`, `@expo/vector-icons`, `expo-router/stack`.
 pub fn package_specifier(s: &str) -> bool {
     let parts: Vec<&str> = s.split('/').collect();
     let part = |p: &str| !p.is_empty() && p != "." && p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
@@ -1315,15 +1167,12 @@ pub fn package_specifier(s: &str) -> bool {
     s.len() <= 214 && !parts[name].starts_with(['.', '_']) && parts[name..].iter().all(|p| part(p))
 }
 
-/// Removes the task's volumes (Kern's tools stay when they are in the dependency cache).
 pub fn clean(out: &Path) -> R<Value> {
     let s = read_own(out.join("setup.json"))?;
     let mut volumes: Vec<&str> = ["old", "new"].iter().filter_map(|side| s[side]["volume"].as_str()).collect();
     if s["tools"]["cached"] != true { volumes.extend(s["tools"]["volume"].as_str()); }
     let mut removed = Vec::new();
-    // A volume Kern could not remove is an error, and setup.json stays for another try: a runner that silently keeps them fills its disk.
     for v in volumes.into_iter().filter(|v| v.starts_with("kern-deps-")) {
-        // A cancelled run can leave Kern's own sandbox behind, still holding the volume: it goes first.
         let filter = format!("volume={v}");
         if let Ok(ids) = crate::sandbox::docker(&["ps", "--all", "--quiet", "--filter", &filter, "--filter", "name=kern-"], std::time::Duration::from_secs(60), 1 << 16) {
             for id in String::from_utf8_lossy(&ids).split_whitespace() { let _ = crate::sandbox::docker(&["rm", "--force", id], std::time::Duration::from_secs(60), 4096); }
@@ -1336,15 +1185,8 @@ pub fn clean(out: &Path) -> R<Value> {
     Ok(json!({ "status": "CLEANED", "removed": removed }))
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------------
-// The whole loop in one command, and the pull request comment.
-
-/// What the driver's author is asked in the first round, and in every later one.
 pub const FIRST: &str = "Read task.md in this folder and do what it says: write driver.mjs here. Read pr.md, diff.patch and lines.md first, then the code in new/ and old/.";
 pub const AGAIN: &str = "Kern ran your driver.mjs. Read feedback.md in this folder: it lists the measured changed lines that did not run, the error output, the steps that threw and what differs between the old and the new code. Revise driver.mjs so the lines that did not run do run, keeping the steps that already work. If a line can never run (dead code), say which and why in notes.md. task.md still applies.";
-/// Every round's report as one. Each round ran the same code with another driver, so a measured line ran if any round ran it and a
-/// difference counts if any round saw it (an input that made the new code throw stays on record after the driver drops it). Lists from
-/// all rounds are kept once each.
 pub fn merge(reports: &[Value]) -> Value {
     let Some(last) = reports.last() else { return Value::Null };
     let mut out = last.clone();
@@ -1384,13 +1226,10 @@ pub fn merge(reports: &[Value]) -> Value {
     out["rounds"] = json!(reports.len());
     out
 }
-/// The reports of every round in `out`, in order.
 fn round_reports(out: &Path) -> Vec<Value> {
     (1..=64u32).filter_map(|n| read_own(out.join("rounds").join(n.to_string()).join("report.json")).ok()).collect()
 }
-/// What the agent is asked once the rounds are over: which differences the pull request describes.
 pub const SORT: &str = "Read pr.md and differences.md in this folder. differences.md lists, numbered D1, D2 and so on, what behaves differently between the old and the new code. For each one, decide from pr.md alone whether the pull request says that this should change. Write verdicts.json here with one entry per difference, like {\"D1\": {\"says\": \"yes\", \"why\": \"...\"}}: says is yes (pr.md describes this change; quote its words in why), no (pr.md does not mention it) or unclear. Change no other file.";
-/// Writes the merged report of every round (out/report.json) and the comment made from it; returns the report.
 fn conclude(out: &Path, d: &Value, sorted: Option<Value>) -> R<Value> {
     let mut report = merge(&round_reports(out));
     ensure!(!report.is_null(), "No round has run yet");
@@ -1403,8 +1242,6 @@ fn conclude(out: &Path, d: &Value, sorted: Option<Value>) -> R<Value> {
     std::fs::write(out.join("comment.md"), comment(d, &report))?;
     Ok(report)
 }
-/// Sorting what every round saw by what the pull request says. Without verdicts: writes task/differences.md for the agent and says how
-/// many differences there are. With the agent's verdicts.json: keeps them with the merged report when they fit, and rewrites comment.md.
 pub fn sort(out: &Path, verdicts: Option<&Path>) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
     let Some(verdicts) = verdicts else {
@@ -1417,18 +1254,12 @@ pub fn sort(out: &Path, verdicts: Option<&Path>) -> R<Value> {
     let report = conclude(out, &d, Some(read_verdicts(verdicts, &merged)))?;
     Ok(json!({ "status": if report["sorted"].is_object() { "SORTED" } else { "NOT_SORTED" }, "percent": report["coverage"]["percent"] }))
 }
-/// The default author of drivers: Claude Code in restricted mode with `model` (KERN_DRIVE_MODEL; an alias, a model name, or a Bedrock or
-/// Vertex id). Its file tools stay inside the task folder and it can run no command and reach no web page, so the code it reads never runs
-/// outside Kern's sandbox. KERN_DRIVE_AGENT replaces it (a JSON array; `{prompt}` is the round's question).
 pub fn default_agent(model: &str) -> R<Vec<String>> {
     ensure!(!model.is_empty() && model.len() <= 200 && !model.starts_with('-') && model.chars().all(|c| c.is_ascii_alphanumeric() || "._:/@[]-".contains(c)),
         "KERN_DRIVE_MODEL must be a model name such as sonnet");
     Ok(["claude", "-p", "{prompt}", "--restricted", "--tools", "Read,Write,Edit,Glob,Grep", "--permission-mode", "acceptEdits", "--model", model,
         "--output-format", "json", "--no-session-persistence", "--strict-mcp-config"].iter().map(|s| s.to_string()).collect())
 }
-/// Whether the agent's process may see a variable. The agent reads untrusted code, and what its driver prints reaches the pull request, so
-/// it gets only what an agent needs: its model credentials (Anthropic, or Bedrock and Vertex), the system's own variables, proxies and
-/// certificates. Every other job secret stays behind; KERN_DRIVE_AGENT_ENV names more for an agent of your own (comma-separated).
 fn agent_may_see(name: &str, extra: &[String]) -> bool {
     const NAMES: [&str; 35] = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TZ", "TMPDIR", "TEMP", "TMP", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
         "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
@@ -1437,10 +1268,7 @@ fn agent_may_see(name: &str, extra: &[String]) -> bool {
     let n = name.to_ascii_uppercase();
     NAMES.contains(&n.as_str()) || PREFIXES.iter().any(|p| n.starts_with(p)) || extra.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
-/// The files a round of the driver's author may find in its task folder: Kern's task, the author's own work, and Kern's answers to it.
 const TASK_FILES: [&str; 12] = ["task.md", "pr.md", "diff.patch", "lines.md", "old", "new", "feedback.md", "differences.md", "driver.mjs", "stubs", "notes.md", "verdicts.json"];
-/// Removes everything else from the task folder before a round, so a round the code under study steered (prompt injection) leaves no
-/// settings, instructions or tools for the next one. Returns what it removed.
 pub fn tidy_task(task: &Path) -> R<Vec<String>> {
     let mut removed = Vec::new();
     for e in std::fs::read_dir(task)? {
@@ -1453,7 +1281,6 @@ pub fn tidy_task(task: &Path) -> R<Vec<String>> {
     removed.sort();
     Ok(removed)
 }
-/// Whether another round can help: none has run, or the last one is under 95% and either was the first or gained 5 points or more.
 pub fn another_round(percents: &[u64], max: usize) -> bool {
     match percents {
         [] => max > 0,
@@ -1463,7 +1290,6 @@ pub fn another_round(percents: &[u64], max: usize) -> bool {
         [.., before, last] => last.saturating_sub(*before) >= 5,
     }
 }
-/// One round of the driver's author: the agent command in the task folder, stopped after `timeout`.
 pub fn agent_round(task: &Path, argv: &[String], prompt: &str, timeout: std::time::Duration) -> R<Value> {
     ensure!(!argv.is_empty(), "The agent command is empty");
     let args: Vec<String> = argv.iter().map(|a| a.replace("{prompt}", prompt)).collect();
@@ -1474,7 +1300,6 @@ pub fn agent_round(task: &Path, argv: &[String], prompt: &str, timeout: std::tim
     let mut child = command.args(&args[1..]).current_dir(task).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| Denied(format!("The agent command could not start: {e}")))?;
     let mut out = child.stdout.take().ok_or_else(|| Denied("The agent command has no output".into()))?;
-    // The first MiB is kept and the rest read and dropped: an agent blocked on a full pipe would never finish.
     let reader = std::thread::spawn(move || {
         let mut b = Vec::new();
         let _ = std::io::Read::read_to_end(&mut std::io::Read::take(&mut out, 1 << 20), &mut b);
@@ -1487,13 +1312,10 @@ pub fn agent_round(task: &Path, argv: &[String], prompt: &str, timeout: std::tim
         if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); break None; }
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
-    // An agent stopped for time may have left a child holding its output; its reader is left behind rather than waited for.
     let stdout = if status.is_some() { reader.join().unwrap_or_default() } else { Vec::new() };
     let said = serde_json::from_slice::<Value>(&stdout).ok().and_then(|v| v["result"].as_str().map(str::to_string)).unwrap_or_else(|| String::from_utf8_lossy(&stdout).to_string());
     Ok(json!({ "exit": status.and_then(|s| s.code()), "timed_out": status.is_none(), "seconds": started.elapsed().as_secs(), "said": clip_str(said.trim(), 600) }))
 }
-/// Prepares the task if it is new, then lets the agent write and revise the driver while Kern runs it, at most `max` rounds; the pull request
-/// comment is the best round's.
 #[allow(clippy::too_many_arguments)]
 pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy::Operator, pr: Option<&str>, agent: &[String], max: usize) -> R<Value> {
     if !out.join("drive.json").exists() { prepare(repo, base, head, out, pr)?; }
@@ -1519,8 +1341,6 @@ pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy:
         let said = rounds.last().and_then(|r| r["agent"]["said"].as_str()).unwrap_or("");
         std::fs::write(out.join("comment.md"), format!("### Kern: what this change does when it runs\n\nKern asked its agent for a driver, but it wrote none, so nothing ran: read this change yourself.\n\nThe agent said: {}\n", span(said, 400)))?;
     } else {
-        // What every round saw, as one report and one comment. With a description to go by, the agent then sorts the differences by
-        // whether the pull request describes them; an answer that does not fit, or none, leaves the comment unsorted.
         let report = conclude(out, &d, None)?;
         percent = report["coverage"]["percent"].clone();
         if pr.is_some_and(|p| !p.trim().is_empty()) && !difference_items(&report).is_empty() {
@@ -1534,10 +1354,7 @@ pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy:
         "comment": out.join("comment.md").display().to_string() }))
 }
 
-/// Marks Kern's comment, so a later run edits it instead of adding another.
 pub const COMMENT_MARK: &str = "<!-- kern-drive -->";
-/// Posts comment.md on the pull request, or edits Kern's earlier comment there (GITHUB_TOKEN, and GITHUB_API_URL on Enterprise). With
-/// `update_only` (a change with nothing to run) it only brings an earlier comment up to date: a pull request that changes docs stays quiet.
 pub fn post(out: &Path, repository: &str, number: u64, update_only: bool) -> R<Value> {
     post_to(&crate::github::Api::from_env("post Kern's comment on the pull request")?, out, repository, number, update_only)
 }
@@ -1547,8 +1364,6 @@ pub fn post_with(out: &Path, repository: &str, number: u64, api: &str, token: &s
 fn post_to(api: &crate::github::Api, out: &Path, repository: &str, number: u64, update_only: bool) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     ensure!(number > 0, "Expected a pull request number");
-    // A run of a commit that is no longer the pull request's head (a re-run of an old run, or one a newer push overtook) never replaces
-    // the comment about the newer one.
     if let Some(head) = read_own(out.join("drive.json")).ok().and_then(|d| d["head"].as_str().map(str::to_string))
         && let Ok(pull) = api.get(&format!("/repos/{repository}/pulls/{number}"))
         && let Some(now) = pull["head"]["sha"].as_str()
@@ -1556,7 +1371,6 @@ fn post_to(api: &crate::github::Api, out: &Path, repository: &str, number: u64, 
         return Ok(json!({ "status": "STALE", "checked": head, "head": now }));
     }
     let body = format!("{COMMENT_MARK}\n{}", std::fs::read_to_string(out.join("comment.md"))?);
-    // Only a comment the same account wrote counts as Kern's: anyone can paste the mark into a comment of their own.
     let author = crate::github::env("KERN_COMMENT_AUTHOR").unwrap_or_else(|| "github-actions[bot]".into());
     let mut existing = None;
     for page in 1..=10 {

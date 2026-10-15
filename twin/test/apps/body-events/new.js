@@ -1,6 +1,6 @@
 import { send } from '../http.js';
 
-// The same body reading, with the retry that charges twice whenever the payment service answers 200 instead of 201.
+
 const charge = (amount) => fetch(`${process.env.KERN_TEST_PAY_URL}/charge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount }) });
 
 export function createApp() {

@@ -31,14 +31,12 @@ test('a later candidate that still shows a known difference stays off, and one t
     for (let i = 0; i < 6; i++) await (await post(url, order(false))).arrayBuffer();
   };
   try {
-    // The new checkout code breaks on every order with a card: the difference becomes a case.
     const first = await routed('checkout', watched(cases));
     await (await post(first.url, order(true))).arrayBuffer();
     await first.twin.idle();
     assert.equal(first.twin.stats().different, 1);
     await first.close();
     assert.equal(readdirSync(cases).length, 1, 'the difference became a case');
-    // The same code again, with fresh evidence: six clean comparisons, but the case still shows the difference.
     const again = await routed('checkout', watched(cases));
     await clean(again.url);
     await again.twin.idle();
@@ -46,7 +44,6 @@ test('a later candidate that still shows a known difference stays off, and one t
     assert.equal(again.twin.stats().serving, 'old');
     assert.match(reasons(again.twin), /1 known case still shows a difference/);
     await again.close();
-    // The fix passes the case, and six clean comparisons switch it on.
     const fixed = await routed('checkout', { ...watched(cases), candidate: app('checkout', 'fixed') });
     await clean(fixed.url);
     await fixed.twin.idle();
@@ -60,7 +57,6 @@ test('a later candidate that still shows a known difference stays off, and one t
 
 test('a known difference only a person can judge, or a case file that cannot be read, holds every later candidate until it is removed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kern-known-'));
-  // The candidate is the old code itself, so nothing ever differs: only the known cases can hold it.
   const later = () => routed('emails', { ...watched(dir), candidate: app('emails', 'old') });
   const clean = async (url) => {
     for (let i = 0; i < 6; i++) await (await post(url, { email: `u${i}@example.com` })).arrayBuffer();
@@ -101,7 +97,6 @@ test('a case file that says it reproduces but holds no request is listed as unre
   const dir = mkdtempSync(join(tmpdir(), 'kern-known-'));
   try {
     writeFileSync(join(dir, '1-1-post.json'), JSON.stringify({ version: 1, route: 'POST /', kinds: ['body'], reproduces: true }));
-    // The candidate is the old code itself, so nothing ever differs: only the known case can hold it.
     const shop = await routed('emails', { ...watched(dir), candidate: app('emails', 'old') });
     for (let i = 0; i < 6; i++) await (await post(shop.url, { email: `u${i}@example.com` })).arrayBuffer();
     await shop.twin.idle();
@@ -122,18 +117,15 @@ test('twin.idle() waits for the known cases to be checked, and for the switch th
   const cases = join(dir, 'cases');
   const state = join(dir, 'state');
   try {
-    // Two known cases from the broken candidate.
     const first = await routed('checkout', watched(cases));
     for (let i = 0; i < 2; i++) await (await post(first.url, order(true))).arrayBuffer();
     await first.twin.idle();
     await first.close();
     assert.equal(readdirSync(cases).length, 2);
-    // The fix earns six clean comparisons, kept in the state folder; it may not switch on by itself yet.
     const earning = await routed('checkout', { stateDir: state, candidate: app('checkout', 'fixed') });
     for (let i = 0; i < 6; i++) await (await post(earning.url, order(false))).arrayBuffer();
     await earning.twin.idle();
     await earning.close();
-    // One more request. Its comparison ends before the second case is checked, so only that last check can switch the fix on.
     const fixed = await routed('checkout', { ...watched(cases), stateDir: state, candidate: app('checkout', 'fixed') });
     await (await post(fixed.url, order(false))).arrayBuffer();
     await fixed.twin.idle();

@@ -1,8 +1,8 @@
 import { MessageChannel } from 'node:worker_threads';
 import { send } from '../http.js';
 
-// On /flood it fails without end, in work no turn holds (a message passed back and forth between two ports), so its ghost keeps
-// reporting itself broken until it is stopped. Every other request is answered as the old version answers it.
+
+
 export function createApp() {
   return (req, res) => {
     if (req.url !== '/flood') return send(res, 200, { ok: true });

@@ -4,12 +4,6 @@ import { pathToFileURL } from 'node:url';
 import { drive } from './driver.mjs';
 import { comparedShare, summarize } from './stats.mjs';
 
-// One proof run's traffic:
-// 1. it waits for the app;
-// 2. it runs the scenario (KERN_PROOF_SCENARIO exports `scenario`);
-// 3. it waits until the twin has judged everything;
-// 4. it writes the run's numbers to $KERN_PROOF_OUT/<app>-<label>.json, the label being 'off' or 'sample-<share>' (and '-pgreads' when
-//    Postgres real reads are on, so its numbers stay apart from the run without them — the proof server labels its log and cases the same way).
 const base = process.env.KERN_PROOF_URL ?? 'http://app:8080';
 const app = process.env.KERN_PROOF_APP;
 const pgReads = process.env.KERN_PROOF_MODE !== 'off' && process.env.KERN_PROOF_PG_READS ? '-pgreads' : '';
@@ -39,7 +33,6 @@ for (let i = 0; after.stats && after.stats.queued > 0 && !after.stats.disabled &
   after = await numbers();
 }
 const s = after.stats;
-// How many changed lines are in each state: never run, partly run, run, proven, at load or accepted (Phase 3).
 const lines = {};
 for (const p of after.paths) lines[p.status] = (lines[p.status] ?? 0) + 1;
 const result = {

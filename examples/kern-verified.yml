@@ -2,11 +2,9 @@ name: kern-verified
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
-  # a merge queue's groups: Kern fetches what it reads itself, so nothing is checked out for them
   merge_group:
     types: [checks_requested]
 permissions:
-  # contents and checks: Kern moves a kern/ branch to the commit it verified again after a push, and reports the check for it
   contents: write
   checks: write
   pull-requests: write
@@ -17,8 +15,7 @@ jobs:
   kern-verified:
     runs-on: ubuntu-24.04
     steps:
-      # Only same-repository agent and dependency-upgrade branches are checked out; other pull requests are reported as SKIPPED.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: (startsWith(github.event.pull_request.head.ref, 'kern/') || startsWith(github.event.pull_request.head.ref, 'renovate/') || startsWith(github.event.pull_request.head.ref, 'dependabot/')) && github.event.pull_request.head.repo.full_name == github.repository
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -27,8 +24,7 @@ jobs:
       - uses: jastijayakrishna/Kerner@FULL_COMMIT_SHA
         with:
           comment: "true"
-          agent-mention: "" # for example @claude or @copilot
+          agent-mention: ""
           max-attempts: "3"
-          # set the variable and the secret to verify pushes to kern/ branches again; leave them unset to keep pushes blocked
           verifier-url: ${{ vars.KERN_VERIFIER_URL }}
           verifier-token: ${{ secrets.KERN_VERIFIER_TOKEN }}

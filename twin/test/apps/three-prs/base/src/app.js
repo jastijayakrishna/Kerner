@@ -1,4 +1,4 @@
-// A small shop with three routes; three pull requests each change one of them.
+
 function send(res, status, value) {
   const body = JSON.stringify(value);
   res.writeHead(status, { 'content-type': 'application/json' });

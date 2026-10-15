@@ -59,7 +59,6 @@ test('evidence gathered against one old version does not carry over when another
     for (let n = 1; n <= 5; n++) assert.equal(await get(`${first.url}/?n=${n}`), 200);
     await first.twin.idle();
     await first.close();
-    // The same candidate, now beside another old version (a hotfix deployed as old).
     const second = await routed('refactor', { stateDir, old: app('broken', 'old') });
     assert.equal(second.twin.evidence().totals['*'].same, 0, 'the comparisons against the version before prove nothing against this one');
     assert.match(second.twin.evidence().note, /another old version/);
@@ -146,8 +145,6 @@ test('without a state folder, the twin still says why the new version does not s
 });
 
 test('a new version that never answers a request while it serves is switched back once a customer gives up on it', async () => {
-  // The request never finishes, so there is no answer to compare: it is replayed in both ghosts, and the new one hangs where the old
-  // one answers.
   const shop = await routed('forgets-answer', { timeoutMs: 1000 });
   try {
     assert.equal(await shop.twin.serve('candidate', 'switched on by hand'), true);

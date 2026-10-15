@@ -1,6 +1,6 @@
 import { send } from '../http.js';
 
-// Reads its settings from a config service while it starts, and ends its own process when it cannot, as many apps do.
+
 export async function createApp() {
   let settings;
   try {

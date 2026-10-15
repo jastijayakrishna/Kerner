@@ -62,7 +62,6 @@ test("a version's name covers the queries, templates and schemas its code reads,
 
 test("a version's name covers the workspace packages linked into node_modules, and links that loop back end", async () => {
   const mono = mkdtempSync(join(tmpdir(), 'kern-identity-'));
-  // Windows links folders with junctions, which need no special rights; elsewhere the type is ignored and this is a plain symlink.
   const link = (target, path) => {
     mkdirSync(dirname(path), { recursive: true });
     symlinkSync(target, path, 'junction');
@@ -78,10 +77,10 @@ test("a version's name covers the workspace packages linked into node_modules, a
       mkdirSync(join(mono, 'packages', name), { recursive: true });
       writeFileSync(join(mono, 'packages', name, 'index.js'), 'export const total = (xs) => xs.reduce((a, b) => a + b, 0);\n');
     }
-    link(join(mono, 'packages', 'lib'), join(api, 'node_modules', '@acme', 'lib')); // as pnpm links a workspace package
-    link(join(mono, 'packages', 'shared'), join(mono, 'node_modules', '@acme', 'shared')); // as npm and yarn do, at the monorepo's root
-    link(api, join(mono, 'packages', 'lib', 'node_modules', '@acme', 'api')); // back to the app
-    link(mono, join(mono, 'packages', 'lib', 'node_modules', '@acme', 'everything')); // back to the whole monorepo
+    link(join(mono, 'packages', 'lib'), join(api, 'node_modules', '@acme', 'lib'));
+    link(join(mono, 'packages', 'shared'), join(mono, 'node_modules', '@acme', 'shared'));
+    link(api, join(mono, 'packages', 'lib', 'node_modules', '@acme', 'api'));
+    link(mono, join(mono, 'packages', 'lib', 'node_modules', '@acme', 'everything'));
     mkdirSync(join(api, 'node_modules', 'dep'), { recursive: true });
     writeFileSync(join(api, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;');
     const first = await versionId(entry, 'createApp');
@@ -99,7 +98,6 @@ test("a version's name covers the workspace packages linked into node_modules, a
 });
 
 test("a version's name covers code its package links to from inside it, and a link that loops back ends", async () => {
-  // src/shared -> ../../shared: the app imports it by a relative path, so it is the version's code, though it lives outside the package.
   const root = mkdtempSync(join(tmpdir(), 'kern-identity-'));
   try {
     const app = join(root, 'app');

@@ -35,11 +35,11 @@ test('evidence survives a restart; a damaged file or another candidate\'s file s
     assert.match(other.note, /another candidate \(c1\)/);
     assert.deepEqual(other.snapshot().segments, {});
     const kept = await Evidence.open({ file, candidate: 'c1' });
-    kept.add(verdict('different', { url: undefined, kinds: ['body'] })); // a value JSON drops must not break the checksum
+    kept.add(verdict('different', { url: undefined, kinds: ['body'] }));
     await kept.flush();
     assert.equal((await Evidence.open({ file, candidate: 'c1' })).note, null);
     const stored = JSON.parse(readFileSync(file, 'utf8'));
-    stored.segments.all['GET /users/:id'].same = 3000; // a hand edit that keeps the old checksum
+    stored.segments.all['GET /users/:id'].same = 3000;
     writeFileSync(file, JSON.stringify(stored));
     const damaged = await Evidence.open({ file, candidate: 'c1' });
     assert.match(damaged.note, /checksum/);
@@ -61,11 +61,9 @@ test('evidence gathered against one old version starts again against another, an
     const again = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-a' });
     assert.equal(again.note, null);
     assert.equal(again.snapshot().segments.all['GET /users/:id'].same, 3);
-    // A hotfix deployed as the old version: comparisons against the version before it prove nothing about the candidate against this one.
     const hotfixed = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-b' });
     assert.match(hotfixed.note, /another old version \(sha256:old-a\).*sha256:old-b/);
     assert.deepEqual(hotfixed.snapshot().segments, {});
-    // A file written before evidence named its old version is for an old version no one knows: it starts again too.
     const { sha256, old, ...earlier } = JSON.parse(readFileSync(file, 'utf8'));
     writeFileSync(file, JSON.stringify({ ...earlier, sha256: createHash('sha256').update(canonical(earlier)).digest('hex') }));
     const unnamed = await Evidence.open({ file, candidate: 'c1', old: 'sha256:old-a' });
@@ -107,7 +105,6 @@ test('a flush resolves only once every write asked for before it, and its own, a
     earlier.push(evidence.flush());
     evidence.add(verdict('same', { route: 'POST /orders' }));
     earlier.push(evidence.flush());
-    // The twin's thread awaits one last flush when it closes, and is stopped right after: everything must be on disk by then.
     await evidence.flush();
     const stored = JSON.parse(readFileSync(file, 'utf8'));
     assert.deepEqual(Object.keys(stored.segments.all).sort(), ['GET /users/:id', 'POST /orders'], 'both verdicts are on disk');

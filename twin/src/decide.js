@@ -1,17 +1,9 @@
-// When a candidate has earned serving customers.
-//
-// The rule of three: after n comparisons with no unexplained difference, the true rate of unexplained differences is below 3/n with
-// 95% confidence (from -ln 0.05 ≈ 3). So a candidate needs ceil(3/ε) clean comparisons for the bound ε. With a manifest (Phase 3) every
-// changed line, old and new, must also have run, every part of it, in minLineRuns clean comparisons.
 import { isCode } from './coverage.js';
 
-/** The statuses that satisfy the line rule. */
 const SATISFIED = ['no code', 'accepted', 'at load', 'proven'];
 
-/** The clean comparisons that bound the rate of unexplained differences below `epsilon`, with 95% confidence. */
 export const needed = (epsilon) => Math.ceil(3 / epsilon - 1e-9);
 
-/** A segment's counts over all its routes; the segment '*' adds up every segment. */
 export function totals(snapshot, segment) {
   const out = { same: 0, stated: 0, different: 0, notCompared: 0, skipped: 0 };
   const names = segment === '*' ? Object.keys(snapshot.segments) : [segment];
@@ -25,17 +17,6 @@ export function totals(snapshot, segment) {
 
 const percent = (x) => `${(x * 100).toFixed(1)}%`;
 
-/**
- * What the evidence says of one changed line, whose text is `text`.
- * - 'no code': the text has no code character (a brace alone, as Prettier writes an array of objects), so nothing on it can run, and
- *   coverage never reports it. kern twin plan keeps such lines; without this status they would wait forever.
- * - 'accepted': a person accepted it.
- * - 'at load': it ran while the version loaded.
- * - 'proven': every code character ran in at least minLineRuns clean comparisons.
- * - 'run': every character ran in a clean comparison, but not that often yet.
- * - 'partly run': some characters never ran in a clean comparison.
- * - 'never run'.
- */
 export function lineStatus(snapshot, key, policy, loaded, text) {
   if (typeof text === 'string' && ![...text].some(isCode)) return 'no code';
   if (policy.accepted?.(key)) return 'accepted';
@@ -48,7 +29,6 @@ export function lineStatus(snapshot, key, policy, loaded, text) {
   return 'partly run';
 }
 
-/** Every changed line (at most 2,000) with its status and counts. `lines` is the manifest's Map of line keys. */
 export function pathsOf(snapshot, lines, policy) {
   const loaded = new Set(snapshot.loadLines ?? []);
   const out = [];
@@ -63,19 +43,6 @@ export function pathsOf(snapshot, lines, policy) {
   return out;
 }
 
-/**
- * Whether the candidate has earned serving customers, with every reason it has not.
- *
- * The policy is { epsilon, minHours, segments, maxUncovered, minLineRuns?, accepted?, lines?, known? }, where `lines` is the manifest's
- * Map of changed lines (line key → { text, ... }). Ready needs all of:
- * - no unexplained difference;
- * - in every listed segment, at least ceil(3/ε) clean comparisons (same or stated);
- * - in every listed segment, at most maxUncovered of its requests left uncompared, since the bound says nothing about requests it
- *   never saw;
- * - minHours since the first comparison;
- * - with lines, every changed line 'proven', 'at load', 'accepted' or 'no code'. The others are listed in `waiting`.
- * - with known cases (Phase 5), every case checked: none still showing a difference, none waiting for a person, every file read.
- */
 export function decide(snapshot, policy, now) {
   const reasons = [];
   const need = needed(policy.epsilon);

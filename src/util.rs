@@ -157,7 +157,6 @@ pub fn unb64(s: &str) -> R<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Lets at most `width` sandboxes run at once, however many runs are asked for in parallel.
 pub struct Gate { free: std::sync::Mutex<usize>, ready: std::sync::Condvar }
 impl Gate {
     pub fn new(width: usize) -> Gate { Gate { free: std::sync::Mutex::new(width.max(1)), ready: std::sync::Condvar::new() } }
@@ -172,7 +171,6 @@ impl Gate {
         out
     }
 }
-/// How many sandboxes one verification may run at once: KERN_VERIFY_PARALLEL (1 to 8), 2 by default.
 pub fn parallelism() -> usize { std::env::var("KERN_VERIFY_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(2) }
 
 pub fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }

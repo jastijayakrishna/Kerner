@@ -1,6 +1,3 @@
-//! The project's own tests on the old and the new code, for the receipt: what passed before and still passes, what broke, what no longer
-//! runs, what is newly skipped and what is new. Tests that already failed before the change are set aside: the change did not cause them.
-//! Each side runs on its installed tree from `drive::setup`, read-only and with the network off (`__drive_test`).
 use crate::policy::{Edits, Kind, Limits, Operator, Runner, Tests};
 use crate::proof::{self, Report};
 use crate::util::*;
@@ -8,20 +5,14 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// The test folders `kern init` knows, wherever they are in the tree.
 const FOLDERS: [&str; 4] = ["test", "tests", "__tests__", "spec"];
-/// How long one run of a project's tests may take.
 const TIMEOUT_SECONDS: u64 = 900;
 
-/// The project's test runner and command, from its package.json: vitest, jest, mocha or `node --test`. None when it uses another one,
-/// or a script Kern cannot read the results of (turbo, nx): the receipt then says the tests did not run, rather than guessing.
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
     let (name, command) = crate::init::runner(package)?;
     Some(Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(name)?, command, edits: Edits::Checked })
 }
 
-/// Which of these paths are test files, as grants the test proof understands: the test folders (at any depth, as folder grants) and files
-/// named like tests (`*.test.*`, `*.spec.*`).
 pub fn test_paths(paths: &[&str]) -> Vec<String> {
     let mut out = BTreeSet::new();
     for p in paths {
@@ -42,8 +33,6 @@ fn sum(r: &Report) -> Value {
     json!({ "passed": p, "failed": f, "skipped": s })
 }
 
-/// The old code's results against the new code's. With a second run of the new code (made when the first one failed), a test counts as
-/// broken only when it failed both times; failing once is flaky.
 pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value {
     let keys = |r: &Report| -> BTreeSet<String> { r.tests.keys().cloned().collect() };
     let (old, new) = (keys(before), keys(after));
@@ -63,22 +52,17 @@ pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value
     let newly_skipped: Vec<&String> = old.iter().filter(|k| passing(before, k) && skipped_only(after, k)).collect();
     let added: Vec<&String> = new.iter().filter(|k| !old.contains(*k)).collect();
     let already_failing: Vec<&String> = old.iter().filter(|k| failing(before, k)).chain(before.problems.iter()).collect();
-    // A failure outside any test (a test file that no longer loads, a failing hook) that the old code did not have: on both runs, if two.
     let new_problems: Vec<&String> = after.problems.iter().filter(|p| !before.problems.contains(*p) && again.is_none_or(|a| a.problems.contains(*p))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(again.unwrap_or(after)), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
         "newly_skipped": newly_skipped, "added": added, "already_failing": already_failing, "new_problems": new_problems })
 }
 
-/// Why a run gave no results, in words a customer can act on: the reader's reason, how the command ended, and the last lines it printed
-/// (on stderr, or else stdout), without terminal colours, in at most 600 characters. A test suite that needs the network, a database or
-/// a build first says so in those lines.
 pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> String {
     let text = |b: &[u8]| -> String {
         let s = String::from_utf8_lossy(b);
         let mut out = String::new();
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
-            // An ANSI escape: ESC [ ... final byte.
             if c == '\u{1b}' { if chars.peek() == Some(&'[') { chars.next(); for d in chars.by_ref() { if d.is_ascii_alphabetic() { break; } } } continue; }
             out.push(if c.is_control() && c != '\n' { ' ' } else { c });
         }
@@ -86,7 +70,6 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     };
     let source = if errors.iter().any(|b| !b.is_ascii_whitespace()) { text(errors) } else { text(output) };
     let last: Vec<&str> = source.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    // The first line of the error, and what follows it, rather than the stack's last frame.
     let from = last.iter().rposition(|l| !l.starts_with("at ")).unwrap_or(0).saturating_sub(1);
     let tail = last[from..].iter().take(3).copied().collect::<Vec<_>>().join(" / ");
     let mut s = format!("{why} ({})", String::from_utf8_lossy(ending).trim());
@@ -95,8 +78,6 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     s
 }
 
-/// One run of a side's tests in its sandbox, from `dir` (the root, or a workspace package's folder): the runner's report, or why there is
-/// none.
 fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str) -> R<Result<Report, String>> {
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
@@ -119,11 +100,8 @@ fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, l
     Ok(proof::read_report(tests.runner, &parts["output"]).map_err(|why| no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])))
 }
 
-/// At most this many workspace packages' tests run for one change; the others are named as not run.
 const MAX_PACKAGES: usize = 5;
 
-/// The workspace packages a change touches: for each changed path, the nearest folder above it, below the root, that has a package.json
-/// (`has_manifest`). Sorted; files in no package, and anything under node_modules, belong to none.
 pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = BTreeSet::new();
     for p in changed.iter().filter(|p| !p.split('/').any(|c| c == "node_modules")) {
@@ -136,10 +114,8 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
     out.into_iter().collect()
 }
 
-/// One set of tests to run on both sides: the root's, or one workspace package's.
 struct Suite { dir: String, old: Option<Tests>, new: Tests }
 
-/// Adds one suite's results to the whole: test names from `node --test` carry no file, so they get the package's folder in front.
 fn absorb(into: &mut Report, from: Report, dir: &str, runner: Runner) {
     let name = |k: String| if runner == Runner::Node && !dir.is_empty() { format!("{dir}: {k}") } else { k };
     for (k, c) in from.tests {
@@ -151,9 +127,6 @@ fn absorb(into: &mut Report, from: Report, dir: &str, runner: Runner) {
     into.problems.extend(from.problems.into_iter().map(name));
 }
 
-/// Runs the project's tests on the old and the new code, each on its installed tree (`drive::setup` first if needed), and compares them.
-/// The runner comes from the root's package.json; without one there (a monorepo whose root runs turbo, nx or pnpm -r), from each
-/// workspace package the change touches, each run from its own folder. A side or package without a readable report is named.
 pub fn run(out: &Path, op: &Operator) -> R<Value> {
     let d = read_json(out.join("drive.json"))?;
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
@@ -192,7 +165,6 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
             Ok(r) => r,
             Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") })); continue; }
         };
-        // Tests the change itself brings (no runner on the old side): nothing to compare against, so they are all new.
         let old = match &suite.old {
             None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
             Some(t) => match run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))? {
@@ -200,7 +172,6 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
                 Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
             },
         };
-        // A failure the old code did not have is run once more before it counts, so a flaky test is told apart from a broken one.
         let fails_new = new.tests.iter().any(|(k, c)| c.failed > 0 && passing(&old, k)) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new { run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))?.ok() } else { None };
         rerun |= second.is_some();

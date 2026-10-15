@@ -1,4 +1,4 @@
-// Small helpers the test apps share: plain node:http, like a simple production app.
+
 export async function readJson(req) {
   const parts = [];
   for await (const chunk of req) parts.push(chunk);

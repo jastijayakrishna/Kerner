@@ -29,8 +29,6 @@ test('a Postgres query is made for real only when it is a read and calls nothing
 });
 
 test('a query text that holds more than one statement is never made for real: a COMMIT inside it would end the read-only transaction', () => {
-  // Without values, pg sends the text whole, and Postgres runs every statement in it: after the COMMIT, the DELETE would run outside the
-  // read-only transaction. A comment marker inside a string literal must not hide what follows it.
   for (const query of ['SELECT 1; COMMIT; DELETE FROM users', "SELECT '--'; COMMIT; DELETE FROM users", "SELECT '/*'; END; DELETE FROM t; SELECT '*/'", 'select 1;\nend;\ndelete from t', 'SELECT 1; -- one more']) {
     assert.equal(pgReadable(query), false, query);
   }
@@ -46,19 +44,16 @@ test('a read the real app answered from its warm cache is made for real by the t
   });
   process.env.KERN_TEST_RATES = rates.url;
   try {
-    // The real app warms its cache on a request the twin does not sample.
     const warm = await production('rates', { sampleRate: 0 });
     assert.deepEqual(await (await fetch(`${warm.url}/`)).json(), { rate: 1.1 });
     await warm.close();
     assert.equal(hits, 1);
-    // Fresh ghosts are cold: without real reads, their call is one the real run did not make.
     const cold = await production('rates');
     await (await fetch(`${cold.url}/`)).arrayBuffer();
     await cold.twin.idle();
     assert.equal(cold.twin.stats().notCompared, 1, JSON.stringify(cold.twin.stats()));
     await cold.close();
     assert.equal(hits, 1);
-    // With the address allow-listed, the twin's thread makes the read for both ghosts.
     const allowed = await production('rates', { realReads: [`GET ${rates.url}/*`] });
     await (await fetch(`${allowed.url}/`)).arrayBuffer();
     await allowed.twin.idle();

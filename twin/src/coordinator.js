@@ -7,11 +7,9 @@ import { pgReader, realRead } from './real-reads.js';
 import { stable } from './keys.js';
 
 const KEEP = 1000;
-// How long a failure after one ghost's result waits for the other ghost's: the same work fails at much the same moment in both.
 const LATE_MS = 500;
 const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared' };
 
-/** Bytes from another thread as a Buffer, without copying them again. */
 const asBuffer = (bytes) => (bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Buffer.alloc(0));
 
 export function toRun(result) {
@@ -31,7 +29,6 @@ export function toRun(result) {
   };
 }
 
-/** Where a request belongs: when it came, its route, its customer segment and the version that served it. */
 function placeOf(capture) {
   const time = Number(capture.start) || Date.now();
   return {
@@ -43,13 +40,6 @@ function placeOf(capture) {
   };
 }
 
-/**
- * Runs the ghost pair: the old and the new version, each in its own thread. They answer the same requests in the same order and
- * always restart together, so their histories stay identical and a difference can only come from the code. Every request handed in
- * ends as one verdict (same, stated, different, not compared or skipped), handed to `onVerdict`.
- * Options: old, candidate, timeoutMs, startMs, queueLimit, ghostMemoryMb, maxRestarts, log, allow, ghostExecArgv, addons, pgReads, and the
- * hooks onVerdict(verdict, capture, runs), onIdle(), onDisabled(reason) and redact(verdict), which scrubs what the log writes.
- */
 export class Coordinator {
   #options;
   #queue = [];
@@ -64,10 +54,8 @@ export class Coordinator {
   #opened;
   #reads = new Map();
   #pgReader = null;
-  // The last real request compared, and the failures each ghost reported after its result for it (in work it left running).
   #last = null;
   #late = { old: null, candidate: null };
-  // Whether a request is being asked (a failure then belongs to it), and whether this pair's failure was already named on a request.
   #asking = false;
   #named = false;
   disabled = null;
@@ -76,13 +64,11 @@ export class Coordinator {
 
   constructor(options) {
     this.#options = options;
-    // Requests handed in before the ghosts are up wait here; with load 'record', the ghosts start only once the app has loaded.
     this.#gate = new Promise((resolve) => {
       this.#opened = resolve;
     });
   }
 
-  /** Starts the ghost pair; `load` is the record of the app's start that their starts are answered from (load 'record'), or null. */
   async start(load = null) {
     this.#load = load;
     try {
@@ -102,7 +88,6 @@ export class Coordinator {
       onRealRead: (message) => this.#realRead(message),
       kind: o.ghosts ?? 'thread', sandbox: o.sandbox ?? 'none',
     };
-    // With a manifest, each ghost measures its own side's changed lines: { old: plan, new: plan }.
     const plans = this.#options.coverage ?? null;
     const named = (label, side, plan) => startGhost(side, { ...settings, coverage: plan }).catch((error) => {
       throw new Error(`the ${label} version (${side.module}) ${error.message}`);
@@ -115,14 +100,10 @@ export class Coordinator {
     this.#dirty = false;
     this.#named = false;
     const pair = { old: old.value, candidate: candidate.value };
-    // A process ghost's last messages are read after it has stopped, so a pair already replaced can still report itself broken: only
-    // the current pair's own ghosts mark it for a restart.
     for (const [side, ghost] of [['old', pair.old], ['candidate', pair.candidate]]) {
       ghost.onDirty((message) => {
         if (this.#pair !== pair) return;
         this.#dirty = true;
-        // A failure after the last request's result, in work that request left running: judged on that request, at once. A failure that
-        // names no request (a ghost that stopped) is the last request's, unless one is being asked, which then sees it for itself.
         const job = message?.job ?? (this.#asking ? undefined : this.#last?.n);
         if (message?.error && job !== undefined && job === this.#last?.n && !this.#late[side]) {
           this.#late[side] = String(message.error);
@@ -153,7 +134,6 @@ export class Coordinator {
     }
   }
 
-  /** Takes one request handed in: a capture to compare, or a skip ({ skipped: reason, ... }) to count. Captures are compared one at a time, in order. */
   submit(capture) {
     if (this.disabled) return;
     if (capture.skipped) {
@@ -164,7 +144,6 @@ export class Coordinator {
       return;
     }
     if (this.#queue.length >= this.#options.queueLimit) {
-      // A request the customer gave up on stays what it always was when there is no room for it: skipped, never dropped.
       if (capture.aborted) this.submit({ ...capture, skipped: 'the request was aborted before its answer finished' });
       else this.counts.dropped++;
       return;
@@ -174,25 +153,14 @@ export class Coordinator {
     this.#pump();
   }
 
-  /** Requests handed in and not yet judged. */
   pending() {
     return this.#queue.length + (this.#busy ? 1 : 0);
   }
 
-  /** The changed lines that ran while each version loaded. */
   loadLines() {
     return this.#pair ? [...this.#pair.old.loadLines, ...this.#pair.candidate.loadLines] : [];
   }
 
-  /**
-   * Readies the pair before it is asked, and answers whether there is one.
-   * - A failure a ghost reported after the last request's result (an uncaught error, or its stop, in work that request left running) is
-   *   judged on that request first (#judgeLate).
-   * - A ghost that failed may have left its app's state broken: the pair restarts first, so no request is judged on that state.
-   * - A ghost that stopped while no request it answered could be named for it is asked all the same: it answers at once that it had
-   *   stopped (ghost-common.js ask), the request's verdict names that, and the pair restarts after. Restarting first would then hide a
-   *   version whose process ends by itself.
-   */
   async #ready() {
     await this.#judgeLate();
     const pair = this.#pair;
@@ -201,11 +169,6 @@ export class Coordinator {
     return Boolean(this.#pair) && !this.disabled;
   }
 
-  /**
-   * Judges a failure a ghost reported after the last request's result, in work that request left running (a thread-pool callback): it
-   * would end a production process that has no handler for it, so it is a crash on that request, unless both versions failed alike. The
-   * other ghost, running the same work, may report its own a moment later: it gets that moment.
-   */
   async #judgeLate() {
     const last = this.#last;
     if (!last || (!this.#late.old && !this.#late.candidate)) return;
@@ -218,12 +181,9 @@ export class Coordinator {
     await this.#judge({ ...last.verdict, outcome: 'different', kinds: ['crash'], details: [{ kind: 'crash', path: 'after the answer', old: old ?? 'none', new: candidate ?? 'none' }] });
   }
 
-  /** Both ghosts on one more copy of a request (a scrubbed case being checked). Answers { old, candidate } runs, or null when the pair is gone. */
   async rerun(capture) {
     if (!(await this.#ready())) return null;
     const n = ++this.#seq;
-    // A ghost counts the changed lines it ran since its last take: this run takes its own counts, and drops them, so the next real
-    // request is not credited with lines only this copy ran.
     const job = { start: capture.start, seed: capture.seed, request: capture.request, io: capture.io, coverage: Boolean(this.#options.coverage) };
     const timeout = this.#options.timeoutMs;
     this.#asking = true;
@@ -235,10 +195,6 @@ export class Coordinator {
     return { old: toRun(old), candidate: toRun(candidate) };
   }
 
-  /**
-   * Runs a known case on both ghosts, in turn with real requests, and answers how the two compare now: { outcome, kinds, details }
-   * with the allow rules applied, or null if the twin stopped first. A check is never counted as traffic.
-   */
   check(capture) {
     if (this.disabled) return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -257,10 +213,8 @@ export class Coordinator {
     }
   }
 
-  /** A real read for the ghosts of one request: made once, and both ghosts get the same answer, so their worlds stay the same. */
   #realRead(message) {
     if (message.kind === 'pg') {
-      // A Postgres read (pgReads): read-only, through the app's own pg package, to the connection the operator named.
       const key = `${message.job} PG ${message.text} ${stable(message.values)}`;
       if (!this.#reads.has(key)) {
         this.#pgReader ??= this.#options.pgReads ? pgReader(this.#options.pgReads, this.#options.old.module) : null;
@@ -304,7 +258,6 @@ export class Coordinator {
     this.#reads.clear();
     if (this.disabled) return;
     const place = placeOf(capture);
-    // From its result on, a failure a ghost reports belongs to this request: noted before anything else waits.
     this.#last = { n, verdict: { n, ...place, method: capture.request.method, url: capture.request.url }, compared: false };
     if (old.dirty || candidate.dirty || this.#dirty) await this.#restart();
     const runs = { old: toRun(old), candidate: toRun(candidate) };
@@ -312,24 +265,17 @@ export class Coordinator {
       await this.#judgeAborted(n, place, capture, runs);
       return;
     }
-    // The ghost of the version that served is checked against what really happened; then the two ghosts are compared with each other.
     const real = { status: capture.response.status, headers: capture.response.headers, body: asBuffer(capture.response.body), effects: capture.effects, events: [] };
     const unfaithful = faithful(real, runs[place.serving], place.serving);
     const judged = unfaithful
       ? { outcome: 'not-compared', kinds: ['unfaithful'], details: [{ kind: 'unfaithful', path: 'ghost', old: '', new: unfaithful }] }
       : explain(compareRuns(runs.old, runs.candidate), place.route, this.#options.allow ?? []);
-    // The changed lines each ghost ran (keys carry their side), and the pull requests behind them.
     const lines = this.#options.coverage ? { ...(old.lines ?? {}), ...(candidate.lines ?? {}) } : null;
     const named = lines && this.#options.manifest ? attribute(Object.keys(lines), this.#options.manifest) : {};
     if (this.#last?.n === n) this.#last.compared = ['same', 'stated', 'different'].includes(judged.outcome);
     await this.#judge({ n, ...place, method: capture.request.method, url: capture.request.url, ...judged, ...(lines ? { lines } : {}), ...named }, capture, runs);
   }
 
-  /**
-   * A request the customer gave up on (capture.js aborted()). Nothing really answered it, so nothing is checked against reality, and it is
-   * never counted as clean: it is skipped, as always, unless the new version hangs where the old one answers, both replayed without a
-   * gap. That is a difference, and while the new version serves, the hang customers met.
-   */
   async #judgeAborted(n, place, capture, runs) {
     const verdict = explain(compareRuns(runs.old, runs.candidate), place.route, this.#options.allow ?? []);
     const where = { n, ...place, method: capture.request.method, url: capture.request.url };
@@ -360,14 +306,12 @@ export class Coordinator {
     if (this.#found.length < KEEP) this.#found.push(verdict);
     if (!this.#options.log) return;
     try {
-      // What the twin writes to disk is scrubbed (redact); the list in memory keeps the real values for the operator.
       await appendFile(this.#options.log, `${JSON.stringify(this.#options.redact ? this.#options.redact(verdict) : verdict)}\n`);
     } catch {
       this.counts.logErrors++;
     }
   }
 
-  /** Resolves once every submitted request has been judged. */
   idle() {
     if (!this.#busy && !this.#queue.length) return Promise.resolve();
     return new Promise((resolve) => this.#waiters.push(resolve));
@@ -379,14 +323,12 @@ export class Coordinator {
     this.#options.onIdle?.();
   }
 
-  /** Switches the twin off for good, keeping the first reason. The app is never affected. */
   disable(reason) {
     this.#opened();
     if (!this.disabled) {
       this.disabled = reason;
       this.#options.onDisabled?.(reason);
     }
-    // A known case still waiting is answered too: the twin stopped first.
     for (const item of this.#queue.splice(0)) item.check?.(null);
     const pair = this.#pair;
     this.#pair = null;

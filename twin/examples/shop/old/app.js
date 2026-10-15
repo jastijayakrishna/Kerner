@@ -1,7 +1,6 @@
 import express from 'express';
 import pg from 'pg';
 
-// A small shop on Express and Postgres, as the twin would meet one in production. createApp builds the app and starts nothing.
 export function createApp() {
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
   const app = express();

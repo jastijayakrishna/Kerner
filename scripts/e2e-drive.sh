@@ -1,9 +1,4 @@
 #!/bin/sh
-# Kern drive end to end on real gVisor: a small TypeScript + React project (a tsconfig path alias, an enum, JSX the project leaves to
-# its bundler, a CommonJS helper, no lockfile) and a change to a discount. A good driver runs every changed line on the old and the new
-# code and Kern sees what changed, in what the driver printed and in its own record of the calls; a driver that reaches nothing gets
-# feedback naming every line it missed. Needs Docker with runsc, jq and git; installs from the public npm registry.
-# Usage: KERN_BIN=/path/to/static/linux/kern scripts/e2e-drive.sh
 set -eu
 K=${KERN_BIN:?set KERN_BIN to a static Linux kern}
 K=$(readlink -f "$K")
@@ -129,7 +124,6 @@ console.log('\u001ekern-drive coverage 2\n{}');
 EOF
 "$K" --control verifier.json drive run "$W/task" operator.json hostile.mjs | tee run3.json
 jq -e '.steps.old >= 1' run3.json > /dev/null || fail "the hostile run's report was not read"
-# What each run printed is kept with the round: the attempts must have been refused on every run, old and new.
 for r in old-1 old-2 new-1 new-2; do
   grep -q '"write":"EROFS"\|"write":"EACCES"' "task/rounds/3/runs/$r.out" || { cat "task/rounds/3/runs/$r.out"; fail "$r: the write to the tree was not refused"; }
   grep -q '"net":"blocked"' "task/rounds/3/runs/$r.out" || { cat "task/rounds/3/runs/$r.out"; fail "$r: the network was reachable"; }
@@ -142,7 +136,6 @@ say "Stand-ins: a package that cannot load here (a native add-on without its bin
 git init -q app && cd app
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p src vendor pkg/package
-# A real package in node_modules, as npm unpacks one from its tarball; loading it throws, as an add-on whose install script never ran does.
 printf '%s\n' '{"name":"native-fee","version":"1.0.0","main":"index.js"}' > pkg/package/package.json
 printf '%s\n' "throw new Error('Could not locate the bindings file. Tried: build/Release/native_fee.node');" > pkg/package/index.js
 tar -czf vendor/native-fee-1.0.0.tgz -C pkg package && rm -rf pkg
@@ -182,22 +175,17 @@ git init -q mono && cd mono
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p apps/web/src
 printf '%s\n' '{"name":"mono","private":true,"workspaces":["apps/*","packages/*"],"dependencies":{"react":"19.1.0","react-dom":"19.1.0"}}' > package.json
-# A sibling package whose built files (dist/) only a build step makes: the checkout has its source alone. It has no "type", so its
-# TypeScript loads as CommonJS, and its index hands on another file's names with export *; an ES package imports them.
 mkdir -p packages/money/src apps/site/src
 printf '%s\n' '{"name":"@mono/money","version":"1.0.0","main":"dist/index.js","types":"dist/index.d.ts"}' > packages/money/package.json
 printf '%s\n' "export * from './cents';" 'export const currency = (code: string): string => code.toUpperCase();' > packages/money/src/index.ts
 printf '%s\n' 'export const cents = (n: number): number => Math.round(n * 100);' > packages/money/src/cents.ts
 printf '%s\n' '{"name":"site","version":"1.0.0","private":true,"type":"module","dependencies":{"@mono/money":"*"}}' > apps/site/package.json
-# Vite's tsconfig layout: tsconfig.json only references the config that has the paths and includes src.
 printf '%s\n' '{ "files": [], "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.app.json" }] }' > apps/site/tsconfig.json
 printf '%s\n' '{ "compilerOptions": { "baseUrl": ".", "paths": { "~/*": ["./src/*"] } }, "include": ["src"] }' > apps/site/tsconfig.app.json
 printf '%s\n' '{ "compilerOptions": { "paths": { "~/*": ["./wrong/*"] } }, "include": ["vite.config.ts"] }' > apps/site/tsconfig.node.json
 printf '%s\n' 'export const SPACE = " ";' > apps/site/src/space.ts
-# Next.js server code marks itself with server-only (not installed); an aliased import names a .ts file by its .js name.
 printf '%s\n' "import 'server-only';" "import { cents, currency } from '@mono/money';" "import { SPACE } from '~/space.js';" '' \
   'export function label(n: number, code: string): string {' '  return cents(n) + SPACE + currency(code);' '}' > apps/site/src/label.ts
-# A component as bundlers build them, in a CommonJS package: a stylesheet, a CSS module, an SVG component and an image.
 printf '%s\n' '.badge { color: red; }' > apps/web/src/badge.css
 printf '%s\n' '.badge { color: blue; }' > apps/web/src/badge.module.css
 printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg"/>' > apps/web/src/logo.svg
@@ -212,7 +200,6 @@ export function Badge({ n }: { n: number }) {
   return <span className={styles.badge} data-icon={icon}><Logo />{n > 9 ? '9+' : n}</span>;
 }
 EOF
-# Content that appears when scrolled into view: only a mounted page with effects (Kern's browser kit) reaches the title inside.
 cat > apps/web/src/Reveal.tsx <<'EOF'
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
@@ -243,10 +230,7 @@ printf '%s\n' "import { cents } from '@mono/money';" '' 'export function price(n
 printf '%s\n' '{ // the package'"'"'s own settings' '  "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"], "@lib/*": ["src/*"] }, "jsx": "preserve", },' '}' > apps/web/tsconfig.json
 printf '%s\n' "import { VAT } from '@lib/rates';" '' 'export function fee(n: number): number {' '  return (n * VAT) / 1000;' '}' > apps/web/src/fee.ts
 printf '%s\n' 'export const VAT = 20;' > apps/web/src/rates.ts
-# Babel-era code (WordPress, Gatsby): JSX in a .js file. Its package has no "type", so it loads as CommonJS, and its default export is a
-# page-style component.
 printf '%s\n' "import { VAT } from './rates';" '' 'export default function Hello({ name }) {' '  return <p title={String(VAT)}>Hello {name}</p>;' '}' > apps/web/src/Hello.js
-# And JSX in a CommonJS file that plain CommonJS code requires.
 printf '%s\n' 'const Tag = ({ t }) => <em>{t}</em>;' 'module.exports = { Tag };' > apps/web/src/Tag.js
 printf '%s\n' "const { Tag } = require('./Tag');" 'module.exports = { tags: (list) => list.map((t) => Tag({ t })) };' > apps/web/src/tags.js
 printf '%s\n' "import { VAT } from '@/rates';" '' 'export function total(net: number): number {' '  return net + (net * VAT) / 100;' '}' > apps/web/src/total.ts
@@ -300,7 +284,6 @@ EOF
 jq -e '.call_differences[] | select(.call == "apps/web/src/Hello.js#default")' monotask/rounds/1/report.json > /dev/null || fail "the calls into a CommonJS module's default export were not recorded"
 jq -e '.call_differences[] | select(.call == "apps/web/src/Tag.js#Tag")' monotask/rounds/1/report.json > /dev/null || fail "the calls into a required CommonJS module with JSX were not recorded"
 grep -q '"step":"fee(1001)","value":20}' monotask/rounds/1/runs/new-1.out || { cat monotask/rounds/1/runs/new-1.out; fail "a stand-in replaced the project's own module behind its alias"; }
-# Assets load as bundlers give them: a CSS module's class names, an image's address, an SVG as a component.
 grep -q 'class=\\"badge\\"' monotask/rounds/1/runs/new-1.out && grep -q 'data-icon=\\"/assets/icon.png\\"' monotask/rounds/1/runs/new-1.out \
   || { cat monotask/rounds/1/runs/new-1.out; fail "the badge's assets did not load as a bundler gives them"; }
 "$K" --control verifier.json drive clean "$W/monotask" > /dev/null

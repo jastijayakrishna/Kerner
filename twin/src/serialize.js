@@ -3,7 +3,6 @@ import { digest } from './keys.js';
 
 const MAX_DECODED = 16 << 20;
 
-/** The body as the client reads it: compressed bodies are unpacked, up to 16 MiB. */
 export function decodeBody(body, headers) {
   const encoding = String(headers['content-encoding'] ?? '').toLowerCase().trim();
   const options = { maxOutputLength: MAX_DECODED };
@@ -13,7 +12,6 @@ export function decodeBody(body, headers) {
   return body;
 }
 
-/** JSON and text bodies are compared by value; anything else by a hash of its bytes. */
 export function readBody(body, headers) {
   let bytes;
   try {
@@ -26,14 +24,12 @@ export function readBody(body, headers) {
     try {
       return { kind: 'json', value: JSON.parse(bytes.toString('utf8')) };
     } catch {
-      // Not valid JSON after all: compared as text below.
     }
   }
   if (type.includes('json') || type.startsWith('text/') || type.includes('xml') || type.includes('javascript')) return { kind: 'text', value: bytes.toString('utf8') };
   return { kind: 'bytes', digest: digest(bytes) };
 }
 
-/** A value as one short line, for showing a difference. A value nested too deeply for JSON.stringify is shown by its kind. */
 export function preview(value) {
   let text;
   try {
@@ -45,16 +41,9 @@ export function preview(value) {
 }
 
 const kindOf = (value) => (value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value);
-// A path as shown: one that runs deeper than this many characters keeps its start and its end.
 const MOST_PATH = 200;
 const shown = (path) => (path.length > MOST_PATH ? `${path.slice(0, 100)}...${path.slice(-97)}` : path);
 
-/**
- * Where two values differ, as paths such as $.items[2].price, in the order of the values; at most `limit` of them. The values are walked
- * with a stack of their own, one frame per array or object being compared, not by recursion: JSON.parse reads a body nested a hundred
- * thousand deep, and comparing it must not run out of stack. A frame hands out one child at a time, so a wide array costs no more memory
- * than a narrow one.
- */
 export function diffValues(a, b, path = '$', out = [], limit = 20) {
   const frames = [];
   const visit = (x, y, at) => {
@@ -92,10 +81,6 @@ export function diffValues(a, b, path = '$', out = [], limit = 20) {
   return out;
 }
 
-/**
- * The parts as one Uint8Array of exactly their size. A Buffer may be a slice of Node's shared 8 KiB pool, and posting it to another
- * thread would carry the whole pool along, other requests' data included (measured); this copy carries only its own bytes.
- */
 export function exactBytes(parts) {
   let size = 0;
   for (const part of parts) size += part.byteLength;
@@ -110,10 +95,6 @@ export function exactBytes(parts) {
 
 const container = (value) => value !== null && typeof value === 'object' && !(value instanceof Uint8Array) && !(value instanceof Date);
 
-/**
- * A value that crossed between threads, where every Buffer became a Uint8Array, with its Buffers back: in place, at any depth (a list of
- * what is left, not recursion), each array or object once.
- */
 export function revive(value) {
   if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
   if (!container(value)) return value;
@@ -133,5 +114,4 @@ export function revive(value) {
   return value;
 }
 
-// jsonText lives in keys.js, which names calls by it too; it is shared from here as before.
 export { jsonText } from './keys.js';

@@ -11,7 +11,6 @@ import { get, listen, post, routed, shopManifest, threePrs } from './helpers.js'
 const cli = fileURLToPath(new URL('../bin/kern-twin.js', import.meta.url));
 const run = (...args) => JSON.parse(execFileSync(process.execPath, [cli, ...args], { encoding: 'utf8' }));
 
-/** One version of the plans shop, whose change adds a plan written with a brace alone on its line, and the manifest of that change. */
 const plans = (version) => {
   const root = fileURLToPath(new URL(`./apps/plans/${version}/`, import.meta.url));
   return { module: join(root, 'src', 'app.js'), export: 'createApp', root };

@@ -11,8 +11,6 @@ const readJson = async (req) => {
   return parts.length ? JSON.parse(Buffer.concat(parts).toString()) : {};
 };
 
-// A shop on Postgres: a list read through the pool, and an order taken in a transaction on one client. The order's created_at is the
-// clock's: its exact value differs between the real run and the ghosts, so the ghosts get its answer by the query's shape.
 export function createApp() {
   const pool = new pg.Pool({ connectionString: process.env.KERN_TWIN_PG_URL, max: 2 });
   return async (req, res) => {

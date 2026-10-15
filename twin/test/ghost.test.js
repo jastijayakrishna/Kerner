@@ -63,7 +63,6 @@ test('a ghost keeps at most maxBodyBytes of its answer: past it, only the size a
     const ghost = await startGhost(app('big-answer', 'new'), { kind, startMs: 20000, memoryMb: 256, maxBodyBytes: 1 << 20 });
     try {
       const result = await ghost.ask(1, job, 5000);
-      // Never handed to assert's diff: it would write out all two million bytes.
       assert.ok(result.body === null, `${kind}: the ghost handed over ${result.body?.byteLength} bytes`);
       assert.deepEqual(result.large, { size: bytes.length, digest: createHash('sha256').update(bytes).digest('hex') }, kind);
     } finally {

@@ -1,4 +1,3 @@
-# The Phase 6 kit check: the Phase 4 shop under the proof kit. No port is opened on the host.
 name: kern-twin-proof-shop
 services:
   db:

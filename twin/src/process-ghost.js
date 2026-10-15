@@ -3,19 +3,10 @@ import { fileURLToPath } from 'node:url';
 import { answer, ask, ghostEnv, stopped } from './ghost-common.js';
 
 const MAIN = fileURLToPath(new URL('./process-ghost-main.js', import.meta.url));
-// Node 22.13 named the permission model's flag --permission; Node 22.12 still calls it --experimental-permission.
 const PERMISSION = process.allowedNodeEnvironmentFlags.has('--permission') ? '--permission' : '--experimental-permission';
-/** bwrap's arguments for a ghost; the twin's start-up probe runs `true` with exactly these, so a sandbox that half works is caught there. */
 export const BWRAP = ['--unshare-user', '--unshare-net', '--unshare-ipc', '--unshare-uts', '--unshare-pid', '--die-with-parent', '--new-session',
   '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
 
-/**
- * The command that starts a process ghost: [program, arguments].
- * - Outside a sandbox, Node's permission model refuses file writes, programs, threads, native add-ons (unless some are allowed) and
- *   the inspector. It does so in Node itself, below anything the app can change.
- * - Inside bwrap, the kernel gives the ghost no network and a read-only file system, and the permission model is left off so the
- *   inspector (line coverage) works.
- */
 export function ghostCommand(settings) {
   const node = [`--max-old-space-size=${settings.memoryMb}`, ...(settings.ghostExecArgv ?? [])];
   if (settings.sandbox !== 'bwrap') {
@@ -34,7 +25,6 @@ function stop(child) {
   });
 }
 
-/** Starts one process ghost; resolves, with the same shape as a thread ghost, once its version has loaded. */
 export function startProcessGhost(side, settings) {
   return new Promise((resolve, reject) => {
     const [command, args] = ghostCommand(settings);
@@ -66,7 +56,6 @@ export function startProcessGhost(side, settings) {
       cleanup();
       const dirty = [];
       child.on('error', (error) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost failed: ${error?.message ?? error}` })));
-      // A ghost that ends between requests is a failure too: the coordinator names it on the request it last answered.
       child.on('exit', (code, signal) => dirty.forEach((listener) => listener({ type: 'dirty', error: `the ghost stopped (exit ${code ?? signal})` })));
       child.on('message', (m) => {
         if (m?.type === 'dirty') dirty.forEach((listener) => listener(m));

@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Installs the Kern binary for a GitHub Action: the release asset pinned in its action.yml, or a source build.
-# KERN_SOURCE is the folder with Kern's Cargo.toml (default: the action's own folder). KERN_STATIC=true builds a static Linux binary, which
-# also runs inside the sandboxes' images; the pinned Linux release assets are static already.
 set -euo pipefail
 src=${KERN_SOURCE:-$GITHUB_ACTION_PATH}
 case "${RUNNER_OS}-${RUNNER_ARCH}" in

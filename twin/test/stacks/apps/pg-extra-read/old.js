@@ -1,6 +1,5 @@
 import pg from 'pg';
 
-// A plan page, and a health route, on Postgres.
 export function createApp() {
   const pool = new pg.Pool({ connectionString: process.env.KERN_TWIN_PG_URL, max: 2 });
   const send = (res, value) => {

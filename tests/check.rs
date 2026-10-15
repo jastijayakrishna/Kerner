@@ -1,5 +1,3 @@
-// kern check: one receipt for a pull request. These tests cover the parts that run without a sandbox: the rules a test run's sandbox
-// must follow, how the old and the new code's test results are compared, the static rules, the receipt and the keyless proof.
 use kern::policy::Limits;
 use kern::sandbox::{self, Spec};
 use kern::util::*;
@@ -31,10 +29,8 @@ fn a_test_run_reads_its_tree_read_only_without_network() {
     for want in ["type=volume,source=kern-deps-tree,target=/workspace,readonly", "--network=none", "--user=1000:1000", "--runtime=runsc", "--read-only", "nofile=65536"] {
         assert!(a.contains(want), "{want}: {a}");
     }
-    // Tools keep their caches in memory, as in a drive run: the installed tree itself stays read-only, so no test can change what later runs see.
     for dir in [".cache", ".vite", ".vite-temp"] { assert!(a.contains(&format!("--tmpfs /workspace/node_modules/{dir}:rw")), "{dir}: {a}"); }
     assert!(a.matches("type=bind").count() == 2, "only /input and /kern are bound: {a}");
-    // A test run never gets a network, root, write grants, a writable tree, a scratch copy or another volume.
     let write = vec!["src/".to_string()];
     let tools = vec![("kern-deps-tools", "/kern-tools/node_modules", true)];
     denied(sandbox::container_args(&Spec { network: "bridge", ..run.clone() }, "kern-x"), "network");
@@ -54,14 +50,12 @@ fn a_test_run_report_is_read_by_length() {
     let parts = sandbox::parts(&out, &sandbox::TEST_PARTS).unwrap();
     assert_eq!(parts["ending"], b"exit 1");
     assert_eq!(parts["behavior"], b"exec:id\n");
-    // Output that pretends to end the report early, or extra bytes after it, is refused.
     let mut forged = out.clone();
     forged.extend(b"more");
     denied(sandbox::parts(&forged, &sandbox::TEST_PARTS), "unexpected data");
     denied(sandbox::parts(&out[..out.len() - 2], &sandbox::TEST_PARTS), "incomplete");
 }
 
-// ---- Tests on the old and the new code -------------------------------------------------------------------------------------------
 use kern::proof::{Count, Report};
 use kern::suite;
 use std::collections::BTreeMap;
@@ -98,13 +92,11 @@ fn a_test_that_fails_once_is_flaky_not_broken() {
     assert!(names(&c, "broke").is_empty(), "{c}");
     assert_eq!(names(&c, "flaky"), ["t > a"]);
     assert_eq!(c["kept"], 2, "both pass on the second run");
-    // With no second run, a failure is a failure.
     assert_eq!(names(&suite::compare(&before, &after, None), "broke"), ["t > a"]);
 }
 
 #[test]
 fn a_test_run_without_results_says_how_it_ended_and_what_it_printed_last() {
-    // mongoose's tests fetch a MongoDB server first: with the network off they stop before mocha writes its report.
     let errors = b"[31mError: getaddrinfo ENOTFOUND fastdl.mongodb.org[0m
     at GetAddrInfoReqWrap.onlookup (node:dns:120:26)
 
@@ -112,7 +104,6 @@ fn a_test_run_without_results_says_how_it_ended_and_what_it_printed_last() {
     let why = kern::suite::no_results("the output contains no mocha report", b"exit 1", errors, b"");
     assert!(why.starts_with("the output contains no mocha report (exit 1)"), "{why}");
     assert!(why.contains("ENOTFOUND fastdl.mongodb.org") && !why.contains(''), "the last lines it printed, without terminal colours: {why}");
-    // Nothing on stderr: the end of what it printed on stdout.
     let why = kern::suite::no_results("the output contains no vitest report", b"exit 1", b"", b"line one
 Error: Failed to load url @cloudflare/workers-shared (resolved id: @cloudflare/workers-shared)
 ");
@@ -133,13 +124,11 @@ fn in_a_monorepo_the_tests_are_those_of_the_packages_a_change_touches() {
 
 #[test]
 fn a_package_s_test_run_finds_its_runner_up_the_tree() {
-    // pnpm gives each package its own node_modules/.bin; npm and yarn hoist the runner to the root.
     let at = |p: &str| ["/workspace/packages/kit/node_modules/.bin/vitest", "/workspace/node_modules/.bin/jest"].contains(&p);
     assert_eq!(kern::sandbox::runner_in("packages/kit", "/workspace/node_modules/.bin/vitest", at), "/workspace/packages/kit/node_modules/.bin/vitest");
     assert_eq!(kern::sandbox::runner_in("packages/kit", "/workspace/node_modules/.bin/jest", at), "/workspace/node_modules/.bin/jest");
     assert_eq!(kern::sandbox::runner_in("", "/workspace/node_modules/.bin/mocha", at), "/workspace/node_modules/.bin/mocha", "nothing found: the command as it was");
     assert_eq!(kern::sandbox::runner_in("packages/kit", "/usr/local/bin/node", at), "/usr/local/bin/node");
-    // The folder a run starts in stays inside the tree.
     for bad in ["../x", "/etc", "a/../../b", "a//b", "a/./b", "a\\b", "a\0b"] { assert!(kern::sandbox::test_dir(bad).is_err(), "{bad}"); }
     assert_eq!(kern::sandbox::test_dir("packages/kit").unwrap(), "/workspace/packages/kit");
     assert_eq!(kern::sandbox::test_dir("").unwrap(), "/workspace");
@@ -163,7 +152,6 @@ fn test_files_are_known_by_folder_and_by_name() {
     assert!(!paths.iter().any(|p| p == "src/sum.ts" || p == "README.md"), "{paths:?}");
 }
 
-// ---- Static rules that report instead of refusing -----------------------------------------------------------------------------------
 use std::path::Path;
 use std::process::Command;
 
@@ -178,7 +166,6 @@ fn write(dir: &Path, path: &str, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, text).unwrap();
 }
-/// A small project: a module, its tests, a package.json with vitest. Returns the repository and its first commit.
 fn project() -> (Temp, String) {
     let t = Temp::new();
     git(&t.0, &["init", "-q", "-b", "main"]);
@@ -247,7 +234,6 @@ fn dependency_changes_say_which_packages_moved_and_a_lockfile_that_points_elsewh
     let lockfile = r["lockfile"].as_array().unwrap();
     assert!(lockfile.len() == 1 && lockfile[0]["path"] == "package-lock.json" && lockfile[0]["why"].as_str().unwrap().contains("left-pad")
         && lockfile[0]["why"].as_str().unwrap().contains("https://evil.example/left-pad-1.3.0.tgz"), "{r}");
-    // A lockfile that only moves packages to their own registry tarballs is no surprise.
     let r = kern::rules::rules(&t.0, &base, &mid).unwrap();
     assert!(r["lockfile"].as_array().unwrap().is_empty(), "{r}");
 }
@@ -261,7 +247,6 @@ fn a_change_with_no_code_has_no_powers_or_tricks() {
     assert_eq!(r["changed"].as_array().unwrap().len(), 1);
 }
 
-// ---- The receipt: one answer, every item, posted once, approved only by people who can merge ----------------------------------------
 use kern::receipt;
 use serde_json::{Value, json};
 
@@ -275,7 +260,6 @@ fn kinds(r: &Value, list: &str) -> Vec<String> { r[list].as_array().unwrap().ite
 fn decision_table() {
     let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off());
     assert_eq!(r["decision"], "clear", "{r}");
-    // A test that passed before and fails now blocks; so does a test trick. An approval cannot clear them.
     let mut t = clean_tests();
     t["broke"] = json!(["t > rounds to cents"]);
     let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
@@ -283,7 +267,6 @@ fn decision_table() {
     let mut rules = clean_rules();
     rules["tricks"] = json!([{ "path": "test/a.test.js", "why": "A test file skips or focuses tests: test/a.test.js uses only. Every test must run, so remove it" }]);
     assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests(), &off())["decision"], "blocked");
-    // Everything else that is unexpected needs a look: new powers, tests that no longer run, settings, CI, secret and dependency files.
     let mut rules = clean_rules();
     rules["powers"] = json!([{ "path": "src/total.js", "added": ["node:child_process"] }]);
     rules["protected"] = json!([{ "path": ".github/workflows/ci.yml", "operation": "modify" }]);
@@ -292,7 +275,6 @@ fn decision_table() {
     let r = receipt::build(&drive_json(), &rules, &t, &off());
     assert_eq!(r["decision"], "look");
     assert_eq!(kinds(&r, "look"), ["power", "test-gone", "protected"], "behaviour first, then powers, then tests, then the files that steer builds: {r}");
-    // Behaviour the pull request does not mention needs a look; what it describes does not.
     let behaviour = json!({ "status": "RAN", "percent": 100, "report": { "coverage": { "percent": 100 }, "call_differences": [
         { "call": "src/total.js#total", "args": "[[1,2]]", "old": "3", "new": "4" },
         { "call": "src/total.js#total", "args": "[[]]", "old": "0", "new": "null" }], "sorted": { "D1": { "says": "yes", "why": "the PR says totals change" }, "D2": { "says": "no", "why": "" } } } });
@@ -327,22 +309,18 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     for want in ["t > rounds to cents", "package.json", "12 tests passed before and still pass", "vitest", "set aside", "/kern approve", "Add an AI key"] {
         assert!(md.contains(want), "{want}:\n{md}");
     }
-    // A clear receipt says what it checked, and so never reads as more than it is.
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
     assert!(md.contains("Nothing unexpected") && md.contains("no test runner Kern can read") && md.contains("Not run"), "{md}");
     assert!(md.contains("in the rules it checked"), "a receipt whose tests did not run says it covers the rules only:\n{md}");
-    // A change with no code in it (docs only) had nothing to run: that is a whole check, not a partial one.
     let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches no code, tests or package.json" });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");
     assert!(!md.contains("sandbox"), "nothing ran, so the receipt does not speak of a sandbox: {md}");
-    // In a monorepo, a package whose tests gave no results is named with the reason, beside the packages that ran.
     let mut t = clean_tests();
     t["runner"] = json!("vitest in packages/kit");
     t["not_run"] = json!([{ "dir": "apps/web", "why": "the tests in apps/web on the new code gave no results: the output contains no jest report (exit 1)" }]);
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
     assert!(md.contains("vitest in packages/kit") && md.contains("apps/web") && md.contains("no jest report (exit 1)"), "{md}");
-    // Hostile names from a pull request cannot break out of their code spans.
     let mut t = clean_tests();
     t["broke"] = json!(["a `b` <script>"]);
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
@@ -404,7 +382,6 @@ fn a_receipt_is_posted_once_with_its_status_and_never_over_a_newer_head() {
     let comment = log.iter().find(|(m, p, _)| m == "POST" && p.ends_with("/comments")).unwrap();
     assert!(comment.2.contains("kern-receipt"), "{}", comment.2);
     assert!(!comment.2.contains("Signed by GitHub") && !comment.2.contains("kern-seal"), "a receipt without a seal never claims a signature: {}", comment.2);
-    // With GitHub's signature, the receipt says so and how anyone can check it.
     std::fs::write(dir.0.join("seal.json"), json!({ "seal": { "v": 1 }, "token": "a.b.c" }).to_string()).unwrap();
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
@@ -416,7 +393,6 @@ fn a_receipt_is_posted_once_with_its_status_and_never_over_a_newer_head() {
     let body: Value = serde_json::from_str(&seen.lock().unwrap().iter().find(|(m, p, _)| m == "POST" && p.ends_with("/comments")).unwrap().2).unwrap();
     let body = body["body"].as_str().unwrap();
     assert!(body.contains("Signed by GitHub for Kern's own workflow") && body.contains("kern receipt verify acme/shop 7") && body.trim_end().ends_with("-->"), "{body}");
-    // A run of an older commit never replaces what Kern said about the newer one.
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"3333333333333333333333333333333333333333"}}"#.into()),
         _ => (404, "{}".into()),
@@ -463,7 +439,6 @@ fn approval_needs_write_access_a_signed_receipt_and_never_unblocks() {
 }
 
 fn oidc_keys() -> Value { serde_json::from_str(include_str!("fixtures/oidc/jwks.json")).unwrap() }
-/// A seal and the token a test key signed over it, as GitHub signs one for Kern's workflow (fixtures/oidc/README.md).
 fn signed_fixture(name: &str) -> (Value, String) {
     let all: Value = serde_json::from_str(include_str!("fixtures/oidc/tokens.json")).unwrap();
     (all["seals"][name].clone(), all[name].as_str().unwrap().to_string())
@@ -478,7 +453,6 @@ fn only_kern_at_a_branch_or_tag_of_its_own_repository_signs_a_receipt() {
     let mut edited = seal.clone();
     edited["decision"] = json!("clear");
     denied(receipt::signed(&edited, &token, &keys, "acme/shop"), "audience");
-    // Kern's workflow at a bare commit or at a pull request's ref can be a fork's copy of it, which anyone can write.
     for name in ["full-bare-sha", "full-pull-ref"] {
         let (seal, token) = signed_fixture(name);
         denied(receipt::signed(&seal, &token, &keys, "acme/shop"), "branch or tag");
@@ -487,7 +461,6 @@ fn only_kern_at_a_branch_or_tag_of_its_own_repository_signs_a_receipt() {
     denied(receipt::kern_workflow(&json!({})), "branch or tag");
 }
 
-/// A pull request #7 whose head is the fixture seals' head, with Kern's receipt carrying `name`'s seal and token (or `author`'s copy of it).
 fn signed_pull(name: &str, author: &'static str, permission: &'static str) -> (String, Seen) {
     let (seal, token) = signed_fixture(name);
     let body = format!("<!-- kern-receipt -->\n### ⚠️ Kern: 1 thing needs a look\n\n{}\n", receipt::seal_line(&seal, &token));
@@ -531,10 +504,8 @@ fn verify_reads_kern_s_receipt_and_checks_its_signature() {
     let v = verify("full-valid", "github-actions[bot]", None);
     assert_eq!((v["status"].as_str(), v["decision"].as_str(), v["current"].as_bool(), v["run"].as_str()), (Some("VERIFIED"), Some("look"), Some(true), Some("123")), "{v}");
     assert!(v["workflow"].as_str().unwrap().ends_with("kern.yml@refs/heads/one"), "{v}");
-    // receipt.json from the job's artifact must be the receipt the seal names.
     assert_eq!(verify("full-valid", "github-actions[bot]", Some(&json!({ "decision": "clear" })))["status"], "INVALID");
     assert_eq!(verify("full-bare-sha", "github-actions[bot]", None)["status"], "INVALID");
-    // Anyone can paste Kern's mark and seal into a comment of their own; only Kern's account's comment is the receipt.
     assert_eq!(verify("full-valid", "mallory", None)["status"], "NO_RECEIPT");
 }
 
@@ -542,7 +513,6 @@ fn verify_reads_kern_s_receipt_and_checks_its_signature() {
 fn sign_asks_github_for_a_token_over_the_receipt_s_seal() {
     let dir = receipt_dir(clean_tests());
     let (url, seen) = stub_github(|m, p| if m == "GET" && p.starts_with("/token") { (200, r#"{"value":"signed-by-github"}"#.into()) } else { (404, "{}".into()) });
-    // SAFETY: no other test in this file reads these variables.
     unsafe {
         std::env::set_var("ACTIONS_ID_TOKEN_REQUEST_URL", format!("{url}/token?api-version=2.0"));
         std::env::set_var("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "bearer-for-this-job");

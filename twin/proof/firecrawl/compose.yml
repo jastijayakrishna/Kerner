@@ -1,5 +1,3 @@
-# firecrawl #2638 under the twin, with database authentication against a stand-in for its two Supabase reads. No port is opened on the
-# host. The queue services firecrawl needs to crawl are not started: the traffic never gets that far.
 name: kern-twin-proof-firecrawl
 x-firecrawl-env: &firecrawl-env
   USE_DB_AUTHENTICATION: "true"

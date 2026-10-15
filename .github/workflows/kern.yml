@@ -1,8 +1,3 @@
-# Kern: one receipt on every pull request.
-#
-# Called from a repository's own workflow (see examples/kern.yml). Everything runs on that repository's runner: Kern hosts nothing, and a
-# public repository pays nothing. Each pull request gets one comment, the receipt, edited in place on every push, and one commit status,
-# `Kern`. A maintainer approves a "needs a look" receipt by commenting `/kern approve`.
 name: Kern
 
 on:
@@ -46,15 +41,13 @@ jobs:
             -d '{"state":"pending","context":"Kern","description":"Checking what this change does when it runs"}' > /dev/null || true
 
       - name: Check out the pull request
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: repo
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # Kern builds the exact version of itself whose workflow this is: GitHub names it in the job's own OIDC token (job_workflow_ref and
-      # job_workflow_sha), so the workflow and the binary can never drift apart.
       - name: Which Kern
         id: which
         run: |
@@ -67,7 +60,6 @@ jobs:
             ref=$(printf '%s' "$claims" | jq -r '.job_workflow_ref // empty')
           fi
           if [ -z "$sha" ]; then
-            # No OIDC token (a pull request from a fork, or no id-token: write): the calling workflow names the version it pinned.
             caller="repo/${GITHUB_WORKFLOW_REF#*/*/}"
             sha=$(grep -oE 'jastijayakrishna/Kerner/\.github/workflows/kern\.yml@[A-Za-z0-9._/-]+' "${caller%@*}" 2>/dev/null | head -n 1 | cut -d@ -f2) || true
             sha=${sha:-main}
@@ -76,7 +68,7 @@ jobs:
           echo "Kern at ${ref:-main} ($sha)"
 
       - name: Check out Kern
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: jastijayakrishna/Kerner
           ref: ${{ steps.which.outputs.sha }}
@@ -84,7 +76,7 @@ jobs:
           persist-credentials: false
 
       - name: Kern's build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry
@@ -143,7 +135,6 @@ jobs:
           VERSION: 2.1.292
         run: |
           case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) echo "::error::No Claude Code build for $(uname -m)"; exit 1 ;; esac
-          # The platform package is the standalone binary: npm checks it against the registry's digest and runs no install script.
           d="$RUNNER_TEMP/claude-code" && rm -rf "$d" && mkdir -p "$d" && cd "$d"
           npm pack --silent "@anthropic-ai/claude-code-linux-$arch@$VERSION" > /dev/null
           tar -xzf ./*.tgz && rm -f ./*.tgz && chmod +x package/claude
@@ -160,7 +151,6 @@ jobs:
           W="$RUNNER_TEMP/kern"
           [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
           [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
-          # The old code is where the pull request's branch left its base: the merge base, not the base branch's newest commit.
           repo="$GITHUB_WORKSPACE/repo"
           base=$(git -C "$repo" merge-base "$BASE_SHA" "$HEAD_SHA")
           jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$W/pr.md"
@@ -196,7 +186,7 @@ jobs:
 
       - name: Keep the receipt
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kern-receipt-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: |
@@ -235,14 +225,14 @@ jobs:
           fi
           echo "sha=${sha:-main}" >> "$GITHUB_OUTPUT"
       - name: Check out Kern
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: jastijayakrishna/Kerner
           ref: ${{ steps.which.outputs.sha }}
           path: .kern
           persist-credentials: false
       - name: Kern's build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry

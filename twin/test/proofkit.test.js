@@ -18,7 +18,6 @@ test('percentiles are exact, by nearest rank, and the share compared counts same
 });
 
 test('a request the twin dropped because it was busy counts as not compared in the share', () => {
-  // Dropped requests were sampled and never judged: leaving them out would make a run that shed load look better covered than it was.
   assert.deepEqual(comparedShare({ same: 45, stated: 0, different: 0, notCompared: 5, skipped: 0, dropped: 50 }), { compared: 45, judged: 100, share: 0.45 });
 });
 
@@ -62,7 +61,6 @@ test("each step's numbers are spread evenly, even the first one: neighbouring st
     bins[Math.min(9, Math.floor(x * 10))]++;
     return bins;
   }, Array(10).fill(0));
-  // The first number of 1,000 neighbouring steps, as the driver seeds them; each tenth should get about 100.
   const first = tenths(Array.from({ length: 1000 }, (_, i) => seeded(7 * 1000003 + i)()));
   assert.ok(first.every((n) => n >= 60 && n <= 140), `first numbers by tenth: ${first.join(' ')}`);
 });
@@ -80,8 +78,6 @@ test('the report sums each app up from its runs, its differences and the hand-wr
     writeFileSync(join(dir, 'demo-off.json'), JSON.stringify(run('off', 1, 2, null)));
     writeFileSync(join(dir, 'demo-sample-1.json'), JSON.stringify(run('sample-1', 1.5, 4, stats)));
     writeFileSync(join(dir, 'demo-sample-1-differences.jsonl'), `${JSON.stringify({ route: 'POST /x', kinds: ['status', 'body'], pulls: [7] })}\n${JSON.stringify({ route: 'POST /x', kinds: ['body', 'status'], pulls: [7] })}\n`);
-    // The second entry is a group that appears only in a pgReads run, not in the headline differences: it must not be counted in the
-    // headline's "Meant", which stays 2.
     writeFileSync(join(dir, 'triage.json'), JSON.stringify({ demo: [
       { route: 'POST /x', kinds: ['status', 'body'], count: 2, verdict: 'meant', why: 'the pull request says so' },
       { route: 'DELETE /y', kinds: ['effects'], count: 5, verdict: 'meant', why: 'only with pgReads' },
@@ -108,7 +104,6 @@ test('the report sums each app up from its runs, its differences and the hand-wr
 });
 
 test('a hand-written file saved with a byte order mark is read, and one that cannot be read is named, never silently dropped', async () => {
-  // PowerShell 5.1 writes UTF-8 with a byte order mark, which JSON.parse refuses: the triage would vanish from the report unseen.
   const root = mkdtempSync(join(tmpdir(), 'kern-proof-'));
   const dir = join(root, 'twin-proof-2026-10-13');
   mkdirSync(dir);
@@ -139,7 +134,6 @@ test('the report shows what opt-in Postgres real reads changed, comparing the ru
     const text = await report(dir);
     assert.match(text, /## What Postgres real reads changed/);
     assert.ok(text.includes('| demo | 288 of 302 (95.4%) | 302 of 302 (100.0%) | 14 → 28 | 14 → 0 |'), `missing pgreads row\n${text}`);
-    // It also appears as its own run in the cost table.
     assert.ok(text.includes('all copied + Postgres real reads'), `missing pgreads cost row\n${text}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -157,7 +151,6 @@ test('the proof server and its traffic runner measure an app without the twin an
     options: { manifest: shopManifest, epsilon: 0.5, minHours: 0, timeoutMs: 3000, log: join(dir, 'three-prs-{label}-differences.jsonl'), cases: join(dir, 'three-prs-{label}-cases') },
   }));
   const kit = (name) => fileURLToPath(new URL(`../proof/kit/${name}`, import.meta.url));
-  // What an earlier run with the same label left behind: each run starts from nothing.
   writeFileSync(join(dir, 'three-prs-sample-1-differences.jsonl'), '{"route":"STALE"}\n');
   mkdirSync(join(dir, 'three-prs-sample-1-cases'));
   writeFileSync(join(dir, 'three-prs-sample-1-cases', '1-1-stale.json'), '{}');

@@ -7,7 +7,6 @@ import { get, listen, post, shopVersion, threePrs } from './helpers.js';
 
 const status = (twin, key) => twin.paths().find((p) => p.key === key)?.status;
 
-/** One version of the plans shop, whose change adds a plan written with a brace alone on its line, and the manifest of that change. */
 const plans = (version) => {
   const root = fileURLToPath(new URL(`./apps/plans/${version}/`, import.meta.url));
   return { module: join(root, 'src', 'app.js'), export: 'createApp', root };
@@ -29,7 +28,6 @@ test('a change whose old branch no request has taken stays off, and that line is
   assert.equal(decision.ready, false);
   assert.deepEqual(decision.waiting, ['old:src/app.js:17']);
   assert.equal(shop.twin.stats().serving, 'old', 'six clean comparisons are not enough while a changed path has never run');
-  // The first request with blank limits takes that path: the old code answers it, the new one would crash, and the change stays off.
   assert.deepEqual(await (await post(`${shop.url}/limit`, { limits: null })).json(), { limit: 100 });
   await shop.twin.idle();
   const [found] = shop.twin.differences();

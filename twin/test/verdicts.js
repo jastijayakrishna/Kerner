@@ -1,4 +1,3 @@
-// A verdict as the twin's thread hands it to the evidence; tests change what they need.
 export const T = 1760097600000;
 
 export const verdict = (outcome, more = {}) => ({

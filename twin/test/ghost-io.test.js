@@ -77,7 +77,6 @@ const answered = (call) => (call ? call.key.split(' ')[0] : null);
 beginJob([version, named, row]);
 const first = [take(version.key), take(version.key), take(redisKey('CLIENT', ['SETNAME', 'bull:2'])), take(redisKey('CLIENT', ['SETNAME', 'bull:3'])), take(row.key), take(row.key)].map(answered);
 endJob();
-// A later job whose own recording lacks them: a pool opened a connection the real run did not need.
 beginJob([]);
 const later = [take(pgKey('select version();', [])), take(redisKey('CLIENT', ['SETNAME', 'bull:4'])), take(row.key)].map(answered);
 endJob();
@@ -165,7 +164,6 @@ console.log(JSON.stringify({
   sharp: code(() => process.dlopen({ exports: {} }, '/app/node_modules/sharp/build/Release/sharp.node')),
 }));
 `], { encoding: 'utf8' }));
-  // An allowed add-on reaches Node's real loader, which fails here only because the file does not exist.
   assert.deepEqual(out, { bcrypt: 'ERR_DLOPEN_FAILED', scoped: 'ERR_DLOPEN_FAILED', sharp: 'EACCES' });
 });
 
@@ -176,7 +174,6 @@ test('a ghost may not write to a file descriptor it did not open', () => {
     const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
 import { installGhostIO, beginJob } from ${source('ghost-io.js')};
 import fs from 'node:fs';
-// Opened before the seal, as the app's own process might have: a ghost thread shares the process's file descriptors.
 const fd = fs.openSync(${JSON.stringify(file)}, 'r+');
 installGhostIO({ harnessPort: 1 });
 beginJob([]);

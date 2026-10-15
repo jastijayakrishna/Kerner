@@ -1,7 +1,6 @@
 import http from 'node:http';
 import { createTwin } from '/twin/src/index.js';
 
-// The shop in production: the twin serves through its own listener and records Postgres. /__twin shows its numbers to the traffic driver.
 const twin = await createTwin({
   old: { module: '/shop/old/app.js', export: 'createApp' },
   candidate: { module: '/shop/new/app.js', export: 'createApp' },

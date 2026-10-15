@@ -11,7 +11,6 @@ const cli = fileURLToPath(new URL('../bin/kern-twin.js', import.meta.url));
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', GIT_CONFIG_NOSYSTEM: '1' };
 const git = (dir, ...args) => execFileSync('git', args, { cwd: dir, env, encoding: 'utf8' }).trim();
 
-/** A project whose last commit changed its code; its packages are installed (node_modules, not in git). */
 function project() {
   const root = mkdtempSync(join(tmpdir(), 'kern-build-'));
   const repo = join(root, 'repo');
@@ -39,7 +38,6 @@ test('kern-twin build writes the old version beside the new one, sharing its pac
     const out = join(root, 'old');
     const result = build('--repo', repo, '--base', base, '--out', out);
     assert.deepEqual([result.status, result.dependencies, result.base], ['BUILT', 'linked', base]);
-    // git archive writes line endings as a checkout on this machine would (Git for Windows sets core.autocrlf), like the new version's.
     assert.equal(readFileSync(join(out, 'src', 'app.js'), 'utf8').replace(/\r\n/g, '\n'), 'export const version = "old";\n');
     assert.equal(realpathSync(join(out, 'node_modules')), realpathSync(join(repo, 'node_modules')));
     assert.equal(existsSync(join(out, '.git')), false);
@@ -66,8 +64,6 @@ test('when a package file changed, kern-twin build installs the old version\'s o
 });
 
 test('in a monorepo the old version loads its own copy of a workspace package, never the new one through a shared link', () => {
-  // npm, yarn and pnpm link a workspace package into node_modules. Linking the old version to the new checkout's node_modules would
-  // make it run the new copy of that package: a change there could never show as a difference.
   const root = mkdtempSync(join(tmpdir(), 'kern-build-'));
   const repo = join(root, 'repo');
   try {

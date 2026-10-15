@@ -1,4 +1,3 @@
-// Sends the shop 200 requests of a fixed mix, waits until the twin has judged them, and passes when it compared at least 95%.
 const base = process.env.SHOP_URL ?? 'http://app:3000';
 let seed = 7;
 const random = () => {

@@ -3,12 +3,8 @@ import { Writable } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// A ghost's file writes, kept in memory for one request (overlay: true). Each write is written down as an effect and never done. The
-// ghost's own later reads see it, so an app that writes a file and reads it back behaves as it would. Every request starts again from
-// the real disk, where the real app's own writes already are.
 let entries = new Map();
 
-/** Forgets every write: called when a request starts. */
 export function resetOverlay() {
   entries = new Map();
 }
@@ -40,11 +36,6 @@ function decoded(data, options) {
   return encoding ? data.toString(encoding) : Buffer.from(data);
 }
 
-/**
- * Puts the overlay under the file functions of `fs`, in their sync, callback and promise forms; `wrote(effect)` writes each write down.
- * - Writes go to memory: writeFile, appendFile, mkdir, rm, rmdir, unlink, rename, copyFile, truncate and createWriteStream.
- * - Reads look there first: readFile, existsSync, stat, lstat, access and readdir.
- */
 export function installOverlay({ wrote }) {
   const real = { readFileSync: fs.readFileSync, existsSync: fs.existsSync, statSync: fs.statSync, lstatSync: fs.lstatSync, accessSync: fs.accessSync, readdirSync: fs.readdirSync };
   const entry = (path) => entries.get(path);

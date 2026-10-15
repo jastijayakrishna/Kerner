@@ -1,7 +1,3 @@
-//! The twin's build-time half. `kern twin plan` lists the lines a change from `base` to `head` touches that hold code, each with the
-//! commit that brought the change and that commit's pull request. The Node twin (twin/src/manifest.js) reads this manifest: it measures
-//! which of these lines each real request ran, holds switch-on until every one has run cleanly, and names the pull request behind a
-//! difference. Which lines changed and which hold code are kern drive's rules (drive::changed, drive::measured).
 use crate::drive::{Item, blobs, changed, commit_check, listing, measured, minified, same_program};
 use crate::ensure;
 use crate::git::{git, git_with, trimmed};
@@ -10,13 +6,10 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// At most this many changed modules, and this much of their text, go into one manifest; the rest is named as skipped.
 const MOST_FILES: usize = 2000;
 const MOST_TEXT: u64 = 128 << 20;
-/// Larger files are generated code or data.
 const LARGEST: u64 = 1 << 20;
 
-/// The pull request a commit's summary names: a trailing "(#123)" (squash merges) or a leading "Merge pull request #123" (merge commits).
 pub fn pull_number(summary: &str) -> Option<u64> {
     let s = summary.trim();
     if let Some(rest) = s.strip_prefix("Merge pull request #") {
@@ -27,7 +20,6 @@ pub fn pull_number(summary: &str) -> Option<u64> {
     inner[at + 2..].parse().ok()
 }
 
-/// Each line's commit from `git blame --porcelain`, by line number (1-based), with whether git marked it as the range's boundary.
 fn blame(repo: &Path, args: &[&str]) -> R<BTreeMap<u32, (String, bool)>> {
     let out = git_with(repo, args, None, 256 << 20)?;
     let text = String::from_utf8_lossy(&out);
@@ -42,7 +34,6 @@ fn blame(repo: &Path, args: &[&str]) -> R<BTreeMap<u32, (String, bool)>> {
         let mut words = row.split(' ');
         let first = words.next().unwrap_or("");
         if first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
-            // "<sha> <line in the original> <line in the final file> [<lines in this group>]"
             if let Some(n) = words.nth(1).and_then(|w| w.parse::<u32>().ok()) { current = Some((first.to_string(), n)); }
         } else if first == "boundary" && let Some((sha, _)) = &current {
             boundary.insert(sha.clone());
@@ -51,8 +42,6 @@ fn blame(repo: &Path, args: &[&str]) -> R<BTreeMap<u32, (String, bool)>> {
     Ok(lines.into_iter().map(|(sha, n)| { let edge = boundary.contains(&sha); (n, (sha, edge)) }).collect())
 }
 
-/// The first-parent commit that brought `commit` into the branch: itself when it is on the first-parent path, else the merge commit that
-/// brought it in (the oldest first-parent commit descending from it).
 fn landing(repo: &Path, head: &str, first: &[String], commit: &str, seen: &mut BTreeMap<String, Option<String>>) -> R<Option<String>> {
     if first.iter().any(|c| c == commit) { return Ok(Some(commit.to_string())); }
     if let Some(found) = seen.get(commit) { return Ok(found.clone()); }
@@ -62,12 +51,9 @@ fn landing(repo: &Path, head: &str, first: &[String], commit: &str, seen: &mut B
     Ok(found)
 }
 
-/// Writes the manifest of the change from `base` to `head` to `out`, which must not exist yet, and answers a summary.
 pub fn plan(repo: &Path, base: &str, head: &str, out: &Path) -> R<Value> {
     commit_check(repo, base)?;
     commit_check(repo, head)?;
-    // In a shallow clone git blame gives every line, changed ones too, to the commit at the shallow edge, even when the base is there: no
-    // line's commit, and so no pull request, could be named, and the manifest would say so nowhere.
     ensure!(trimmed(git(repo, &["rev-parse", "--is-shallow-repository"], None)?) == "false",
         "The repository is a shallow clone, so git blame cannot name the commit behind each changed line. Fetch the full history first: git fetch --unshallow");
     let (old, new) = (listing(repo, base)?, listing(repo, head)?);
@@ -131,8 +117,6 @@ pub fn plan(repo: &Path, base: &str, head: &str, out: &Path) -> R<Value> {
             skipped.push(json!({ "path": p, "why": "no line of code changed (comments, imports or types only)" }));
             continue;
         }
-        // A new line: the commit git blame gives it in base..head. An old line: git blame --reverse gives the last commit it still existed
-        // in, and the next commit on the first-parent path replaced it.
         let blamed_new = if pn.is_empty() { BTreeMap::new() } else { blame(repo, &["blame", "--porcelain", &range, "--", p])? };
         let blamed_old = if po.is_empty() { BTreeMap::new() } else { blame(repo, &["blame", "--reverse", "--porcelain", &range, "--", p])? };
         let mut new_side = Map::new();
@@ -158,7 +142,6 @@ pub fn plan(repo: &Path, base: &str, head: &str, out: &Path) -> R<Value> {
         let status = match (old_at.contains_key(p), new_at.contains_key(p)) { (false, _) => "added", (_, false) => "deleted", _ => "modified" };
         files.push(json!({ "path": p, "status": status, "changed": { "old": co, "new": cn }, "old": old_side, "new": new_side }));
     }
-    // Every commit a line names, with its summary and pull request, read in groups so any number fits on a command line.
     let mut named = BTreeSet::new();
     for f in &files {
         for side in ["old", "new"] {

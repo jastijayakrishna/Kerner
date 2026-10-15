@@ -1,17 +1,10 @@
 'use strict';
-// Kern's probe. Kern runs it inside the verifier's sandbox on the old and on the new code, twice each, with the same plan: it calls the
-// exported functions of the planned modules with the planned arguments, asks the app's routes as each role, and prints what happened.
-// Kern compares the runs; nothing here decides anything. Module code runs only in worker threads, which share the process but never the
-// main thread's JavaScript. The main thread judges the task's `when` tests and expected answers itself, takes a worker's messages only
-// with the key the worker deleted before the module loaded, and prints the one report after every worker has stopped, to the stdout it
-// started with.
 const { isMainThread, Worker, parentPort, workerData } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const MARK = '\n\u001ekern-probe\u001e\n';
 const LATE = Symbol('late');
-// Workers still stopping; the report waits for every one of them.
 const stopping = [];
 
 if (isMainThread) {
@@ -21,7 +14,6 @@ if (isMainThread) {
   work();
 }
 function identity(fd) { try { const s = fs.fstatSync(fd); return `${s.dev}:${s.ino}`; } catch { return null; } }
-// Code that closed the probe's stdout and opened something else in its place gets no report through: the run fails instead.
 function finish(report, stdout) {
   if (stdout === null || identity(1) !== stdout) process.exit(3);
   process.stdout.write(MARK + JSON.stringify(report) + '\n', () => process.exit(0));
@@ -32,7 +24,6 @@ async function main() {
   if (plan.version !== 1) throw new Error('unsupported probe plan');
   const root = path.resolve(process.env.KERN_PROBE_ROOT || '/workspace');
   const started = Date.now();
-  // The app gets a part of the time of its own; the modules share the rest fairly, so one slow module cannot starve the others.
   const reserve = plan.app ? Math.min(90000, Math.floor(plan.budget_ms / 3)) : 0;
   const deadline = started + plan.budget_ms - reserve;
   const modules = [];
@@ -46,8 +37,6 @@ async function main() {
   return { version: 1, modules, app };
 }
 
-// One module in a worker. Every function gets the same calls on every side, whatever else its module exports: the first `per_function`
-// argument lists, the functions the task names first. `ended` says why the module stopped: done, time, restarts, load or reload.
 function probeModule(root, plan, mod, until) {
   const file = path.join(root, ...mod.path.split('/'));
   const result = { path: mod.path, load: null, ended: null, more: false, exports: {}, examples: [] };
@@ -73,7 +62,6 @@ function probeModule(root, plan, mod, until) {
       }
       resolve(result);
     };
-    // A call that never returns, or code that stops its thread, ends that worker: the call is recorded and a new worker goes on after it.
     const record = (c, out) => {
       if (c.phase === 'examples') result.examples.push({ i: c.i, out, ok: false });
       else { const x = result.exports[c.name]; if (x && x.calls && x.calls[c.k] === null) x.calls[c.k] = out; }
@@ -103,7 +91,6 @@ function probeModule(root, plan, mod, until) {
         start(after(c));
       };
       w.on('message', (m) => {
-        // Only this worker's harness holds its key: anything else posted on the port is the code under test talking, and is ignored.
         if (worker !== w || !m || typeof m !== 'object' || m.key !== key) return;
         if (m.kind === 'load') {
           clearTimeout(timer);
@@ -145,16 +132,12 @@ function probeModule(root, plan, mod, until) {
       });
       w.on('error', () => stopped('x'));
       w.on('exit', () => stopped('x'));
-      // Loading has a time limit of its own: a module that never finishes loading (a busy loop, a connection retried forever with the
-      // network off) ends its worker like a call that never returns.
       timer = setTimeout(() => stopped('t'), Math.max(1000, Math.min(plan.load_ms || 20000, until - Date.now())));
     };
     start({ phase: 'examples', pos: 0 });
   });
 }
 
-// The task's own words, judged here in the main thread, which the code under test never reaches, each with a time limit: whether a call
-// is part of the stated change, and what an example must give.
 function judge(changes, name, tuples) {
   const tests = changes.filter((c) => c.name === '*' || c.name === name);
   if (!tests.length) return null;
@@ -174,12 +157,9 @@ function holds(x, out) {
 function work() {
   const d = workerData;
   const key = d.key;
-  // Before any module code runs: nothing it can reach holds the key afterwards, so it cannot sign a message as the harness.
   delete d.key;
   const send = parentPort.postMessage.bind(parentPort);
-  // What the harness uses once the module has loaded is taken now, before the module can replace it.
   const tools = { evaluate: eval, apply: Reflect.apply, construct: Reflect.construct, now: process.hrtime.bigint, isArray: Array.isArray, Promise, setTimeout, clearTimeout };
-  // The behaviour recorder runs in every thread, so what module code does in a worker is recorded too.
   const pre = /--require[= ]"?([^\s"]*monitor\.cjs)/.exec(process.env.NODE_OPTIONS || '');
   if (pre) { try { require(pre[1]); } catch {} }
   steady(d.seed);
@@ -204,7 +184,6 @@ async function run(d, key, send, t) {
       send({ key, kind: 'example', i: e.i, out });
     }
   }
-  // The functions the task names first, then the rest by name; at most 200 functions of one module are called.
   const fns = list.filter((x) => x.type !== 'value');
   const order = fns.filter((x) => d.first.includes(x.key)).concat(fns.filter((x) => !d.first.includes(x.key))).slice(0, 200);
   const at = from.phase === 'calls' ? order.findIndex((x) => x.key === from.name) : 0;
@@ -221,9 +200,6 @@ async function run(d, key, send, t) {
   send({ key, kind: 'done' });
 }
 
-// The exports of a module, the same for ES modules and CommonJS: named exports first, then the functions of a default object under their
-// own names, so moving between `export function add` and `module.exports = { add }` is not a change. Every name counts, aliases included;
-// a function is called on the object it was read from, as a caller would call it.
 function exportsOf(ns) {
   const list = [];
   const entry = (key, v, self) => {
@@ -243,7 +219,6 @@ function exportsOf(ns) {
       try { v = d[k]; } catch { continue; }
       if (typeof v !== 'function') continue;
       if (!names.includes(k)) { list.push(entry(k, v, d)); continue; }
-      // CommonJS: the same function is a named export as well, and is listed once, under its name.
       let same = false;
       try { same = ns[k] === v; } catch {}
       if (!same) list.push(entry('default.' + k, v, d));
@@ -276,7 +251,6 @@ async function call(x, a, ms, root, t) {
   }
 }
 
-// Time and chance are the same in every run: a fixed clock and seeded randomness, so the old and the new code see the same world.
 function steady(seed) {
   let s = parseInt(String(seed).slice(0, 8), 16) >>> 0;
   const rand = () => { s = (s + 0x6d2b79f5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -293,7 +267,6 @@ function steady(seed) {
   const bytes = (n) => { const b = Buffer.alloc(n); for (let i = 0; i < n; i++) b[i] = Math.floor(rand() * 256); return b; };
   const fill = (a) => { const b = bytes(a.byteLength); new Uint8Array(a.buffer, a.byteOffset, a.byteLength).set(b); return a; };
   const uuid = () => { const b = bytes(16); b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80; const h = b.toString('hex'); return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`; };
-  // Some of these are getters on Node's own objects: define them over, never assign.
   const put = (o, name, value) => { try { Object.defineProperty(o, name, { value, writable: true, configurable: true, enumerable: true }); } catch { try { o[name] = value; } catch {} } };
   put(crypto, 'randomBytes', (n, cb) => { const b = bytes(n); if (typeof cb === 'function') { process.nextTick(cb, null, b); return undefined; } return b; });
   put(crypto, 'randomUUID', uuid);
@@ -305,8 +278,6 @@ function steady(seed) {
 
 function digest() { return require('crypto').createHash('sha256'); }
 function unrooted(s, root) { return root ? s.split(pathToFileURL(root).href).join('').split(root).join('') : s; }
-// An error as one line: its kind, then its words, with the sandbox's own path removed. Words past 300 characters are shown cut short
-// with a hash of all of them.
 function text(e, root) {
   let name = typeof e, msg = '';
   try {
@@ -316,8 +287,6 @@ function text(e, root) {
   const s = unrooted(name + ': ' + msg, root).replace(/\r?\n/g, '\\n');
   return s.length > 300 ? s.slice(0, 280) + '...#' + digest().update(s).digest('hex').slice(0, 16) : s;
 }
-// What a value is, written out the same way every time, object keys in order. What is shown is cut short (long text, long lists, deep
-// nesting); whenever anything was cut, a hash of all of it is shown with it, so a difference anywhere in the value still counts.
 function ser(v, root) {
   const shown = write(v, root, false);
   if (!shown.cut && shown.text.length <= 240) return shown.text;
@@ -325,7 +294,6 @@ function ser(v, root) {
   write(v, root, true, (s) => h.update(s));
   return shown.text.slice(0, 120) + '...#' + h.digest('hex').slice(0, 16);
 }
-// Writes a value out, cut short for showing (full = false) or whole for the hash (full = true, up to 64 MiB and 64 levels deep).
 function write(v, root, full, sink) {
   const state = { text: '', cut: false, size: 0 };
   const FULL = 64 * 1024 * 1024;
@@ -444,7 +412,6 @@ function ask(port, route, headers) {
   const http = require('http');
   const space = route.indexOf(' ');
   return new Promise((done) => {
-    // An idle socket times out after 5 seconds, and every request after 10 in all, so an app that trickles its answer cannot hold the probe.
     let limit = null;
     const resolve = (s) => { clearTimeout(limit); done(s); };
     const req = http.request({ host: '127.0.0.1', port, method: route.slice(0, space), path: route.slice(space + 1), headers, agent: false, timeout: 5000 }, (res) => {

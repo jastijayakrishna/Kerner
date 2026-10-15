@@ -1,8 +1,8 @@
 import http from 'node:http';
 import { send } from '../http.js';
 
-// Reaches its upstream by address: by IP, naming the site in a Host header of its own (a virtual host; a signed request names its host
-// the same way), and by an IPv6 address. The upstream's ports are in KERN_TEST_UPSTREAM_PORT and KERN_TEST_UPSTREAM6_PORT.
+
+
 function getJson(options) {
   return new Promise((resolve, reject) => {
     http.get(options, (res) => {

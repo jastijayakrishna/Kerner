@@ -17,7 +17,6 @@ async function upstream(counts) {
   return listen(answering(counts));
 }
 
-/** The same upstream on IPv6's loopback address, or null on a machine without one. */
 async function upstreamSix(counts) {
   const server = http.createServer(answering(counts));
   const listening = await new Promise((resolve) => {
@@ -137,7 +136,6 @@ test('a body chunk Node itself refuses, or takes without a word, does exactly wh
   process.env.KERN_TEST_UPSTREAM = server.url;
   try {
     const { tryWrites } = await import('./apps/odd-write/old.js');
-    // Outside any sampled request, nothing records: these are Node's own answers.
     const alone = tryWrites();
     assert.match(alone[0], /^ERR_INVALID_ARG_TYPE: The "chunk" argument/);
     assert.equal(alone[1], 'written');
@@ -153,7 +151,6 @@ test('a body chunk Node itself refuses, or takes without a word, does exactly wh
 });
 
 test("headers a node:http call gives as Node's raw list keep their names when the replay passes them on", () => {
-  // Node takes headers as an object or as a raw list of names and values; read as an object, a list became headers named '0', '1', ...
   assert.deepEqual(plainHeaders(['X-Trace', 'abc', 'Host', 'shop.example', 'Content-Length', '2', 'x-tag', 'a', 'x-tag', 'b']), { 'x-trace': 'abc', 'x-tag': ['a', 'b'] });
   assert.deepEqual(plainHeaders({ 'X-Trace': 'abc', host: 'shop.example' }), { 'x-trace': 'abc' });
 });

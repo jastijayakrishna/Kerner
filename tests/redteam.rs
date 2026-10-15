@@ -18,40 +18,32 @@ fn verdict(base: &[(&str, &str)], edit: &[(&str, &str)]) -> Result<(), String> {
 
 const LIB: &str = "module.exports = function add(a, b) { return a + b; };\n";
 const ATTACKS: &[&str] = &[
-    // child_process and process spawning
     "require('child'+'_process').exec(c);", "const m='child_process';require(m);", "require(['child','process'].join('_'));",
     "require(Buffer.from('6368696c645f70726f63657373','hex')+'');", "require(atob('Y2hpbGRfcHJvY2Vzcw=='));", "const r=require;r('child_process');",
     "import('node:child_process').then(c=>c.exec(x));", "require('node:module').createRequire(__filename)('child_process');", "process.binding('spawn_sync');",
     "module.constructor._load('child_process');", "globalThis.process.mainModule.require('child_process');", "new (require('module').Module)().require('child_process');",
     "const {execSync:e}=require('child_process');e(x);", "require('node:child_process').execFile(p,a);", "require(`child_process`);", "require.call(null,'child_process');",
     "export { exec } from 'child_process';", "import * as cp from 'child_process';", "module.require('child_process');", "require.main.require('child_process');",
-    // eval and dynamic code
     "eval('ma'+'l');", "const f=eval;f(s);", "(0,eval)(s);", "new Function('return process')();", "(()=>{}).constructor('return this')();",
     "Function.prototype.constructor(code);", "setTimeout('run()',0);", "import('data:text/javascript,'+encodeURIComponent(c));", "require('vm').runInThisContext(c);",
     "WebAssembly.instantiate(bytes);", "require('vm').compileFunction(c)();", "import('data:text/javascript,1');", "setTimeout(`${a}`,0);",
-    // network
     "globalThis.fetch(u);", "globalThis['fe'+'tch'](u);", "const g=globalThis;g.fetch(u);", "import('node:https').then(h=>h.get(u));", "require('ht'+'tps').request(o);",
     "new WebSocket('wss://x');", "navigator.sendBeacon(u,d);", "globalThis.navigator.sendBeacon(u,d);", "new EventSource(u);", "Function.prototype.call.bind(fetch)(null,u);",
     "Reflect.apply(fetch,null,[u]);", "[u].map(fetch);", "require('dgram').createSocket('udp4');", "new XMLHttpRequest();", "importScripts('https://x/a.js');",
     "new Worker('data:text/javascript,fetch(1)');", "window.fetch(u);", "self.fetch(u);", "global.fetch(u);", "globalThis?.fetch?.(u);",
-    // process.env and secrets
     "process['en'+'v'].SECRET;", "const e=process.env;e.TOKEN;", "const {env}=process;env.X;", "Object.values(process.env);", "with(process){env.SECRET}",
     "Reflect.get(process,'env').SECRET;", "process?.env?.TOKEN;", "const p=process;p.env.TOKEN;", "global.process.env.TOKEN;", "const { env: e } = globalThis.process;",
-    // filesystem
     "require('fs').writeFileSync('/etc/x',d);", "require('node:fs/promises').writeFile(p,d);", "require('fs').createWriteStream('/tmp/x');",
     "(async()=>{(await require('fs/promises').open(p,'w')).write(d)})();",
-    // structural and reflective reach
     "new Proxy(require,{apply:(t,_,a)=>t(...a)})('child_process');", "const o={get r(){return require}};o.r('fs');", "function f(){return this} f().process.env.TOKEN;",
     "var g=(function(){return this})(); g.fetch(u);", "({}).__proto__.polluted=payload;", "require.extensions['.txt']=require.extensions['.js'];", "require('./node_modules/execa')(c);",
     "require('../../outside/secret.js');", "Object.getPrototypeOf(async function(){}).constructor('return 1');", "x.constructor.constructor('return process')();",
     "const m=module;m.require('child_process');", "process.dlopen(m,'./x.node');", "anything.mainModule.require('child_process');", "o.getBuiltinModule('child_process');",
-    // a plain function called without a receiver gets the global object as `this` in sloppy CommonJS
     "function leak(){ return this.process.env.AWS_SECRET_ACCESS_KEY; }", "function beacon(u,d){ return this.fetch(u,{method:'POST',body:d}); }",
     "function x(){ return this.require('child_process').execSync('id'); }", "function x(s){ return this.eval(s); }", "function x(){ return this['pro'+'cess']['env']; }",
     "(function(){return this.process.env.NPM_TOKEN})();", "function g(){ 1; return this; } g().fetch(u);", "function g(){ if(true) return this; } g().process.env.SECRET;",
     "function cap(){ const g=this; return g.fetch; }", "[1].forEach(function(){ this.fetch(u); });", "var h = function(){ var self = this; return self.process; };",
 ];
-// realistic agent edits that must never be blocked
 const BENIGN: &[(&str, &str, &str)] = &[
     ("src/lib.js", "const fs = require('fs');\nmodule.exports = (p) => fs.readFileSync(p, 'utf8');\n", "const fs = require('fs');\nmodule.exports = (path) => fs.readFileSync(path, 'utf8').trim();\n"),
     ("src/lib.js", LIB, "function add(a, b) { return a + b; }\nfunction mean(xs) { return xs.reduce(add, 0) / Math.max(xs.length, 1); }\nmodule.exports = { add, mean };\n"),
@@ -75,7 +67,6 @@ const BENIGN: &[(&str, &str, &str)] = &[
     ("src/view.jsx", "import React from 'react';\nexport const A = () => <div>a</div>;\n", "import React, { useState } from 'react';\nexport const A = ({ items = [] }) => { const [n, setN] = useState(0); return <ul onClick={() => setN(n + 1)}>{items.map((i) => <li key={i}>{i}</li>)}</ul>; };\n"),
     ("src/lib.js", LIB, "const timer = setTimeout(() => {}, 10);\nclearTimeout(timer);\nconst later = (f) => setInterval(f, 1000);\nmodule.exports = later;\n"),
     ("src/lib.js", LIB, "module.exports = function add(a, b) {\n  if (typeof a !== 'number' || typeof b !== 'number') throw new TypeError('numbers only');\n  return a + b;\n};\n"),
-    // `this` that is an instance, a receiver or strict-mode undefined is not the global object
     ("src/lib.js", LIB, "class Job { constructor(f) { this.fetch = f; } run() { return this.fetch().then((r) => this.process(r)); } process(r) { return r; } }\nmodule.exports = Job;\n"),
     ("src/lib.js", LIB, "const api = { cache: null, fetch() { return this.cache; }, get env() { return this.cache; }, process: function (x) { return this.fetch() || x; } };\nmodule.exports = api;\n"),
     ("src/lib.js", LIB, "function Pipeline() { this.process = (x) => x; this.require = []; }\nPipeline.prototype.run = function (x) { var self = this; return self.process(x); };\nmodule.exports = Pipeline;\n"),
@@ -83,8 +74,6 @@ const BENIGN: &[(&str, &str, &str)] = &[
     ("src/lib.mjs", "export const add = (a, b) => a + b;\n", "export function plain() { return this && this.fetch; }\nexport const add = (a, b) => a + b;\n"),
     ("src/view.js", "module.exports = {};\n", "'use strict';\nmodule.exports = function wire($) { $('.item').each(function () { $(this).toggleClass('on'); }); };\n"),
 ];
-// accepted trade-offs: in non-strict code a plain function's `this` may be the global object, so new code that passes
-// it on as a value is refused, closing every escape such as `id(this).fetch`; existing code is covered by its baseline
 const KNOWN_FALSE_BLOCKS: &[(&str, &str, &str)] = &[
     ("src/view.js", "module.exports = {};\n", "module.exports = function wire($) { $('.item').each(function () { $(this).toggleClass('on'); }); };\n"),
     ("src/util.js", "module.exports = {};\n", "module.exports = function once(fn) { var done = false; return function () { if (!done) { done = true; return fn.apply(this, arguments); } }; };\n"),

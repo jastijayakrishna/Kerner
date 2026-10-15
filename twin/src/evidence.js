@@ -7,10 +7,6 @@ const MAX_ROUTES = 500;
 const KEEP_UNEXPLAINED = 20;
 const FIELD = { same: 'same', stated: 'stated', different: 'different', 'not-compared': 'notCompared', skipped: 'skipped' };
 
-/**
- * JSON with every object's keys in order: the same content always gives the same text, and so the same checksum. Like JSON, it leaves
- * out keys whose value is undefined and writes undefined in arrays as null, so a file read back gives the checksum it was written with.
- */
 export function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -22,29 +18,13 @@ export function canonical(value) {
 
 const checksum = (body) => createHash('sha256').update(canonical(body)).digest('hex');
 const zero = () => ({ same: 0, stated: 0, different: 0, notCompared: 0, skipped: 0, first: 0, last: 0 });
-// A name chosen by the app becomes a key: '__proto__' would reach the object's prototype instead.
 const keyOf = (name) => (name === '__proto__' ? '(__proto__)' : name);
 const capped = (table, name, max, other) => (Object.hasOwn(table, name) || Object.keys(table).length < max ? name : other);
 
-/**
- * What the twin has seen of one candidate. Per customer segment and route, it counts how many requests were:
- * - the same;
- * - different in a way the team stated;
- * - different with no explanation;
- * - not compared, or skipped.
- *
- * With a manifest (Phase 3) it also records, per changed line, how often requests ran it and which of its characters clean
- * comparisons ran.
- *
- * Everything is kept in one file, rewritten whole (a temporary file, then a rename) with a checksum. So a crash or a hand edit can
- * never leave counts that look valid but are not.
- */
 export class Evidence {
   #file;
   #hashes;
   #dirty = false;
-  // Every flush waits here for the ones asked for before it. A flush that found nothing new to write while an earlier write was still
-  // in flight would otherwise resolve before that write landed, and the twin's thread, stopped right after its last flush, would lose it.
   #flushing = Promise.resolve();
   note = null;
   errors = 0;
@@ -56,10 +36,6 @@ export class Evidence {
     this.data = { version: 1, candidate, old, since: 0, segments: {}, unexplained: [], lines: {}, loadLines: [] };
   }
 
-  /**
-   * The evidence for this candidate against this old version: what `file` holds if it is intact, for this candidate and gathered against
-   * this old version (`old`, its id), else a fresh start with the reason. Without `old`, any old version's evidence is read.
-   */
   static async open({ file, candidate, old = null, hashes }) {
     const evidence = new Evidence({ file, candidate, old, hashes });
     if (!file) return evidence;
@@ -86,19 +62,14 @@ export class Evidence {
       evidence.note = `the evidence file was for another candidate (${body.candidate}); started again`;
       return evidence;
     }
-    // Every comparison was this candidate against one old version. Against another (a hotfix deployed as old) they prove nothing: a bug
-    // the new old version fixed may still be in the candidate. A file that names no old version was written before this was kept, so
-    // its old version is unknown, and it starts again too.
     if (old !== null && body.old !== old) {
       evidence.note = `the evidence file was gathered against another old version (${body.old ?? 'not named'}), not ${old}; started again`;
       return evidence;
     }
-    // A file written before Phase 3 has no line evidence yet.
     evidence.data = { lines: {}, loadLines: [], ...body };
     return evidence;
   }
 
-  /** Counts one verdict: { outcome, route, segment, time, kinds, details, lines?, ... }. */
   add(verdict) {
     const field = FIELD[verdict.outcome];
     if (!field) return;
@@ -111,8 +82,6 @@ export class Evidence {
     const time = Number(verdict.time) || Date.now();
     counts.first = counts.first ? Math.min(counts.first, time) : time;
     counts.last = Math.max(counts.last, time);
-    // minHours counts from the first comparison. Requests that were skipped or not compared say nothing of the candidate: a day of them
-    // would otherwise meet a 24-hour minHours after an hour of real comparisons.
     if (field === 'same' || field === 'stated' || field === 'different') this.data.since = this.data.since ? Math.min(this.data.since, time) : time;
     if (field === 'different' && this.data.unexplained.length < KEEP_UNEXPLAINED) {
       const { n, at, route: r, segment: s, serving, method, url, kinds } = verdict;
@@ -122,10 +91,6 @@ export class Evidence {
     this.#dirty = true;
   }
 
-  /**
-   * Per changed line, counts the requests that touched it, the requests that ran it fully, and those of them that were clean. Per code
-   * character, it counts how many clean comparisons ran it (one digit, 0 to 9), so `a ? b : c` is proven only once both branches ran.
-   */
   #addLines(field, lines) {
     const clean = field === 'same' || field === 'stated';
     for (const [key, mask] of Object.entries(lines)) {
@@ -139,22 +104,15 @@ export class Evidence {
     }
   }
 
-  /** The changed lines that ran while the versions loaded: they ran before every request. */
   setLoadLines(keys) {
     this.data.loadLines = [...new Set([...this.data.loadLines, ...keys])].sort();
     this.#dirty = true;
   }
 
-  /** A copy of everything counted so far. */
   snapshot() {
     return structuredClone(this.data);
   }
 
-  /**
-   * Writes the evidence if it changed: whole, through a temporary file and a rename. A failed write is counted and tried again later.
-   * Flushes run one at a time, in the order they were asked for, so one resolves only once every write asked for before it, and its
-   * own, are on disk.
-   */
   flush() {
     const turn = this.#flushing.then(() => this.#write());
     this.#flushing = turn.catch(() => {});
@@ -164,7 +122,6 @@ export class Evidence {
   async #write() {
     if (!this.#file || !this.#dirty) return;
     this.#dirty = false;
-    // The checksum is taken over exactly what JSON keeps, which is what a later open reads back.
     const body = JSON.parse(JSON.stringify(this.data));
     const text = `${JSON.stringify({ ...body, sha256: checksum(body) })}\n`;
     const temp = `${this.#file}.${process.pid}.${Date.now()}.tmp`;

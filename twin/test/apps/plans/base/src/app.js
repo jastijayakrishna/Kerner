@@ -1,4 +1,4 @@
-// A shop's plans, written the way Prettier writes an array of objects: each opening brace alone on its line.
+
 const PLANS = [
   {
     name: 'free',

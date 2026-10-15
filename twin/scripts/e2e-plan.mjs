@@ -1,6 +1,3 @@
-// End to end for Phase 3: the real `kern twin plan` writes the manifest of the three-pull-request shop, which must say what the
-// hand-written test manifest says, and the twin names each difference's pull request from it.
-// Needs Node 22, git and a kern binary: node twin/scripts/e2e-plan.mjs --kern <path to kern>
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
@@ -20,7 +17,6 @@ const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT
 const git = (...args) => execFileSync('git', args, { cwd: repo, env, encoding: 'utf8' }).trim();
 
 try {
-  // The repository: the base, then one commit per pull request, each changing one line of the base into the head's.
   mkdirSync(join(repo, 'src'), { recursive: true });
   git('init', '-q');
   const base = readFileSync(fixture('base', 'src', 'app.js'), 'utf8').split('\n');
@@ -39,14 +35,12 @@ try {
   const manifestFile = join(work, 'manifest.json');
   execFileSync(kern, ['twin', 'plan', repo, baseSha, headSha, manifestFile], { encoding: 'utf8' });
 
-  // kern's manifest says what the hand-written one says, but for commit ids.
   const shape = (m) => m.files.map((f) => ({
     path: f.path, status: f.status, changed: f.changed,
     ...Object.fromEntries(['old', 'new'].map((side) => [side, Object.fromEntries(Object.entries(f[side]).map(([n, e]) => [n, { text: e.text, pull: m.commits[e.commit]?.pull ?? null }]))])),
   }));
   assert.deepEqual(shape(JSON.parse(readFileSync(manifestFile, 'utf8'))), shape(JSON.parse(readFileSync(fixture('manifest.json'), 'utf8'))));
 
-  // The twin, with kern's manifest, names each difference's pull request.
   const side = (version) => ({ module: fixture(version, 'src', 'app.js'), export: 'createApp', root: fixture(version) });
   const twin = await createTwin({ old: side('base'), candidate: side('head'), manifest: manifestFile, timeoutMs: 3000 });
   assert.equal(twin.stats().disabled, null, twin.stats().disabled);

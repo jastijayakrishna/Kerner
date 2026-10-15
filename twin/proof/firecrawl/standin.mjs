@@ -1,13 +1,5 @@
 import http from 'node:http';
 
-// A stand-in for the two Supabase reads firecrawl's credit check makes, so the lines pull request #2638 changed can run without
-// firecrawl's cloud:
-// - GET /rest/v1/rpc/auth_credit_usage_chunk_38: an API key's credit row, with the fields of firecrawl's own mockACUC
-//   (src/controllers/auth.ts);
-// - GET /rest/v1/teams: a team's auto-recharge settings (off).
-// Anything else gets an empty success, so nothing waits on it. The one key belongs to a team that has used 100 of its 1,000 credits:
-// 10%, under every notification threshold.
-// The same key firecrawl sends as input_key (a valid v4 UUID without dashes; see scenario.mjs).
 const KEY = '00000000000040008000000000000001';
 const row = (isExtract) => ({
   api_key: KEY, api_key_id: 1, team_id: 'proof-team', sub_id: 'proof-sub',

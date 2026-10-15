@@ -1,14 +1,7 @@
 #!/bin/sh
-# Kern's verifier end to end on real gVisor, from nothing. It installs gVisor when Docker lacks it (Ubuntu or Debian), sets up a
-# throwaway verifier with Kern's own commands, and checks real changes to a small project:
-#   an honest change is VERIFIED, and its signed proof passes the deploy gate while a tampered copy does not;
-#   a change that breaks the tests, one that gives code new authority, and one that changes behaviour the task did not state
-#   are refused.
-# Usage: KERN_BIN=/path/to/static/linux/kern scripts/e2e-gvisor.sh     (CI runs it on every change)
 set -eu
 K=${KERN_BIN:?set KERN_BIN to a static Linux kern}
 K=$(readlink -f "$K")
-# The verifier copies itself into its sandboxes, whose images have their own C library: only the static build runs there.
 if command -v file >/dev/null && ! file "$K" | grep -qE 'static(ally|-pie) linked'; then
   echo "e2e-gvisor: KERN_BIN must be the static Linux build (cargo build --release --target x86_64-unknown-linux-musl)" >&2; exit 1
 fi
@@ -50,7 +43,7 @@ printf '{"version":1,"cases":[{"command":["/usr/local/bin/npm","test"],"stdout":
 jq -n --arg image "$image" --arg builder "$builder" --argjson check "$("$K" pin-check test-suite checks/test-suite.json)" \
   '{ version: 3, repository: "acme/demo", deployment: "single-vm", executors: ["external"], image: $image,
      builders: { executor: null, verifier: $builder }, checks: [$check], registry: null, permissions: {} }' > operator.json
-task() { # name delta
+task() {
   jq -n --arg name "$1" --argjson delta "$2" '{ version: 5, task: $name, filesystem: { read: ["src/", "test/"], write: ["src/", "test/"] },
     network: [], secrets: [], publish: false, dependencies: null,
     limits: { files_changed: 8, lines_changed: 400, file_bytes: 262144, total_bytes: 4194304, timeout_seconds: 300, memory_mb: 1024, pids: 256 },
@@ -75,7 +68,7 @@ for t in demo tidy; do
     '{ version: 3, repo: $repo, base: $base, contract: $c, operator: $op, command: null, verification_key: $key, output: $out }' > "job-$t.json"
 done
 
-change() { # name: the agent's commit for one scenario, from the base
+change() {
   git -C agent checkout -q -B "$1" "$base"
   case "$1" in
     honest) printf '%s\n' 'exports.sub = (a, b) => a - b' >> agent/src/add.js
@@ -87,7 +80,7 @@ change() { # name: the agent's commit for one scenario, from the base
   esac
   git -C agent add -A && git -C agent commit -qm "$1" && git -C agent rev-parse HEAD
 }
-verify() { # name task: ingest, hand off, verify on gVisor; prints VERIFIED, DENIED: <reason> or BLOCKED: <reason>
+verify() {
   commit=$(change "$1")
   r=$("$K" ingest "job-$2.json" "$W/agent" "$commit" 2>&1) || true
   if [ "$(printf '%s' "$r" | jq -r .status 2>/dev/null)" != CANDIDATE ]; then printf 'BLOCKED: %s' "$(printf '%s' "$r" | jq -r '.reason // .' 2>/dev/null || printf '%s' "$r")"; return 0; fi
@@ -95,7 +88,7 @@ verify() { # name task: ingest, hand off, verify on gVisor; prints VERIFIED, DEN
   if "$K" --control verifier.json verify "run-$1" "task-$2.json" operator.json "out-$1" keys/private.pem > "out-$1.json" 2> "out-$1.err"; then echo VERIFIED
   else printf 'DENIED: %s' "$(jq -r '.reason // .' "out-$1.err" 2>/dev/null || cat "out-$1.err")"; fi
 }
-expect() { # name task wanted-start-of-verdict
+expect() {
   started=$(date +%s)
   got=$(verify "$1" "$2")
   printf '%-10s %s (%ss)\n' "$1" "$(printf '%s' "$got" | cut -c1-220)" "$(( $(date +%s) - started ))"
@@ -110,7 +103,6 @@ expect surprise tidy "DENIED: Behaviour changed outside the task's stated change
 
 say "The signed proof at the deploy gate"
 mkdir -p trusted/tasks && cp operator.json trusted/ && cp keys/public.pem trusted/verifier.pub && cp task-demo.json trusted/tasks/demo.json
-# The proof covers the commit Kern built at hand-off (the agent's tree on the base), which is what a promotion publishes and a deploy ships.
 signed=$(jq -r .commit run-honest/run.json)
 "$K" gate-artifact "$W/run-honest/objects.git" "$signed" out-honest/attestation.json "$W/trusted" > gate.json || { cat gate.json; fail "the deploy gate refused a VERIFIED change"; }
 echo "the verified commit: $(jq -r .status gate.json)"

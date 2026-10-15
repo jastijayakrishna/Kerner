@@ -83,7 +83,6 @@ fn count(args: &[String], n: usize) -> R<()> {
 fn promotion(a: &[String]) -> R<(std::path::PathBuf, Value, kern::policy::Contract, kern::policy::Operator, Value, String)> {
     Ok((Path::new(&a[0]).join("objects.git"), read_json(&a[1])?, contract(&read_json(&a[2])?)?, operator(&read_json(&a[3])?)?, read_json(&a[4])?, std::fs::read_to_string(&a[5])?))
 }
-/// The agent that writes drivers (KERN_DRIVE_AGENT, a JSON array; or Claude Code with KERN_DRIVE_MODEL) and how many rounds it may take.
 fn drive_agent() -> R<(Vec<String>, usize)> {
     let agent: Vec<String> = match std::env::var("KERN_DRIVE_AGENT") {
         Ok(v) => serde_json::from_str(&v).map_err(|_| Denied("KERN_DRIVE_AGENT must be a JSON array of strings".into()))?,
@@ -172,7 +171,6 @@ fn cli() -> R<(Option<Value>, i32)> {
             let (store, envelope, c, op, expected, key) = promotion(a)?;
             let d = promote::authorize(&store, &envelope, &key, &c, &op, &expected, now)?;
             let token = std::fs::read_to_string(&a[6])?;
-            // The verifier writes its comparison of the old and the new code beside the attestation; it goes into the description when the proof covers it.
             let evidence = read_json(Path::new(&a[1]).with_file_name("compare.json")).ok().filter(|e| kern::compare::attested(&envelope, e));
             (Some(promote::promote_github(&store, &d, &c, &envelope, &key, GitHub { token: token.trim(), base_branch: &a[7], ledger: Path::new(&a[8]), git: git_pin, evidence: evidence.as_ref() })?), 0)
         }
@@ -196,7 +194,6 @@ fn cli() -> R<(Option<Value>, i32)> {
             ensure!(a.len() == 5 || a.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
             let pr = a.get(5).map(std::fs::read_to_string).transpose()?;
             let (agent, rounds) = drive_agent()?;
-            // The AI part runs when a key or an agent of your own is there; KERN_CHECK_AI=0 turns it off, =1 turns it on (a logged-in Claude Code).
             let wanted = std::env::var("KERN_CHECK_AI").ok();
             let ai_on = wanted.as_deref() != Some("0") && (wanted.as_deref() == Some("1") || ["KERN_DRIVE_AGENT", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())));
             let ai = kern::check::Ai { agent: &agent, rounds };

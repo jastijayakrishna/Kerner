@@ -1,5 +1,3 @@
-// Prints where a CPU profile (node --cpu-prof) spent its time: the 15 functions with the most time of their own.
-// Usage: node bench/top.js <file.cpuprofile>
 import { readFileSync } from 'node:fs';
 
 const profile = JSON.parse(readFileSync(process.argv[2], 'utf8'));

@@ -2,14 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { post, production, threePrs } from './helpers.js';
 
-// Run by scripts/test-sandbox.sh, in a Linux container with bubblewrap.
 const SANDBOX = process.env.KERN_TWIN_SANDBOX === '1';
 const skip = !SANDBOX && 'needs bubblewrap: run scripts/test-sandbox.sh';
 
 test('in the bwrap sandbox a ghost has no network, even past its JavaScript seal', { skip }, async (t) => {
   const keep = new URL('./apps/escape-net/keep.mjs', import.meta.url).href;
   const shop = await production('escape-net', { ghosts: 'process', sandbox: 'bwrap', ghostExecArgv: ['--import', keep] });
-  // Closed even when an assertion fails: an open server would keep the run waiting until its timeout.
   t.after(() => shop.close());
   assert.equal(shop.twin.stats().disabled, null, shop.twin.stats().disabled);
   await (await fetch(shop.url)).arrayBuffer();

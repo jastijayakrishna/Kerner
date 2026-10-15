@@ -1,2 +1,1 @@
-# Shell scripts run on Linux, macOS and in containers: they keep Unix line endings in every checkout, Windows included.
 *.sh text eol=lf

@@ -1,4 +1,4 @@
-// Grows without end: the ghost's memory limit has to stop it.
+
 export function createApp() {
   return () => {
     const hog = [];

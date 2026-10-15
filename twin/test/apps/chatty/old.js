@@ -1,6 +1,6 @@
 import { send } from '../http.js';
 
-// Asks a flag service (KERN_TEST_DATA) about 600 features, one call each, for one request: every call is tiny, there are many.
+
 export function createApp() {
   return async (req, res) => {
     let on = 0;

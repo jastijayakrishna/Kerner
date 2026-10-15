@@ -1,6 +1,3 @@
-// firecrawl's API as a request listener, for the Kern twin. Its src/index.ts builds the Express app when it is loaded and listens only
-// when it is run as the program; it exports nothing. So the app is taken from the last http.createServer call made while it loads
-// (express-ws makes one per router and one for the app). Then the two set-up steps startServer runs before listening are run here.
 import http from 'node:http';
 import { createRequire } from 'node:module';
 

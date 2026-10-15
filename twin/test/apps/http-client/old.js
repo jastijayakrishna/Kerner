@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { send } from '../http.js';
 
-// Talks to its upstream with node:http, as many client libraries do underneath: a GET with http.get, a POST with http.request.
+
 const upstream = () => process.env.KERN_TEST_UPSTREAM;
 
 export function getJson(path) {

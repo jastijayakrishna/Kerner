@@ -1,4 +1,4 @@
-// Traffic for the three-pull-request shop: limits (answered alike by both versions) and profiles (renamed by #102).
+
 export const scenario = {
   async step(client, state, random, i) {
     const json = { 'content-type': 'application/json' };

@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { listen, post, production } from './helpers.js';
 
-/** A payment service that answers everything and counts the charges it is asked for. */
 async function payService() {
   const asked = { charge: 0 };
   const service = await listen((req, res) => {

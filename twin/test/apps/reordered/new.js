@@ -1,6 +1,6 @@
 import { readJson, send } from '../http.js';
 
-// The same charge, its body built another way: the same JSON value, its keys in another order.
+
 export function createApp() {
   return async (req, res) => {
     const { currency, amount } = await readJson(req);

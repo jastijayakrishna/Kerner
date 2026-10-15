@@ -5,8 +5,6 @@ import timersPromises from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { isCurrent, owner } from './turn.js';
 
-// Time and chance inside a ghost. Both ghosts of one request see the same clock and the same random numbers, so time and
-// randomness can never show up as a difference. The clock does not move during a request.
 let now = 0;
 let state = 1;
 
@@ -18,13 +16,11 @@ function random() {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
 
-/** Sets the clock to the moment the real request arrived, and seeds the random numbers for this request. */
 export function resetWorld(time, seed) {
   now = time;
   state = seed >>> 0;
 }
 
-/** Replaces the clock and every source of randomness in this thread. Call once, before the app loads. */
 export function installWorld() {
   const Real = Date;
   function GhostDate(...args) {
@@ -53,12 +49,10 @@ export function installWorld() {
     const h = b.toString('hex');
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
   };
-  // Some of these are getters on Node's own objects: define them over, never assign.
   const put = (owner, name, value) => {
     try {
       Object.defineProperty(owner, name, { value, writable: true, configurable: true, enumerable: true });
     } catch {
-      // A frozen object keeps its own; the old and the new ghost then still behave alike.
     }
   };
   put(crypto, 'randomBytes', (n, callback) => {
@@ -71,7 +65,6 @@ export function installWorld() {
   });
   put(crypto, 'randomUUID', uuid);
   put(crypto, 'getRandomValues', fill);
-  // Id generators (nanoid, say) fill bytes in place: an ArrayBuffer, a typed array or a DataView, all of it or offset and size.
   const fillRange = (target, offset = 0, size = undefined) => {
     const view = target instanceof ArrayBuffer ? new Uint8Array(target) : new Uint8Array(target.buffer, target.byteOffset, target.byteLength);
     view.set(bytes(size ?? view.length - offset), offset);
@@ -113,8 +106,6 @@ export function installWorld() {
   };
   hrtime.bigint = () => BigInt(now) * 1000000n;
   put(process, 'hrtime', hrtime);
-  // Time belongs to the current turn (turn.js). A timer an earlier turn set (the app's start, or a request already answered) never
-  // fires, so background work waits instead of running into the request being answered. An interval that misses its turn is cleared.
   const wait = (schedule, clear) => function ghostTimer(callback, ...rest) {
     if (typeof callback !== 'function') return schedule(callback, ...rest);
     const mine = owner();
@@ -139,8 +130,6 @@ export function installWorld() {
   const promised = { setTimeout: later(timersPromises.setTimeout), setImmediate: later(timersPromises.setImmediate) };
   timed.setTimeout[promisify.custom] = promised.setTimeout;
   timed.setImmediate[promisify.custom] = promised.setImmediate;
-  // timers/promises' interval and its scheduler run on timers of their own, not on the functions above, so they are held to their turn
-  // here: a round of an interval, or a scheduler's wait or yield, that comes after its turn waits forever, and such an interval stops.
   const rounds = (interval) => function ghostInterval(...args) {
     const mine = owner();
     const inner = interval(...args);

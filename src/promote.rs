@@ -60,13 +60,10 @@ pub fn promote_local(store: &Path, d: &Decision, key_pem: &str, target: &Path, l
 }
 
 pub const MARKER: &str = "<!-- kern-attestation:v1\n";
-/// The comparison of the old and the new code travels in the description too; the merge check shows it only when the proof covers it.
 pub const EVIDENCE: &str = "<!-- kern-evidence:v1\n";
 fn evidence_block(evidence: Option<&Value>) -> R<String> {
     let Some(e) = evidence else { return Ok(String::new()) };
     let text = canonical(e)?;
-    // A comparison too large for a description stays with the verifier's evidence; the proof still covers it by its digest. With the
-    // "What changed" text and the proof, the description stays far below GitHub's 65,536 characters, leaving room for a reviewer's words.
     Ok(if text.len() > 16_000 { String::new() } else { format!("{EVIDENCE}{}\n-->\n", b64(text.as_bytes())) })
 }
 fn without_block(body: &str, marker: &str) -> String {
@@ -79,7 +76,6 @@ pub fn pr_body(task: &str, d: &Decision, envelope: &Value, evidence: Option<&Val
     Ok(format!("Kern-verified agent change for task `{task}`.\n\nCommit: `{}`\nAttestation SHA-256: `{}`\n\n{what}Review before merging. The `kern-verified` check re-verifies this attestation against the PR head.\n\n{MARKER}{}\n-->\n{}",
         d.commit, digest(envelope)?, b64(canonical(envelope)?.as_bytes()), evidence_block(evidence)?))
 }
-/// The description with its Kern proof replaced: Kern's own description is written anew, any other text keeps its place around the new block.
 pub fn with_attestation(body: &str, task: &str, d: &Decision, envelope: &Value, evidence: Option<&Value>) -> R<String> {
     let body = body.replace("\r\n", "\n");
     if body.starts_with("Kern-verified agent change for task") { return pr_body(task, d, envelope, evidence); }
@@ -89,7 +85,6 @@ pub fn with_attestation(body: &str, task: &str, d: &Decision, envelope: &Value, 
     let rest = body[end..].strip_prefix('\n').unwrap_or(&body[end..]);
     Ok(format!("{}{MARKER}{}\n-->\n{}{rest}", &body[..start], b64(canonical(envelope)?.as_bytes()), evidence_block(evidence)?))
 }
-/// The comparison a description carries, if it carries exactly one. Nothing here says whether a proof covers it: see compare::attested.
 pub fn extract_evidence(body: &str) -> Option<Value> {
     let body = body.replace("\r\n", "\n");
     if body.len() > 65536 || body.matches(EVIDENCE).count() != 1 { return None; }
@@ -103,7 +98,6 @@ pub fn extract_attestation(body: &str) -> R<Value> {
     let end = rest.find("\n-->").ok_or_else(|| Denied("Unterminated Kern attestation block".into()))?;
     Ok(serde_json::from_slice(&unb64(rest[..end].trim())?)?)
 }
-/// `evidence`: the verifier's comparison of the old and the new code, when it wrote one (compare.json beside the attestation).
 pub struct GitHub<'a> { pub token: &'a str, pub base_branch: &'a str, pub ledger: &'a Path, pub git: Pin, pub evidence: Option<&'a Value> }
 pub fn promote_github(store: &Path, d: &Decision, policy: &Contract, envelope: &Value, key_pem: &str, gh: GitHub) -> R<Value> {
     ensure!(!gh.token.is_empty() && !gh.token.contains(['\r', '\n']), "An explicit publishing token is required");
@@ -148,13 +142,11 @@ pub fn git_pin(file: &Path) -> R<Pin> {
 pub fn step_summary(result: &R<Value>) -> String {
     let (status, detail) = match result { Ok(r) => (r["status"].as_str().unwrap_or("UNKNOWN").to_string(), serde_json::to_string_pretty(r).unwrap_or_default()), Err(e) => ("DENIED".into(), e.0.clone()) };
     let status: String = status.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-    // Kern writes these sections itself; every value taken from the change sits inside code formatting.
     let mut sections = String::new();
     if let Ok(r) = result {
         if let Some(what) = r["what_changed"].as_str() { sections += &format!("#### What changed\n\n{what}\n"); }
         if let Some(list) = r["removed_code"].as_array().filter(|l| !l.is_empty()) { sections += &format!("#### Who added the code this change removes\n\n{}\n", crate::github::who_markdown(list)); }
     }
-    // A heading ends the lists above, so the indented detail below stays a code block instead of becoming part of their last item.
     let heading = if sections.is_empty() { "" } else { "#### Details\n\n" };
     format!("### kern-verified: {status}\n\n{sections}{heading}{}\n", detail.lines().map(|l| format!("    {l}\n")).collect::<String>())
 }
@@ -165,7 +157,6 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     let (head, base, head_ref) = (text(&pr["head"], "sha")?, text(&pr["base"], "sha")?, text(&pr["head"], "ref")?);
     let repository = text(&pr["base"]["repo"], "full_name")?;
     let Some(rest) = head_ref.strip_prefix("kern/") else {
-        // A dependency upgrade from a bot is verified when the base branch asks for it; any other branch follows ordinary review rules.
         return crate::reverify::upgrade(event, checkout, config, now).unwrap_or_else(|| Ok(json!({ "status": "SKIPPED", "reason": "Not a Kern agent branch; ordinary review rules apply", "head": head })));
     };
     let (task, run_id) = rest.split_once('/').ok_or_else(|| Denied("Kern branches must be kern/<task>/<run_id>".into()))?;
@@ -174,7 +165,6 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
     git::oid(base)?;
     let body = pr["body"].as_str().unwrap_or("");
     let stale = match gate(checkout, config, now, repository, task, run_id, head, base, body) { Ok(v) => return Ok(v), Err(e) => e };
-    // A push to the branch, or a new base, leaves a proof for another commit: with a hosted verifier Kern verifies the branch again.
     let same_repository = pr["head"]["repo"]["full_name"].as_str() == Some(repository);
     match crate::reverify::Hosted::from_env() {
         Some(hosted) if same_repository => {
@@ -188,8 +178,6 @@ pub fn check_pr(event: &Value, checkout: &Path, config: &str, now: u64) -> R<Val
 #[allow(clippy::too_many_arguments)]
 fn gate(checkout: &Path, config: &str, now: u64, repository: &str, task: &str, run_id: &str, head: &str, base: &str, body: &str) -> R<Value> {
     let envelope = extract_attestation(body)?;
-    // A proof for another commit or base is stale whatever else holds. Saying so first keeps the reason clear when an agent pushed, because
-    // then the checkout does not even hold the old base. This only picks the error; acceptance below checks everything.
     if let Some(claim) = attest::claimed(&envelope) {
         ensure!(claim["commit"] == head, "Attestation mismatch: commit");
         ensure!(claim["base"] == base, "Attestation mismatch: base");
@@ -205,8 +193,6 @@ fn gate(checkout: &Path, config: &str, now: u64, repository: &str, task: &str, r
     let changed = git::changes(&original, &candidate, &policy)?;
     let capabilities = capability::check(&original, &candidate, &changed, &op.permissions)?;
     let mut result = json!({ "status": "PASS", "head": head, "base": base, "task": task, "run_id": run_id, "executor": k["executor"]["kind"], "verified_at": iso8601(k["issued_at"].as_u64().unwrap_or(0)), "changes": changed, "capabilities": capabilities });
-    // What the verifier saw when it compared the old and the new code, shown only when the proof covers exactly that comparison, and who
-    // added the code the change removes, so a reviewer can ask whether it was there for a reason.
     if let Some(e) = extract_evidence(body).filter(|e| crate::compare::attested(&envelope, e)) { result["what_changed"] = json!(crate::compare::markdown(&e)); }
     if policy.compare {
         let removed = crate::compare::removed_code(&original, &candidate, &result["changes"], &policy);

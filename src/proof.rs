@@ -28,15 +28,11 @@ const MUTATORS: [(&str, &str); 8] = [("Object", "defineProperty"), ("Object", "d
 const SNIFFS: [&str; 6] = ["JEST_WORKER_ID", "VITEST", "VITEST_WORKER_ID", "VITEST_POOL_ID", "NODE_TEST_CONTEXT", "MOCHA_WORKER_ID"];
 const GLOBALS: [&str; 4] = ["globalThis", "global", "window", "self"];
 
-/// The command the verifier runs: the contract's test command with the one reporter Kern reads.
 pub fn command(tests: &Tests) -> Vec<String> {
     let mut c = tests.command.clone();
     match tests.runner {
         Runner::Mocha => c.extend(["--reporter".to_string(), "json".to_string()]),
-        // Tests run on a writable copy of the repo; in CI mode jest fails a missing snapshot instead of recording whatever the code returns.
-        // The report comes from a results processor, because --json would also move the tests' console output and change what they see.
         Runner::Jest => c.extend(["--ci".to_string(), "--testResultsProcessor=/kern/jest-report.cjs".to_string()]),
-        // The shared dependency install is read-only, so vitest keeps no results cache (vitest itself follows CI=true for snapshots).
         Runner::Vitest => c.extend(["--reporter=json".to_string(), "--no-cache".to_string()]),
         Runner::Node => { let at = c.iter().position(|a| a == "--test").map_or(c.len(), |i| i + 1); c.insert(at, "--test-reporter=tap".into()); }
     }
@@ -70,8 +66,6 @@ fn literal(e: &Expression) -> Option<String> {
 }
 
 enum Write { Module(String), Symbol(SymbolId) }
-/// Finds what a changed file does to the test run. In a new test file: markers that skip or focus tests. Elsewhere: use of test-runner
-/// globals, changes to an assertion library, and checks of whether tests are running.
 struct Scan<'s> { scoping: &'s Scoping, test: bool, found: BTreeSet<String>, bound: BTreeMap<SymbolId, String>, writes: Vec<Write> }
 impl Scan<'_> {
     fn global(&self, id: &IdentifierReference) -> bool { id.reference_id.get().is_none_or(|r| self.scoping.get_reference(r).symbol_id().is_none()) }
@@ -91,7 +85,6 @@ impl Scan<'_> {
         if let Some(m) = self.module(r) { self.writes.push(Write::Module(m)); }
         else if let Expression::Identifier(id) = r && let Some(s) = id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()) { self.writes.push(Write::Symbol(s)); }
     }
-    /// An error made only to read its stack, the caller of a function, or a hook into stack traces: ways for code to see which test calls it.
     fn caller(&mut self, object: &Expression, prop: &str) {
         let made = |e: &Expression| match unwrap(e) {
             Expression::NewExpression(n) => matches!(unwrap(&n.callee), Expression::Identifier(id) if id.name == "Error" && self.global(id)),
@@ -227,8 +220,6 @@ fn markers(path: &str, source: &str, test: bool) -> R<BTreeSet<String>> {
 fn text_of<'f>(files: &'f Files, path: &str) -> Option<&'f str> { files.get(path).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) }
 fn helper(path: &str) -> bool { path.split('/').map(str::to_ascii_lowercase).any(|d| HELPERS.contains(&d.as_str())) }
 
-/// Checks a change before anything runs: existing tests are locked, the runner's settings stay as they are, new test files do not skip or
-/// focus tests, and code outside the tests does not reach into the test runner.
 pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -> R<Value> {
     let (mut new_tests, mut changed_tests, mut deleted_tests, mut regression) = (Vec::new(), Vec::new(), Vec::new(), false);
     for f in changed["files"].as_array().into_iter().flatten() {
@@ -270,8 +261,6 @@ impl Count {
     fn total(self) -> u32 { self.passed + self.failed + self.skipped }
     fn ran(self) -> u32 { self.passed + self.failed }
 }
-/// One run's results as the test runner reported them: how often each test passed, failed or was skipped, and failures outside any test
-/// (a test file that could not load, a failing hook).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report { pub tests: BTreeMap<String, Count>, pub problems: Vec<String> }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -286,8 +275,6 @@ impl Report {
 }
 fn rel(path: &str) -> String { path.strip_prefix("/workspace/").unwrap_or(path).to_string() }
 
-/// Reads the one report the runner printed. Anything else on the output, such as text or JSON that a test prints, is ignored, and a
-/// second report is refused, so a test cannot pass off results of its own.
 pub fn read_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
     if runner == Runner::Node { return tap(out); }
     let (mut found, mut at, mut attempts) = (Vec::new(), 0usize, 0u32);
@@ -390,7 +377,6 @@ fn tap(out: &[u8]) -> Result<Report, String> {
         points.push(Point { depth: indent / 4, ok, directive, name, suite });
     }
     if plan != Some(points.iter().filter(|p| p.depth == 0).count()) { return Err(incomplete()); }
-    // Subtests come before the test or suite that holds them, one level deeper.
     let mut levels: Vec<Vec<(String, Option<Status>)>> = vec![Vec::new()];
     for p in points {
         while levels.len() < p.depth + 2 { levels.push(Vec::new()); }
@@ -417,7 +403,6 @@ impl Run {
     fn code(self) -> &'static str { match self { Run::Base => "the old code", Run::New => "the new code", Run::Kept => "the new code with the old tests", Run::Old => "the old code with the new tests added" } }
 }
 pub struct Output { pub stdout: Vec<u8>, pub exit_code: i64 }
-/// Runs the test suite on one combination of code and tests, passing the given test files to the runner (none: the whole suite).
 pub type Exec<'a> = dyn Fn(Run, &[String]) -> R<Output> + Sync + 'a;
 fn batch(run: &Exec, jobs: &[(Run, Vec<String>)]) -> Vec<R<Output>> {
     std::thread::scope(|s| {
@@ -426,7 +411,6 @@ fn batch(run: &Exec, jobs: &[(Run, Vec<String>)]) -> Vec<R<Output>> {
     })
 }
 fn failing(r: &Report) -> Vec<&String> { r.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k).chain(&r.problems).collect() }
-/// Tests that failed on the old code with the change's tests where the existing suite had not failed: candidates for showing the bug.
 fn fails_on_old(old: &Report, before: &Report) -> BTreeSet<String> { old.tests.iter().filter(|(k, c)| c.failed > before.count(k).failed).map(|(k, _)| k.clone()).collect() }
 fn quote<S: AsRef<str>>(keys: &[S]) -> String {
     let shown: Vec<String> = keys.iter().take(5).map(|k| {
@@ -441,15 +425,11 @@ fn summary(r: &Report) -> Value {
     json!({ "tests": s.total(), "passed": s.passed, "failed": s.failed, "skipped": s.skipped, "failed_outside_tests": r.problems.len() })
 }
 
-/// Proves the change honest from the runner's own reports: the existing suite on the old code, everything on the new code, the old tests
-/// on the new code when tests were rewritten, and for a bug fix the new tests on the old code. Every test that ran before must still run and
-/// pass, nothing may fail or be newly skipped, and a bug fix needs a test the runner reports failing on the old code, twice.
 pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, run: &Exec, mutate: &mut dyn FnMut(&Plan) -> R<Value>) -> R<Value> {
     let screened = match changed.get("tests") { Some(t) if t.is_object() => t.clone(), _ => screen(base, candidate, changed, tests)? };
     let names = |k: &str| -> Vec<String> { screened[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() };
     let edited = !names("changed_test_files").is_empty() || !names("deleted_test_files").is_empty();
     let (bugfix, kept_run) = (tests.kind == Kind::Bugfix, old_tests_alone(&changed["files"], &screened, tests));
-    // The old code only needs the new and changed test files; helpers come along through their imports.
     let focused: Vec<String> = names("new_test_files").into_iter().chain(names("changed_test_files").into_iter().filter(|p| is_code(p) && !helper(p))).collect();
     let read = |which: Run, out: R<Output>| -> R<(Report, i64)> {
         let out = out.map_err(|e| Denied(format!("Kern could not run the test suite on {}: {}", which.code(), e.0)))?;
@@ -462,24 +442,18 @@ pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, ru
         Ok((report, out.exit_code))
     };
     let missing = || Err(Denied("A test run returned no result".into()));
-    // Independent runs go in parallel. A run that fails gets one more try before it counts; a failure on the old code only shows the bug if it
-    // repeats; and a focused run that shows nothing is redone on the whole suite, so focusing can only save time, never decide.
     let mut jobs = vec![(Run::Base, Vec::new()), (Run::New, Vec::new())];
     if kept_run { jobs.push((Run::Kept, Vec::new())); }
     if bugfix { jobs.push((Run::Old, focused.clone())); }
     let mut outs = batch(run, &jobs).into_iter();
     let (before, _) = read(Run::Base, outs.next().unwrap_or_else(missing))?;
-    // Tests that already fail on the old code, before the agent did anything (often because they need the internet, which the sandbox does
-    // not give): they must keep running, but can neither block the change nor count as proof. The agent cannot touch the old code's run.
     let known: BTreeSet<String> = failing(&before).into_iter().cloned().collect();
     ensure!(known.is_empty() || before.sum().passed > 0, "The test suite already fails before the change: {}. No test passes before the change, so the test proof has nothing to compare against; fix the suite on the base branch first", quote(&known.iter().collect::<Vec<_>>()));
-    // A run is fine when every failing test failed before as well, and a failed command is explained by such a test.
     let healthy = |r: &R<(Report, i64)>| r.as_ref().is_ok_and(|(report, exit)| { let f = failing(report); f.iter().all(|k| known.contains(*k)) && (*exit == 0 || !f.is_empty()) });
     let new1 = read(Run::New, outs.next().unwrap_or_else(missing));
     let kept1 = kept_run.then(|| read(Run::Kept, outs.next().unwrap_or_else(missing)));
     let old1 = bugfix.then(|| read(Run::Old, outs.next().unwrap_or_else(missing)));
     let shown1 = old1.as_ref().and_then(|r| r.as_ref().ok()).map(|(r, _)| fails_on_old(r, &before)).unwrap_or_default();
-    // What the old code runs next: the same files again to confirm, or the whole suite when the focused run showed nothing.
     let old2_files = old1.as_ref().and_then(|_| if !shown1.is_empty() { Some(focused.clone()) } else if !focused.is_empty() { Some(Vec::new()) } else { None });
     let mut again = Vec::new();
     if !healthy(&new1) { again.push((Run::New, Vec::new())); }
@@ -497,8 +471,6 @@ pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, ru
     let (after, exit) = new_final?;
     let failed: Vec<&String> = failing(&after).into_iter().filter(|k| !known.contains(*k)).collect();
     ensure!(failed.is_empty(), "The test suite fails on the new code: {}. Every test must pass after the change; fix the code, not the tests", quote(&failed));
-    // Rewritten or removed tests may leave the suite; the old tests then run separately on the new code instead. A test that failed before
-    // only has to run; every other test that ran before has to pass.
     let stopped = before.tests.iter().filter(|_| !edited).filter(|(k, c)| { let n = after.count(k); n.total() < c.total() || if known.contains(*k) { n.passed + n.failed < c.ran() } else { n.passed < c.ran() } }).map(|(k, _)| k);
     let skipped = after.tests.iter().filter(|(k, c)| c.skipped > before.count(k).skipped).map(|(k, _)| k);
     let not_run: Vec<&String> = stopped.chain(skipped).collect::<BTreeSet<_>>().into_iter().collect();
@@ -516,8 +488,6 @@ pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, ru
         evidence["already_failing"] = json!({ "total": known.len(), "tests": known.iter().take(100).collect::<Vec<_>>(), "passing_now": passing_now });
     }
     if !edited && let Some(alone) = kept_final.as_ref() {
-        // New tests arrived and nothing else changed in the tests: the old tests alone must still pass on the new code, or the code keeps
-        // state that changes its answers depending on which tests ran first.
         let (alone, _) = alone.clone_report()?;
         let failed: Vec<&String> = failing(&alone).into_iter().filter(|k| !known.contains(*k)).collect();
         ensure!(failed.is_empty(), "Existing tests fail on the new code when they run without the new tests: {}. The code has to behave the same however the tests are run, so it must not keep state that changes its answers", quote(&failed));
@@ -526,7 +496,6 @@ pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, ru
         evidence["old_tests_alone"] = summary(&alone);
     }
     if edited {
-        // When only tests changed, the code is the old code, so the existing suite's run already is the old tests on the new code.
         let kept = kept_final.unwrap_or_else(|| Ok((before.clone(), 0)));
         let record = json!({ "mode": tests.edits.name(), "changed_files": screened["changed_test_files"], "deleted_files": screened["deleted_test_files"] });
         evidence["test_edits"] = edits(tests, base, candidate, &screened, &before, kept, record, mutate)?;
@@ -536,7 +505,6 @@ pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, ru
         return Ok(evidence);
     }
     ensure!(edited || !new_tests.is_empty(), "No new test ran in the test suite. A bug fix must add a test under {} that the test command runs, and that fails before the fix and passes after it", tests.paths.join(", "));
-    // The pair of old-code runs that decides: the focused run and its confirmation, or the whole suite run twice.
     let (decider, confirm) = match (old1, old2) {
         (Some(first), Some(second)) if !shown1.is_empty() => (first?, Some(second?)),
         (Some(_), Some(full)) => {
@@ -566,9 +534,6 @@ pub fn prove(tests: &Tests, base: &Files, candidate: &Files, changed: &Value, ru
     Ok(evidence)
 }
 
-/// Whether the old tests also run on the new code by themselves: when existing tests were rewritten or removed, and when new test files
-/// arrived, because code that keeps state between calls can pass an old and a new test that contradict each other while the new one runs
-/// first. A change to the tests alone needs no such run: its code is the old code.
 pub fn old_tests_alone(files: &Value, screened: &Value, tests: &Tests) -> bool {
     let any = |k: &str| screened[k].as_array().is_some_and(|a| !a.is_empty());
     let code_changed = files.as_array().into_iter().flatten().filter_map(|f| f["path"].as_str()).any(|p| !allowed(&tests.paths, p));
@@ -579,8 +544,6 @@ impl CloneReport for R<(Report, i64)> {
     fn clone_report(&self) -> R<(Report, i64)> { match self { Ok((r, e)) => Ok((r.clone(), *e)), Err(e) => Err(Denied(e.0.clone())) } }
 }
 
-/// Existing tests were rewritten or removed. The old tests, run on the new code, must still pass (unless the task changes behaviour on
-/// purpose, when every changed expectation is listed instead), and every planted bug the old tests caught must still be caught.
 #[allow(clippy::too_many_arguments)]
 fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, before: &Report, kept: R<(Report, i64)>, mut record: Value, mutate: &mut dyn FnMut(&Plan) -> R<Value>) -> R<Value> {
     let change = tests.kind == Kind::Change;
@@ -605,7 +568,6 @@ fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, befor
     ensure!(failing.is_empty(), "Existing tests fail on the new code: {}. Tests may be rewritten or removed, but the old tests must still pass on the new code; fix the code", quote(&failing));
     ensure!(missing.is_empty(), "Tests did not run on the new code: {}. Every test that ran before must still run, and every new test must run; do not skip, remove or rename tests", quote(&missing));
     let mut plan = plan(tests, base, candidate, screened)?;
-    // A suite with tests that already failed before the change fails on every run, so the planting runs are judged by their reports.
     if !known.is_empty() { (plan.command, plan.known) = (command(tests), known); }
     let mut net = json!({ "targets": plan.targets, "planted": plan.mutants.len() });
     if !plan.mutants.is_empty() {
@@ -644,8 +606,6 @@ fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, befor
     Ok(record)
 }
 
-/// Whether one planting run caught the bug. Without known failures that is a failed run, as the exit code says. With them, the run's report
-/// decides: a bug is caught when a test fails that did not fail before the change; a run that leaves no readable report counts by its exit code.
 pub fn caught(runner: Runner, known: &BTreeSet<String>, stdout: &[u8], passed: bool) -> bool {
     if known.is_empty() { return !passed; }
     match read_report(runner, stdout) {
@@ -654,11 +614,8 @@ pub fn caught(runner: Runner, known: &BTreeSet<String>, stdout: &[u8], passed: b
     }
 }
 
-/// Which tests a planted-bug run uses: the old tests, the new tests that reach the planted file, or the whole new suite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Suite { Old, NewFocused, NewFull }
-/// The order of runs for one planted bug: the old tests first, then the new tests that reach it, then the whole new suite, and a second look at
-/// both before a bug counts as lost. Each run answers whether the bug was caught, or `None` when no time is left.
 pub fn decide(run: &mut dyn FnMut(Suite) -> R<Option<bool>>, focused: bool) -> R<&'static str> {
     let Some(old) = run(Suite::Old)? else { return Ok("not run") };
     if !old { return Ok("missed by old"); }
@@ -676,7 +633,6 @@ pub fn decide(run: &mut dyn FnMut(Suite) -> R<Option<bool>>, focused: bool) -> R
     })
 }
 
-/// How long a run may take: a baseline gets whatever time is left, a planted run starts only if its own limit still fits.
 pub fn run_limit(left: std::time::Duration, limit: Option<std::time::Duration>) -> Option<std::time::Duration> {
     match limit { None => (!left.is_zero()).then_some(left), Some(l) => (left >= l).then_some(l) }
 }
@@ -684,21 +640,14 @@ pub fn run_limit(left: std::time::Duration, limit: Option<std::time::Duration>) 
 const MAX_PLANTED: usize = 40;
 const MAX_TARGETS: usize = 40;
 const EXTENSIONS: [&str; 8] = [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".mts", ".cts"];
-/// One planted bug: a small edit to one line of the new code that a good test notices.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mutant { pub id: usize, pub path: String, pub line: usize, pub start: usize, pub end: usize, pub original: String, pub replacement: String, what: String,
-    /// The new test files that reach this mutant's file (empty: the whole suite).
     pub tests: Vec<String> }
 impl Mutant {
     pub fn describe(&self) -> String { format!("{}:{} {}", self.path, self.line, self.what) }
 }
-/// `old_files` are the changed test files the old side may run alone (empty: the whole old suite).
-/// `known` lists tests that already failed before the change; when there are any, the planting runs print the report (the command carries
-/// the reporter) and a bug counts as caught only when another test fails, see `caught`.
 #[derive(Clone, Debug)]
 pub struct Plan { pub targets: Vec<String>, pub mutants: Vec<Mutant>, pub command: Vec<String>, pub tests_paths: Vec<String>, pub old_files: Vec<String>, pub runner: Runner, pub known: Vec<String> }
-/// The planting work for up to `n` sandboxes that run side by side, each with at least four bugs, since every sandbox runs its own baselines
-/// before any bug. The bugs keep their ids and every part runs the same commands.
 pub fn split_planting(plan: &Plan, n: usize) -> Vec<Plan> {
     let total = plan.mutants.len();
     let parts = n.min(total.div_ceil(4)).max(1);
@@ -711,8 +660,6 @@ pub fn split_planting(plan: &Plan, n: usize) -> Vec<Plan> {
         part
     }).collect()
 }
-/// The planting parts' answers as one: every part's baselines must have held, the timings are the slowest part's, and the bugs come back in
-/// plan order. An answer that is not a planting result is passed on as it is, for the caller to refuse.
 pub fn merge_planted(parts: Vec<Value>) -> R<Value> {
     let mut merged = json!({ "version": 1, "baseline": { "old": true, "new": true, "old_error": "", "new_error": "" }, "milliseconds": { "old": 0, "new": 0, "total": 0 } });
     let mut mutants = Vec::new();
@@ -741,7 +688,6 @@ impl Plan {
     }
 }
 
-/// Whether a file declares tests (a call to describe, it, test, specify, suite or context).
 struct Declares(bool);
 impl<'a> Visit<'a> for Declares {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
@@ -755,7 +701,6 @@ impl<'a> Visit<'a> for Declares {
     }
 }
 fn declares_tests(path: &str, source: &str) -> bool { parsed(path, source, |program, _| { let mut v = Declares(false); v.visit_program(program); v.0 }).unwrap_or(false) }
-/// The files each code file imports, resolved within one tree.
 pub fn import_edges(files: &Files) -> BTreeMap<String, Vec<String>> { edges(files) }
 fn edges(files: &Files) -> BTreeMap<String, Vec<String>> {
     files.iter().filter(|(k, _)| is_code(k)).filter_map(|(k, _)| {
@@ -806,7 +751,6 @@ fn resolve(from: &str, spec: &str, exists: &dyn Fn(&str) -> bool) -> Option<Stri
     std::iter::once(p.clone()).chain(EXTENSIONS.iter().map(|e| format!("{p}{e}"))).chain(swapped).chain(EXTENSIONS.iter().map(|e| format!("{p}/index{e}")))
         .find(|c| is_code(c) && exists(c))
 }
-/// The code the old versions of the changed tests reach: follow their relative imports, through test helpers, into the new code.
 fn reach(tests: &Tests, base: &Files, candidate: &Files, starts: &[String]) -> Vec<String> {
     let side = |p: &str| allowed(&tests.paths, p);
     let exists = |p: &str| if side(p) { base.contains_key(p) } else { candidate.contains_key(p) };
@@ -838,7 +782,6 @@ fn swap(op: &str) -> Option<(&'static str, u8)> {
         _ => return None,
     })
 }
-/// Where an operator sits between its operands, skipping comments.
 fn operator_at(source: &str, from: usize, to: usize, op: &str) -> Option<usize> {
     let gap = source.get(from..to)?;
     let mut i = 0;
@@ -912,7 +855,6 @@ impl<'a> Visit<'a> for Plant<'_> {
         self.p.add(it.span.start as usize, it.span.end as usize, o, r, format!("changes {o} to {r}"), 5);
     }
 }
-/// Candidate bugs for one file: at most one per line, the strongest kind first (Google's mutation testing makes the same choice).
 fn plant(path: &str, source: &str) -> Vec<Mutant> {
     let found = parsed(path, source, |program, src| { let mut v = Plant { source: src, p: Planter::default() }; v.visit_program(program); v.p.found }).unwrap_or_default();
     let mut best: BTreeMap<usize, (usize, usize, String, String, String, u8)> = BTreeMap::new();
@@ -922,7 +864,6 @@ fn plant(path: &str, source: &str) -> Vec<Mutant> {
     }
     best.into_iter().map(|(line, (start, end, original, replacement, what, _))| Mutant { id: 0, path: path.to_string(), line, start, end, original, replacement, what, tests: Vec::new() }).collect()
 }
-/// What to plant for a change that rewrote or removed tests: bugs in the code the old versions of those tests reach, spread across files.
 pub fn plan(tests: &Tests, base: &Files, candidate: &Files, screened: &Value) -> R<Plan> {
     let starts: Vec<String> = ["changed_test_files", "deleted_test_files"].iter().flat_map(|k| screened[*k].as_array().cloned().unwrap_or_default()).filter_map(|v| v.as_str().map(str::to_string)).collect();
     let mut targets = reach(tests, base, candidate, &starts);
@@ -930,7 +871,6 @@ pub fn plan(tests: &Tests, base: &Files, candidate: &Files, screened: &Value) ->
         targets = candidate.keys().filter(|k| is_code(k) && !allowed(&tests.paths, k) && !k.split('/').any(|d| d == "node_modules") && !helper(k)).take(MAX_TARGETS).cloned().collect();
     }
     let per_file: Vec<Vec<Mutant>> = targets.iter().filter_map(|t| text_of(candidate, t).map(|s| plant(t, s))).collect();
-    // Share the planted bugs out across the files, then spread each file's share from its first candidate line to its last.
     let (mut quota, mut left) = (vec![0usize; per_file.len()], MAX_PLANTED);
     while left > 0 && quota.iter().zip(&per_file).any(|(q, f)| *q < f.len()) {
         for (q, f) in quota.iter_mut().zip(&per_file) { if left > 0 && *q < f.len() { *q += 1; left -= 1; } }
@@ -940,7 +880,6 @@ pub fn plan(tests: &Tests, base: &Files, candidate: &Files, screened: &Value) ->
     while picked.iter().any(|f| !f.is_empty()) {
         for f in picked.iter_mut() { if let Some(m) = f.pop_front() { mutants.push(m); } }
     }
-    // Each planted bug runs first with only the new test files that reach its file; a file most tests reach just runs the whole suite.
     let new_edges = edges(candidate);
     let new_tests: Vec<&String> = candidate.keys().filter(|k| allowed(&tests.paths, k) && is_code(k) && !helper(k) && text_of(candidate, k).is_some_and(|s| declares_tests(k, s))).collect();
     let mut reachers: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -949,7 +888,6 @@ pub fn plan(tests: &Tests, base: &Files, candidate: &Files, screened: &Value) ->
         m.id = i + 1;
         m.tests = reachers.get(&m.path).filter(|r| r.len() * 2 <= new_tests.len().max(1)).cloned().unwrap_or_default();
     }
-    // The old side may run just the changed test files when each declares tests and no other test file imports it; otherwise the whole old suite.
     let old_edges = edges(&base.iter().filter(|(k, _)| allowed(&tests.paths, k)).map(|(k, v)| (k.clone(), v.clone())).collect());
     let imported = |p: &String| old_edges.iter().any(|(from, to)| from != p && to.contains(p));
     let focus = !starts.is_empty() && starts.iter().all(|p| is_code(p) && text_of(base, p).is_some_and(|s| declares_tests(p, s)) && !imported(p));

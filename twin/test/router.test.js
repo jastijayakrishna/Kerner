@@ -10,7 +10,6 @@ import { app, until } from './helpers.js';
 const fsp = createRequire(import.meta.url)('node:fs/promises');
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Replaces one function of node:fs/promises, for the router too (its ESM binding follows the change). Answers how to put it back. */
 function patch(name, replace) {
   const real = fsp[name];
   fsp[name] = replace(real);
@@ -21,7 +20,6 @@ function patch(name, replace) {
   };
 }
 
-/** A router for the refactor app with a state folder. `told` lists what it told the twin's thread: [side, hold] per message. */
 async function opened(more = {}) {
   const stateDir = mkdtempSync(join(tmpdir(), 'kern-router-'));
   const told = [];
@@ -41,7 +39,6 @@ test('a switch back made while the control file is being read is not undone by w
   let undo = () => {};
   try {
     assert.equal(await router.switchTo('candidate', 'switched on'), true);
-    // From here on the router's reads of the control file find what is there, then wait until let go: the switch back comes in between.
     let reads = 0;
     let letGo;
     const gate = new Promise((resolve) => {
@@ -55,10 +52,8 @@ test('a switch back made while the control file is being read is not undone by w
       }
       return text;
     });
-    // A person writes the file, and the candidate stays on. The router looks at it within a second.
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), changedAt: new Date().toISOString(), reason: 'a person keeps it on' }));
     await until(() => reads > 0);
-    // Meanwhile the twin finds an unexplained difference and switches back.
     const back = router.switchTo('old', 'switched back: an unexplained difference (body) on GET /');
     await Promise.race([back, pause(500)]);
     letGo();
@@ -74,7 +69,6 @@ test('a switch back made while the control file is being read is not undone by w
   }
 });
 
-/** Makes the router's writes of the control file fail (the disk is full, say) while `failing.now` is true. Answers how to put it back. */
 function failWrites(file, failing) {
   return patch('rename', (real) => async function (from, to, ...rest) {
     if (failing.now && String(to) === file) throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
@@ -97,7 +91,6 @@ test("a switch back whose control file could not be written still holds: the rou
     assert.equal(await router.switchTo('old', 'switched back: an unexplained difference (body) on GET /'), true);
     assert.equal(router.writeErrors, 1);
     assert.equal(readFileSync(file, 'utf8'), before, 'the file still says the candidate serves');
-    // The watcher looks at the file again (the router's own write of the candidate, seen anew), within a second.
     writeFileSync(file, before);
     const seen = reads;
     await until(() => reads > seen);
@@ -142,7 +135,6 @@ test('a write tried again never covers a switch a person wrote to the control fi
     assert.equal(await router.switchTo('candidate', 'switched on'), true);
     failing.now = true;
     assert.equal(await router.switchTo('old', 'switched back: an unexplained difference (body) on GET /'), true);
-    // The router has not yet looked at what a person writes next: its watcher stops here, so its write tried again comes first.
     unwatchFile(file);
     const person = JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), serving: 'candidate', hold: false, changedAt: new Date().toISOString(), reason: 'a person checked it' });
     writeFileSync(file, person);
@@ -187,7 +179,6 @@ test("the control file's watcher never rejects, even when telling the twin's thr
 });
 
 test('a person who holds the old version in the control file while it already serves is followed: the hold reaches the twin', async () => {
-  // kern-twin serve old, while old already serves, changes only the hold. Ignored, the twin could still switch the candidate on by itself.
   const { router, told, file, done } = await opened();
   try {
     assert.deepEqual([router.serving, router.hold], ['old', false]);

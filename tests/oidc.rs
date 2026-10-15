@@ -1,5 +1,3 @@
-// Keyless proofs: inside GitHub Actions, GitHub signs an OIDC token whose audience names a Kern seal, and anyone can check it later against
-// GitHub's published keys. The fixtures are a test key's public JWKS and finished tokens; fixtures/oidc/README.md says how they were made.
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use kern::oidc::{self, ISSUER, WORKFLOW};
@@ -13,7 +11,6 @@ fn token(name: &str) -> String {
 }
 fn seal() -> Value { json!({ "v": 1, "head": "abc" }) }
 fn aud() -> String { oidc::audience(&seal()).unwrap() }
-/// What a receipt check asks: this seal, Kern's workflow, the customer's repository.
 fn check(t: &str) -> R<Value> { oidc::verify(t, &keys(), &aud(), WORKFLOW, Some("acme/shop")) }
 fn denied<T>(r: R<T>, needle: &str) {
     match r { Ok(_) => panic!("expected denial containing {needle:?}"), Err(e) => assert!(e.0.contains(needle), "{:?} does not contain {needle:?}", e.0) }
@@ -40,9 +37,7 @@ fn a_token_github_signed_for_this_seal_verifies_and_returns_its_claims() {
     assert_eq!(claims["job_workflow_ref"], format!("{WORKFLOW}refs/heads/one"));
     assert_eq!((claims["sha"].as_str(), claims["run_id"].as_str()), (Some("9f1c2e3d4b5a69788796a5b4c3d2e1f0a9b8c7d6"), Some("11850203412")));
     assert!(claims["exp"].as_u64().unwrap() * 1000 < now_ms(), "the token expired long ago: receipts are checked long after the job, so exp is not enforced");
-    // the repository is checked only when the caller names one, and a longer prefix pins the workflow's ref
     assert_eq!(oidc::verify(&token("valid"), &keys(), &aud(), &format!("{WORKFLOW}refs/heads/one"), None).unwrap(), claims);
-    // aud may be a list that contains the seal's audience
     assert_eq!(check(&token("audience-list")).unwrap()["aud"], json!(["https://github.com/acme", aud()]));
 }
 
@@ -64,17 +59,14 @@ fn a_token_signed_by_another_key_or_algorithm_is_refused() {
     denied(check(&token("hs256")), "accepts only RS256");
     denied(check(&token("other-key")), "signature does not match");
     let (head, body, sig) = parts(&token("valid"));
-    // a header that asks for extensions Kern does not know, or is not JSON at all
     let crit = URL_SAFE_NO_PAD.encode(json!({ "alg": "RS256", "kid": "test-key-1", "typ": "JWT", "crit": ["exp"] }).to_string());
     denied(check(&format!("{crit}.{body}.{sig}")), "crit");
     denied(check(&format!("{}.{body}.{sig}", URL_SAFE_NO_PAD.encode("not json"))), "header");
-    // a "signature" that is the modulus itself, or larger
     let n = URL_SAFE_NO_PAD.decode(keys()["keys"][0]["n"].as_str().unwrap()).unwrap();
     denied(check(&format!("{head}.{body}.{}", URL_SAFE_NO_PAD.encode(&n))), "smaller than");
     denied(check(&format!("{head}.{body}.{}", URL_SAFE_NO_PAD.encode([0xff; 256]))), "smaller than");
 }
 
-/// Tokens over a full Kern seal, for end-to-end tests of approve and verify; tokens.json keeps each one's seal under "seals".
 #[test]
 fn tokens_over_a_full_seal_are_bound_to_it_and_name_their_workflow_ref() {
     let all: Value = serde_json::from_str(include_str!("fixtures/oidc/tokens.json")).unwrap();
@@ -88,19 +80,14 @@ fn tokens_over_a_full_seal_are_bound_to_it_and_name_their_workflow_ref() {
         let claims = oidc::verify(&token(name), &keys(), &oidc::audience(&seals[name]).unwrap(), &workflow, Some("acme/shop")).unwrap();
         assert_eq!((claims["job_workflow_ref"].as_str(), claims["run_id"].as_str(), claims["iss"].as_str()), (Some(workflow.as_str()), Some("123"), Some(ISSUER)), "{name}");
     }
-    // verify checks a prefix, so with WORKFLOW alone the bare commit (which a fork could supply) and the pull request's ref pass too
     let (aud, branch) = (oidc::audience(&look).unwrap(), format!("{WORKFLOW}refs/heads/"));
     for name in ["full-bare-sha", "full-pull-ref"] { oidc::verify(&token(name), &keys(), &aud, WORKFLOW, Some("acme/shop")).unwrap(); }
-    // a caller that wants a branch narrows the prefix, and both are refused
     oidc::verify(&token("full-valid"), &keys(), &aud, &branch, Some("acme/shop")).unwrap();
     denied(oidc::verify(&token("full-bare-sha"), &keys(), &aud, &branch, Some("acme/shop")), "workflow");
     denied(oidc::verify(&token("full-pull-ref"), &keys(), &aud, &branch, Some("acme/shop")), "workflow");
-    // a blocked decision is another seal, so another audience
     denied(oidc::verify(&token("full-blocked"), &keys(), &aud, WORKFLOW, Some("acme/shop")), "audience");
 }
 
-/// The test key's own raw signatures over blocks a parsing verifier would take: the hash followed by garbage (Bleichenbacher 2006), and a
-/// DigestInfo without its NULL. Comparing s^e mod n with the one rebuilt block refuses both.
 #[test]
 fn a_signature_block_only_a_lenient_parser_accepts_is_refused() {
     denied(check(&token("garbage-after-hash")), "signature does not match");
@@ -130,12 +117,10 @@ fn only_rsa_keys_of_2048_bits_or_more_with_a_sound_exponent_are_used() {
 fn a_changed_or_truncated_token_is_refused() {
     let t = token("valid");
     let (head, body, sig) = parts(&t);
-    // one character of the payload changed
     let mid = body.len() / 2;
     let changed = format!("{}{}{}", &body[..mid], if &body[mid..=mid] == "A" { "B" } else { "A" }, &body[mid + 1..]);
     assert_ne!(changed, body);
     denied(check(&format!("{head}.{changed}.{sig}")), "signature");
-    // cut short inside the signature, before it, and to nothing
     denied(check(&t[..t.len() - 1]), "signature");
     denied(check(&t[..t.len() - 40]), "signature");
     denied(check(&format!("{head}.{body}.")), "signature");
@@ -143,7 +128,6 @@ fn a_changed_or_truncated_token_is_refused() {
     denied(check(""), "three parts");
 }
 
-/// The only test that touches the environment, so nothing races these variables.
 #[test]
 fn request_asks_github_for_a_token_bound_to_the_seal_and_needs_id_token_write() {
     let (url, bearer) = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN");
@@ -153,7 +137,6 @@ fn request_asks_github_for_a_token_bound_to_the_seal_and_needs_id_token_write() 
     denied(oidc::request(&aud()), "permissions: id-token: write");
     unsafe { std::env::set_var(url, "http://example.invalid/token"); std::env::set_var(bearer, "request-token"); }
     denied(oidc::request(&aud()), "https");
-    // a stand-in for GitHub's token service: it records each request and answers as GitHub does
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let root = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
@@ -180,7 +163,6 @@ fn request_asks_github_for_a_token_bound_to_the_seal_and_needs_id_token_write() 
     unsafe { std::env::remove_var(url); std::env::remove_var(bearer); }
 }
 
-/// Run with --ignored: GitHub's real keys pass every key check, so a token naming one of them reaches the signature check.
 #[test]
 #[ignore = "asks GitHub over the network"]
 fn githubs_published_keys_are_keys_kern_can_use() {

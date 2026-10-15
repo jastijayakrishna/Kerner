@@ -1,7 +1,5 @@
 import pg from 'pg';
 
-// The new version reads the plan's features too, which the old one never read; and its health route moves a sequence, a write disguised
-// as a SELECT.
 export function createApp() {
   const pool = new pg.Pool({ connectionString: process.env.KERN_TWIN_PG_URL, max: 2 });
   const send = (res, value) => {

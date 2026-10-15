@@ -87,14 +87,11 @@ test('scrubbing takes time in proportion to the text, so a large body cannot sta
   const s = scrubber();
   const started = performance.now();
   for (const text of ['a'.repeat(1 << 17), 'a-'.repeat(1 << 16), '1 '.repeat(1 << 16)]) s.text(text);
-  // A few milliseconds; a search that rescans the text from every place in it takes about 20 seconds here.
   const ms = performance.now() - started;
   assert.ok(ms < 2000, `took ${Math.round(ms)} ms`);
 });
 
 test('a body nested a hundred thousand deep is scrubbed in full, private names included, without running out of stack', () => {
-  // JSON.parse reads any depth. A scrubber that gave up on it would fall back to patterns alone, and a value under a private name
-  // (a password) would reach the disk as it was.
   const deep = `${'['.repeat(100000)}"ada@corp.com"${']'.repeat(100000)}`;
   const body = new Uint8Array(Buffer.from(`{"password":"hunter2","deep":${deep}}`));
   const reply = JSON.parse(deep);

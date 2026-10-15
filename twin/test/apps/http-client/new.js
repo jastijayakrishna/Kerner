@@ -1,7 +1,7 @@
 import { getJson, postJson } from './old.js';
 import { send } from '../http.js';
 
-// Retries the charge "to be safe": every order would be charged twice.
+
 export function createApp() {
   return async (req, res) => {
     if (req.url === '/rate') return send(res, 200, { rate: (await getJson('/rate')).rate });

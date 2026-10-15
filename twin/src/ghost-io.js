@@ -10,22 +10,11 @@ import { callKey, isSession, isWrite, readAllowed, shapeOf } from './keys.js';
 import { installOverlay, resetOverlay } from './overlay.js';
 import { mine, never } from './turn.js';
 
-// What a ghost may do: have its calls answered from the real run's recording, and nothing else. Writes are written down and never
-// done. Every other way out is refused, so a ghost cannot touch anything real through Node's own APIs: network connections, UDP,
-// DNS, programs, threads, signals, native add-ons (but those allowed by name), Node's internal bindings, WASI, process priorities,
-// file writes, opening files to write, and writing to file descriptors it did not open.
 let job = null;
-// The answers to calls about the connection or the server (keys.js isSession) seen in every recording so far, the newest kept: such a
-// call is never used up, and a job whose own recording lacks one (a pool opened a connection the real run did not need) is answered from
-// these. Data never carries over from one job to another.
 const session = new Map();
 const MOST_SESSION = 1000;
-// A ghost counts every write it makes, by key, as the real run's record keeps every one: a request with hundreds of writes (a bulk
-// import, a batch endpoint) is compared in full. The first 200 are also listed in order, to show and to keep in case files. Past this many
-// different keys it counts no new one and says so (`tooMany`), and the request is not compared in full.
 const MOST_WRITES = 10000;
 
-/** Starts a request: the real run's calls, in the order they were made; each recorded answer is used once, but session calls. */
 export function beginJob(io) {
   resetOverlay();
   for (const call of io ?? []) {
@@ -37,20 +26,12 @@ export function beginJob(io) {
   job = { calls: (io ?? []).map((call) => ({ call, shape: shapeOf(call.key), used: false })), effects: [], writes: new Map(), tooMany: false, events: [], weighty: 0 };
 }
 
-/**
- * Ends a request: what the ghost tried to write (`effects`, the first 200 in order; `writes`, every one as [key, how often]; `tooMany`,
- * whether it made more different writes than it counts), and what it was refused or could not find.
- */
 export function endJob() {
   const out = job ? { effects: job.effects, writes: [...job.writes], tooMany: job.tooMany, events: job.events } : { effects: [], writes: [], tooMany: false, events: [] };
   job = null;
   return out;
 }
 
-/**
- * The recorded answer to a call: the unused one with exactly this key, else the next unused one with the same shape (its payload carried
- * the clock or a random id, which a ghost cannot reproduce exactly; such a match is noted as 'loose'). Undefined when there is none.
- */
 export function take(key) {
   if (!job || !mine()) return undefined;
   const shape = shapeOf(key);
@@ -66,11 +47,8 @@ export function take(key) {
   return found.call;
 }
 
-// The notes a verdict depends on: something refused, a call the recording could not answer. Up to 200 of them are kept; notes that only
-// inform (a loose match, a real read) up to 50, so a busy request's loose matches can never crowd out the ones that decide its verdict.
 const WEIGHTY = new Set(['denied', 'unmatched-read', 'unmatched-write']);
 
-/** Something the ghost was refused ('denied'), or a call the recording could not answer ('unmatched-read', 'unmatched-write'). */
 export function note(type, detail) {
   if (!mine() || !job) return;
   const weighty = WEIGHTY.has(type);
@@ -79,7 +57,6 @@ export function note(type, detail) {
   job.events.push({ type, detail: String(detail).slice(0, 300) });
 }
 
-/** A write the ghost made: written down, never done. */
 export function wrote(effect) {
   if (!mine() || !job) return;
   if (job.effects.length < 200) job.effects.push(effect);
@@ -91,29 +68,16 @@ const NULL_BODY = new Set([101, 204, 205, 304]);
 const loopback = (host) => ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(String(host));
 const refusal = (what) => Object.assign(new Error(`${what} is refused in a Kern ghost run`), { code: 'EACCES' });
 const { O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
-// Only 'r', 'rs' and 'sr' open a file just to read it; every other flag can change it ('w' already empties it).
 const opensToWrite = (flags) => (typeof flags === 'number' ? (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) !== 0 : !/^(r|rs|sr)$/.test(String(flags ?? 'r')));
-/** Refuses a call made in callback style: its callback gets the refusal, as it would a real failure. */
 function refuseLater(args, what) {
   const done = args.findLast((a) => typeof a === 'function');
   if (done) process.nextTick(done, refusal(what));
 }
-/** The package a native add-on file belongs to: the last node_modules/<name> (or @scope/name) on its path. */
 export const packageOf = (file) => String(file).replaceAll('\\', '/').match(/.*node_modules\/((?:@[^/]+\/)?[^/]+)\//)?.[1] ?? null;
 
-/**
- * The name a native add-on is allowed and named by: its node_modules package, or, when it loads from a path outside node_modules (a
- * build that copies its .node into the app, as firecrawl does with native/firecrawl-rs.<platform>.node), its file's stem — the base name
- * before the platform suffix and extension (firecrawl-rs.linux-x64-gnu.node -> firecrawl-rs).
- */
 export const addonName = (file) => packageOf(file) ?? String(file).replaceAll('\\', '/').split('/').pop().split('.')[0];
 const LOOKUPS = ['lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'];
 
-/**
- * Seals this thread. `ports` are the loopback ports of the ghost's own servers (the harness, and the http replay of Phase 4): the only
- * connections it may make. `harnessPort` alone still works. `addons` names the packages whose native add-ons may load: pure computation
- * only (bcrypt, say), since an add-on acts below every control here.
- */
 export function installGhostIO({ harnessPort, ports = [harnessPort], addons = [], realReads = [], ask = null, overlay = false }) {
   const allowed = new Set(ports.filter((port) => Number.isInteger(port)));
   const realFetch = globalThis.fetch;
@@ -121,7 +85,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (loopback(url.hostname) && allowed.has(Number(url.port))) return realFetch(request);
-    // A call the current turn did not make waits forever (turn.js): no answer, nothing written down.
     if (!mine()) return never();
     const body = request.body ? Buffer.from(await request.arrayBuffer()) : Buffer.alloc(0);
     const key = callKey(request.method, request.url, body);
@@ -129,7 +92,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     if (write) wrote(key);
     let recorded = take(key);
     if (!recorded && !write && ask && readAllowed(realReads, request.method, request.url)) {
-      // An allow-listed read the recording cannot answer: the twin's thread makes it for real, once for both ghosts of this request.
       const answer = await ask({ type: 'real-read', method: request.method.toUpperCase(), url: request.url, headers: Object.fromEntries(request.headers) });
       if (!answer.error) {
         note('real-read', `${request.method.toUpperCase()} ${request.url}`);
@@ -141,7 +103,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
       throw new TypeError('fetch failed');
     }
     if (recorded.error) throw new TypeError('fetch failed');
-    // A header recorded as a list (every cookie a Set-Cookie of its own) is answered as one header per value.
     const headers = Object.entries(recorded.headers ?? {})
       .filter(([name]) => !['content-encoding', 'content-length', 'transfer-encoding'].includes(name))
       .flatMap(([name, value]) => (Array.isArray(value) ? value.map((one) => [name, one]) : [[name, value]]));
@@ -153,14 +114,12 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
   net.Socket.prototype.connect = function ghostConnect(...args) {
     const first = Array.isArray(args[0]) ? args[0][0] : args[0];
     const options = first !== null && typeof first === 'object' ? first : { port: first, host: typeof args[1] === 'string' ? args[1] : 'localhost' };
-    // Node's HTTP client always passes `path: null` (its agent's way of saying "not a pipe"), so null counts as no path too.
     if (options.path == null && loopback(options.host ?? 'localhost') && allowed.has(Number(options.port))) return realConnect.apply(this, args);
     note('denied', `a network connection to ${options.path ?? `${options.host ?? 'localhost'}:${options.port}`}`);
     process.nextTick(() => this.destroy(refusal('A network connection')));
     return this;
   };
 
-  // The app may start its own server when it loads; in a ghost that server never opens. The harness's server is already listening.
   net.Server.prototype.listen = function ghostListen(...args) {
     const done = args.find((a) => typeof a === 'function');
     if (done) process.nextTick(done);
@@ -180,13 +139,11 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     };
   }
 
-  // A thread the app starts would begin outside this seal, free to reach anything real.
   workerThreads.Worker = function ghostWorker() {
     note('denied', 'starting a worker thread');
     throw refusal('Starting a worker thread');
   };
 
-  // A name lookup is itself a message to the outside world (a name can carry data), and its answer is not in the recording.
   const looked = (target) => note('denied', `a DNS lookup of ${String(target)}`);
   for (const owner of [dns, dns.Resolver.prototype]) {
     for (const name of LOOKUPS.filter((n) => typeof owner[n] === 'function')) {
@@ -205,7 +162,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     }
   }
 
-  // Inside a thread, process.kill reaches the whole process: an app's shutdown path that signals itself would end production.
   process.kill = function ghostKill(pid, signal) {
     note('denied', `sending ${signal ?? 'SIGTERM'} to process ${pid}`);
     throw refusal('Sending a signal');
@@ -216,7 +172,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     note('denied', `loading the native add-on ${String(filename)}`);
     throw refusal('Loading a native add-on');
   };
-  // Node's internal bindings reach sockets and files without passing through anything sealed here.
   for (const name of ['binding', '_linkedBinding']) {
     process[name] = function ghostBinding(module) {
       note('denied', `Node's internal binding ${String(module)}`);
@@ -227,14 +182,12 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     note('denied', 'changing the priority of a process');
     throw refusal('Changing the priority of a process');
   };
-  // WASI has its own access to files. Loaded only here, after worker.js has muted the ghost's output: loading it prints a warning.
   const wasi = process.getBuiltinModule('node:wasi');
   wasi.WASI = function ghostWASI() {
     note('denied', 'starting WASI, which has its own access to files');
     throw refusal('Starting WASI');
   };
 
-  // Opening a file to write can already destroy it, so a ghost may open files only to read them.
   const { open, openSync } = fs;
   const promisesOpen = fs.promises.open;
   const opened = (target) => wrote(`FS open ${String(target)} -`);
@@ -254,7 +207,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     throw refusal('Opening a file to write');
   };
 
-  // With the overlay, these writes go to memory for the request (overlay.js); every other write is still refused.
   const OVERLAID = new Set(['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'copyFile', 'truncate']);
   for (const name of ['writeFile', 'appendFile', 'unlink', 'rm', 'rmdir', 'rename', 'mkdir', 'mkdtemp', 'copyFile', 'cp', 'truncate', 'symlink', 'link', 'chmod', 'chown', 'lchown', 'utimes', 'lutimes'].filter((n) => !(overlay && OVERLAID.has(n)))) {
     const effect = (target) => wrote(`FS ${name} ${String(target)} -`);
@@ -279,8 +231,6 @@ export function installGhostIO({ harnessPort, ports = [harnessPort], addons = []
     };
   }
 
-  // A ghost opens files only to read them, so any other file descriptor it writes to belongs to the app's process. Only the ghost's own
-  // output (1 and 2, which worker.js sends to the null device) is written.
   for (const name of ['write', 'writeSync', 'writev', 'writevSync']) {
     const inner = fs[name];
     fs[name] = function ghostFdWrite(fd, ...rest) {

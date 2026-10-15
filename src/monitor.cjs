@@ -1,16 +1,10 @@
 'use strict';
-// Kern's behaviour recorder, preloaded into every Node process of a check, a test run or a probe: the hosts the code reaches (and how often),
-// the names it looks up, the programs it starts, the variables it reads, and the files of the repository it deletes or overwrites.
 const out = process.env.KERN_MONITOR;
-// The main thread of Kern's own probe run is the harness, never code under test: starting the app and handing it the environment are not
-// the app's behaviour. Code under test runs in the probe's workers and in the app, which are recorded. Only Kern's control mount holds
-// these two files, so repository code cannot claim to be the harness.
 const harness = (() => { try { return require('worker_threads').isMainThread && process.argv[1] === '/kern/probe.cjs' && process.argv[2] === '/kern/probe.json'; } catch { return false; } })();
 if (out && !harness && !globalThis.__kernMonitor) {
   globalThis.__kernMonitor = true;
   const fs = require('fs');
   const path = require('path');
-  // The recorder's own log never goes through the functions it watches.
   const append = fs.appendFileSync;
   const lstat = fs.lstatSync;
   const seen = new Set();
@@ -20,7 +14,6 @@ if (out && !harness && !globalThis.__kernMonitor) {
     seen.add(line);
     try { append(out, `${line}\n`); } catch {}
   };
-  // Every attempt to reach a host is counted as well, so Kern can compare how often the old and the new code call it (a paid API, say).
   let counted = 0;
   const count = (key) => { if (counted++ < 5000) { try { append(out, `count ${key}\n`); } catch {} } };
   const loopback = (h) => h == null || h === '' || /^(localhost|127(\.\d+){3}|::1|0\.0\.0\.0|::)$/i.test(String(h).replace(/^\[|\]$/g, ''));
@@ -60,15 +53,11 @@ if (out && !harness && !globalThis.__kernMonitor) {
     const f = cp[name];
     cp[name] = function (file, ...rest) { note('exec', name === 'fork' ? 'node' : program(file)); return f.call(this, file, ...rest); };
   }
-  // Files. A path counts when it belongs to the repository the run started from (the sandbox keeps that snapshot read-only at /input) or lies
-  // outside the workspace and the temporary folder. Files the run made itself, the dependency install and temporary files never count.
   const ws = path.resolve(process.env.KERN_WORKSPACE || '/workspace');
   const input = path.resolve(process.env.KERN_INPUT || '/input');
   const tmp = path.resolve(require('os').tmpdir());
   const exists = (p) => { try { lstat(p); return true; } catch { return false; } };
   const snapshot = exists(input);
-  // A folder reached through a link (macOS keeps temporary folders under /var, a link to /private/var) has two names, and the working
-  // directory always has the real one: a path counts as inside a folder under either name.
   const names = (p) => { try { return [...new Set([p, fs.realpathSync(p)])]; } catch { return [p]; } };
   const wsNames = names(ws), tmpNames = names(tmp);
   const within1 = (root, abs) => { const r = path.relative(root, abs); return r === '' ? '.' : !r.startsWith('..') && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null; };
@@ -106,7 +95,6 @@ if (out && !harness && !globalThis.__kernMonitor) {
   for (const owner of [fs, fs.promises]) {
     for (const n of ['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync']) wrap(owner, n, (p) => destroy('delete', p));
     for (const n of ['rename', 'renameSync']) wrap(owner, n, (from, to) => { destroy('delete', from); write(to); });
-    // appendFile reaches writeFile with the flag 'a': adding to a file is not destroying it.
     for (const n of ['writeFile', 'writeFileSync']) wrap(owner, n, (p, data, o) => { if (truncating((o && typeof o === 'object' && o.flag) || 'w')) write(p); else create(p); });
     for (const n of ['truncate', 'truncateSync']) wrap(owner, n, (p) => destroy('overwrite', p));
     for (const n of ['copyFile', 'copyFileSync', 'cp', 'cpSync']) wrap(owner, n, (from, to) => write(to));

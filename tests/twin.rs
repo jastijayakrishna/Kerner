@@ -1,5 +1,3 @@
-// Kern twin plan: the changed lines of code of a change, each with the commit and pull request that changed it. The Node twin reads the
-// manifest it writes (twin/src/manifest.js).
 use kern::twin;
 use kern::util::*;
 use serde_json::Value;
@@ -33,7 +31,6 @@ fn read(path: &Path) -> Value { serde_json::from_str(&std::fs::read_to_string(pa
 const BASE: &str = include_str!("../twin/test/apps/three-prs/base/src/app.js");
 const HEAD: &str = include_str!("../twin/test/apps/three-prs/head/src/app.js");
 
-/// The twin's three-pull-request fixture as a repository: the base, one commit per pull request, then a change that is not code.
 fn three_prs() -> (Temp, String, String) {
     let t = Temp::new();
     let r = t.join("repo");
@@ -116,8 +113,6 @@ fn a_line_changed_on_a_merged_branch_names_the_merge_pull_request() {
 
 #[test]
 fn a_shallow_clone_is_refused_because_its_blame_cannot_name_the_commits() {
-    // In a shallow clone git blame gives every line, changed ones too, to the commit at the shallow edge, so each line's commit, and so
-    // its pull request, would be silently missing.
     let t = Temp::new();
     let r = t.join("repo");
     std::fs::create_dir_all(&r).unwrap();

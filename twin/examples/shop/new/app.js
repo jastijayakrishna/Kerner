@@ -1,7 +1,6 @@
 import express from 'express';
 import pg from 'pg';
 
-// The new version: the same shop, except that a large order's total is now shown rounded to whole units.
 export function createApp() {
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
   const app = express();

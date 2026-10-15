@@ -36,7 +36,6 @@ const nested = (depth, leaf) => {
 };
 
 test('values nested a hundred thousand deep are compared without running out of stack', () => {
-  // JSON.parse reads any depth; a body that deep must not end the twin when it is compared.
   assert.deepEqual(diffValues(nested(100000, 1), nested(100000, 1)), []);
   const found = diffValues(nested(100000, 1), nested(100000, 2));
   assert.equal(found.length, 1);

@@ -1,15 +1,8 @@
 import { diffValues, readBody } from './serialize.js';
 import { digest, shapeOf } from './keys.js';
 
-/** Headers that change on every answer and say nothing about behaviour. */
 export const VOLATILE_HEADERS = new Set(['date', 'etag', 'last-modified', 'age', 'expires', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'x-request-id', 'x-response-time', 'server-timing']);
 
-/**
- * A Set-Cookie as it is compared: its name, its attributes (in order, their names in lower case) and its value, but for a value that is
- * an opaque token (16 or more characters, letters and digits: a session id, a signed or random value), which changes whenever a version
- * draws one more random number first. So a cookie no longer set, a weaker flag (HttpOnly, Secure, SameSite) or a plain value that changed
- * (role=user to role=admin) is a difference, and a fresh session id is not.
- */
 function cookieShape(line) {
   const [pair = '', ...attributes] = String(line).split(';').map((part) => part.trim());
   const at = pair.indexOf('=');
@@ -25,10 +18,6 @@ function cookieShape(line) {
 
 const cookiesOf = (headers) => [headers?.['set-cookie'] ?? []].flat().map(cookieShape).sort().join('\n');
 
-/**
- * Kinds only a rule that names them can state: a path rule never makes a crash, a hang, an opened door, another write or a reach for
- * something a ghost may not use "meant".
- */
 const SERIOUS = new Set(['crash', 'hang', 'door-opened', 'effects', 'refused']);
 const KEPT = 20;
 
@@ -36,10 +25,6 @@ const refused = (status) => status === 401 || status === 403 || status === 404 |
 const succeeded = (status) => status >= 200 && status < 300;
 const MANY = 'more different writes than a ghost counts';
 
-/**
- * Every write of a run by key, with how often it was made. A ghost counts all of its writes (`writes`, [key, how often] pairs); a run
- * without counts (the real run, whose record lists every write, or a run kept in an older case) is counted from its list.
- */
 function tally(run) {
   if (run.writes) return new Map(run.writes);
   const out = new Map();
@@ -47,8 +32,6 @@ function tally(run) {
   return out;
 }
 
-// The real run records calls (fetch, http, Postgres, Redis), not file writes, and its payloads carry the real clock: what it wrote is
-// compared with the serving ghost by shape, every write counted, and file writes are compared between the two ghosts only.
 function shapes(run) {
   const out = new Map();
   for (const [key, n] of tally(run)) if (!key.startsWith('FS ')) out.set(shapeOf(key), (out.get(shapeOf(key)) ?? 0) + n);
@@ -57,7 +40,6 @@ function shapes(run) {
 
 const sameTally = (x, y) => x.size === y.size && [...x].every(([key, n]) => y.get(key) === n);
 
-/** The writes two tallies differ in, as each run made them, a key with how often: at most 200 a side, so a person sees them all. */
 function differing(x, y) {
   const keys = [...new Set([...x.keys(), ...y.keys()])].filter((key) => x.get(key) !== y.get(key)).sort();
   if (!keys.length) return null;
@@ -72,19 +54,10 @@ function differing(x, y) {
 const strayCalls = (run) => run.events.filter((e) => e.type === 'unmatched-read' || e.type === 'unmatched-write');
 const unansweredReads = (run) => new Set(run.events.filter((e) => e.type === 'unmatched-read').map((e) => e.detail));
 const refusals = (run) => new Set(run.events.filter((e) => e.type === 'denied').map((e) => e.detail));
-// A ghost that gave this request no answer of its own: it ran out of time, or it had stopped before the request came (`gone`).
 const silent = (run) => Boolean(run.timedOut || run.gone);
-// An answer over maxBodyBytes crossed from its ghost only as its size and sha256 (`large`); a body that crossed whole is measured the same
-// way when it is compared with one.
 const measured = (run) => run.large ?? { size: run.body.length, digest: digest(run.body) };
 const sized = (body) => `${body.size} bytes, sha256 ${body.digest.slice(0, 16)}`;
 
-/**
- * Compares two runs of one request: `a` from the old code, `b` from the new.
- * A run is { status, headers, body: Buffer, large?: { size, digest }, effects: string[], writes?: [key, count][], tooMany?, events: [{ type, detail }],
- * error?, timedOut?, gone? }.
- * Answers { outcome: 'same' | 'different' | 'not-compared', kinds, details: [{ kind, path, old, new }] }, at most 20 details.
- */
 export function compareRuns(a, b) {
   const kinds = new Set();
   const details = [];
@@ -92,10 +65,6 @@ export function compareRuns(a, b) {
     kinds.add(kind);
     if (details.length < KEPT) details.push({ kind, path, old, new: now });
   };
-  // A write one version would make and the other would not, or would make more often, is a difference whatever else happened: a double
-  // charge is caught even when the new code then fails on a call the recording cannot answer, or reaches for something a ghost may not
-  // use. Every write counts, by key. A ghost that made more different writes than it counts (`tooMany`) cannot be compared in full: when
-  // only one did, the two certainly differ; when both did, the request is not compared, unless something else differs.
   const uncounted = Boolean(a.tooMany && b.tooMany);
   if (!uncounted && (a.tooMany || b.tooMany)) {
     add('effects', 'writes', a.tooMany ? MANY : `${tally(a).size} different writes`, b.tooMany ? MANY : `${tally(b).size} different writes`);
@@ -103,11 +72,6 @@ export function compareRuns(a, b) {
     const writes = differing(tally(a), tally(b));
     if (writes) add('effects', 'writes', writes.old, writes.new);
   }
-  // Something a ghost may not use (a program, a connection no recording answers) is refused, so what it would have answered is unknown,
-  // and nothing after it can be compared. Reached for by the new code alone, on the same request in the same world, it is a difference
-  // in itself: left "not compared", a rare path could switch on with it unseen. Reached for by both versions, or by the old one alone
-  // (while the new version serves, the old ghost is the one not checked against reality), the request is not compared, unless the
-  // writes already differ.
   const oldRefused = refusals(a);
   const newRefused = refusals(b);
   if (oldRefused.size || newRefused.size) {
@@ -118,16 +82,11 @@ export function compareRuns(a, b) {
     const denied = [...a.events, ...b.events].filter((e) => e.type === 'denied');
     return { outcome: 'not-compared', kinds: ['unsupported'], details: denied.slice(0, 5).map((e) => ({ kind: 'unsupported', path: 'io', old: '', new: e.detail })) };
   }
-  // A write the recording cannot answer was never made, and its answer is unknown (a version's new code path writes what the old one
-  // never did, say), so whatever its ghost did after it, a status, a body or a crash, came from the replay, not from the version. The
-  // write itself is the difference.
   const unanswerable = [...a.events, ...b.events].find((e) => e.type === 'unmatched-write');
   if (kinds.size && unanswerable) {
     add('effects', 'answer', 'compared', `unknown: the recording cannot answer ${unanswerable.detail}, so what the ghost did after it is not compared`);
     return { outcome: 'different', kinds: [...kinds], details };
   }
-  // A read the recording cannot answer, made by one ghost only: its answer is unknown, so nothing that ghost did after it can be
-  // compared. Unless the writes already differ, the request is not compared.
   const oldReads = unansweredReads(a);
   const newReads = unansweredReads(b);
   const unanswered = [
@@ -138,21 +97,14 @@ export function compareRuns(a, b) {
     if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
     return { outcome: 'not-compared', kinds: ['unanswered'], details: unanswered.slice(0, 5) };
   }
-  // A version that failed after it had answered (an uncaught error in work the request left running) would end a production process
-  // that has no handler for it: a difference, whatever its answer was. Both failing alike behave alike.
   if ((a.after ?? null) !== (b.after ?? null)) add('crash', 'after the answer', a.after ?? 'none', b.after ?? 'none');
   if (a.error || b.error) {
-    // Neither ghost answered (each ran out of time, or had stopped before the request came), so what either version would have answered
-    // is unknown: the request is not compared, unless the writes already differ. Two equal crashes are compared, and are the same: both
-    // versions failed alike on the same request.
     if (silent(a) && silent(b)) {
       if (kinds.size) return { outcome: 'different', kinds: [...kinds], details };
       return { outcome: 'not-compared', kinds: ['no-answer'], details: [{ kind: 'no-answer', path: 'result', old: a.error, new: b.error }] };
     }
     if (!a.error) add(b.timedOut ? 'hang' : 'crash', 'result', `status ${a.status}`, b.error);
     else if (!b.error) add('fixed', 'result', a.error, `status ${b.status}`);
-    // A request the old version failed on fast and the new one now hangs on is a hang: worse for a customer, so only a rule naming it may
-    // state it.
     else if (b.timedOut && !a.timedOut) add('hang', 'result', a.error, b.error);
     else if (a.error !== b.error) add('changed-error', 'result', a.error, b.error);
   } else {
@@ -193,11 +145,6 @@ export function compareRuns(a, b) {
 
 const matches = (pattern, path) => (pattern.endsWith('*') ? path.startsWith(pattern.slice(0, -1)) : pattern === path);
 
-/**
- * Marks a difference the team said is meant as 'stated'. The `allow` rules for this route (or for '*') must cover every detail: by
- * naming the detail's kind, or, for kinds other than crash, hang, door-opened and effects, by matching its path ('$.user*' matches by
- * prefix). A difference with more details than were kept can only be stated by naming every one of its kinds.
- */
 export function explain(verdict, route, allow) {
   if (verdict.outcome !== 'different' || !allow?.length) return verdict;
   const rules = allow.filter((rule) => rule.route === '*' || rule.route === route);
@@ -209,11 +156,6 @@ export function explain(verdict, route, allow) {
   return stated ? { ...verdict, outcome: 'stated' } : verdict;
 }
 
-/**
- * Whether the ghost of the version that served (`who`: 'old' or 'candidate') reproduced the real run: the same status and the same
- * writes, nothing refused, and no call the real run did not make. Bodies may differ (real time, real randomness); the two ghosts are
- * compared with each other for that. Answers null when faithful, or the reason it is not.
- */
 export function faithful(real, ghost, who = 'old') {
   const code = who === 'candidate' ? 'new' : 'old';
   if (ghost.error) return `the ${code} code's ghost failed: ${ghost.error}`;

@@ -2,24 +2,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Which characters of each changed line a ghost ran, one request at a time. V8's precise coverage counts how often each function and
-// block ran since the last take; the source V8 ran is mapped to the manifest's changed lines, directly or through a source map. The
-// rule for "ran" is kern drive's (src/drive.rs: plausible, line_left_out), kept per character so that branches add up across requests.
-
-/** Helpers a bundler adds to a module (esbuild, tsc): their counts are not the project's code. kern drive's list. */
 const HELPERS = new Set(['__name', '__export', '__copyProps', '__toCommonJS', '__toESM', '__reExport', '__commonJS', '__esm', '__require', '__defProp',
   '__defNormalProp', '__publicField', '__decorateClass', '__decorateParam', '__async', '__await', '__spreadValues', '__spreadProps', '__objRest',
   '__template', '__using', 'get']);
 const QUIET = new Set([...'{}()[];,']);
-/** Whether a character is code, the rule every mask is built on: braces, brackets, parentheses, `;`, `,` and blanks are not. */
 export const isCode = (c) => c.trim() !== '' && !QUIET.has(c);
 const normalize = (path) => (process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
 
-/**
- * Whether a span that starts at `column` of a line (its text `text`) starts where the language lets a function or a block start. A span
- * starting anywhere else (`export`, the middle of `x = () =>`) is a rewrite's helper mapped onto the line, not code left out. Columns are
- * UTF-16 units, which is how JavaScript strings index.
- */
 export function plausible(text, column, isFunction) {
   const before = text.slice(0, column).trimEnd();
   const at = text.slice(column).trimStart();
@@ -30,7 +19,6 @@ export function plausible(text, column, isFunction) {
     return ['function', 'async', '(', 'get ', 'set ', 'static ', '*', '#'].some((s) => at.startsWith(s))
       || (name !== '' && !['const', 'let', 'var', 'return', 'if', 'for', 'while', 'switch', 'new', 'await', 'typeof'].includes(name) && (rest.startsWith('=>') || rest.startsWith('(')));
   }
-  // A branch starts after its operator, or (as a source map can place it) at it: the ` : 0` of `a ? b + 1 : 0`.
   return before === '' || at.startsWith('{') || ['?', ':', '&&', '||', '??', ')', 'else', '=>', '{', ';'].some((t) => before.endsWith(t))
     || [':', '&&', '||', '??'].some((t) => at.startsWith(t)) || (at.startsWith('?') && !at.startsWith('?.'));
 }
@@ -41,7 +29,6 @@ function lineStarts(text) {
   return starts;
 }
 
-/** Where line `line` (0-based) ends: before its line break, and before a carriage return. */
 function lineEnd(text, starts, line) {
   let end = line + 1 < starts.length ? starts[line + 1] - 1 : text.length;
   if (end > starts[line] && text[end - 1] === '\r') end--;
@@ -59,10 +46,6 @@ function lineAt(starts, offset) {
   return low;
 }
 
-/**
- * The spans that count, for one script: every range V8 reported, but bundler helpers, and zero-count spans that start where no function
- * or block can start.
- */
 function spansOf(text, starts, functions) {
   const spans = [];
   for (const f of functions) {
@@ -84,7 +67,6 @@ function codeOffsets(text, from, to) {
   return out;
 }
 
-/** For each offset, '1' when the innermost span holding it ran, else '0' (no span holds it, or the innermost one counted zero). */
 function maskOf(spans, offsets) {
   let mask = '';
   for (const at of offsets) {
@@ -95,7 +77,6 @@ function maskOf(spans, offsets) {
   return mask;
 }
 
-/** The masks of `lines` (1-based) of a script whose running source is the file itself: Map(line → mask). */
 export function lineMasks(text, functions, lines) {
   const starts = lineStarts(text);
   const spans = spansOf(text, starts, functions);
@@ -111,7 +92,6 @@ export function lineMasks(text, functions, lines) {
 
 const DIGITS = new Map([...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'].map((c, i) => [c, i]));
 
-/** A source map's `mappings`: per generated line, its segments [column, source, original line, original column], all from 0 (-1: none). */
 export function decodeMappings(mappings) {
   const lines = [];
   let source = 0;
@@ -149,7 +129,6 @@ export function decodeMappings(mappings) {
   return lines;
 }
 
-/** The source map a script points at, inline (a data: URL) or a file beside it, with the folder its sources are relative to; or null. */
 export function sourceMapOf(text, file) {
   const at = text.lastIndexOf('sourceMappingURL=');
   if (at < 0) return null;
@@ -170,7 +149,6 @@ export function sourceMapOf(text, file) {
   }
 }
 
-/** A source map's sources as normalized absolute paths ('' for one that is not a file). */
 function sourcesOf(map, dir) {
   const root = typeof map.sourceRoot === 'string' ? map.sourceRoot : '';
   return map.sources.map((source) => {
@@ -186,11 +164,6 @@ function sourcesOf(map, dir) {
   });
 }
 
-/**
- * The masks of changed lines of original files, from a generated script and its source map. An original line gathers the generated
- * pieces the map points at it, in order; its mask covers their code characters. `targets` maps a normalized absolute path to
- * { path, lines }. Answers Map(normalized path → Map(line → mask)).
- */
 export function mappedMasks(text, functions, map, mapDir, targets) {
   const starts = lineStarts(text);
   const spans = spansOf(text, starts, functions);
@@ -229,27 +202,22 @@ export function mappedMasks(text, functions, map, mapDir, targets) {
   return out;
 }
 
-/** The changed files one ghost measures: Map(normalized absolute path → { path, lines }), from a coverage plan { side, root, files }. */
 export function targetsOf(plan) {
   return new Map(plan.files.map((file) => [normalize(resolve(plan.root, file.path)), { path: file.path, lines: file.lines }]));
 }
 
-/** Starts precise coverage in this thread. Called before the app is imported, so every function it compiles is counted precisely. */
 export async function startCoverage(session) {
   await session.post('Profiler.enable');
   await session.post('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
-  // For Debugger.getScriptSource: a file transformed as it loads is read as V8 ran it.
   await session.post('Debugger.enable');
 }
 
-// Both texts with every line break in the same place: Node's type stripping blanks types out and keeps every position.
 function sameLines(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if ((a.charCodeAt(i) === 10) !== (b.charCodeAt(i) === 10)) return false;
   return true;
 }
 
-/** How one script is read, worked out once: directly (it is a changed file, as on disk), through its source map, or not at all (null). */
 async function howToRead(session, script, targets) {
   let file;
   try {
@@ -269,7 +237,6 @@ async function howToRead(session, script, targets) {
     try {
       disk = readFileSync(file, 'utf8');
     } catch {
-      // Not readable: read through its source map, if it has one.
     }
     if (disk !== null && sameLines(disk, text)) return { file, text, lines: target.lines };
   }
@@ -278,10 +245,6 @@ async function howToRead(session, script, targets) {
   return { text, map: found.map, mapDir: found.dir };
 }
 
-/**
- * The changed lines this ghost ran since the last take, as { 'new:src/app.js:9': '1110…' }: only lines with at least one character that
- * ran. `coverage` is { session, side, targets, cache }, the cache keeping how each script is read.
- */
 export async function takeLines(coverage) {
   const { session, side, targets, cache } = coverage;
   const { result } = await session.post('Profiler.takePreciseCoverage');

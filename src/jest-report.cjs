@@ -1,6 +1,4 @@
 'use strict';
-// Kern reads jest's results through this processor instead of --json. --json also sends the tests' console to stderr, which changes what
-// tests that capture output see (three of winston's tests fail under --json and pass without it). The report carries the fields of --json.
 module.exports = (results) => {
   const report = {
     numTotalTests: results.numTotalTests,

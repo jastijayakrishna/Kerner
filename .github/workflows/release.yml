@@ -14,11 +14,10 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: kern-linux-arm64 }
           - { os: windows-2025, target: x86_64-pc-windows-msvc, asset: kern-windows-x64.exe }
           - { os: macos-15, target: aarch64-apple-darwin, asset: kern-macos-arm64 }
-          # GitHub's last Intel Mac machine, kept until August 2027.
           - { os: macos-15-intel, target: x86_64-apple-darwin, asset: kern-macos-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - name: Toolchain
@@ -37,14 +36,13 @@ jobs:
           TARGET: ${{ matrix.target }}
           ASSET: ${{ matrix.asset }}
         run: |
-          # The static Linux builds compile their C parts with musl's own compiler wrapper.
           if [[ "$TARGET" == *musl ]]; then export "CC_${TARGET//-/_}=musl-gcc"; fi
           cargo build --locked --release --target "$TARGET"
           mkdir dist
           cp "target/$TARGET/release/kern$([[ "$TARGET" == *windows* ]] && echo .exe)" "dist/$ASSET"
           if [[ "$TARGET" == *musl ]]; then file "dist/$ASSET" | tee /dev/stderr | grep -qE 'static(ally|-pie) linked'; fi
           "dist/$ASSET" --version
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -57,10 +55,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           path: dist
           merge-multiple: true
@@ -68,7 +66,6 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          # Each release's installers fetch exactly that release, checked against its SHA256SUMS.
           [[ "$TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ && "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::Unexpected tag or repository name"; exit 1; }
           for f in install.sh install.ps1; do
             sed -e "s|__KERN_REPO__|$GITHUB_REPOSITORY|g" -e "s|__KERN_VERSION__|$TAG|g" "scripts/$f" > "dist/$f"
@@ -76,7 +73,7 @@ jobs:
           done
       - name: Checksums
         run: cd dist && sha256sum kern-* install.sh install.ps1 | tee SHA256SUMS
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-path: |
             dist/kern-*

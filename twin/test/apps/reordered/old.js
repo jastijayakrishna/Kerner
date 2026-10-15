@@ -1,6 +1,6 @@
 import { readJson, send } from '../http.js';
 
-// Charges an order through a payment service (KERN_TEST_PAY): the body is built field by field.
+
 export function createApp() {
   return async (req, res) => {
     const order = await readJson(req);

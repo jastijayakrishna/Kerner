@@ -1,14 +1,4 @@
 #!/bin/sh
-# kern check end to end on real gVisor: a small project with vitest tests and six changes, each with the receipt it must get.
-#   harmless   a refactor; the tests still pass                      -> clear
-#   breaks     the discount starts one euro later; a test now fails  -> blocked (a test that passed before now fails)
-#   only       a test file focuses one test with .only               -> blocked (a trick)
-#   power      the code starts a program                             -> needs a look (a new power)
-#   docs       only the README changes                               -> clear, and nothing is installed or run
-#   writes     a test writes into the project, before and after      -> clear: a test that failed before is set aside, never blamed
-#   mono       a monorepo whose root runs no tests; a package's test breaks -> blocked: the package's own tests ran, from its folder
-# The AI part is off (KERN_CHECK_AI=0); scripts/e2e-drive.sh covers it. Needs Docker with runsc, jq and git; installs from npm.
-# Usage: KERN_BIN=/path/to/static/linux/kern scripts/e2e-check.sh
 set -eu
 K=${KERN_BIN:?set KERN_BIN to a static Linux kern}
 K=$(readlink -f "$K")
@@ -64,7 +54,6 @@ EOF
 printf '# calc\n' > README.md
 git add -A && git commit -qm base && base=$(git rev-parse HEAD)
 
-# Each change is a branch from the base; `change NAME MESSAGE` commits what the lines before it did.
 change() { git add -A && git commit -qm "$2" && git rev-parse HEAD > "$W/$1.head" && git checkout -q "$base"; }
 git checkout -q -b harmless "$base"
 sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
@@ -93,7 +82,6 @@ sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.pric
 change writes "Shorter names, with a test that writes"
 cd "$W"
 
-# check NAME BASE [REPO]: runs kern check on the change (in calc, or REPO) and keeps its summary in NAME.json.
 check() {
   printf '# %s\n' "$1" > "$1.md"
   started=$(date +%s)

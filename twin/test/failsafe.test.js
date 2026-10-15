@@ -101,7 +101,6 @@ test('a ghost that ended its own process after answering is named on the request
     const shop = await production('quits', { ghosts, timeoutMs: 8000 });
     assert.equal((await fetch(`${shop.url}/?n=2`)).status, 200);
     await shop.twin.idle();
-    // The new version's slow background work ends, and its ghost with it: between two requests, after its answer was sent.
     await new Promise((resolve) => setTimeout(resolve, 1000));
     const asked = Date.now();
     assert.equal((await fetch(`${shop.url}/?n=3`)).status, 200);
@@ -122,7 +121,6 @@ test('a ghost that ran out of memory after answering is named on the request tha
   const shop = await production('late-hog', { ghostMemoryMb: 64 });
   assert.equal((await fetch(`${shop.url}/?n=2`)).status, 200);
   await shop.twin.idle();
-  // The new version's background work fills its ghost's memory between two requests: the ghost reports a failure, and stops.
   await new Promise((resolve) => setTimeout(resolve, 1500));
   assert.equal((await fetch(`${shop.url}/?n=3`)).status, 200);
   await shop.twin.idle();
@@ -148,7 +146,6 @@ test('a new version that answers more than maxBodyBytes is compared by size and 
   const size = Number(/^(\d+) bytes, sha256 [0-9a-f]{16}$/.exec(found.details[0].new)?.[1]);
   assert.ok(size > 2 * (1 << 20), found.details[0].new);
   await shop.close();
-  // Both ghosts answer the same table, each over the cap: the same.
   const both = await production('big-answer', { maxBodyBytes: 1 << 20, old: app('big-answer', 'new') });
   await (await fetch(both.url)).arrayBuffer();
   await both.twin.idle();
@@ -202,8 +199,6 @@ test('an answer nested fifty thousand levels deep is judged like any other, and 
 });
 
 test('a request whose copies come to more than eight times maxBodyBytes in all is skipped, though each is small enough, and the customer served', async () => {
-  // Each answer is under maxBodyBytes; ten of them, or six hundred tiny calls (each counting at least 1 KiB), are not: R7 bounds what
-  // one request may hold in the app's memory, not only each body.
   const data = await listen((req, res) => {
     res.writeHead(200, { 'content-type': 'application/octet-stream' });
     res.end(req.url.startsWith('/flag/') ? '1' : Buffer.alloc(60 * 1024, 1));
@@ -226,7 +221,6 @@ test('a request whose copies come to more than eight times maxBodyBytes in all i
 });
 
 test("each twin's maxBodyBytes holds for its own requests, though an earlier twin in the process patched the recorders", async () => {
-  // fetch, node:http, pg and ioredis are patched once per process; the limit must still be the twin's whose request it is.
   const data = await listen((req, res) => {
     res.writeHead(200, { 'content-type': 'application/octet-stream' });
     res.end(Buffer.alloc(8 * 1024, 1));

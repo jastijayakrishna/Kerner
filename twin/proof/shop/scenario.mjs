@@ -1,5 +1,3 @@
-// The shop's traffic, as the Phase 4 acceptance run sends it: lists, lookups, orders (some large, which the new version rounds) and
-// order lookups.
 export const scenario = {
   async step(client, state, random) {
     const pick = random();

@@ -1,8 +1,4 @@
 #!/bin/sh
-# Installs Kern on Linux or macOS from a GitHub release, checked against the release's SHA256SUMS:
-#   curl -fsSL https://github.com/jastijayakrishna/Kerner/releases/latest/download/install.sh | sh
-# KERN_VERSION=v0.4.0 picks the release, KERN_INSTALL_DIR the folder (default ~/.local/bin). On Windows, use
-# install.ps1 from the same release in PowerShell. The release workflow writes its repository and tag into this file.
 set -eu
 
 repo="${KERN_REPO:-__KERN_REPO__}"
@@ -18,13 +14,11 @@ case "$(uname -s)-$(uname -m)" in
   Linux-aarch64 | Linux-arm64) asset=kern-linux-arm64 ;;
   Darwin-arm64) asset=kern-macos-arm64 ;;
   Darwin-x86_64)
-    # A shell under Rosetta on an Apple silicon Mac says x86_64; the native build is the right one there.
     if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then asset=kern-macos-arm64; else asset=kern-macos-x64; fi ;;
   MINGW* | MSYS* | CYGWIN*) fail "on Windows, run this in PowerShell instead: irm $base/install.ps1 | iex" ;;
   *) fail "there is no Kern build for $(uname -s) $(uname -m)" ;;
 esac
 
-# Downloads use HTTPS only, unless KERN_DOWNLOAD_URL names a mirror of your own.
 fetch() {
   if command -v curl >/dev/null 2>&1; then
     case "$1" in
@@ -57,8 +51,6 @@ want=$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA25
 got=$(sha256 "$tmp/$asset")
 [ "$got" = "$want" ] || fail "the download does not match SHA256SUMS (expected $want, got $got); nothing was installed"
 
-# Tried where it will live (some systems forbid running programs from /tmp), then moved into place in one step,
-# so a failed install never leaves a broken kern behind.
 mkdir -p "$dir" || fail "cannot create $dir"
 cp "$tmp/$asset" "$dir/.kern.new" || fail "cannot write to $dir; set KERN_INSTALL_DIR to a folder you can write"
 chmod 755 "$dir/.kern.new"
@@ -66,7 +58,6 @@ if ! "$dir/.kern.new" --version >/dev/null 2>&1; then rm -f "$dir/.kern.new"; fa
 mv -f "$dir/.kern.new" "$dir/kern" || fail "cannot replace $dir/kern"
 
 printf 'Installed Kern %s to %s/kern\n' "$version" "$dir"
-# shellcheck disable=SC2016 # the line shown to the user keeps $PATH as written
 case ":$PATH:" in
   *":$dir:"*) ;;
   *) printf 'Add %s to your PATH, for example with this line in ~/.profile (or ~/.zshrc on a Mac):\n  export PATH="%s:$PATH"\n' "$dir" "$dir" ;;

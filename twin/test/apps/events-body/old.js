@@ -1,6 +1,6 @@
 import { send } from '../http.js';
 
-// Reads its body the way body parsers do (express.json, raw-body): with 'data' and 'end' listeners. Then it calls a payment service.
+
 export function createApp() {
   return (req, res) => {
     const parts = [];

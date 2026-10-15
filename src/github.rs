@@ -11,7 +11,6 @@ pub fn repository(name: &str) -> bool {
 
 pub struct Api { agent: ureq::Agent, base: String, token: String }
 impl Api {
-    /// A client for an explicit API root and token (GitHub Enterprise, tests); `from_env` reads both from the environment.
     pub fn new(base: &str, token: &str) -> R<Api> {
         let base = base.trim_end_matches('/').to_string();
         ensure!(base.starts_with("https://") || ["http://127.0.0.1:", "http://localhost:"].iter().any(|p| base.starts_with(p)), "The GitHub API URL must use https");
@@ -40,9 +39,7 @@ impl Api {
     pub fn get(&self, path: &str) -> R<Value> { self.send("GET", path, None) }
     pub fn post(&self, path: &str, body: &Value) -> R<Value> { self.send("POST", path, Some(body)) }
     pub fn patch(&self, path: &str, body: &Value) -> R<Value> { self.send("PATCH", path, Some(body)) }
-    /// The token, for git commands that talk to the same GitHub (see git::remote).
     pub fn token(&self) -> &str { &self.token }
-    /// A GraphQL query: api.github.com/graphql, or /api/graphql on GitHub Enterprise Server (whose REST root ends in /api/v3).
     pub fn graphql(&self, query: &str, variables: &Value) -> R<Value> {
         let url = match self.base.strip_suffix("/api/v3") { Some(host) => format!("{host}/api/graphql"), None => format!("{}/graphql", self.base) };
         let mut r = self.agent.post(&url).header("Authorization", &format!("Bearer {}", self.token)).header("Accept", "application/vnd.github+json").header("Content-Type", "application/json")
@@ -56,8 +53,6 @@ impl Api {
 
 const BLAME: &str = "query($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!) { repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit { blame(path: $path) { ranges { startingLine endingLine commit { oid messageHeadline associatedPullRequests(first: 1) { nodes { number title url closingIssuesReferences(first: 3) { nodes { number title } } } } } } } } } } }";
 fn clip(s: &str, n: usize) -> String { s.chars().take(n).collect() }
-/// Who added the code a change removes: for each removed range, the commits that last touched those lines at `base`, with the pull request
-/// that brought each one and the issues it closed. Informational only: when GitHub cannot be asked, there is simply nothing to show.
 pub fn who_added(repository: &str, base: &str, removals: &[Value]) -> Value {
     let (Ok(api), Some((owner, name))) = (Api::from_env("read who added the code a change removes"), repository.split_once('/')) else { return Value::Null };
     let mut blamed: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
@@ -83,7 +78,6 @@ pub fn who_added(repository: &str, base: &str, removals: &[Value]) -> Value {
     }
     json!(out)
 }
-/// The same as Markdown bullets; titles and paths sit inside code formatting, numbers are plain.
 pub fn who_markdown(list: &[Value]) -> String {
     let code = |s: &str| format!("`{}`", s.replace('`', "'").replace(['\r', '\n'], " "));
     list.iter().map(|r| {
@@ -97,11 +91,9 @@ pub fn who_markdown(list: &[Value]) -> String {
         if by.is_empty() { format!("- {at}: GitHub did not say who added it\n") } else { format!("- {at} was added in {}\n", by.join("; ")) }
     }).collect()
 }
-/// The GitHub web server the repository lives on (GITHUB_SERVER_URL in Actions); tests may name a local file URL.
 pub fn server() -> R<String> {
     let s = env("GITHUB_SERVER_URL").unwrap_or_else(|| "https://github.com".into()).trim_end_matches('/').to_string();
     ensure!(s.starts_with("https://") || s.starts_with("file://"), "GITHUB_SERVER_URL must use https");
     Ok(s)
 }
-/// A branch name in an API path, escaped segment by segment.
 pub fn ref_path(branch: &str) -> String { branch.split('/').map(|s| s.replace('%', "%25")).collect::<Vec<_>>().join("/") }

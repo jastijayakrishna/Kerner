@@ -1,7 +1,4 @@
 #!/bin/sh
-# Runs the twin's tests against real Postgres and Redis (test/stacks/). Each runs in a throwaway container on a private network. No port
-# is opened on the host, and everything is removed at the end, even when a test fails.
-# Usage: sh twin/scripts/test-stacks.sh
 set -eu
 cd "$(dirname "$0")/.."
 PG=docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
@@ -22,8 +19,6 @@ until docker exec "$run-pg" pg_isready -U postgres >/dev/null 2>&1; do
   if [ "$i" -gt 60 ]; then echo "Postgres did not start"; exit 1; fi
   sleep 1
 done
-# The apps under test keep their own connections open, as real apps do (an ioredis client never closes by itself), and the twin cannot
-# close an app's connections: so the run ends once every test has finished.
 docker run --rm --network "$run" -v "$PWD:/stacks/twin" -w /stacks/twin \
   -e KERN_TWIN_PG_URL="postgres://postgres:kern@$run-pg:5432/postgres" -e KERN_TWIN_REDIS_URL="redis://$run-redis:6379" \
   kern-twin-stacks:local node --test --test-concurrency=1 --test-force-exit test/stacks/stacks.test.js

@@ -13,7 +13,6 @@ const ENGINE_ENV: [&str; 4] = ["PATH", "HOSTNAME", "container", "TERM"];
 
 #[derive(Clone, Debug)]
 pub struct Mount { pub source: PathBuf, pub target: String }
-/// `feedback`: Kern's verdict on the agent's previous attempt (KERN_FEEDBACK); `delta`: what the task states will change (KERN_DELTA).
 pub struct BoxSpec<'a> {
     pub image: &'a str, pub command: &'a [String], pub workspace: &'a Path, pub mounts: &'a [Mount], pub env: &'a [String],
     pub network: bool, pub timeout_seconds: u64, pub memory_mb: u64, pub pids: u64, pub feedback: Option<&'a str>, pub delta: Option<&'a str>,

@@ -8,9 +8,6 @@ import { current, loadRecord } from '../src/capture.js';
 import pgAdapter from '../src/adapters/pg.js';
 import ioredisAdapter from '../src/adapters/ioredis.js';
 
-// The recorders run in the app's own thread: whatever they cannot copy, the app must see exactly what it would see without the twin.
-
-/** A folder with an app file and stand-ins for client libraries in its node_modules; answers a require from that app. */
 function appWith(packages) {
   const dir = mkdtempSync(join(tmpdir(), 'kern-twin-recording-'));
   for (const [name, source] of Object.entries(packages)) {
@@ -21,7 +18,6 @@ function appWith(packages) {
   return { appRequire: createRequire(join(dir, 'app.js')), remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-// Like pg: a value it cannot send comes back as a rejected promise (or through the callback), never as a throw from query().
 const PG = `
 class Client {
   constructor() { this._Promise = Promise; this.calls = 0; }
@@ -36,7 +32,6 @@ class Client {
 module.exports = { Client };
 `;
 
-// Like ioredis: every command goes through sendCommand, which answers the command's promise.
 const IOREDIS = `
 class Redis {
   constructor() { this.sent = 0; }

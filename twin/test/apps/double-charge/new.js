@@ -1,6 +1,6 @@
 import { readJson, send } from '../http.js';
 
-// Retries the charge unless the answer is 201 Created, but the payment service answers 200 OK: every order would be charged twice.
+
 const charge = (amount) => fetch(`${process.env.KERN_TEST_PAY_URL}/charge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount }) });
 
 export function createApp() {

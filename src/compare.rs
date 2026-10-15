@@ -1,9 +1,3 @@
-//! The old code is the rulebook (contract version 5). The verifier calls the exported functions of the changed modules, and of the modules
-//! that use them, with the same arguments on the old and on the new code, twice each, in its sandbox without network, and compares what every
-//! call did. A task states its change before the code exists (its delta); everything else must behave exactly as before. A few things are
-//! refused whatever the task states, unless it names them: a new crash or hang, a removed file or export, new code that deletes files, and a
-//! route that now lets in someone it refused. Speed and paid API calls are measured from the same runs, and code the change removed is
-//! explained by what it did and, where the history is at hand, by who added it.
 use crate::capability::{is_code, source_types};
 use crate::ensure;
 use crate::git::{Entry, Files, object_id};
@@ -20,26 +14,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub use crate::policy::COMPARE as CHECK;
-/// The harness that runs inside the sandbox, see probe.cjs.
 pub const PROBE: &str = include_str!("probe.cjs");
 const MARK: &[u8] = b"\n\x1ekern-probe\x1e\n";
 const MAX_MODULES: usize = 40;
 const MAX_TUPLES: usize = 240;
 const MAX_HARVEST: usize = 120;
-/// About how many calls one probe run makes in all, spread evenly over the functions it calls.
 const MAX_CALLS: usize = 20000;
-/// How many items each list in the evidence keeps; the counts beside them are complete.
 const KEEP: usize = 20;
-/// Arguments nobody expects a caller to pass. The new code must handle each of them at least as well as the old code did.
 const UNUSUAL: &[&str] = &[
     "undefined", "null", "0", "-0", "1", "-1", "2", "10", "0.5", "-0.5", "1e21", "NaN", "Infinity", "-Infinity", "9007199254740991", "true", "false",
     "\"\"", "\" \"", "\"a\"", "\"abc\"", "\"0\"", "\"-1\"", "\"1.5\"", "\"true\"", "\"null\"", "\"%s\"", "\"\\u0000\"", "\"\\u00e9\\ud83d\\ude00\"", "\"<script>\"",
     "\"a\".repeat(1000)", "[]", "[1, 2, 3]", "[null]", "{}", "{\"a\": 1}", "{\"length\": -1}", "new Date(0)",
 ];
-/// Calls that delete or truncate files: always, or (the generic names) when they go through a filesystem module.
 const DELETES: &[&str] = &["rmSync", "unlinkSync", "rmdirSync", "rmdir", "truncateSync", "ftruncateSync", "emptyDir", "emptyDirSync", "removeSync", "rimraf", "rimrafSync", "deleteAsync", "deleteSync"];
 const DELETES_VIA_FS: &[&str] = &["rm", "unlink", "truncate", "ftruncate", "remove"];
-/// Calls to paid APIs, by the end of the call, most specific first: OpenAI, Anthropic, Google, the Vercel AI SDK, Twilio.
 const PAID: &[&str] = &["chat.completions.create", "responses.create", "completions.create", "embeddings.create", "images.generate", "audio.speech.create", "audio.transcriptions.create",
     "messages.create", "messages.stream", "generateContentStream", "generateContent", "generateText", "streamText", "generateObject", "streamObject"];
 const PAID_HOSTS: &[&str] = &["api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "aiplatform.googleapis.com", "api.cohere.ai", "api.cohere.com", "api.mistral.ai",
@@ -55,7 +43,6 @@ fn is_test(path: &str, tests: Option<&Tests>) -> bool {
     tests.is_some_and(|t| allowed(&t.paths, path)) || lower.split('/').any(|d| ["test", "tests", "__tests__", "spec", "__mocks__", "e2e", "fixtures", "__fixtures__"].contains(&d))
         || [".test.", ".spec."].iter().any(|m| name.contains(m))
 }
-/// A module Kern calls: code that is not a test, a tool's configuration or part of the dependency install.
 pub fn probeable(path: &str, tests: Option<&Tests>) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
@@ -63,8 +50,6 @@ pub fn probeable(path: &str, tests: Option<&Tests>) -> bool {
         && !["gulpfile", "gruntfile", "webpack.", "rollup.", "jest.", "babel.", "eslint", "prettier"].iter().any(|t| name.starts_with(t))
 }
 
-/// What one source file holds for the comparison: calls written with plain values (the tests' own inputs), the plain values themselves,
-/// and the calls that delete files or reach a paid API.
 #[derive(Default)]
 struct Scan { tuples: Vec<String>, values: Vec<String>, deletes: BTreeMap<String, u64>, paid: BTreeMap<String, u64> }
 struct Scanner<'s> { source: &'s str, found: Scan }
@@ -124,7 +109,6 @@ fn scan(path: &str, source: &str) -> Option<Scan> {
     })
 }
 
-/// Deterministic choices for the random part of the inputs, so the same change is always probed the same way.
 struct Rng(u64);
 impl Rng {
     fn new(seed: &str) -> Rng { Rng(u64::from_str_radix(&seed[..16.min(seed.len())], 16).unwrap_or(0x9e37_79b9_7f4a_7c15) | 1) }
@@ -138,8 +122,6 @@ impl Rng {
     }
 }
 fn add(list: &mut Vec<String>, p: &str) { if list.len() < MAX_MODULES && !list.iter().any(|x| x == p) { list.push(p.to_string()); } }
-/// The modules to call: the ones the task names, the changed ones, the ones that import those (two levels up), and for an upgrade, which
-/// changes no file of the project, the modules that use a package that moved and then the rest of the code.
 fn targets(base: &Files, candidate: &Files, changed: &Value, policy: &Contract) -> Vec<String> {
     let tests = policy.tests.as_ref();
     let mut list = Vec::new();
@@ -166,8 +148,6 @@ fn targets(base: &Files, candidate: &Files, changed: &Value, policy: &Contract) 
     }
     list
 }
-/// The calls the tests write with plain values: the old tests' first (up to three quarters of them), so a change cannot crowd them out with
-/// tests of its own, then the new tests'.
 fn harvest(base: &Files, candidate: &Files, tests: Option<&Tests>) -> Vec<String> {
     let (mut out, mut seen) = (Vec::new(), BTreeSet::new());
     for (files, cap) in [(base, MAX_HARVEST * 3 / 4), (candidate, MAX_HARVEST)] {
@@ -182,19 +162,13 @@ fn harvest(base: &Files, candidate: &Files, tests: Option<&Tests>) -> Vec<String
 fn push(tuples: &mut Vec<String>, seen: &mut BTreeSet<String>, t: String) { if t.len() <= 600 && tuples.len() < MAX_TUPLES && seen.insert(t.clone()) { tuples.push(t); } }
 fn app_json(a: &App) -> Value { json!({ "setup": a.setup, "start": a.start, "port": a.port, "ready": a.ready, "routes": a.routes, "roles": a.roles, "env": a.env }) }
 
-/// The plan both sides run: every module with the same argument lists, the task's stated change and examples, the code the change removed
-/// (pure deletions, explained later) and the app recipe. The arguments come from the tests' own calls, unusual values, the plain values in
-/// the module's old and new source (so a value the change adds is tried too), and seeded random mixes of those.
 pub fn plan(base: &Files, candidate: &Files, changed: &Value, policy: &Contract, seed: &str, timeout_seconds: u64) -> R<Value> {
     ensure!(is_hex64(seed), "Invalid comparison seed");
     let harvested = harvest(base, candidate, policy.tests.as_ref());
     let mut rng = Rng::new(seed);
     let targets = targets(base, candidate, changed, policy);
-    // Every function gets the same number of calls on both sides: the plan's calls spread over its modules, about 20 functions each.
     let per_function = (MAX_CALLS / targets.len().max(1) / 20).max(8);
     let modules: Vec<Value> = targets.into_iter().map(|path| {
-        // The old source's values first, in the order they appear, then values only the new source has: 40 in all, so a change cannot
-        // crowd out the old code's own constants.
         let values = |f: &Files| text_of(f, &path).and_then(|s| scan(&path, s)).map(|x| x.values).unwrap_or_default();
         let (old, new) = (values(base), values(candidate));
         let mut literals: Vec<String> = Vec::new();
@@ -216,7 +190,6 @@ pub fn plan(base: &Files, candidate: &Files, changed: &Value, policy: &Contract,
         "changes": changes, "examples": examples, "removals": removals(base, candidate, changed, policy), "app": policy.app.as_ref().map(app_json) }))
 }
 
-/// Lines a change only deletes: maximal runs of the old file's lines with nothing added in their place.
 fn pure_removals(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
     let (mut out, mut hunk) = (Vec::new(), Vec::new());
     for s in edits(a, b)?.into_iter().chain(std::iter::once(Step::Keep)) {
@@ -227,7 +200,6 @@ fn pure_removals(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
     }
     Some(out)
 }
-/// The lines a change touches: indices of the old lines it deletes or replaces and of the new lines it inserts or puts in their place.
 pub fn changed_lines(a: &[&str], b: &[&str]) -> Option<(Vec<usize>, Vec<usize>)> {
     let (mut old, mut new) = (Vec::new(), Vec::new());
     for s in edits(a, b)? {
@@ -235,7 +207,6 @@ pub fn changed_lines(a: &[&str], b: &[&str]) -> Option<(Vec<usize>, Vec<usize>)>
     }
     Some((old, new))
 }
-/// Myers' line diff (at most 1000 edits), as steps over all of both versions; indices are into `a` and `b`.
 fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
     let mut pre = 0;
     while pre < a.len() && pre < b.len() && a[pre] == b[pre] { pre += 1; }
@@ -260,7 +231,6 @@ fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
         }
     }
     let end = end?;
-    // Walk back through the edits; the common start and end are kept lines around them.
     let (mut px, mut py, mut steps) = (n, m, vec![Step::Keep; suf]);
     for d in (0..=end).rev() {
         let w = &trace[d as usize];
@@ -277,13 +247,9 @@ fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
     steps.reverse();
     Some(steps)
 }
-/// One step of a line diff: a line both versions keep, one the change deletes (its index in the old lines), or one it inserts (its
-/// index in the new lines).
 #[derive(Clone, Copy)]
 enum Step { Keep, Delete(usize), Insert(usize) }
-/// Code the change removed (`path`, `start`, `count`, `file`), for history lookups outside the verifier.
 pub fn removed_code(base: &Files, candidate: &Files, changed: &Value, policy: &Contract) -> Vec<Value> { removals(base, candidate, changed, policy) }
-/// Code the change removed: deleted modules and lines it only deleted, the ones "why was this here?" explains.
 fn removals(base: &Files, candidate: &Files, changed: &Value, policy: &Contract) -> Vec<Value> {
     let tests = policy.tests.as_ref();
     let mut out = Vec::new();
@@ -299,7 +265,6 @@ fn removals(base: &Files, candidate: &Files, changed: &Value, policy: &Contract)
     out.truncate(KEEP);
     out
 }
-/// The old code without what the change removed, and nothing else: run beside the old code, it shows what the removed code did.
 pub fn without_removals(base: &Files, plan: &Value) -> Files {
     let mut files = base.clone();
     let mut cut: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
@@ -328,7 +293,6 @@ fn porcelain(text: &str) -> Vec<Value> {
     }
     commits.into_iter().take(3).map(|(c, s)| json!({ "commit": c, "summary": clip(&s, 200) })).collect()
 }
-/// Who added the code a change removed, from the repository's own history (the commits that last touched those lines, newest summary).
 pub fn history(repo: &Path, base: &str, plan: &Value) -> Vec<Value> {
     plan["removals"].as_array().into_iter().flatten().take(10).filter_map(|r| {
         let path = r["path"].as_str()?;
@@ -345,7 +309,6 @@ pub fn history(repo: &Path, base: &str, plan: &Value) -> Vec<Value> {
     }).collect()
 }
 
-/// The one report a probe run printed. Code under test runs in worker threads and cannot write it, but a second report is refused anyway.
 pub fn read_probe(stdout: &[u8]) -> R<Value> {
     let found: Vec<usize> = stdout.windows(MARK.len()).enumerate().filter(|(_, w)| *w == MARK).map(|(i, _)| i).collect();
     ensure!(!found.is_empty(), "the output holds no probe report");
@@ -357,7 +320,6 @@ pub fn read_probe(stdout: &[u8]) -> R<Value> {
     Ok(v)
 }
 
-/// The four runs of a comparison, the old code without what the change removed, and the host counts of the old and the new runs.
 pub struct Runs { pub old: [Value; 2], pub new: [Value; 2], pub removed: Option<Value>, pub counts: [BTreeMap<String, u64>; 2] }
 static NOTHING: Value = Value::Null;
 fn module<'v>(run: &'v Value, path: &str) -> &'v Value { run["modules"].as_array().and_then(|m| m.iter().find(|x| x["path"] == path)).unwrap_or(&NOTHING) }
@@ -384,12 +346,7 @@ fn does(out: &str) -> String {
         _ => out.to_string(),
     }
 }
-/// The kind of error a call threw (`TypeError` in `e TypeError: ...`).
 fn error_name(out: &str) -> Option<&str> { out.strip_prefix("e ").map(|s| s.split(": ").next().unwrap_or(s)) }
-/// What kind of difference a call shows. Worse than before: a crash or a hang where the old code answered, and a stopped thread where it
-/// threw an error a caller could catch. A change: another answer, an input the old code refused (an error or a stopped thread) that now gets
-/// an answer, since a check that is gone looks exactly like that, and an error of another kind. Shown but never refused: an error whose words
-/// alone changed, since renaming a variable changes what the engine says, and a call that finishes now where the old one ran out of time.
 fn kind(old: &str, new: &str) -> &'static str {
     let (o, n) = (old.as_bytes().first().copied().unwrap_or(b'?'), new.as_bytes().first().copied().unwrap_or(b'?'));
     match (o, n) {
@@ -420,8 +377,6 @@ fn quote(items: &[String]) -> String {
 fn ms(us: u64) -> String { format!("{}.{:03}", us / 1000, us % 1000) }
 fn first(items: &[String]) -> Value { json!(items.iter().take(KEEP).map(|s| clip(s, 240)).collect::<Vec<_>>()) }
 
-/// Compares the runs and says whether the change may pass: the evidence (integers and text only, so it can be signed) and the reason to
-/// refuse it, if any.
 pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, changed: &Value, policy: &Contract) -> (Value, Option<String>) {
     let delta = policy.delta.as_ref();
     let tests = policy.tests.as_ref();
@@ -444,10 +399,8 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
             if base.contains_key(path) { unloadable.push(format!("{path}: {}", xa["load"].as_str().or(xb["load"].as_str()).unwrap_or("no result"))); }
             continue;
         }
-        // How many calls both old runs answered here: what the new code must answer too.
         let answered: usize = xa["exports"].as_object().into_iter().flatten().filter(|(_, e)| e["type"] != "value")
             .map(|(key, e)| (0..tuples.len()).filter(|k| e["calls"][*k].is_string() && xb["exports"][key.as_str()]["calls"][*k].is_string()).count()).sum();
-        // A new run whose time ran out before it could load this module answered none of it.
         let late = |y: &Value| y["ended"] == "time" && !loaded(y);
         if late(ya) || late(yb) {
             if answered > 5 { unanswered.push(format!("{path}: the old code answered {answered} calls here, the new code had no time left to load it")); } else { skipped += answered as u64; }
@@ -455,12 +408,10 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
         }
         if !(loaded(ya) && loaded(yb)) {
             let why = ya["load"].as_str().or(yb["load"].as_str()).unwrap_or("no result");
-            // Only a task that states the whole module changes (`path#*` with no `when`) may leave it unable to load.
             if !inside(delta, &format!("{path}#*"), None) { crashes.push(format!("{path}: loaded before, now fails to load ({why})")); }
             continue;
         }
         modules += 1;
-        // A listing cut short (more than 2,000 exports) cannot show that an export is gone.
         let complete = ya["more"] != true && yb["more"] != true;
         let mut missing: Vec<String> = Vec::new();
         let keys: BTreeSet<String> = [xa, ya].iter().flat_map(|x| x["exports"].as_object().into_iter().flatten().map(|(k, _)| k.clone())).collect();
@@ -469,7 +420,6 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
             let pick = |x: &Value| -> Value { x["exports"][key.as_str()].clone() };
             let (o, o2, n, n2) = (pick(xa), pick(xb), pick(ya), pick(yb));
             if o.is_null() { continue; }
-            // A function that is gone, or that became a plain value no caller can call, is removed.
             if n.is_null() || n2.is_null() || (o["type"] != "value" && (n["type"] == "value" || n2["type"] == "value")) {
                 if (n.is_null() || n2.is_null()) && !complete { continue; }
                 if !stated_removal(delta, &name) { removed.push(name); }
@@ -494,7 +444,6 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
                 compared = true;
                 calls += 1;
                 if a != b { noisy += 1; continue; }
-                // A crash or a hang on either run of the new code is one, even when the other run answered.
                 let worse = [&c, &d].into_iter().map(|x| (x, kind(&a, x))).find(|(_, w)| matches!(*w, "new crash" | "new hang"));
                 let (what, out) = match worse {
                     Some((x, w)) => (w, x.clone()),
@@ -521,12 +470,9 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
                 }
             }
         }
-        // Messages the code under test sends are ignored, so a call the new code left unanswered was cut by time or by the code itself. A
-        // few at the end of a long module, when the new run ran out of time, are noise; more, or any when it did not, are not.
         let timed_out = ya["ended"] == "time" || yb["ended"] == "time";
         if !missing.is_empty() && (!timed_out || missing.len() > (answered / 10).max(5)) { unanswered.append(&mut missing); } else { skipped += missing.len() as u64; }
     }
-    // The task's own examples, on the new code: both runs must give the stated answer.
     let (mut examples, mut failing) = (Vec::new(), Vec::new());
     for (i, e) in plan["examples"].as_array().into_iter().flatten().enumerate() {
         let find = |run: &Value| run["modules"].as_array().into_iter().flatten().flat_map(|m| m["examples"].as_array().into_iter().flatten()).find(|x| x["i"] == i as u64).cloned();
@@ -538,12 +484,10 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
         if !ok { failing.push(format!("{call}: expected to {expected}, but it {actual}")); }
         examples.push(json!({ "call": clip(&call, 240), "expected": clip(&expected, 240), "actual": clip(&actual, 240), "ok": ok }));
     }
-    // Every deleted file must be stated, code or not; deleted tests are the test proof's to judge.
     for f in changed["files"].as_array().into_iter().flatten().filter(|f| f["operation"] == "delete") {
         let path = f["path"].as_str().unwrap_or("");
         if !is_test(path, tests) && !stated_removal(delta, path) && !removed.iter().any(|r| r == path) { removed.push(path.to_string()); }
     }
-    // What the new source itself says: calls that delete files, and calls to paid APIs, compared with the old source of each file.
     let (mut deletes, mut paid, mut more) = (Vec::new(), Vec::new(), Vec::new());
     for f in changed["files"].as_array().into_iter().flatten().filter(|f| f["operation"] != "delete") {
         let path = f["path"].as_str().unwrap_or("");
@@ -567,7 +511,6 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
     }
     let hosts: Vec<(String, u64, u64)> = hosts.into_iter().filter(|(_, (o, n))| o != n).map(|(h, (o, n))| (h, o, n)).collect();
     for (h, o, n) in hosts.iter().filter(|(_, o, n)| n > o) { more.push(format!("{h}: {o} before, {n} now")); }
-    // The app, asked every route as every role on both sides: a route that refused someone and now lets them in is a door that opened.
     let (mut opened, mut moved, mut access) = (Vec::new(), Vec::new(), Value::Null);
     if plan["app"].is_object() {
         let app = |run: &Value| run["app"].clone();
@@ -582,12 +525,10 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
                 let get = |x: &Value| x["results"][key.as_str()].as_str().map(str::to_string);
                 let (Some(a), Some(b), Some(c), Some(d)) = (get(&pa), get(&pb), get(&qa), get(&qb)) else { continue };
                 checked += 1;
-                // The old app is the rule only where it answered the same both times; each answer of the new app counts on its own.
                 if a != b { continue; }
                 let now: Vec<String> = [c, d].into_iter().filter(|x| *x != a).collect();
                 let Some(changed_to) = now.first() else { continue };
                 let code = |s: &str| s.split(' ').next().and_then(|x| x.parse::<u16>().ok());
-                // A refusal (401, 403, a redirect) or a route that did not exist (404, 405) that now answers with success is a door that opened.
                 let refused = code(&a).is_some_and(|x| matches!(x, 401 | 403 | 404 | 405) || (300..400).contains(&x));
                 match now.iter().find(|x| code(x).is_some_and(|x| (200..300).contains(&x))) {
                     Some(open) if refused => opened.push(format!("{key}: {a} before, {open} now")),
@@ -597,7 +538,6 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
         }
         access = json!({ "checked": checked, "opened": first(&opened), "changed": first(&moved) });
     }
-    // Code the change removed: what the old code does with it and without it.
     let mut grouped: BTreeMap<String, (Vec<String>, bool)> = BTreeMap::new();
     for r in plan["removals"].as_array().into_iter().flatten() {
         let (start, count) = (r["start"].as_u64().unwrap_or(0), r["count"].as_u64().unwrap_or(0));
@@ -647,7 +587,6 @@ pub fn evaluate(plan: &Value, runs: &Runs, base: &Files, candidate: &Files, chan
     (evidence, block)
 }
 
-/// Whether the evidence is exactly what the attestation's comparison check covers. The envelope must already have been verified.
 pub fn attested(envelope: &Value, evidence: &Value) -> bool {
     let (Some(k), Ok(d)) = (crate::attest::claimed(envelope), digest(evidence)) else { return false };
     k["checks"].as_array().into_iter().flatten().any(|c| c["id"] == CHECK && c["evidence_sha256"] == d.as_str())
@@ -656,10 +595,7 @@ fn code(s: &str) -> String {
     let flat: String = s.replace('`', "'").replace(['\r', '\n'], " ").chars().take(240).collect();
     format!("`{flat}`")
 }
-/// The comparison in plain words, for a person: what the task states, what Kern called, and everything that differs.
 pub fn summary(e: &Value) -> Vec<String> { lines(e, &|s: &str| s.to_string()) }
-/// The same as Markdown bullets, with every value taken from the code inside code formatting, in at most 8,000 characters so that a pull
-/// request description always has room for it beside the proof.
 pub fn markdown(e: &Value) -> String {
     let mut out = String::new();
     for l in lines(e, &code) {
@@ -681,7 +617,6 @@ fn lines(e: &Value, wrap: &dyn Fn(&str) -> String) -> Vec<String> {
     out.push(line);
     let list = |k: &str| e[k].as_array().into_iter().flatten().filter_map(Value::as_str).take(3).map(str::to_string).collect::<Vec<_>>();
     for (k, label) in [("crashes", "New crash"), ("unanswered", "Not answered by the new code"), ("surprises", "Changed without being stated"), ("removed", "Removed without being stated"), ("deletes", "New code deletes files")] {
-        // A task that states nothing has nothing to differ from: its differences are listed once, below, by their kind.
         if k == "surprises" && e["mode"] == "report" { continue; }
         for item in list(k) { out.push(format!("{label}: {}", wrap(&item))); }
     }

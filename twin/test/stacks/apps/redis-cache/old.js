@@ -6,7 +6,6 @@ const send = (res, status, value) => {
   res.end(body);
 };
 
-// Counts visits and reads a greeting and a profile in one pipeline; /hello only reads.
 export function createApp() {
   const redis = new Redis(process.env.KERN_TWIN_REDIS_URL);
   return async (req, res) => {

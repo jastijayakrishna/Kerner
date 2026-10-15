@@ -6,8 +6,6 @@ import { exactBytes } from '../src/serialize.js';
 import { listen, post } from './helpers.js';
 
 test('a sampled request is handed over as bytes, and only its own bytes', async () => {
-  // Node keeps small buffers in a shared 8 KiB pool. Posting a slice of it to a thread would carry the rest of the pool along,
-  // other requests' data included.
   let copy;
   const listener = wrapListener((req, res) => {
     req.resume();

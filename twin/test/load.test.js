@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { app, listen, routed, until } from './helpers.js';
 
-/** The config service the fixture reads while it starts; it remembers what it was asked. */
 async function configService() {
   const asked = [];
   const service = await listen((req, res) => {
@@ -59,11 +58,8 @@ test('a start the seal refuses names what it refused, and how to allow a native 
 test('a native add-on loaded from a path outside node_modules is named, and allowed, by its file name', async () => {
   const shop = await routed('native-path');
   await until(() => shop.twin.stats().disabled);
-  // It has no node_modules package, so it is named by its file's stem (before the platform suffix): 'fast_hash'.
   assert.match(shop.twin.stats().disabled, /refused it: loading the native add-on \/opt\/shop\/native\/fast_hash\.linux-x64-gnu\.node; .*addons: \["fast_hash"\]/, shop.twin.stats().disabled);
   await shop.close();
-  // Allowed by that name, the seal lets the load through (the fake file then ENOENTs, which the app ignores), the ghosts start, and the
-  // request is compared.
   const allowed = await routed('native-path', { addons: ['fast_hash'] });
   assert.deepEqual(await (await fetch(allowed.url)).json(), { ok: true });
   await allowed.twin.idle();

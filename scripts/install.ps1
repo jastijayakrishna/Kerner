@@ -1,17 +1,11 @@
-# Installs Kern on Windows from a GitHub release, checked against the release's SHA256SUMS. In PowerShell:
-#   irm https://github.com/jastijayakrishna/Kerner/releases/latest/download/install.ps1 | iex
-# $env:KERN_VERSION = 'v0.4.0' picks the release, $env:KERN_INSTALL_DIR the folder (default %LOCALAPPDATA%\Programs\kern).
-# Works in Windows PowerShell 5.1 and PowerShell 7. The release workflow writes its repository and tag into this file.
 & {
     $ErrorActionPreference = 'Stop'
-    # The progress bar makes downloads in Windows PowerShell many times slower.
     $ProgressPreference = 'SilentlyContinue'
     $repo = if ($env:KERN_REPO) { $env:KERN_REPO } else { '__KERN_REPO__' }
     $version = if ($env:KERN_VERSION) { $env:KERN_VERSION } else { '__KERN_VERSION__' }
     if ("$repo$version" -like '*__KERN_*') { throw 'kern install: this copy of install.ps1 is not from a release; set $env:KERN_REPO and $env:KERN_VERSION' }
     $base = if ($env:KERN_DOWNLOAD_URL) { $env:KERN_DOWNLOAD_URL.TrimEnd('/') } else { "https://github.com/$repo/releases/download/$version" }
     $dir = if ($env:KERN_INSTALL_DIR) { $env:KERN_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\kern' }
-    # Windows 11 on Arm runs the x64 build through its built-in emulation.
     $asset = 'kern-windows-x64.exe'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -31,9 +25,7 @@
         $got = (Get-FileHash -Algorithm SHA256 -Path $file).Hash.ToLowerInvariant()
         if ($got -ne $want) { throw "kern install: the download does not match SHA256SUMS (expected $want, got $got); nothing was installed" }
 
-        # Tried where it will live, then moved into place in one step, so a failed install never leaves a broken kern behind.
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        # Windows runs only files that end in .exe, so the trial copy is kern-new.exe.
         $new = Join-Path $dir 'kern-new.exe'
         Copy-Item -Force -Path $file -Destination $new
         try {
@@ -48,14 +40,12 @@
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 
-    # The user's PATH, read and written as stored, so entries such as %USERPROFILE%\bin stay as they are.
     $key = Get-Item -Path 'HKCU:\Environment'
     $raw = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     $present = $raw -split ';' | Where-Object { $_ -and ([Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $dir.TrimEnd('\')) }
     if (-not $present) {
         $kind = if ($raw -like '*%*') { 'ExpandString' } else { 'String' }
         Set-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -Value ((@($raw.TrimEnd(';'), $dir) | Where-Object { $_ }) -join ';') -Type $kind
-        # Setting a user variable through .NET tells Windows the environment changed, so new terminals see the new PATH.
         [Environment]::SetEnvironmentVariable('KERN_INSTALL_REFRESH', '1', 'User')
         [Environment]::SetEnvironmentVariable('KERN_INSTALL_REFRESH', $null, 'User')
         $env:Path = "$env:Path;$dir"

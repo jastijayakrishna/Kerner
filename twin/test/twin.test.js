@@ -9,7 +9,6 @@ import { app, production } from './helpers.js';
 import { createTwin } from '../src/index.js';
 
 test('a running twin never keeps the app\'s process alive', () => {
-  // An app that closes its server expects its process to end; the twin's thread and its ghosts must not hold it open.
   const file = join(tmpdir(), `kern-twin-exit-${process.pid}.mjs`);
   writeFileSync(file, `
 import http from 'node:http';
@@ -33,8 +32,6 @@ console.log(JSON.stringify(twin.stats()));
 });
 
 test('a copy the twin cannot hand to its thread at all never ends the app: the twin switches itself off', () => {
-  // Handing a copy over failed twice (the copy, then the skip that replaces it). That must never become an unhandled rejection in the
-  // app's process, which Node ends by default.
   const file = join(tmpdir(), `kern-twin-handover-${process.pid}.mjs`);
   writeFileSync(file, `
 import http from 'node:http';
@@ -66,8 +63,6 @@ await twin.close();
 });
 
 test('a switch the twin\'s thread cannot be told about never leaves the new version serving unwatched', () => {
-  // The router has switched; telling the twin's thread fails. Serving the candidate without a thread that knows would mean nothing switches
-  // it back at the next unexplained difference: the twin switches itself off instead, and the old version serves.
   const file = join(tmpdir(), `kern-twin-unwatched-${process.pid}.mjs`);
   writeFileSync(file, `
 import { Worker } from 'node:worker_threads';
@@ -128,8 +123,6 @@ test('when the twin\'s thread fails, customers are served as always and the twin
 });
 
 test('waiting for the twin keeps the process alive until everything handed over is judged', () => {
-  // An app that closes its server and then awaits idle() must get its answer, not a process that ends with the work half done.
-  // The new version answers 300 ms late, so the twin is still judging after the server has closed.
   const file = join(tmpdir(), `kern-twin-idle-${process.pid}.mjs`);
   writeFileSync(file, `
 import http from 'node:http';
@@ -167,7 +160,6 @@ test('a version named by a path relative to the working folder, or by a file URL
 });
 
 test('on a Node older than 22.3 the twin stays off and says why, and the app is served as always', () => {
-  // The ghosts need process.getBuiltinModule (Node 22.3). Taking it away in the app's process stands in for an older Node.
   const file = join(tmpdir(), `kern-twin-old-node-${process.pid}.mjs`);
   writeFileSync(file, `
 delete process.getBuiltinModule;

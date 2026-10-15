@@ -1,12 +1,3 @@
-// Kern's drive loader. It runs before the driver, in the sandbox, and loads a project's code roughly the way its own toolchain would, so a
-// driver can run it under plain Node:
-//   - TypeScript, TSX/JSX (React's automatic runtime), tsconfig paths and imports without extensions: tsx, from Kern's pinned tools;
-//   - assets load as bundlers hand them over, and Vite's import.meta.env is a plain object;
-//   - source maps are the tools' own: a project file's sourceMappingURL comments are blanked wherever it is read;
-//   - time and randomness are fixed, the same as in Kern's probe, so the old and the new code see the same world;
-//   - every call into the changed modules' exported functions is recorded here, so the comparison never rests on what the driver chooses
-//     to print: imports of a changed ES module get a recording wrapper (drive-hooks.mjs); CommonJS modules get their function exports
-//     wrapped when they are required.
 import { register, createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import fs from 'node:fs';
@@ -16,8 +7,6 @@ const config = JSON.parse(fs.readFileSync('/kern/drive.json', 'utf8'));
 const LIMIT = 100;
 await import('/kern-tools/node_modules/tsx/dist/loader.mjs');
 
-// Every read of a project source file sees its own source map comments blanked (drive-support.mjs): tsx's and Node's CommonJS loading
-// read files here, and the hooks blank what the ES path loads.
 const readRaw = fs.readFileSync;
 {
   const SOURCE = /\.[cm]?[jt]sx?$/;
@@ -31,27 +20,20 @@ const readRaw = fs.readFileSync;
   createRequire(import.meta.url)('node:module').syncBuiltinESMExports();
 }
 
-// The changed CommonJS modules, whose function exports are recorded (below).
 const cjs = new Map(config.modules.filter((m) => m.cjs).map((m) => ['/workspace/' + m.path, m]));
 
-// Each changed ES module with exported functions gets a recording wrapper at a kern-wrap: address (see drive-hooks.mjs).
 const esm = config.modules.filter((m) => !m.cjs && m.functions.length).map((m) => {
   const url = pathToFileURL('/workspace/' + m.path).href;
   return { url, wrap: 'kern-wrap:' + url, path: m.path, functions: m.functions, hasDefault: m.default === true };
 });
-// The driver's stand-ins for packages that cannot load here, at /kern/stubs/<package>.mjs (see drive-hooks.mjs).
 const stubs = Object.fromEntries((config.stubs || []).map((s) => [s, pathToFileURL('/kern/stubs/' + s + '.mjs').href]));
 register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
-// CommonJS requires get the same help as imports: a package name that does not resolve, or resolves into node_modules, gets its
-// stand-in; a name that does not resolve may be a path alias of the requiring file's own package or a package of the project that was
-// never built; an asset loads as bundlers hand it over, even one the build would have made (drive-support.mjs).
 {
   const Module = createRequire(import.meta.url)('node:module');
   for (const ext of ['.css', '.scss', '.sass', '.less', '.styl', '.pcss', '.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.bmp', '.woff', '.woff2',
     '.ttf', '.otf', '.eot', '.mp3', '.mp4', '.webm', '.wav', '.ogg', '.pdf', '.md', '.mdx', '.txt', '.html', '.glsl', '.frag', '.vert', '.wasm', '.sql']) {
     Module._extensions[ext] = (m, filename) => { m.exports = assetExports(filename); };
   }
-  // Next.js's marker packages (drive-support.mjs): the empty module Kern puts next to this loader.
   const EMPTY = '/kern/empty-marker.js';
   const files = new Map((config.stubs || []).map((s) => [s, '/kern/stubs/' + s + '.mjs']));
   const own = new Set(files.values());
@@ -62,7 +44,6 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
     if (stub && !(parent && own.has(parent.filename))) {
       let real = null;
       try { real = resolveFilename.call(this, request, parent, ...rest); } catch {}
-      // The project's own code is never stood in for: a path alias of the requiring file's own package, a package of the project.
       for (const file of real === null ? ownFiles(request, parent && parent.filename) : []) {
         try { real = resolveFilename.call(this, file, parent, ...rest); break; } catch {}
       }
@@ -73,17 +54,12 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
       for (const file of ownFiles(request, parent && parent.filename)) {
         try { return resolveFilename.call(this, file, parent, ...rest); } catch {}
       }
-      // An asset the build makes (a generated stylesheet, a query such as ?raw): a name of its own under /kern/assets, never read; it
-      // keeps its extension, which picks the asset's loader above.
       if (ASSET.test(request)) return '/kern/assets/' + request.replace(/[?#].*$/, '').replace(/^(\.\.?\/)+/, '');
       throw e;
     }
   };
 }
 
-// JSX in .js files, as Babel, webpack and Gatsby allow it. tsx compiles a .js file as plain JavaScript, and Node reads one tsx leaves
-// alone as it is, so either stops at the first tag. Such a file of the project is compiled by the same esbuild with JSX on (React's
-// automatic runtime, as for .tsx), in the module format it has; its source map keeps every position coverage reports on its own lines.
 {
   const Module = createRequire(import.meta.url)('node:module');
   const esbuild = createRequire(import.meta.url)('/kern-tools/node_modules/esbuild');
@@ -92,7 +68,6 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
   const hasJsx = (code) => { if (!TAG.test(code)) return false; try { esbuild.transformSync(code, { loader: 'js' }); return false; } catch (e) { return OFF.test(String(e && e.message)); } };
   const compile = (file, code, format) => ({
     format, shortCircuit: true,
-    // import.meta.env as the hooks write it for every other file (drive-hooks.mjs).
     source: esbuild.transformSync(code.replace(/import\.meta\.env/g, '__kern_meta_env'), { loader: 'jsx', jsx: 'automatic', format: format === 'module' ? 'esm' : 'cjs',
       platform: 'node', target: 'node22', sourcefile: file, sourcemap: 'inline' }).code,
   });
@@ -106,14 +81,11 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
       const given = out.source != null ? (typeof out.source === 'string' ? out.source : Buffer.from(out.source).toString('utf8')) : null;
       const code = given ?? fs.readFileSync(file, 'utf8');
       if (hasJsx(code)) return compile(file, fs.readFileSync(file, 'utf8'), out.format);
-      // A file Node loads as it is (it reads one it is handed no source for itself, past the reads blanked above) keeps no source map of
-      // its own either: Node is handed the file blanked. A file a tool compiled keeps the tool's map.
       const raw = readRaw(file, 'utf8');
       if (raw.includes('sourceMappingURL') && (given === null || given === raw)) return { ...out, source: blankMaps(raw) };
       return out;
     },
   });
-  // require() reaches a .js file past these hooks (tsx loads it itself): the same compile there, for a project file with JSX.
   const load = Module._extensions['.js'];
   Module._extensions['.js'] = function (module, filename) {
     if (filename.startsWith('/workspace/') && !filename.includes('/node_modules/')) {
@@ -124,10 +96,6 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
   };
 }
 
-// Names a CommonJS module of the project hands on with `export *`. tsx compiles the TypeScript of a package without "type": "module" to
-// CommonJS, closing with a note of its exports that Node reads to give ES importers their names: `0 && (module.exports = { a,
-// ...require("./b") })`. Node follows `require("./b")` only into .js files, so the names another TypeScript file hands on are lost ("does
-// not provide an export named"). Kern adds them to the note, each file's names as tsx compiles it; the code that runs is unchanged.
 {
   const Module = createRequire(import.meta.url)('node:module');
   const NOTE = /0\s*&&\s*\(\s*module\.exports\s*=\s*\{([^{}]*)\}\s*\)/g;
@@ -145,7 +113,6 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
       const follow = (file, list) => {
         for (const e of list) {
           const star = /^\.\.\.require\((["'])([^"']+)\1\)$/.exec(e);
-          // A file of the project: a relative one, or a package of the project (a sibling, its source when it was never built).
           let target = null;
           if (star && /^\.{1,2}\//.test(star[2])) target = relativeFile(star[2], file);
           else if (star) { try { target = createRequire(file).resolve(star[2]); } catch {} }
@@ -153,7 +120,6 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
           if (!href || seen.has(href) || !own(href)) continue;
           seen.add(href);
           let inner = [];
-          // A file of the same CommonJS package, compiled as tsx compiles it when it is required.
           try { const t = nextLoad(href, context); if (t.source != null) inner = entries(text(t.source)); } catch {}
           for (const n of inner) if (/^[A-Za-z_$][\w$]*$/.test(n) && n !== 'default') handed.add(n);
           follow(target, inner);
@@ -161,11 +127,8 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
       };
       follow(fileURLToPath(url), listed);
       const extra = [...handed].filter((n) => !listed.includes(n));
-      // A changed CommonJS module that loads here, on the ES path, never passes Module._load, where its calls are recorded (below): it
-      // hands itself over once it has run.
       const changed = cjs.has(fileURLToPath(url));
       if (!extra.length && !changed) return out;
-      // Before the source map's comment, after every line of code: no position the coverage reports moves.
       let add = extra.length ? '\n;0 && (module.exports = { ' + extra.map((n) => JSON.stringify(n) + ': __kern_star').join(', ') + ' });' : '';
       if (changed) add += '\n;globalThis.__kernDriveCjs && globalThis.__kernDriveCjs(module);';
       const at = code.lastIndexOf('\n//# sourceMappingURL=');
@@ -177,7 +140,6 @@ register('./drive-hooks.mjs', import.meta.url, { data: { esm, stubs } });
 globalThis.__kern_meta_env = Object.assign({ MODE: 'production', DEV: false, PROD: true, SSR: true, BASE_URL: '/' },
   Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('VITE_'))));
 
-// Fixed time and seeded randomness, as in Kern's probe.
 let seed = 0x2545f491 >>> 0;
 const rand = () => { seed = (seed + 0x6d2b79f5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 Math.random = rand;
@@ -197,8 +159,6 @@ globalThis.Date = FixedDate;
   if (globalThis.crypto) { put(globalThis.crypto, 'getRandomValues', fill); put(globalThis.crypto, 'randomUUID', uuid); }
   try { (await import('node:module')).syncBuiltinESMExports(); } catch {}
 }
-// Fixed ports. Every run is its own sandbox with nothing but a loopback network, so a server that asks for any free port gets the next of
-// a fixed sequence instead, the same on every run: its address never makes two runs of one side disagree.
 {
   const net = (await import('node:net')).default;
   let port = 41000;
@@ -212,8 +172,6 @@ globalThis.Date = FixedDate;
   };
 }
 
-// Values written out the same way every time, as Kern's probe writes them: object keys in order, long values cut short with a hash of
-// all of them, so a difference anywhere still counts.
 function digest() { return createRequire(import.meta.url)('node:crypto').createHash('sha256'); }
 function text(e) {
   let n = typeof e, msg = '';
@@ -255,7 +213,6 @@ function write(v, full, sink) {
       }
       let then = null; try { then = x.then; } catch {}
       if (typeof then === 'function') return out('Promise');
-      // A React element, as its markup would be written: the element's type and its props, without React's own bookkeeping.
       let tag = null; try { tag = x.$$typeof; } catch {}
       if (typeof tag === 'symbol' && String(tag.description || '').startsWith('react.')) {
         let type = 'element';
@@ -285,7 +242,6 @@ function ser(v) {
   return shown.text.slice(0, 120) + '...#' + h.digest('hex').slice(0, 16);
 }
 
-// The call recorder: each changed function's first calls, in order, with their arguments and what they returned or threw.
 const calls = [];
 const counts = new Map();
 globalThis.__kernDriveRecord = function (key, fn, self, args, target) {
@@ -309,14 +265,12 @@ globalThis.__kernDriveRecord = function (key, fn, self, args, target) {
 };
 process.on('exit', () => { try { fs.writeFileSync(process.env.KERN_DRIVE_CALLS || '/tmp/.kern-calls', calls.map((c) => JSON.stringify(c)).join('\n')); } catch {} });
 
-// CommonJS: a changed module's function exports are wrapped the first time it is required, or once it has run on the ES path.
 if (cjs.size) {
   const Module = createRequire(import.meta.url)('node:module');
   const original = Module._load;
   const done = new WeakSet();
   const isClass = (f) => { try { return /^class\b/.test(Function.prototype.toString.call(f)); } catch { return false; } };
   const wrap = (key, f) => Object.assign(function (...a) { return globalThis.__kernDriveRecord(key, f, this, a, new.target); }, f);
-  // The module's exports, recorded once: a module that exports a single function becomes its wrapper.
   const record = (m, module) => {
     const exp = module.exports;
     if (!exp || (typeof exp !== 'object' && typeof exp !== 'function') || done.has(exp)) return exp;

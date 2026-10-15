@@ -98,12 +98,10 @@ pub struct Expect<'a> {
     pub run_id: &'a str, pub task: &'a str, pub repository: &'a str, pub base: &'a str, pub commit: &'a str, pub manifest_sha256: &'a str, pub contract_sha256: &'a str,
     pub verifier_sha256: &'a str, pub verifier_builder: &'a str, pub deployment: &'a str, pub image: &'a str, pub executors: &'a [String], pub executor_builder: Option<&'a str>, pub checks: Vec<String>,
 }
-/// What an envelope claims, unchecked: only for choosing which error to report, never for accepting anything.
 pub fn claimed(envelope: &Value) -> Option<Value> {
     let bytes = unb64(envelope["payload"].as_str()?).ok()?;
     Some(serde_json::from_slice::<Value>(&bytes).ok()?["predicate"][EXTENSION].clone())
 }
-/// The Kern summary of an envelope `key` signed, checked for its signature and canonical form only.
 pub fn signed(envelope: &Value, key: &VerifyingKey) -> R<Value> {
     exact(envelope, &["payloadType", "payload", "signatures"], "envelope")?;
     ensure!(envelope["payloadType"] == PAYLOAD_TYPE, "Attestation must be an in-toto DSSE envelope");

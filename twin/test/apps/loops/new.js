@@ -1,9 +1,9 @@
 import { setInterval as every, scheduler } from 'node:timers/promises';
 import { send } from '../http.js';
 
-// Starts three loops of background work as it loads, on the promise timers: an interval's rounds, scheduler.wait and scheduler.yield,
-// each counting its rounds. A request clears the counts, waits on the same timers itself (three rounds of an interval, a wait and a
-// yield, about 50 ms in all), and answers which loops ran meanwhile.
+
+
+
 export function createApp() {
   const rounds = { interval: 0, wait: 0, yield: 0 };
   (async () => {

@@ -3,10 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { createTwin } from '../src/index.js';
 import { join } from 'node:path';
 
-/** One version of a test app, as the twin loads it: an absolute file and the function that builds the request listener. */
 export const app = (name, version) => ({ module: fileURLToPath(new URL(`./apps/${name}/${version}.js`, import.meta.url)), export: 'createApp' });
 
-/** A local HTTP server for a listener. */
 export async function listen(listener) {
   const server = http.createServer(listener);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -19,7 +17,6 @@ export async function listen(listener) {
   };
 }
 
-/** Production as it would run: the old app serves customers, and the twin runs the old and the new version as ghosts. */
 export async function production(name, options = {}) {
   const twin = await createTwin({ old: app(name, 'old'), candidate: app(name, 'new'), timeoutMs: 3000, ...options });
   const { createApp } = await import(new URL(`./apps/${name}/old.js`, import.meta.url).href);
@@ -36,7 +33,6 @@ export async function production(name, options = {}) {
 
 export const post = (url, value) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(value) });
 
-/** Production with switching: the twin's own listener serves, and sends each request to the version serving now. */
 export async function routed(name, options = {}) {
   const twin = await createTwin({ old: app(name, 'old'), candidate: app(name, 'new'), timeoutMs: 3000, ...options });
   const server = await listen(await twin.listener());
@@ -50,14 +46,12 @@ export async function routed(name, options = {}) {
   };
 }
 
-/** One GET, its body read to the end; answers the status. */
 export const get = async (url) => {
   const answer = await fetch(url);
   await answer.arrayBuffer();
   return answer.status;
 };
 
-/** Waits until `check()` holds, looking every 50 ms, for at most `ms`. */
 export async function until(check, ms = 5000) {
   const end = Date.now() + ms;
   while (!check()) {
@@ -66,7 +60,6 @@ export async function until(check, ms = 5000) {
   }
 }
 
-/** One version of the three-pull-request shop, with the folder its manifest's paths start from. */
 export const shopVersion = (version) => {
   const root = fileURLToPath(new URL(`./apps/three-prs/${version}/`, import.meta.url));
   return { module: join(root, 'src', 'app.js'), export: 'createApp', root };
@@ -74,7 +67,6 @@ export const shopVersion = (version) => {
 
 export const shopManifest = fileURLToPath(new URL('./apps/three-prs/manifest.json', import.meta.url));
 
-/** The three-pull-request shop in production: the old version serves, and the twin has the manifest of the three changes. */
 export async function threePrs(options = {}) {
   const twin = await createTwin({ old: shopVersion('base'), candidate: shopVersion('head'), manifest: shopManifest, timeoutMs: 3000, ...options });
   const server = await listen(await twin.listener());

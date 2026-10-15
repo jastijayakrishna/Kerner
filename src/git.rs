@@ -10,7 +10,6 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct Entry { pub mode: String, pub oid: String, pub size: u64, pub bytes: Option<Vec<u8>> }
 impl Entry {
-    /// A symlink or a submodule: carried along unchanged, never read as code, never written into a snapshot, and never changed by a task.
     pub fn link(&self) -> bool { self.mode == "120000" || self.mode == "160000" }
 }
 pub type Files = BTreeMap<String, Entry>;
@@ -44,7 +43,6 @@ pub fn blob_sha256(repo: &Path, oid: &str, size: u64) -> R<String> {
 
 pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: usize) -> R<Vec<u8>> {
     let repo = std::path::absolute(repo)?;
-    // Paths are always file names, never git's patterns: a file called `:(glob)*` from a pull request must not change what git reads.
     let mut full: Vec<String> = ["--no-replace-objects", "--literal-pathspecs", "-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C"]
         .map(String::from).to_vec();
     full.push(repo.display().to_string());
@@ -52,8 +50,6 @@ pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: us
     run(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input, timeout: Duration::from_secs(600), max_output })
 }
 pub fn git(repo: &Path, args: &[&str], input: Option<&[u8]>) -> R<Vec<u8>> { git_with(repo, args, input, BUNDLE_BYTES) }
-/// A git command that talks to `server` (https, or a local file URL in tests). The token travels in the environment, scoped to that server,
-/// so it never appears on a command line; every other protocol stays off.
 pub fn remote(repo: &Path, args: &[&str], server: &str, token: &str) -> R<Vec<u8>> {
     let repo = std::path::absolute(repo)?;
     let local = server.starts_with("file://");
@@ -154,7 +150,6 @@ pub fn write_commit(repo: &Path, files: &Files, parent: Option<&str>, task: &str
     for (name, e) in files {
         ensure!(["100644", "100755", "120000", "160000"].contains(&e.mode.as_str()), "Invalid file mode");
         let id = e.oid.clone();
-        // A submodule names a commit of another repository, so there is no object to write here.
         match &e.bytes {
             Some(bytes) => { ensure!(object_id("blob", bytes) == id, "Blob identity mismatch: {name}"); objects.push((id.clone(), "blob", bytes.clone())); }
             None if e.mode == "160000" => {}
@@ -216,7 +211,6 @@ pub fn parents(repo: &Path, commit: &str) -> R<Vec<String>> {
 pub fn materialize(store: Option<&Path>, files: &Files, dest: &Path, grants: Option<&[String]>) -> R<()> {
     std::fs::create_dir_all(dest)?;
     for (name, e) in files {
-        // No link is ever created on the host: a symlink could point anywhere, and a submodule's content is not in this repository.
         if e.link() || grants.is_some_and(|g| !allowed(g, name)) { continue; }
         let target = name.split('/').fold(dest.to_path_buf(), |p, part| p.join(part));
         std::fs::create_dir_all(target.parent().unwrap_or(dest))?;
@@ -266,12 +260,10 @@ pub fn protected(name: &str) -> bool {
         || base.starts_with(".env.")
         || (base.starts_with("requirements") && base.ends_with(".txt"))
 }
-/// Lines deleted plus lines added between two versions, as a line diff counts them (Myers' algorithm), up to `cap`.
 fn diff_lines(a: &[&str], b: &[&str], cap: usize) -> usize {
     let (n, m) = (a.len(), b.len());
     let max = (n + m).min(cap);
     let offset = max as isize + 1;
-    // v[k + offset]: how far along `a` the best path on diagonal k (x - y = k) has come.
     let mut v = vec![0usize; 2 * max + 3];
     for d in 0..=max as isize {
         for k in (-d..=d).step_by(2) {
@@ -294,7 +286,6 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
         let (a, b) = (base.get(name), candidate.get(name));
         if let (Some(a), Some(b)) = (a, b) && a.mode == b.mode && a.oid == b.oid { continue; }
         ensure!(![a, b].iter().flatten().any(|e| e.link()), "Symlinks and submodules cannot change: {name}. Kern checks regular files only; make this change yourself");
-        // A task that approves packages lets package.json and the lockfile change; deps::screen then holds them to the approved packages.
         let manifest = !policy.approved.is_empty() && (name == crate::deps::MANIFEST || name == crate::deps::LOCKFILE);
         ensure!(manifest || allowed(&policy.write, name), "Write outside contract: {name}. To allow it, add \"{name}\" to filesystem.read and filesystem.write in the task contract");
         ensure!(manifest || !protected(name), "Protected dependency/configuration path: {name}. Agents may never change dependency, CI or secret files; make this change yourself");
@@ -310,7 +301,6 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
         let (mut start, mut ea, mut eb) = (0, x.len(), y.len());
         while start < ea && start < eb && x[start] == y[start] { start += 1; }
         while ea > start && eb > start && x[ea - 1] == y[eb - 1] { ea -= 1; eb -= 1; }
-        // Counted only as far as the budget, so a large rewrite costs no more than the limit to measure.
         lines += diff_lines(&x[start..ea], &y[start..eb], (policy.limits.lines_changed.saturating_sub(lines) + 1) as usize) as u64;
         result.push(json!({ "path": name, "operation": if a.is_none() { "add" } else if b.is_none() { "delete" } else { "modify" } }));
     }

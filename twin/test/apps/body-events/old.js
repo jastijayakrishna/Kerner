@@ -1,6 +1,6 @@
 import { send } from '../http.js';
 
-// Reads the body the way express.json() and body-parser do, with data and end events, and then charges the order.
+
 export function createApp() {
   return (req, res) => {
     const parts = [];

@@ -1,8 +1,3 @@
-# Kern: one receipt on every pull request.
-#
-# Save this file in your repository as .github/workflows/kern.yml. That is the whole install.
-# Optional: add an ANTHROPIC_API_KEY secret (Settings > Secrets and variables > Actions) so Kern also runs every changed line on the old
-# and the new code, and make the `Kern` status required (Settings > Branches) so nothing merges without its receipt.
 name: Kern
 
 on:

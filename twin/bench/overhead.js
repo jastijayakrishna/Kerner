@@ -1,6 +1,3 @@
-// Measures what the twin adds to request latency: no twin, then the twin's routing listener sampling 0%, 10% and 100% of requests.
-// Run it a second time with --experimental-async-context-frame: on Node 22 that flag makes AsyncLocalStorage, which the twin uses for
-// sampled requests, much cheaper.
 import http from 'node:http';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +29,6 @@ async function measure(label, listener, { total = 4000, lanes = 16, report = tru
   console.log(`${label.padEnd(24)} p50 ${at(0.5)} ms   p99 ${at(0.99)} ms`);
 }
 
-// The first round pays for compiling and for opening connections; without this unreported round, "no twin" looks slowest.
 await measure('warm-up', createApp(), { report: false });
 await measure('no twin', createApp());
 for (const sampleRate of [0, 0.1, 1]) {

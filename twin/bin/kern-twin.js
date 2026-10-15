@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-// kern-twin: the twin runtime's command line. Every command prints one JSON object; a refusal goes to stderr with exit code 1.
 import { spawnSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -100,8 +98,6 @@ function caseTests(flags) {
   if (!flags.cases || !flags.candidate) throw new Error('test needs --cases <dir> --candidate <module>');
   const file = fileURLToPath(new URL('../src/case-test.js', import.meta.url));
   const env = { ...process.env, KERN_TWIN_CASES: resolve(flags.cases), KERN_TWIN_CANDIDATE: resolve(flags.candidate), KERN_TWIN_EXPORT: flags.export ?? 'createApp' };
-  // Node's test runner marks the processes it starts with NODE_TEST_CONTEXT, and a node --test that inherits the mark skips every file
-  // and passes. Called from inside another test suite, the cases would never run.
   delete env.NODE_TEST_CONTEXT;
   const run = spawnSync(process.execPath, ['--test', '--test-concurrency=1', file], { stdio: 'inherit', env });
   process.exit(run.status ?? 1);
@@ -113,7 +109,6 @@ async function casesIn(dir) {
   return Promise.all(names.map((name) => readCase(resolve(dir, name))));
 }
 
-/** The copy an agent is handed: without the hints on how a person could allow a difference. */
 async function feedback(flags) {
   return forAgent(toFeedback(await casesIn(flags.cases), { casesDir: flags.cases, candidate: flags.candidate }));
 }

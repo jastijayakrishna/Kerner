@@ -1,4 +1,4 @@
-// Answers the JSON it was sent, byte for byte, without reading it: a body nested however deep comes back as it went.
+
 export function createApp() {
   return async (req, res) => {
     const parts = [];

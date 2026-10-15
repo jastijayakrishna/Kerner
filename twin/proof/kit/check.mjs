@@ -1,5 +1,3 @@
-// A first start's check, run inside an app's container: it asks the app for one path through the twin, waits until the twin has judged
-// it (its ghosts may still be loading a real app: up to 3 minutes), and prints the twin's numbers. Usage: node /twin/proof/kit/check.mjs <path>
 const path = process.argv[2] ?? '/';
 const base = 'http://127.0.0.1:8080';
 const answer = await fetch(`${base}${path}`);

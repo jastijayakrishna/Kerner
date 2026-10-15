@@ -1,7 +1,7 @@
 import { send } from '../http.js';
 
-// Signs in through an upstream that sets two cookies, a session and a CSRF token, as an auth proxy or an OAuth flow gets them. With only
-// one of them, the sign-in failed. The upstream is at KERN_TEST_AUTH_URL.
+
+
 export function createApp() {
   return async (req, res) => {
     const answer = await fetch(`${process.env.KERN_TEST_AUTH_URL}/session`);

@@ -6,23 +6,19 @@ use crate::github::{Api, env};
 use std::collections::BTreeSet;
 
 pub const SCHEMA: &str = "kern-feedback/v1";
-/// Every feedback comment carries this marker with the commit it judged, so retries count rejected commits, not re-runs.
 pub const MARKER: &str = "<!-- kern-feedback:v1 head=";
 const RESOLVED: &str = "<!-- kern-feedback:v1:pass head=";
 pub fn rejected(n: u64) -> String { format!("after {n} rejected attempt{}", if n == 1 { "" } else { "s" }) }
 
-/// Text that came from the change (paths, test names, program names) only ever appears inside code formatting.
 fn code(s: &str) -> String {
     let flat: String = s.replace('`', "'").replace(['\r', '\n'], " ").trim().chars().take(300).collect();
     format!("`{flat}`")
 }
 fn codes<'a>(items: impl IntoIterator<Item = &'a str>) -> String { items.into_iter().map(code).collect::<Vec<_>>().join(", ") }
-/// A known message with one value between a fixed start and a fixed end; anything else around it means it is not that message.
 fn shaped<'a>(r: &'a str, start: &str, end: &str) -> Option<&'a str> { r.strip_prefix(start)?.strip_suffix(end).filter(|v| !v.is_empty()) }
 fn digits(s: &str) -> Option<&str> { (!s.is_empty() && s.len() <= 12 && s.bytes().all(|b| b.is_ascii_digit())).then_some(s) }
 fn check_id(s: &str) -> bool { !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') }
 
-/// An independent verifier's verdict arrives wrapped by the transport that carried it; explain the verdict itself.
 fn unwrap_reason(reason: &str) -> String {
     let mut r = reason.trim().to_string();
     loop {
@@ -101,7 +97,6 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
             else { String::new() };
         if !instruction.is_empty() { return (true, vec![fix("check-failed", None, instruction)]); }
     }
-    // The comparison of the old and the new code (contract version 5): the old code is the rulebook for everything the task does not state.
     let delta_hint = |v: &mut Violation, what: &str| v.allow = Some(format!("A human can state {what} in the task contract's delta."));
     if let Some(list) = shaped(r, "New crash where the old code worked: ", ". The new code must handle every input the old code handled") {
         let mut v = fix("never-worse", None, format!("Make these calls work again as they did on the old code: {}. The new code must handle every input the old code handled.", code(list)));
@@ -284,7 +279,6 @@ pub fn explain(reason: &str, contract: Option<&Contract>) -> Value {
     }).collect();
     json!({ "schema": SCHEMA, "status": "BLOCKED", "reason": reason, "agent_fixable": fixable, "violations": list })
 }
-/// The copy an agent is handed: instructions only, without the raw reason or the hints on how a human could allow the change.
 pub fn for_agent(feedback: &Value) -> Value {
     let mut f = feedback.clone();
     if let Some(o) = f.as_object_mut() { o.remove("reason"); }
@@ -348,7 +342,6 @@ impl Thread {
     fn post(&self, body: &str) -> R<Value> { self.api.post(&self.path, &json!({ "body": body })) }
 }
 
-/// The note on the pull request after Kern verified a push again and moved the branch to the verified commit.
 fn reverified(r: &Value, earlier: u64, head: &str) -> String {
     let short = |k: &str| hex(r[k].as_str().unwrap_or("")).chars().take(12).collect::<String>();
     let after = if earlier > 0 { format!(" It passed {}.", rejected(earlier)) } else { String::new() };
@@ -382,7 +375,6 @@ pub fn publish(event: &Value, result: &R<Value>) -> String {
         None => None,
     };
     let head = head.unwrap_or_default();
-    // An attempt is a commit Kern rejected: re-runs and edits on the same commit are not new attempts.
     let earlier = history.as_ref().map_or(0, |h| h.blocked.iter().filter(|b| **b != head).count() as u64);
     let feedback = result.as_ref().err().map(|e| {
         let mut f = explain(&e.0, None);

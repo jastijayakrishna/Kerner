@@ -1,5 +1,3 @@
-// Measures how many requests per second the ghost pair judges, without and with measuring the changed lines (Phase 3's coverage).
-// Measuring lines costs the ghosts time, never the customers: the ghosts run after the answer has gone out.
 import { performance } from 'node:perf_hooks';
 import http from 'node:http';
 import { join } from 'node:path';
@@ -16,7 +14,7 @@ async function rate(label, options, total = 600) {
   const server = http.createServer(await twin.listener());
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const send = async () => (await fetch(`http://127.0.0.1:${server.address().port}/total`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).arrayBuffer();
-  for (let i = 0; i < 50; i++) await send(); // warm-up, not counted
+  for (let i = 0; i < 50; i++) await send();
   await twin.idle();
   const before = twin.stats().same;
   const started = performance.now();

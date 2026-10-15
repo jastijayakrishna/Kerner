@@ -1,7 +1,7 @@
 import { readJson, send } from '../http.js';
 
-// Starts background work as real apps do (a heartbeat every 2 ms, as a cron tick or a queue poller would), and charges for each
-// order it is sent.
+
+
 export function createApp() {
   setInterval(() => {
     fetch(`${process.env.KERN_TEST_PAY_URL}/heartbeat`, { method: 'POST' }).catch(() => {});

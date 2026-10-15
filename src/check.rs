@@ -1,20 +1,10 @@
-//! `kern check`: one receipt for one pull request, from the parts Kern already has. In order:
-//! 1. kern drive's prepare: what changed, which lines hold code, and the task folder for the AI's driver;
-//! 2. the static rules (seconds, no sandbox): new powers, test tricks, and the files that steer builds, secrets and agents;
-//! 3. the project's own tests on the old and the new code, each on its installed tree in gVisor with the network off;
-//! 4. with an AI agent, every changed line run on the old and the new code, sorted by what the pull request says;
-//! 5. the receipt: receipt.json and receipt.md in `out`.
-//!
-//! A part that cannot run says why in the receipt; only a broken repository or sandbox stops the check itself.
 use crate::policy::Operator;
 use crate::util::*;
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// What the AI part needs: the agent's command line (kern drive's default is Claude Code in restricted mode) and how many rounds it may take.
 pub struct Ai<'a> { pub agent: &'a [String], pub rounds: usize }
 
-/// Whether the change has anything to install and run: changed code Kern measures, or changed test files, or a changed package.json.
 fn runnable(d: &Value, rules: &Value) -> bool {
     let code = d["totals"]["new"].as_u64().unwrap_or(0) + d["totals"]["old"].as_u64().unwrap_or(0) > 0;
     let paths: Vec<&str> = rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();

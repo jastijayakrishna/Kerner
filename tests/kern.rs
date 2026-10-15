@@ -170,23 +170,18 @@ fn change_gate_enforces_grants_protected_paths_budgets_and_text() {
     let mut tight = policy_value();
     tight["limits"]["lines_changed"] = json!(1);
     denied(git::changes(&f.original, &f.candidate, &contract(&tight).unwrap()), "budget");
-    // lines are counted with a real diff: an edit at the top and one at the bottom of a long file are 4 changed lines, not the whole file
-    // (8 of 320 real agent PRs, some of 3 files and 65 lines, were refused as over 2000 lines before)
     let long: String = (1..=1000).map(|i| format!("export const v{i} = {i};\n")).collect();
     let edited = long.replacen("export const v1 = 1;", "export const v1 = 0;", 1).replacen("export const v1000 = 1000;", "export const v1000 = 0;", 1);
     tight["limits"]["lines_changed"] = json!(10);
     let (before, after) = (files(&[("src/long.mjs", &long)]), files(&[("src/long.mjs", &edited)]));
     assert_eq!(git::changes(&before, &after, &contract(&tight).unwrap()).unwrap()["lines_changed"], 4);
-    // moving a block is deleting and adding it
     let moved: String = long.lines().skip(10).chain(long.lines().take(10)).map(|l| format!("{l}\n")).collect();
     assert_eq!(git::changes(&before, &files(&[("src/long.mjs", &moved)]), &contract(&policy_value()).unwrap()).unwrap()["lines_changed"], 20);
-    // and a change too big for the budget says by how much it may change, without counting the whole file
     let rewritten: String = (1..=1000).map(|i| format!("export const w{i} = {i};\n")).collect();
     denied(git::changes(&before, &files(&[("src/long.mjs", &rewritten)]), &contract(&tight).unwrap()), "1 file and more than 10 lines changed; the contract allows");
 }
 #[test]
 fn symlinks_and_submodules_ride_along_unchanged_and_never_reach_the_sandbox() {
-    // 29 of 320 real agent PRs came from repositories Kern refused outright because some folder held a symlink or a submodule.
     let t = Temp::new();
     let repo = t.join("r");
     sh(&t.0, &["init", "-q", "r"]);
@@ -202,15 +197,12 @@ fn symlinks_and_submodules_ride_along_unchanged_and_never_reach_the_sandbox() {
     let files = git::read_commit(&repo, &base, 65536, 1048576).unwrap();
     let (l, s) = (&files["docs/a.js"], &files["vendor/lib"]);
     assert!(l.link() && s.link() && !files["src/a.js"].link() && l.bytes.is_none() && s.bytes.is_none(), "links are carried, never read as code");
-    // a Kern commit of the same files is the same tree, links included
     let again = git::write_commit(&repo, &files, None, "x").unwrap();
     assert_eq!(sh(&repo, &["rev-parse", &format!("{again}^{{tree}}")]), sh(&repo, &["rev-parse", &format!("{base}^{{tree}}")]));
-    // the manifest names them, and a snapshot never contains them: no link is ever created on the verifier host
     let manifest = git::manifest(&repo, &base, 65536, 1048576).unwrap();
     assert!(manifest["files"].as_array().unwrap().iter().any(|f| f["path"] == "vendor/lib" && f["commit"] == "e".repeat(40)), "{manifest}");
     git::materialize(Some(&repo), &files, &t.join("snap"), None).unwrap();
     assert!(t.join("snap/src/a.js").exists() && !t.join("snap/docs/a.js").exists() && !t.join("snap/vendor/lib").exists());
-    // ordinary changes pass; changing, adding or removing a link does not
     let mut policy = policy_value();
     policy["filesystem"] = json!({ "read": ["src/", "docs/", "vendor/"], "write": ["src/", "docs/", "vendor/"] });
     let policy = contract(&policy).unwrap();
@@ -226,7 +218,6 @@ fn symlinks_and_submodules_ride_along_unchanged_and_never_reach_the_sandbox() {
     let mut replaced = files.clone();
     replaced.insert("docs/a.js".into(), file("now a file\n"));
     for c in [&retarget, &added, &removed, &replaced] { denied(git::changes(&files, c, &policy), "Symlinks and submodules cannot change"); }
-    // a workspace never holds them, so reading one back keeps them as they were
     let ws = t.join("ws");
     git::materialize(Some(&repo), &files, &ws, None).unwrap();
     let back = kern::local::read_workspace(&ws, &files, 65536, 1048576).unwrap();
@@ -264,7 +255,6 @@ fn behaviour_monitor_records_network_processes_and_environment_reads() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let log = std::fs::read_to_string(t.join("log")).unwrap();
     for want in ["net:telemetry.invalid:8080", "net:loopback", "exec:node", "exec:curl-not-installed", "env:NPM_TOKEN", "env:*", "dns:secret.exfil.invalid", "dns:p.exfil.invalid", "dns:r.exfil.invalid"] { assert!(log.lines().any(|l| l == want), "missing {want} in:\n{log}"); }
-    // the monitor stays silent when it is not asked to record
     let quiet = Command::new("node").arg("--require").arg(t.join("monitor.cjs")).arg("-e").arg("process.env.NPM_TOKEN").output().unwrap();
     assert!(quiet.status.success() && quiet.stdout.is_empty() && quiet.stderr.is_empty());
 }
@@ -279,7 +269,6 @@ fn behaviour_diff_blocks_new_reach_and_contracts_can_allow_it() {
     assert_eq!(blocking, vec!["dns:telemetry.example", "env:*", "env:NPM_TOKEN", "exec:curl", "net:telemetry.example:443"]);
     let (_, blocking) = flow::behavior_diff(&base, &candidate, &["exec:curl".into(), "net:telemetry.example:443".into(), "dns:telemetry.example".into()]);
     assert_eq!(blocking, vec!["env:*", "env:NPM_TOKEN"]);
-    // contracts v3 carry the allowlist; it is validated and can only narrow
     let mut v3 = policy_value();
     v3["version"] = json!(3);
     v3["behaviors"] = json!(["net:api.example.com:443", "exec:git"]);
@@ -335,7 +324,6 @@ fn hosted_verifier_serves_profiles_and_verifies_only_authorised_known_runs() {
     git::handoff(&f.store, &run, &f.t.join("handoff")).unwrap();
     let body = json!({ "run": run, "bundle": b64(&std::fs::read(f.t.join("handoff/artifact.bundle")).unwrap()) });
     assert_eq!(post("wrong", &body).0, 401);
-    // an unauthenticated client cannot make the service read or reserve a body
     let mut raw = std::net::TcpStream::connect(url.trim_start_matches("http://")).unwrap();
     raw.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
     std::io::Write::write_all(&mut raw, b"POST /v1/verify HTTP/1.1\r\nHost: x\r\nContent-Length: 100000000\r\n\r\n").unwrap();
@@ -349,11 +337,9 @@ fn hosted_verifier_serves_profiles_and_verifies_only_authorised_known_runs() {
     let mut stale = body.clone();
     stale["run"]["contract_sha256"] = json!("c".repeat(64));
     assert!(post(token, &stale).1["reason"].as_str().unwrap().contains("No trusted task contract"));
-    // a valid request is imported and matched to the trusted contract; this machine then has no gVisor to verify with
     let (code, r) = post(token, &body);
     assert!(code == 422 && r["reason"].as_str().unwrap().contains("Verifier builder identity"), "{r}");
     if container_ready() {
-        // kern run hands its boxed result to the same service and reports the service's verdict
         std::fs::write(f.t.join("task.json"), policy_value().to_string()).unwrap();
         std::fs::write(f.t.join("token.txt"), format!("{token}\n")).unwrap();
         std::fs::create_dir_all(f.t.join("keys")).unwrap();
@@ -375,7 +361,6 @@ fn npm_lock(root: &[(&str, &str)], packages: &[(&str, &str, &[&str])]) -> String
     let mut map = serde_json::Map::new();
     map.insert(String::new(), json!({ "name": "app", "version": "1.0.0", "dependencies": root.iter().map(|(n, v)| (n.to_string(), json!(v))).collect::<serde_json::Map<_, _>>() }));
     for (name, version, deps) in packages {
-        // npm's own tarball address: a scoped package's file is named without its scope
         let file = name.rsplit('/').next().unwrap_or(name);
         map.insert(format!("node_modules/{name}"), json!({ "version": version, "resolved": format!("https://registry.npmjs.org/{name}/-/{file}-{version}.tgz"), "integrity": "sha512-abc",
             "dependencies": deps.iter().map(|d| (d.to_string(), json!("*"))).collect::<serde_json::Map<_, _>>() }));
@@ -403,16 +388,13 @@ fn agents_change_dependencies_only_for_packages_the_task_approves() {
     let with = |manifest: &str, lock: &str, code: &str| { let mut f = base.clone(); f.insert("package.json".into(), file(manifest)); f.insert("package-lock.json".into(), file(lock)); f.insert("src/a.js".into(), file(code)); f };
     let zod_manifest = npm_manifest(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], scripts.clone());
     let zod_lock = npm_lock(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], &[("lodash", "4.17.20", &[]), ("zod", "3.23.0", &["zod-helper"]), ("zod-helper", "1.0.0", &[])]);
-    // adding an approved package, with what it needs, is accepted, and the code may then import it
     let ok = with(&zod_manifest, &zod_lock, "const z = require('zod');\nmodule.exports = z;\n");
     let changed = git::changes(&base, &ok, &c).unwrap();
     assert_eq!(changed["dependencies"]["approved"], json!(["zod"]), "{changed}");
     capability::check(&base, &ok, &changed, &std::collections::BTreeMap::new()).unwrap();
-    // without approval the same files stay out of reach
     let mut strict = v.clone();
     strict["dependencies"] = json!({ "manager": "npm", "lockfile": "package-lock.json" });
     denied(git::changes(&base, &ok, &contract(&strict).unwrap()), "package-lock.json");
-    // a package the task did not approve, a change outside the dependency entries, and a quiet move of another package are refused
     let pad = with(&npm_manifest(&[("lodash", "^4.17.0"), ("left-pad", "^1.0.0")], scripts.clone()), &npm_lock(&[("lodash", "^4.17.0"), ("left-pad", "^1.0.0")], &[("lodash", "4.17.20", &[]), ("left-pad", "1.3.0", &[])]), "module.exports = 1;\n");
     denied(git::changes(&base, &pad, &c), "Dependency change not approved: left-pad");
     let told = kern::feedback::explain(&reason(git::changes(&base, &pad, &c)), Some(&c));
@@ -424,12 +406,10 @@ fn agents_change_dependencies_only_for_packages_the_task_approves() {
     let mut reformatted: Value = serde_json::from_str(&zod_lock).unwrap();
     reformatted["lockfileVersion"] = json!(2);
     denied(git::changes(&base, &with(&zod_manifest, &reformatted.to_string(), "module.exports = 1;\n"), &c), "The lockfile format changed");
-    // updating an approved package in the lockfile alone is fine, and a scope approval covers the whole scope
     let bumped = with(&zod_manifest, &npm_lock(&[("lodash", "^4.17.0"), ("zod", "^3.0.0")], &[("lodash", "4.17.20", &[]), ("zod", "3.23.8", &["zod-helper"]), ("zod-helper", "1.0.0", &[])]), "module.exports = 1;\n");
     git::changes(&ok, &bumped, &c).unwrap();
     let types = with(&npm_manifest(&[("lodash", "^4.17.0"), ("@types/node", "^22.0.0")], scripts.clone()), &npm_lock(&[("lodash", "^4.17.0"), ("@types/node", "^22.0.0")], &[("lodash", "4.17.20", &[]), ("@types/node", "22.0.0", &[])]), "module.exports = 1;\n");
     assert_eq!(git::changes(&base, &types, &c).unwrap()["dependencies"]["approved"], json!(["@types/node"]));
-    // importing a package that was not approved is still new authority
     let sneaky = with(&zod_manifest, &zod_lock, "const pad = require('left-pad');\nmodule.exports = pad;\n");
     let changed = git::changes(&base, &sneaky, &c).unwrap();
     denied(capability::check(&base, &sneaky, &changed, &std::collections::BTreeMap::new()), "package:left-pad");
@@ -458,22 +438,17 @@ fn dependency_installs_are_reused_only_for_the_same_manifests_registry_and_image
     assert!(cache.put(&key, "kern-deps-one", &record).unwrap());
     assert_eq!(cache.get(&key), Some(("kern-deps-one".to_string(), record.clone())));
     assert!(!cache.put(&key, "kern-deps-two", &record).unwrap(), "the first install stays the cached one");
-    // a damaged or foreign entry is ignored rather than trusted
     std::fs::write(t.join("cache").join(format!("{}.json", "b".repeat(64))), "{\"volume\":\"/etc\",\"record\":{}}").unwrap();
     assert!(cache.get(&"b".repeat(64)).is_none());
     assert!(cache.get("../escape").is_none());
-    // an install made before the writable cache folders existed lacks their mount points, so it is never reused
     std::fs::write(t.join("cache").join(format!("{}.json", "e".repeat(64))), json!({ "volume": "kern-deps-old", "record": record, "created_ns": 1 }).to_string()).unwrap();
     assert!(cache.get(&"e".repeat(64)).is_none());
     assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(t.join("cache").join(format!("{key}.json"))).unwrap()).unwrap()["layout"], 2);
-    // a full cache drops outdated entries and then its oldest ones, and names the volumes to remove
     let (k2, k3) = ("c".repeat(64), "d".repeat(64));
     cache.put(&k2, "kern-deps-c", &record).unwrap();
     cache.put(&k3, "kern-deps-d", &record).unwrap();
     assert_eq!(cache.evict(), vec!["kern-deps-old".to_string(), "kern-deps-one".to_string()]);
     assert!(cache.get(&key).is_none() && cache.get(&k3).is_some());
-    // An entry whose volume was removed by hand (a pruned Docker) is forgotten, and the next install takes its place: otherwise every
-    // install after it would make a volume of its own that nothing ever removes.
     cache.forget(&k3);
     assert!(cache.get(&k3).is_none() && cache.put(&k3, "kern-deps-e", &record).unwrap());
     assert_eq!(cache.get(&k3).map(|e| e.0), Some("kern-deps-e".to_string()));
@@ -501,7 +476,6 @@ fn a_gate_lets_only_so_many_sandboxes_run_at_once() {
 fn the_action_builds_kern_from_its_own_source_never_inside_the_pull_request() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let action = std::fs::read_to_string(root.join("action.yml")).unwrap();
-    // cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory, which holds the pull request's files
     let install = action.split("- name: Install Kern").nth(1).unwrap().split("- name:").next().unwrap();
     assert!(install.contains("id: install") && install.contains("working-directory: ${{ github.action_path }}"), "{install}");
     let verify = action.split("- name: Verify the agent change").nth(1).unwrap();
@@ -534,7 +508,6 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     assert_eq!((c.read.clone(), c.write.clone()), (vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()], vec!["README.md".to_string(), "index.js".into(), "src/".into(), "test/".into()]));
     assert!(c.dependencies && c.checks == vec!["addition".to_string()]);
     assert!(c.compare && c.delta.is_none() && c.app.is_none(), "every change is compared with the old code; the task states its change when it has one");
-    // a repository with a lockfile gets an upgrade task: any package it uses may move, and nothing else may change
     let up = contract(&read_json(repo.join(".github/kern/tasks/upgrade.json")).unwrap()).unwrap();
     assert!(up.approved == ["*"] && up.write.is_empty() && up.delta.as_ref().is_some_and(|d| d.changes.is_empty()), "{:?}", up.value);
     assert_eq!(up.tests.as_ref().map(|t| t.kind), Some(policy::Kind::Refactor), "an upgrade keeps every test passing and needs no new one");
@@ -547,7 +520,6 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     let workflow = std::fs::read_to_string(repo.join(".github/workflows/kern-verified.yml")).unwrap();
     assert!(workflow.contains("uses: acme/kern@0123456789abcdef0123456789abcdef01234567") && workflow.contains("pull_request_target"));
     assert!(workflow.contains("pull-requests: write") && workflow.contains("agent-mention:") && workflow.contains("max-attempts:"), "{workflow}");
-    // pushes to a kern/ branch are verified again through the hosted verifier, one run at a time per pull request
     for want in ["contents: write", "checks: write", "verifier-url: ${{ vars.KERN_VERIFIER_URL }}", "verifier-token: ${{ secrets.KERN_VERIFIER_TOKEN }}", "group: kern-verified-${{ github.event.pull_request.number || github.event.merge_group.head_ref }}", "cancel-in-progress: false",
         "merge_group:
     types: [checks_requested]"] {
@@ -559,13 +531,10 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
     assert!(r["next_steps"].as_array().unwrap().iter().any(|s| s.as_str().unwrap().contains("audit-merges")), "{r}");
     let ruleset = read_json(repo.join(".github/kern/ruleset.json")).unwrap();
     assert_eq!(ruleset["rules"][0]["parameters"]["required_status_checks"][0], json!({ "context": "kern-verified", "integration_id": 15368 }));
-    // never overwrites an existing setup
     denied(kern::init::init(&repo, &profile, "agent", "acme/kern@0123456789abcdef0123456789abcdef01234567"), "already");
-    // the CLI accepts repository paths relative to the working directory
     std::fs::remove_dir_all(repo.join(".github")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_kern")).current_dir(&t.0).args(["init", "widget", "profile.json", "acme/kern@0123456789abcdef0123456789abcdef01234567", "second"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    // without a test runner Kern can read, the contract has no test proof and says how to add one
     let plain = t.join("plain");
     sh(&t.0, &["init", "-q", "plain"]);
     sh(&plain, &["remote", "add", "origin", "https://github.com/acme/plain.git"]);
@@ -583,8 +552,6 @@ fn init_sets_up_a_repository_from_a_verifier_profile_in_one_command() {
 
 #[test]
 fn init_grants_the_folders_people_edit_and_keeps_config_generated_and_agent_files_out() {
-    // A Next.js-style app with no src/ folder, the commonest shape among 320 real agent PRs: 41 such repos could not be set up at all, and
-    // in the rest 127 PRs were refused for touching README.md, components/, public/ or index.html.
     let repo = files(&[("app/page.tsx", "export default 1;\n"), ("components/Button.tsx", "export const B = 1;\n"), ("hooks/use.ts", "export {};\n"), ("lib/db.ts", "export {};\n"),
         ("public/index.html", "<p></p>\n"), ("styles/globals.css", "p {}\n"), ("scripts/seed.js", "1;\n"), ("supabase/functions/x.ts", "export {};\n"), ("docs/guide.md", "x\n"),
         ("assets/logo.png", "png"), ("dist/bundle.js", "1;\n"), ("build/x.js", "1;\n"), ("coverage/lcov.info", "x\n"), ("vendor/lib.js", "1;\n"), (".vscode/settings.json", "{}\n"),
@@ -593,17 +560,13 @@ fn init_grants_the_folders_people_edit_and_keeps_config_generated_and_agent_file
     let (c, _) = kern::init::draft(&repo, Some(b"{}"), "agent", vec![json!("smoke")]).unwrap();
     assert_eq!(c.write, ["AUTHORS", "CHANGELOG.md", "README.md", "app/", "components/", "docs/", "hooks/", "index.html", "lib/", "public/", "scripts/", "styles.css", "styles/", "supabase/"]);
     assert_eq!(c.read, c.write);
-    // the change budget fits 99% of those PRs (they changed at most 33 files; 2 of 320 changed more than 5000 lines)
     assert_eq!((c.limits.files_changed, c.limits.lines_changed), (40, 4000));
-    // repositories up to 64 MiB of text can be set up (21 of the 44 refused at 16 MiB held at most 32 MiB, 28 at most 64 MiB)
     let sized = |mib: usize| -> Files { (0..mib).map(|i| (format!("src/f{i}.js"), Entry { mode: "100644".into(), oid: "a".repeat(40), size: 1048576, bytes: None })).collect() };
     let (c, _) = kern::init::draft(&sized(40), None, "agent", vec![json!("smoke")]).unwrap();
     assert_eq!(c.limits.total_bytes, 64 << 20);
     denied(kern::init::draft(&sized(65), None, "agent", vec![json!("smoke")]), "Kern supports up to 67108864");
-    // apps that keep every component at the top level (one real repo had 101 entries there) still fit in a contract
     let flat: Files = (0..120).map(|i| (format!("Screen{i}.jsx"), file("export default 1;\n"))).collect();
     assert_eq!(kern::init::draft(&flat, None, "agent", vec![json!("smoke")]).unwrap().0.write.len(), 120);
-    // a repository with nothing to grant still says so
     denied(kern::init::draft(&files(&[("assets/logo.png", "png"), (".github/workflows/ci.yml", "x\n")]), None, "agent", vec![json!("smoke")]), "write the task contract by hand");
 }
 
@@ -622,7 +585,6 @@ fn audit_log_chains_every_decision_and_the_report_escapes_agent_text() {
     let html = kern::audit::report(&log).unwrap();
     assert!(html.contains("&lt;script&gt;") && !html.contains("<script>alert"), "agent-controlled text must be escaped");
     assert!(html.contains("Patch widens module capabilities") && html.contains("fix-addition"));
-    // editing an earlier decision breaks the chain at the next entry
     let text = std::fs::read_to_string(&log).unwrap();
     std::fs::write(&log, text.replacen("VERIFIED", "BLOCKED", 1)).unwrap();
     denied(kern::audit::verify(&log), "line 2");
@@ -704,7 +666,6 @@ fn contracts_can_require_a_proof_of_honest_fix() {
     let mut unnamed = tested("bugfix");
     unnamed["tests"].as_object_mut().unwrap().remove("runner");
     denied(contract(&unnamed), "missing or unknown fields");
-    // edits to existing tests are checked by default, can be locked instead, and the choice is part of the contract's digest
     assert_eq!((t.edits, c.value["tests"]["edits"].as_str()), (policy::Edits::Checked, Some("checked")));
     let mut locked_edits = tested("bugfix");
     locked_edits["tests"]["edits"] = json!("locked");
@@ -715,9 +676,7 @@ fn contracts_can_require_a_proof_of_honest_fix() {
     assert_eq!(contract_digest(&contract(&explicit).unwrap()).unwrap(), contract_digest(&c).unwrap());
     locked_edits["tests"]["edits"] = json!("sometimes");
     denied(contract(&locked_edits), "tests.edits");
-    // a task may change behaviour on purpose; Kern then lists what changed instead of refusing it
     assert_eq!(contract(&tested("change")).unwrap().tests.unwrap().kind, policy::Kind::Change);
-    // Kern adds the one reporter it reads, so the command may not pick its own, and vitest has to run once instead of watching
     let with = |runner: &str, command: Value| { let mut v = tested("bugfix"); v["tests"]["runner"] = json!(runner); v["tests"]["command"] = command; contract(&v) };
     denied(with("vitest", json!(["/workspace/node_modules/.bin/vitest"])), "vitest run");
     for flags in [vec!["--reporter", "dot"], vec!["-R", "dot"], vec!["--reporter=spec"]] {
@@ -729,31 +688,25 @@ fn contracts_can_require_a_proof_of_honest_fix() {
     for (runner, command, want) in [
         ("node", json!(["/usr/local/bin/node", "--test", "test/"]), vec!["/usr/local/bin/node", "--test", "--test-reporter=tap", "test/"]),
         ("mocha", json!(["/workspace/node_modules/.bin/mocha", "--recursive"]), vec!["/workspace/node_modules/.bin/mocha", "--recursive", "--reporter", "json"]),
-        // in CI mode jest never writes a missing snapshot, so a new snapshot test cannot pass by recording whatever the code returns; the results
-        // come from a processor, not --json, which also sends the tests' console to stderr and failed 3 of winston's tests that pass in its own CI
         ("jest", json!(["/workspace/node_modules/.bin/jest"]), vec!["/workspace/node_modules/.bin/jest", "--ci", "--testResultsProcessor=/kern/jest-report.cjs"]),
         ("vitest", json!(["/workspace/node_modules/.bin/vitest", "run"]), vec!["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache"]),
     ] {
         assert_eq!(kern::proof::command(with(runner, command).unwrap().tests.as_ref().unwrap()), want);
     }
-    // a bug fix needs room to add the test that proves it; a refactor does not
     let mut locked = tested("bugfix");
     locked["filesystem"]["write"] = json!(["src/"]);
     denied(contract(&locked), "add a test");
     locked["tests"]["kind"] = json!("refactor");
     contract(&locked).unwrap();
-    // only version 4 carries the section, and version 4 must state it (null is allowed)
     let mut v3 = tested("bugfix");
     v3["version"] = json!(3);
     denied(contract(&v3), "missing or unknown fields");
     let mut v4 = tested("bugfix");
     v4.as_object_mut().unwrap().remove("tests");
     denied(contract(&v4), "missing or unknown fields");
-    // a narrower contract can never weaken or drop the proof, but may add one
     denied(attenuate(&tested("bugfix"), &tested("feature")), "test proof");
     denied(attenuate(&tested("bugfix"), &none), "test proof");
     attenuate(&none, &tested("bugfix")).unwrap();
-    // operators cannot shadow the built-in check
     let mut op = operator_value(&["external"]);
     op["checks"][0]["id"] = json!("honest-fix");
     denied(operator(&op), "reserved");
@@ -778,13 +731,10 @@ fn screened(kind: &str, changes: &[(&str, Option<&str>)]) -> R<Value> { git::cha
 fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
     let ok = screened("bugfix", &[FIX, REGRESSION]).unwrap();
     assert_eq!((ok["tests"]["new_test_files"].clone(), ok["tests"]["existing_test_files"].as_u64(), ok["tests"]["runner"].as_str()), (json!(["test/regression.test.mjs"]), Some(2), Some("node")));
-    // existing tests may be rewritten or removed: the verifier then checks that the old tests still pass and that their safety net holds
     let edited = screened("refactor", &[FIX, ("test/add.test.mjs", Some("// gutted\n")), ("test/fixtures/data.json", None)]).unwrap();
     assert_eq!((edited["tests"]["changed_test_files"].clone(), edited["tests"]["deleted_test_files"].clone()), (json!(["test/add.test.mjs"]), json!(["test/fixtures/data.json"])));
-    // a regression test may go into an existing test file
     let extended = format!("{ADD_TEST}test('adds 2 + 2', () => assert.equal(add(2, 2), 4));\n");
     screened("bugfix", &[FIX, ("test/add.test.mjs", Some(&extended))]).unwrap();
-    // a contract can lock existing tests instead
     let mut locked = tested("bugfix");
     locked["tests"]["edits"] = json!("locked");
     let strict = |changes: &[(&str, Option<&str>)]| git::changes(&honest_base(), &honest_change(changes), &contract(&locked).unwrap());
@@ -794,9 +744,7 @@ fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
     denied(screened("bugfix", &[FIX]), "must add a test");
     denied(screened("bugfix", &[FIX, ("test/helpers/build.mjs", Some("export const x = 1;\n"))]), "must add a test");
     screened("refactor", &[FIX]).unwrap();
-    // an edit may not slip a skip or focus marker into an existing test file
     denied(screened("refactor", &[FIX, ("test/add.test.mjs", Some(&ADD_TEST.replace("test('adds'", "test.skip('adds'")))]), "test.skip");
-    // a new test file may not skip or focus tests; the runner's own report catches the rest, however it is written
     for (code, marker) in [
         ("test.only('x', () => {});", "test.only"), ("describe.skip('x', () => {});", "describe.skip"), ("it.todo('x');", "it.todo"),
         ("xit('x', () => {});", "xit"), ("fdescribe('x', () => {});", "fdescribe"), ("test('x', { skip: true }, () => {});", "the skip option"),
@@ -805,13 +753,11 @@ fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
         let body = format!("import {{ test, describe, it }} from 'node:test';\n{code}\n");
         denied(screened("feature", &[FIX, ("test/new.test.mjs", Some(&body))]), &format!("test/new.test.mjs uses {marker}"));
     }
-    // what a test decides while it runs is judged from the runner's report instead, so ordinary code is not refused up front
     for code in ["test('x', (t) => { if (process.platform === 'win32') t.skip(); });", "class Store { skip() {} }\nnew Store().skip();", "process.on('exit', () => {});", "test('x', { skip: false }, () => {});"] {
         let body = format!("import {{ test }} from 'node:test';\n{code}\n");
         screened("feature", &[FIX, ("test/new.test.mjs", Some(&body))]).unwrap();
     }
     screened("feature", &[FIX, ("test/fixtures/more.json", Some("{}\n")), ("test/helpers/build.mjs", Some("export const x = 1;\n"))]).unwrap();
-    // code outside the tests may not reach into the test runner or the assertion library, or check whether tests are running
     for (path, code, marker) in [
         ("src/add.mjs", "export const add = (a, b) => a + b;\nit.only('x', () => {});\n", "the test global it"),
         ("src/add.mjs", "export const add = (a, b) => (typeof describe === 'function' ? 4 : a + b);\n", "the test global describe"),
@@ -822,7 +768,6 @@ fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
         ("src/patch.cjs", "const a = require('node:assert/strict');\nReflect.set(a, 'equal', () => {});\n", "a change to node:assert/strict"),
         ("src/add.mjs", "export const add = (a, b) => (process.env.JEST_WORKER_ID ? 4 : a + b);\n", "JEST_WORKER_ID"),
         ("src/add.mjs", "export const add = (a, b) => (process.env['VITEST'] ? 4 : a + b);\n", "VITEST"),
-        // code that looks at who is calling it can answer the new test one way and the old tests another
         ("src/add.mjs", "export const add = (a, b) => (new Error().stack.includes('regression') ? 4 : a + b);\n", "new Error().stack"),
         ("src/add.mjs", "export const add = (a, b) => (Error('x').stack.includes('regression') ? 4 : a + b);\n", "new Error().stack"),
         ("src/patch.cjs", "function add(a, b) { return add.caller && add.caller.name === 'regression' ? 4 : a + b; }\nmodule.exports = add;\n", ".caller"),
@@ -832,16 +777,13 @@ fn honest_fix_contracts_lock_existing_tests_and_refuse_tricks() {
     ] {
         denied(screened("feature", &[(path, Some(code))]), marker);
     }
-    // a local name that happens to match is not the test runner, and code that already did this before is judged as before
     screened("feature", &[("src/add.mjs", Some("export const add = (a, b) => { for (const it of [a, b]) it.toString(); return a + b; };\n"))]).unwrap();
-    // ordinary error handling reads an error's stack; that is not looking at the caller
     screened("feature", &[("src/add.mjs", Some("export const add = (a, b) => { try { return a + b; } catch (e) { console.error(e.stack); throw e; } };\n"))]).unwrap();
     let mut before = honest_base();
     before.insert("src/env.mjs".into(), file("export const worker = process.env.JEST_WORKER_ID;\n"));
     let mut after = before.clone();
     after.insert("src/env.mjs".into(), file("export const worker = process.env.JEST_WORKER_ID || '1';\n"));
     git::changes(&before, &after, &contract(&tested("feature")).unwrap()).unwrap();
-    // the test runner's settings decide which tests run and how they check results
     for config in ["test/.mocharc.json", "test/mocha.opts", "test/jest.config.js", "test/vitest.config.mts", "src/setupTests.js", "test/vite.config.ts", "src/.babelrc", "test/babel.config.cjs", "test/jest.setup.js"] {
         denied(screened("feature", &[FIX, (config, Some("{}\n"))]), "Test runner configuration");
     }
@@ -854,29 +796,23 @@ fn runner_reports_are_read_test_by_test() {
     use kern::proof::{Count, read_report};
     let c = |passed: u32, failed: u32, skipped: u32| Count { passed, failed, skipped };
     let tests = |items: &[(&str, Count)]| items.iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>();
-    // mocha 10 names each test's file, and JSON that a test prints before the report is not mistaken for it
     let m = read_report(Runner::Mocha, &report_fixture("mocha10.json")).unwrap();
     assert_eq!(m.tests, tests(&[("test/console.test.js > logs", c(1, 0, 0)), ("test/math.test.js > math adds", c(1, 0, 0)), ("test/math.test.js > math fails", c(0, 1, 0)),
         ("test/math.test.js > math pending", c(0, 0, 1)), ("test/math.test.js > math skipped", c(0, 0, 1))]));
     assert!(m.problems.is_empty());
-    // mocha 5 does not, so the full title identifies a test
     assert_eq!(read_report(Runner::Mocha, &report_fixture("mocha5.json")).unwrap().tests.keys().map(String::as_str).collect::<Vec<_>>(), ["logs", "math adds", "math fails", "math pending", "math skipped"]);
-    // jest and vitest: a todo counts as skipped, and a test file that cannot load is a failure of its own
     let j = read_report(Runner::Jest, &report_fixture("jest.json")).unwrap();
     assert_eq!(j.tests, tests(&[("test/math.jest.test.js > math > adds", c(1, 0, 0)), ("test/math.jest.test.js > math > fails", c(0, 1, 0)),
         ("test/math.jest.test.js > math > later", c(0, 0, 1)), ("test/math.jest.test.js > math > skipped", c(0, 0, 1))]));
     assert_eq!(j.problems, vec!["test/broken.test.js".to_string()]);
-    // the same run read through Kern's results processor, which Kern uses instead of --json, gives the same results
     let p = read_report(Runner::Jest, &report_fixture("jest-processor.out")).unwrap();
     assert_eq!((p.tests, p.problems), (j.tests.clone(), j.problems.clone()));
     let v = read_report(Runner::Vitest, &report_fixture("vitest.json")).unwrap();
     assert_eq!(v.tests, tests(&[("test/math.vitest.test.mjs > math > adds", c(1, 0, 0)), ("test/math.vitest.test.mjs > math > fails", c(0, 1, 0)),
         ("test/math.vitest.test.mjs > math > later", c(0, 0, 1)), ("test/math.vitest.test.mjs > math > skipped", c(0, 0, 1))]));
-    // node --test: suites group their tests, and a file that cannot load is reported as a failed test
     let n = read_report(Runner::Node, &report_fixture("node.tap")).unwrap();
     assert_eq!(n.tests, tests(&[("adds", c(1, 0, 0)), ("fails", c(0, 1, 0)), ("group > inner", c(1, 0, 0)), ("later", c(0, 0, 1)), ("skipped", c(0, 0, 1))]));
     assert_eq!(read_report(Runner::Node, &report_fixture("node-broken.tap")).unwrap().tests.get("test/broken.test.js"), Some(&c(0, 1, 0)));
-    // no report, a report cut short, or a second report is never taken as results
     let text = |name: &str| String::from_utf8(report_fixture(name)).unwrap();
     let (mocha, jest, tap, processed) = (text("mocha10.json"), text("jest.json"), text("node.tap"), text("jest-processor.out"));
     for (runner, out, why) in [
@@ -900,7 +836,6 @@ fn tap(tests: &[(&str, &str)]) -> Vec<u8> {
 }
 fn no_edits(_: &kern::proof::Plan) -> R<Value> { panic!("no existing test changed, so no bugs are planted") }
 fn runs(r: kern::proof::Run, base: &[(&str, &str)], new: &[(&str, &str)], old: &[(&str, &str)]) -> R<kern::proof::Output> {
-    // the old tests alone on the new code behave as they did on the old code: these are honest changes
     let tests = match r { kern::proof::Run::Base | kern::proof::Run::Kept => base, kern::proof::Run::New => new, kern::proof::Run::Old => old };
     Ok(kern::proof::Output { stdout: tap(tests), exit_code: i64::from(tests.iter().any(|t| t.1 == "failed")) })
 }
@@ -926,7 +861,6 @@ fn honest_fix_proof_compares_what_the_runner_says_ran() {
     assert_eq!(evidence["new_tests"], json!([{ "test": "adds 2 + 2", "old": "failed", "new": "passed" }]));
     assert_eq!((evidence["fail_to_pass"].as_u64(), evidence["pass_to_pass"].as_u64(), evidence["existing_test_files"].as_u64(), evidence["runner"].as_str()), (Some(1), Some(1), Some(2), Some("node")), "{evidence}");
     assert!(evidence["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "{evidence}");
-    // whatever the trick, the runner's own report shows what happened
     let refuse = |new: &[(&str, &str)], old: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &before, new, old)), why);
     refuse(&fixed, &fixed, "None of the new tests fails on the old code");
     refuse(&[("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
@@ -935,29 +869,22 @@ fn honest_fix_proof_compares_what_the_runner_says_ran() {
     refuse(&[("adds", "passed"), ("adds 2 + 2", "skipped")], &failing, "Tests did not run on the new code: \"adds 2 + 2\"");
     refuse(&[("adds", "failed"), ("adds 2 + 2", "passed")], &failing, "The test suite fails on the new code: \"adds\"");
     refuse(&before, &failing, "No new test ran");
-    // a new test that cannot even load on the old code does not show which behaviour was wrong
     denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Old { Ok(Output { stdout: b"Error: Cannot find module '../src/new.mjs'\n".to_vec(), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }),
         "The test run on the old code with the new tests added gave no usable results");
-    // a run that fails although every test passed, and a run that could not happen, are never taken as a pass or as proof
     denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::New { Ok(Output { stdout: tap(&fixed), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }), "although no test failed");
     denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Old { Err(Denied("docker timed out after 35s".into())) } else { runs(r, &before, &fixed, &failing) }),
         "Kern could not run the test suite on the old code with the new tests added: docker timed out");
     denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Base { Ok(Output { stdout: Vec::new(), exit_code: 0 }) } else { runs(r, &before, &fixed, &failing) }), "Kern could not read the test results of the old code");
-    // a suite that already failed before the change is reported as such
     denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &[("adds", "failed")], &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing)), "already fails before the change");
-    // two tests may share a title (mocha 5 does not name files): counting keeps them apart
     prove_with("bugfix", &candidate, &|r, _| runs(r, &before, &[("adds", "passed"), ("adds", "passed")], &[("adds", "passed"), ("adds", "failed")])).unwrap();
-    // a test that fails once and passes when run again is flaky: it is recorded, never blocked on
     let news = AtomicUsize::new(0);
     let flaky = prove_with("bugfix", &candidate, &|r, _| if r == Run::New && news.fetch_add(1, SeqCst) == 0 { runs(r, &before, &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing) } else { runs(r, &before, &fixed, &failing) }).unwrap();
     assert_eq!((flaky["flaky"].clone(), news.load(SeqCst)), (json!(["adds"]), 2), "{flaky}");
     let crashed = AtomicUsize::new(0);
     prove_with("bugfix", &candidate, &|r, _| if r == Run::New && crashed.fetch_add(1, SeqCst) == 0 { Ok(Output { stdout: b"Segmentation fault\n".to_vec(), exit_code: 139 }) } else { runs(r, &before, &fixed, &failing) }).unwrap();
-    // ...but a failure on the old code only counts as proof when it repeats
     let olds = AtomicUsize::new(0);
     denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::Old && olds.fetch_add(1, SeqCst) > 0 { runs(r, &before, &fixed, &fixed) } else { runs(r, &before, &fixed, &failing) }),
         "The new tests fail on the old code only sometimes: \"adds 2 + 2\"");
-    // a runner that finds nothing for the file list gets the whole suite instead, so a focused run can only save time, never decide
     let calls = Mutex::new(Vec::new());
     prove_with("bugfix", &candidate, &|r, files| {
         calls.lock().unwrap().push((r, files.len()));
@@ -965,8 +892,6 @@ fn honest_fix_proof_compares_what_the_runner_says_ran() {
     }).unwrap();
     let calls = calls.into_inner().unwrap();
     assert_eq!(calls.iter().filter(|c| **c == (Run::Old, 0)).count(), 2, "the whole suite on the old code, twice: {calls:?}");
-    // a feature's new tests need not fail first and a refactor needs no new test; neither runs the old code with the new tests, and only
-    // the feature, which adds a test file, also runs the old tests alone on the new code
     let seen = Mutex::new(Vec::new());
     prove_with("feature", &candidate, &|r, _| { seen.lock().unwrap().push(r); runs(r, &before, &fixed, &fixed) }).unwrap();
     let mut seen = seen.into_inner().unwrap();
@@ -983,8 +908,6 @@ fn honest_fix_proof_compares_what_the_runner_says_ran() {
 #[test]
 fn code_that_only_behaves_when_the_new_tests_run_first_is_caught() {
     use kern::proof::{Exec, Output, Run, prove};
-    // The impossible-task benchmark: code that returns the new answer only on its first call passes the new test (its file runs first) and
-    // the old test (it runs later), though the two contradict each other. 5 of 55 attempts got through until the old tests also ran alone.
     let (base, candidate) = (honest_base(), honest_change(&[FIX, REGRESSION]));
     let policy = contract(&tested("bugfix")).unwrap();
     let changed = git::changes(&base, &candidate, &policy).unwrap();
@@ -998,7 +921,6 @@ fn code_that_only_behaves_when_the_new_tests_run_first_is_caught() {
     denied(prove_with(&alone(&[])), "Tests did not run on the new code: \"adds\"");
     let evidence = prove_with(&alone(&[("adds", "passed")])).unwrap();
     assert_eq!(evidence["old_tests_alone"]["passed"], 1, "{evidence}");
-    // a change that adds no test file has nothing to run first, so it gets no extra run
     let seen = std::sync::Mutex::new(Vec::new());
     let refactor = contract(&tested("refactor")).unwrap();
     let plain = honest_change(&[FIX]);
@@ -1010,8 +932,6 @@ fn code_that_only_behaves_when_the_new_tests_run_first_is_caught() {
 fn tests_that_already_fail_before_the_change_are_set_aside_but_must_keep_running() {
     use kern::proof::{Exec, Output, Run, prove};
     use std::sync::Mutex;
-    // Real suites have tests that cannot pass in the offline sandbox (axios: two need the internet) or are broken upstream (axios: one on
-    // Node 22). They fail on the old code before the agent did anything, so they can neither block the change nor count as proof.
     let (base, candidate) = (honest_base(), honest_change(&[FIX, REGRESSION]));
     let prove_with = |kind: &str, candidate: &Files, run: &Exec| -> R<Value> {
         let policy = contract(&tested(kind)).unwrap();
@@ -1028,22 +948,15 @@ fn tests_that_already_fail_before_the_change_are_set_aside_but_must_keep_running
     let mut calls = calls.into_inner().unwrap();
     calls.sort();
     assert_eq!(calls, vec![(Run::Base, 0), (Run::New, 0), (Run::Kept, 0), (Run::Old, 1), (Run::Old, 1)], "a known failure is not a reason to run the new code again");
-    // a test that failed before may start passing; that is fine and recorded
     let healed = prove_with("bugfix", &candidate, &|r, _| runs(r, &before, &[("adds", "passed"), ("needs internet", "passed"), ("adds 2 + 2", "passed")], &failing)).unwrap();
     assert_eq!(healed["already_failing"]["passing_now"], 1, "{healed}");
-    // it must still run: dropping, skipping or renaming it is caught as before
     let refuse = |new: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &before, new, &failing)), why);
     refuse(&[("adds", "passed"), ("adds 2 + 2", "passed")], "Tests did not run on the new code: \"needs internet\"");
     refuse(&[("adds", "passed"), ("needs internet", "skipped"), ("adds 2 + 2", "passed")], "Tests did not run on the new code: \"needs internet\"");
-    // everything that passed before must still pass, and every new test must pass
     refuse(&[("adds", "failed"), ("needs internet", "failed"), ("adds 2 + 2", "passed")], "The test suite fails on the new code: \"adds\"");
     refuse(&[("adds", "passed"), ("needs internet", "failed"), ("adds 2 + 2", "failed")], "The test suite fails on the new code: \"adds 2 + 2\"");
-    // a crash with no failing test is still a crash, known failures or not
     denied(prove_with("bugfix", &candidate, &|r, _| if r == Run::New { Ok(Output { stdout: tap(&[("adds", "passed"), ("adds 2 + 2", "passed")]), exit_code: 1 }) } else { runs(r, &before, &fixed, &failing) }), "");
-    // a suite where nothing passes before the change proves nothing
     denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &[("adds", "failed")], &[("adds", "failed"), ("adds 2 + 2", "passed")], &failing)), "already fails before the change");
-    // rewritten tests are still checked by planting bugs: the suite fails anyway, so the planting runs read the report, and a planted bug
-    // counts as caught only when a test fails that did not already fail before the change
     let rewritten = honest_change(&[FIX, ("test/add.test.mjs", Some("import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add } from '../src/add.mjs';\ntest('adds', () => assert.equal(add(2, 3), 5));\n"))]);
     let policy = contract(&tested("feature")).unwrap();
     let changed = git::changes(&base, &rewritten, &policy).unwrap();
@@ -1057,7 +970,6 @@ fn tests_that_already_fail_before_the_change_are_set_aside_but_must_keep_running
     assert_eq!((plan["known"].clone(), plan["runner"].as_str()), (json!(["needs internet"]), Some("node")), "{plan}");
     assert!(plan["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "the planting runs print the report they are judged by: {plan}");
     assert!(evidence["test_edits"]["safety_net"]["checked"].as_u64() > Some(0), "{evidence}");
-    // the judgement itself: only a failure beyond the known ones catches a bug, and a run that leaves no report counts by its exit code
     use kern::proof::caught;
     let known = BTreeSet::from(["needs internet".to_string()]);
     assert!(!caught(policy::Runner::Node, &known, &tap(&before), false), "the known failure alone catches nothing");
@@ -1079,26 +991,21 @@ fn planted_bugs_are_small_edits_in_the_code_the_old_tests_reach() {
     let policy = contract(&tested("refactor")).unwrap();
     let changed = git::changes(&base, &candidate, &policy).unwrap();
     let plan = kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap();
-    // only the code the old version of the changed test reaches, through its helpers, and nothing it does not import
     assert_eq!(plan.targets, ["src/add.mjs", "src/log.mjs"]);
-    // the old side runs only the changed test file; each planted bug, only the new tests that reach its file
     assert_eq!(plan.old_files, ["test/add.test.mjs"]);
     assert!(!plan.mutants.is_empty() && plan.mutants.iter().all(|m| m.tests == ["test/add.test.mjs"]), "{:?}", plan.mutants);
-    // planted runs use the same CI-mode command as the proof runs: no snapshot is ever recorded, no cache written
     for (runner, command, last) in [("jest", json!(["/workspace/node_modules/.bin/jest"]), "--ci"), ("vitest", json!(["/workspace/node_modules/.bin/vitest", "run"]), "--no-cache"), ("node", json!(["/usr/local/bin/node", "--test"]), "--test")] {
         let mut v = tested("refactor");
         (v["tests"]["runner"], v["tests"]["command"]) = (json!(runner), command);
         let other = contract(&v).unwrap();
         assert_eq!(kern::proof::plan(other.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap().command.last().map(String::as_str), Some(last), "{runner}");
     }
-    // a changed helper reaches other tests, so the old side runs the whole suite
     let mut helped = candidate.clone();
     helped.insert("test/helpers/load.mjs".into(), file("export { add } from '../../src/add.mjs';
 export const unused = 1;
 "));
     let changed_helper = git::changes(&base, &helped, &policy).unwrap();
     assert!(kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &helped, &changed_helper["tests"]).unwrap().old_files.is_empty());
-    // one small edit per line, the strongest kind first, never inside logging
     let planted: Vec<String> = plan.mutants.iter().map(|m| m.describe()).collect();
     assert_eq!(planted, ["src/add.mjs:3 changes > to >=", "src/add.mjs:4 removes a call", "src/add.mjs:7 changes + to -"], "{planted:?}");
     for m in &plan.mutants {
@@ -1107,7 +1014,6 @@ export const unused = 1;
         kern::capability::footprint("src/add.mjs", &mutated).expect("every planted bug still parses");
     }
     assert_eq!(plan.mutants, kern::proof::plan(policy.tests.as_ref().unwrap(), &base, &candidate, &changed["tests"]).unwrap().mutants, "the same change plants the same bugs");
-    // a long file gets its bugs spread from top to bottom, not bunched at the start
     let long: String = (1..=60).map(|i| format!("export const f{i} = (a) => a + {i};\n")).collect();
     let mut wide = base.clone();
     wide.insert("src/add.mjs".into(), file(&long));
@@ -1118,7 +1024,6 @@ export const unused = 1;
     let lines: Vec<usize> = kern::proof::plan(policy.tests.as_ref().unwrap(), &wide, &wide_candidate, &changed["tests"]).unwrap().mutants.iter().map(|m| m.line).collect();
     assert_eq!(lines.len(), 40);
     assert!(lines[0] == 1 && lines[39] >= 59 && lines.windows(2).all(|w| w[0] < w[1]), "{lines:?}");
-    // tests that import nothing Kern can follow fall back to the code outside the tests
     candidate.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\ntest('nothing', () => {});\n"));
     let mut lone = base.clone();
     lone.insert("test/add.test.mjs".into(), file("import { test } from 'node:test';\ntest('nothing at all', () => {});\n"));
@@ -1129,7 +1034,6 @@ export const unused = 1;
 #[test]
 fn planted_bugs_spread_over_parallel_sandboxes_and_come_back_in_order() {
     use kern::proof::{merge_planted, split_planting};
-    // winston's 40 planted bugs took most of the 30-minute limit one after another in a single sandbox
     let long: String = (1..=60).map(|i| format!("export const f{i} = (a) => a + {i};\n")).collect();
     let base = files(&[("src/add.mjs", &long), ("test/add.test.mjs", "import { test } from 'node:test';\nimport { f1 } from '../src/add.mjs';\ntest('f1', () => f1(1));\n")]);
     let mut candidate = base.clone();
@@ -1143,10 +1047,8 @@ fn planted_bugs_spread_over_parallel_sandboxes_and_come_back_in_order() {
     let mut ids: Vec<usize> = parts.iter().flat_map(|p| p.mutants.iter().map(|m| m.id)).collect();
     ids.sort();
     assert!(ids == (1..=40).collect::<Vec<_>>() && parts.iter().all(|p| p.command == plan.command && p.old_files == plan.old_files && p.known == plan.known));
-    // a few bugs are not worth a second sandbox: each one runs its own baselines first
     assert_eq!(split_planting(&plan, 64).len(), 10);
     assert_eq!(split_planting(&plan, 1).len(), 1);
-    // the answers come back as one, in plan order, and a part whose baseline failed decides the whole
     let answer = |p: &kern::proof::Plan, ok: bool, ms: u64| json!({ "version": 1, "baseline": { "old": ok, "new": true, "old_error": if ok { "" } else { "boom" }, "new_error": "" },
         "milliseconds": { "old": ms, "new": ms, "total": ms * 10 }, "mutants": p.mutants.iter().rev().map(|m| json!({ "id": m.id, "result": "caught" })).collect::<Vec<_>>() });
     let merged = merge_planted(parts.iter().enumerate().map(|(i, p)| answer(p, true, 100 + i as u64)).collect()).unwrap();
@@ -1173,11 +1075,9 @@ fn a_planted_bug_counts_as_lost_only_when_both_runs_agree_twice() {
     assert_eq!(decided(false, &[Some(true), Some(false), Some(true), Some(true)]).0, "flaky", "the new tests missed it only once");
     assert_eq!(decided(false, &[None]).0, "not run");
     assert_eq!(decided(false, &[Some(true), Some(false), None]).0, "not run");
-    // with the tests that reach the planted bug known, those run first; the whole suite has the last word before anything counts as lost
     assert_eq!(decided(true, &[Some(true), Some(true)]), ("caught", vec![Old, NewFocused]));
     assert_eq!(decided(true, &[Some(true), Some(false), Some(true)]), ("caught", vec![Old, NewFocused, NewFull]));
     assert_eq!(decided(true, &[Some(true), Some(false), Some(false), Some(true), Some(false)]), ("lost", vec![Old, NewFocused, NewFull, Old, NewFull]));
-    // a baseline always runs with whatever time is left; a planted run starts only if its own limit still fits
     use kern::proof::run_limit;
     let s = std::time::Duration::from_secs;
     assert_eq!(run_limit(s(100), None), Some(s(100)), "a baseline gets the whole remaining budget");
@@ -1204,7 +1104,6 @@ fn rewritten_tests_must_keep_the_old_behaviour_and_the_safety_net() {
     let renamed = [("adds two numbers", "passed")];
     let honest = |r: Run| runs(r, &[("adds", "passed")], &renamed, &[]);
     let kept = |r: Run, old: &[(&str, &str)]| if r == Run::Kept { Ok(Output { stdout: tap(old), exit_code: 0 }) } else { honest(r) };
-    // an honest rewrite: the old tests still pass on the new code, and every planted bug they caught is still caught
     let (calls, mut plans) = (Mutex::new(Vec::new()), Vec::new());
     let evidence = prove_with("refactor", &edited_change(), &|r, _| { calls.lock().unwrap().push(r); kept(r, &[("adds", "passed")]) }, &mut |p| { plans.push(p.mutants.len()); Ok(mutated(&["caught"])) }).unwrap();
     let mut calls = calls.into_inner().unwrap();
@@ -1214,36 +1113,27 @@ fn rewritten_tests_must_keep_the_old_behaviour_and_the_safety_net() {
     let net = &evidence["test_edits"]["safety_net"];
     assert_eq!((net["planted"].as_u64(), net["checked"].as_u64(), net["still_caught"].as_u64(), net["lost"].clone()), (Some(1), Some(1), Some(1), json!([])), "{evidence}");
     assert_eq!(evidence["test_edits"]["changed_files"], json!(["test/add.test.mjs"]));
-    // the evidence is signed, so it holds only what Kern checked itself, never the planting run's raw output
     canonical(&evidence).expect("the evidence can be signed");
     assert_eq!((net["milliseconds"]["old"].as_u64(), net["milliseconds"]["new"].as_u64(), net.get("seconds")), (Some(400), Some(500), None), "{net}");
-    // the rewrite stops catching a bug the old test caught
     denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["lost"]))),
         "Your test changes stop catching bugs the old tests caught: \"src/add.mjs:1 changes + to -\"");
-    // a result seen only once is noise: it is recorded, never blocked on
     let flaky = prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["flaky"]))).unwrap();
     assert_eq!(flaky["test_edits"]["safety_net"]["flaky"], json!(["src/add.mjs:1 changes + to -"]));
-    // the old test fails on the new code: rewriting it does not change what it checked
     denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "failed")]), &mut |_| Ok(mutated(&["caught"]))), "Existing tests fail on the new code: \"adds\"");
     denied(prove_with("bugfix", &edited_change(), &|r, _| if r == Run::Kept { Ok(Output { stdout: b"Error: Cannot find module '../src/add.mjs'\n".to_vec(), exit_code: 1 }) } else { honest(r) }, &mut |_| Ok(mutated(&["caught"]))),
         "The old tests gave no usable results on the new code");
-    // ...unless the task changes behaviour on purpose: then Kern lists every changed expectation for the reviewer
     let changed = prove_with("change", &edited_change(), &|r, _| kept(r, &[("adds", "failed")]), &mut |_| Ok(mutated(&["caught"]))).unwrap();
     assert_eq!(changed["test_edits"]["changed_expectations"], json!(["adds"]), "{changed}");
-    // checking that could not finish in time is not a pass
     denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["not run"]))), "could not check the test changes in time");
     let mut broken = mutated(&["caught"]);
     broken["baseline"]["old"] = json!(false);
     denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(broken.clone())), "Kern could not check the test changes");
-    // a result for a bug Kern did not plant is never trusted
     denied(prove_with("refactor", &edited_change(), &|r, _| kept(r, &[("adds", "passed")]), &mut |_| Ok(mutated(&["caught", "caught"]))), "Kern could not check the test changes");
-    // nothing extra runs when no existing test changed
     let calls = Mutex::new(Vec::new());
     prove_with("refactor", &honest_change(&[FIX]), &|r, _| { calls.lock().unwrap().push(r); runs(r, &[("adds", "passed")], &[("adds", "passed")], &[]) }, &mut |_| panic!("no planted bugs without test edits")).unwrap();
     let mut calls = calls.into_inner().unwrap();
     calls.sort();
     assert_eq!(calls, vec![Run::Base, Run::New]);
-    // when only tests changed, the code is the old code, so the existing suite's run already is the old tests on the new code
     let calls = Mutex::new(Vec::new());
     let tests_only = honest_change(&[("test/add.test.mjs", Some(&ADD_TEST.replace("test('adds'", "test('adds two numbers'")))]);
     let only = prove_with("refactor", &tests_only, &|r, _| { calls.lock().unwrap().push(r); runs(r, &[("adds", "passed")], &renamed, &[]) }, &mut |_| Ok(mutated(&["caught"]))).unwrap();
@@ -1277,7 +1167,6 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     let nine: Vec<(String, String)> = (0..9).map(|i| (format!("src/f{i}.mjs"), "export const x = 1;\n".to_string())).collect();
     let nine: Vec<(&str, &str)> = nine.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
     check(reason(git::changes(&base, &with(&nine), &policy)), "budget", true, None, &["8 files", "200"]);
-    // code whose answers depend on which tests ran first is the agent's to fix; a suite that never passed is a human's
     {
         use kern::proof::{Output, Run, prove};
         let (hb, hc) = (honest_base(), honest_change(&[FIX, REGRESSION]));
@@ -1300,7 +1189,6 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     check("Tests show new runtime behavior: exec:id, net:api.example.com:443. If this is intended, allow it in the task contract (version 3): \"behaviors\": [\"exec:id\",\"net:api.example.com:443\"]".into(), "behavior", true, None, &["`exec:id`", "`net:api.example.com:443`"]);
     check("Check addition case 2 failed (exit code 1)".into(), "check-failed", true, None, &["`addition`"]);
     check("Check addition case 1 output differs from the expected answer".into(), "check-failed", true, None, &["`addition`"]);
-    // honest-fix messages come from the real proof
     let mut locked = tested("bugfix");
     locked["tests"]["edits"] = json!("locked");
     check(reason(git::changes(&honest_base(), &honest_change(&[FIX, ("test/add.test.mjs", Some("// gutted\n"))]), &contract(&locked).unwrap())), "test-locked", true, Some("test/add.test.mjs"), &["`test/add.test.mjs`"]);
@@ -1322,7 +1210,6 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
         "test-proof", true, None, &["every time"]);
     check(reason(kern::proof::prove(p.tests.as_ref().unwrap(), &b, &c, &ch, &|r, _| if r == kern::proof::Run::New { Ok(kern::proof::Output { stdout: b"Segmentation fault\n".to_vec(), exit_code: 139 }) } else { runs(r, &[("adds", "passed")], &fixed, &fixed) }, &mut no_edits)),
         "test-results", true, None, &["new code"]);
-    // rewritten tests: the old ones must still pass on the new code, and the bugs they caught must still be caught
     let (pe, edited) = (contract(&tested("refactor")).unwrap(), edited_change());
     let che = git::changes(&b, &edited, &pe).unwrap();
     let edits = |kept: &[(&str, &str)], result: &str| reason(kern::proof::prove(pe.tests.as_ref().unwrap(), &b, &edited, &che,
@@ -1330,7 +1217,6 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     check(edits(&[("adds", "failed")], "caught"), "behavior-changed", true, None, &["`\"adds\"`"]);
     check(edits(&[("adds", "passed")], "lost"), "tests-weakened", true, None, &["src/add.mjs:1 changes + to -"]);
     check(edits(&[("adds", "passed")], "not run"), "test-edits", true, None, &["unchanged"]);
-    // the agent's own run
     check("The agent exited with code 3".into(), "agent", true, None, &["code 3"]);
     check(reason(kern::util::tree_paths(["src/aux.js"], true)), "file-name", true, Some("src/aux.js"), &["`src/aux.js`"]);
     check(reason(kern::util::tree_paths(["src/A.js", "src/a.js"], true)), "file-name", true, None, &["upper and lower case"]);
@@ -1338,11 +1224,9 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     std::fs::create_dir_all(ws.0.join("src")).unwrap();
     std::fs::write(ws.0.join("src/big.txt"), "x".repeat(70000)).unwrap();
     check(reason(kern::local::read_workspace(&ws.0, &base, 65536, 1048576)), "workspace", true, Some("src/big.txt"), &["`src/big.txt`"]);
-    // a proof that no longer matches the pull request needs a human when no hosted verifier checks pushes again
     for r in ["Attestation mismatch: commit", "Attestation mismatch: base", "Pull request must carry exactly one Kern attestation block"] {
         check(r.into(), "proof-stale", false, None, &["re-verification"]);
     }
-    // when Kern does check a push again, a file the base branch changed too is the agent's to merge
     let (from, mut onto, mut pushed) = (base.clone(), base.clone(), base.clone());
     onto.insert("src/add.mjs".into(), file("export const add = (a, b) => a - b; // reviewed\n"));
     pushed.insert("src/add.mjs".into(), file("export const add = (a, b) => a + b;\n"));
@@ -1350,11 +1234,9 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     check(reason(kern::reverify::merge(&from, &onto, &pushed, "main")), "base-conflict", true, None, &["`main`", "`src/add.mjs`"]);
     onto.insert("src/add.mjs".into(), pushed["src/add.mjs"].clone());
     assert_eq!(kern::reverify::merge(&from, &onto, &pushed, "main").unwrap()["README.md"].bytes.as_deref(), Some(&b"y\n"[..]), "the same change on both sides is no conflict");
-    // an independent verifier's verdict arrives wrapped, and is explained the same way
     check("independent verifier rejected the change: Check addition case 2 failed (exit code 1)".into(), "check-failed", true, None, &["`addition`"]);
     let transported = format!("independent verifier unreachable or rejected the change: sh failed (1): {}\n ", json!({ "status": "DENIED", "reason": "Check addition case 2 failed (exit code 1)" }));
     check(transported, "check-failed", true, None, &["`addition`"]);
-    // what an agent cannot fix stops the loop, and text that only looks like a known block is never trusted
     for r in ["The agent ran out of memory; the contract allows 256 MB (limits.memory_mb)", "The agent did not finish within 3 seconds (limits.timeout_seconds); its container was stopped and nothing was accepted",
               "Interrupted: the agent was stopped and nothing was accepted", "Invalid attestation signature", "Untrusted signing key", "independent verifier unreachable: connection refused",
               "Kern runs agents in a Linux container, but no container runtime is ready (docker: not installed)", "Something nobody planned for",
@@ -1366,7 +1248,6 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
         let instruction = f["violations"][0]["instruction"].as_str().unwrap();
         assert!(!instruction.is_empty() && !instruction.contains("@everyone") && !instruction.contains(r), "raw reasons stay out of instructions: {f}");
     }
-    // what the agent is handed carries no hint about loosening the gate
     let agent = kern::feedback::for_agent(&f);
     assert!(agent.get("reason").is_none() && agent["violations"].as_array().unwrap().iter().all(|v| v.get("allow").is_none() && v["instruction"].is_string()), "{agent}");
 }
@@ -1389,7 +1270,6 @@ fn feedback_comments_cannot_be_used_to_ping_people_or_break_out_of_code() {
     let json = body.split("````json\n").nth(1).unwrap().split("\n````").next().unwrap();
     assert!(!json.contains('`') && serde_json::from_str::<Value>(json).unwrap() == kern::feedback::for_agent(&f), "the machine-readable block round-trips and cannot close its fence");
     assert!(!json.contains("filesystem.write"), "the agent's copy carries no hint about loosening the gate: {json}");
-    // no mention when the agent cannot fix it or when retries are used up; the history stays visible either way
     assert!(!comment_body(&explain("Invalid attestation signature", None), 1, 3, Some("@claude"), &head).contains("@claude"));
     let exhausted = comment_body(&f, 4, 3, Some("@claude"), &head);
     assert!(!exhausted.contains("@claude") && exhausted.contains("human"), "{exhausted}");
@@ -1433,14 +1313,11 @@ fn capability_footprint_reads_js_ts_and_jsx_semantically() {
     ];
     for (code, cap) in attacks { assert!(caps("src/a.js", code).contains(&cap.to_string()), "{code} missing {cap}"); }
     assert!(capability::footprint("src/a.js", "const = broken").is_err());
-    // React projects (Create React App, Next.js) write JSX in plain .js files; 3 of 320 real agent PRs were refused before this was read
     let component = "import { useState } from 'react';\nexport default function Chat({ msgs }) {\n  const [text, setText] = useState('');\n  return (\n    <div style={{ display: 'flex' }}>\n      {msgs.length === 0 && <div>No messages</div>}\n      <input value={text} onChange={(e) => setText(e.target.value)} />\n    </div>\n  );\n}\n";
     assert_eq!(caps("components/Chat.js", component), ["package:react"]);
     assert_eq!(caps("components/Old.js", "var React = require('react');\nmodule.exports = function Old() { return <p onClick={() => fetch('/x')}>old</p>; };\n"), ["global:fetch", "package:react"]);
-    // JSX is only a fallback: plain JavaScript keeps its meaning, so comparisons are never read as tags
     assert!(caps("src/cmp.js", "const a = 1, b = 2, c = 3;\nmodule.exports = a < b > c;\n").is_empty());
     assert!(capability::footprint("components/Broken.js", "export default () => <div>;\n").is_err());
-    // the test-proof screen reads the same files
     let screened = kern::proof::screen(&files(&[]), &files(&[("components/Chat.js", component)]), &json!({ "files": [{ "path": "components/Chat.js", "operation": "add" }] }), contract(&tested("feature")).unwrap().tests.as_ref().unwrap());
     assert!(screened.is_ok(), "{screened:?}");
 }
@@ -1469,8 +1346,6 @@ fn capability_check_blocks_only_widening_with_file_directory_and_operator_baseli
     let mut shell = base.clone();
     shell.insert("src/run.sh".into(), file("curl x\n"));
     denied(check(&shell), "Unsupported changed file type");
-    // contributor lists and change logs often have no extension (mathjs asks every contributor to add themselves to AUTHORS, so 2 of 4 real
-    // mathjs pull requests were refused); they are text, still checked for code hidden in them, while extensionless build files stay out
     for name in ["src/AUTHORS", "src/CONTRIBUTORS", "src/CHANGELOG"] {
         let mut docs = base.clone();
         docs.insert(name.into(), file("Jane Doe <jane@example.com>\n"));
@@ -1671,7 +1546,6 @@ fn comments_api(page: String) -> StubApi {
     })
 }
 
-/// GitHub for re-verification: a repository the action fetches from and pushes to, the API answers derived from it, and a hosted verifier.
 struct Hub { t: Temp, server: PathBuf, url: String, base0: String, c0: String, branch: String, run_id: String, policy: Contract, op: Operator, key: SigningKey, envelope: Value }
 fn hub() -> Hub {
     let f = fixture();
@@ -1703,7 +1577,6 @@ fn hub() -> Hub {
     Hub { t: f.t, server, url, base0, c0, branch, run_id, policy, op, key: f.key, envelope }
 }
 impl Hub {
-    /// A commit on top of `parent` with `edits`, moved to `branch`.
     fn commit(&self, parent: &str, edits: &[(&str, &str)], branch: &str) -> String {
         let mut files = git::read_commit(&self.server, parent, 1048576, 16777216).unwrap();
         for (p, c) in edits { files.insert(p.to_string(), file(c)); }
@@ -1732,7 +1605,6 @@ impl Hub {
             }
         })
     }
-    /// The hosted verifier: signs what it is sent, or refuses with `refuse`.
     fn verifier(&self, refuse: Option<&'static str>) -> StubApi {
         let (policy, op, key) = (self.policy.clone(), self.op.clone(), self.key.clone());
         stub_server(move |method, path, body| {
@@ -1743,7 +1615,6 @@ impl Hub {
             (200, attest::sign(&k, &KeySource::File(key.clone())).unwrap().to_string())
         })
     }
-    /// The action's run for a push of `head`: a checkout holding only that commit and its parent, as actions/checkout leaves it.
     fn check(&self, head: &str, event_base: &str, body: &str, api: &StubApi, verifier: Option<&StubApi>, fork: bool) -> (Checked, Value) {
         let dir = self.t.join(&format!("check-{}", uuid4().unwrap()));
         let checkout = dir.join("checkout");
@@ -1776,19 +1647,16 @@ impl Hub {
 #[test]
 fn an_agent_push_is_verified_again_and_the_branch_moves_to_the_verified_commit() {
     let h = hub();
-    // the agent answers review by pushing a commit onto its kern/ branch; meanwhile someone changed the base branch
     let pushed = h.commit(&h.c0, &[("src/add.mjs", "export const add = (a, b) => b + a;\n")], &h.branch);
     let base1 = h.commit(&h.base0, &[("README.md", "A fixture, documented\n")], "main");
     let (api, verifier) = (h.api(), h.verifier(None));
     let (r, calls) = h.check(&pushed, &h.base0, &h.body(&h.envelope, &h.c0), &api, Some(&verifier), false);
     assert_eq!(r.code, Some(0), "{} {calls}", r.summary);
-    // the branch now holds one Kern commit on the base branch's current tip, with the agent's change and the base's
     let moved = h.at(&h.branch);
     assert!(moved != pushed && git::parents(&h.server, &moved).unwrap() == vec![base1.clone()], "{moved}");
     let tree = git::read_commit(&h.server, &moved, 65536, 1048576).unwrap();
     assert_eq!((tree["src/add.mjs"].bytes.as_deref(), tree["README.md"].bytes.as_deref()), (Some(&b"export const add = (a, b) => b + a;\n"[..]), Some(&b"A fixture, documented\n"[..])));
     assert!(String::from_utf8_lossy(&git::git(&h.server, &["cat-file", "commit", &moved], None).unwrap()).contains("author Kern <kern@invalid> 0 +0000"));
-    // the verifier saw the same run, the description carries the new proof, and the required check is reported for the new commit
     let sent = verifier.seen.lock().unwrap().iter().map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["run"].clone()).collect::<Vec<_>>();
     assert_eq!((sent.len(), sent[0]["run_id"].as_str(), sent[0]["base"].as_str(), sent[0]["commit"].as_str()), (1, Some(h.run_id.as_str()), Some(base1.as_str()), Some(moved.as_str())));
     let body = calls["patched"][0]["body"].as_str().unwrap().to_string();
@@ -1797,14 +1665,11 @@ fn an_agent_push_is_verified_again_and_the_branch_moves_to_the_verified_commit()
     assert_eq!(calls["checks"], json!([{ "name": "kern-verified", "head_sha": moved, "status": "completed", "conclusion": "success",
         "output": calls["checks"][0]["output"].clone() }]), "{calls}");
     assert!(r.output.contains("status=PASS") && r.posted.len() == 1 && r.posted[0].contains("verified the change again") && r.posted[0].contains(&moved[..12]), "{:?}", r.posted);
-    // a re-run of the same push, after the branch already moved (say the description could not be updated), finishes the job
     let (rerun, calls_rerun) = h.check(&pushed, &h.base0, &h.body(&h.envelope, &h.c0), &api, Some(&verifier), false);
     assert!(rerun.code == Some(0) && rerun.output.contains("status=PASS") && h.at(&h.branch) == moved && calls_rerun["patched"].as_array().unwrap().len() == 1, "{} {calls_rerun}", rerun.summary);
-    // the next run on the new commit passes as any Kern pull request does, without the verifier
     let quiet = h.verifier(Some("must not be called"));
     let (again, calls2) = h.check(&moved, &base1, &body, &api, Some(&quiet), false);
     assert!(again.code == Some(0) && quiet.seen.lock().unwrap().is_empty() && calls2["checks"].as_array().unwrap().is_empty(), "{} {calls2}", again.summary);
-    // a newer push that lands while Kern verifies wins: Kern leaves the branch alone and reports nothing for the older push
     let newer = h.commit(&moved, &[("src/add.mjs", "export const add = (a, b) => a + b + 0;\n")], &h.branch);
     let stale = h.commit(&moved, &[("src/add.mjs", "export const add = (a, b) => 0 + a + b;\n")], "elsewhere");
     let (lost, calls3) = h.check(&stale, &base1, &body, &api, Some(&h.verifier(None)), false);
@@ -1812,7 +1677,6 @@ fn an_agent_push_is_verified_again_and_the_branch_moves_to_the_verified_commit()
 }
 
 impl Hub {
-    /// A merge-queue group for pull request 7: `tree_of`'s tree on `base`, as GitHub's merge method makes it (parents: base, then `parent2`).
     fn group(&self, base: &str, tree_of: &str, parent2: &str) -> String {
         let tree = sh(&self.server, &["rev-parse", &format!("{tree_of}^{{tree}}")]);
         let m = sh(&self.server, &["commit-tree", &tree, "-p", base, "-p", parent2, "-m", "Merge pull request #7"]);
@@ -1829,7 +1693,6 @@ impl Hub {
             _ => (404, "{}".into()),
         })
     }
-    /// The action's run for a merge-queue group: no checkout, Kern fetches what it needs.
     fn queue(&self, group: &str, base: &str, pr_head: &str, api: &StubApi, verifier: Option<&StubApi>) -> (Checked, Value) {
         let dir = self.t.join(&format!("queue-{}", uuid4().unwrap()));
         std::fs::create_dir_all(dir.join("workspace")).unwrap();
@@ -1851,12 +1714,10 @@ impl Hub {
 fn a_merge_queue_lands_exactly_what_kern_verified() {
     let h = hub();
     let body = h.body(&h.envelope, &h.c0);
-    // the pull request is up to date: the queue's group is the verified tree on the verified base, so it passes without the verifier
     let group = h.group(&h.base0, &h.c0, &h.c0);
     let quiet = h.verifier(Some("must not be called"));
     let (r, _) = h.queue(&group, &h.base0, &h.c0, &h.queue_api(&h.c0, &body), Some(&quiet));
     assert!(r.code == Some(0) && r.output.contains("status=PASS") && quiet.seen.lock().unwrap().is_empty(), "{}", r.summary);
-    // the queue's base moved: without a hosted verifier the group fails, with one Kern verifies the queued result again and records the proof
     let base1 = h.commit(&h.base0, &[("README.md", "A fixture, documented\n")], "main");
     let mut onto = git::read_commit(&h.server, &base1, 1048576, 16777216).unwrap();
     onto.insert("src/add.mjs".into(), file("export const add = (a, b) => a + b;\n"));
@@ -1874,12 +1735,10 @@ fn a_merge_queue_lands_exactly_what_kern_verified() {
     let lands = git::write_commit(&h.server, &git::read_commit(&h.server, &moved, 1048576, 16777216).unwrap(), Some(&base1), "fix-addition").unwrap();
     assert_eq!((k["base"].as_str(), k["commit"].as_str()), (Some(base1.as_str()), Some(lands.as_str())),
         "the recorded proof covers exactly the tree the queue lands, on its base, so the merge audit finds it");
-    // a group that holds more than the verified change (another pull request's work, here) is refused
     let extra = h.commit(&h.c0, &[("src/other.mjs", "export const o = 1;\n")], "extra");
     let mixed = h.group(&h.base0, &extra, &h.c0);
     let (refused, _) = h.queue(&mixed, &h.base0, &h.c0, &h.queue_api(&h.c0, &body), None);
     assert_eq!(refused.code, Some(1), "{}", refused.summary);
-    // an ordinary pull request in the queue is not Kern's to gate
     let ordinary = stub_api(|method, path| match (method, path) {
         ("GET", "/repos/acme/project/pulls/7") => (200, json!({ "number": 7, "body": "", "head": { "ref": "feature/x", "sha": "a".repeat(40), "repo": { "full_name": "acme/project" } }, "base": { "ref": "main", "repo": { "full_name": "acme/project" } } }).to_string()),
         _ => (404, "{}".into()),
@@ -1891,7 +1750,6 @@ fn a_merge_queue_lands_exactly_what_kern_verified() {
 #[test]
 fn a_dependency_upgrade_from_a_bot_is_verified_through_the_hosted_verifier() {
     let h = hub();
-    // the base branch asks for upgrades to be verified: an upgrade task beside the project's manifests
     let up = json!({ "version": 5, "task": "upgrade", "filesystem": { "read": [], "write": [] }, "network": [], "secrets": [], "publish": false,
         "dependencies": { "manager": "npm", "lockfile": "package-lock.json", "allow": ["*"] },
         "limits": { "files_changed": 2, "lines_changed": 100000, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 60, "memory_mb": 256, "pids": 64 },
@@ -1927,18 +1785,14 @@ fn a_dependency_upgrade_from_a_bot_is_verified_through_the_hosted_verifier() {
     assert_eq!(r["changes"]["dependencies"]["upgraded"], json!(["lodash"]), "{r}");
     let sent: Vec<Value> = verifier.seen.lock().unwrap().iter().map(|(_, _, b)| serde_json::from_str::<Value>(b).unwrap()["run"].clone()).collect();
     assert!(sent.len() == 1 && sent[0]["base"] == base1.as_str(), "the verifier saw the upgrade on its base: {sent:?}");
-    // Kern's commit is the bot's tree on the same base, written deterministically: what merges is exactly what was verified
     let expected = git::write_commit(&h.server, &git::read_commit(&h.server, &bump, 1048576, 16777216).unwrap(), Some(&base1), "upgrade").unwrap();
     assert_eq!((sent[0]["commit"].as_str(), r["verified_commit"].as_str()), (Some(expected.as_str()), Some(expected.as_str())));
-    // without a hosted verifier nothing is verified, and the result says why instead of pretending
     let (code, r, _) = run(&bump, "renovate/lodash-4.x", None);
     assert!(code == Some(0) && r["status"] == "SKIPPED" && r["reason"].as_str().unwrap().contains("Dependabot"), "{r}");
-    // an upgrade branch that also changes code is refused before anything is sent
     let sneaky = h.commit(&base1, &[("package.json", &manifest("4.17.21")), ("package-lock.json", &lockfile("4.17.21")), ("src/add.mjs", "export const add = (a, b) => a * b;\n")], "renovate/sneaky");
     let quiet = h.verifier(Some("must not be called"));
     let (code, _, err) = run(&sneaky, "renovate/sneaky", Some(&quiet));
     assert!(code == Some(1) && err.contains("Write outside contract: src/add.mjs") && quiet.seen.lock().unwrap().is_empty(), "{err}");
-    // any other branch stays an ordinary pull request
     let (code, r, _) = run(&bump, "feature/lodash", Some(&quiet));
     assert!(code == Some(0) && r["status"] == "SKIPPED" && quiet.seen.lock().unwrap().is_empty(), "{r}");
 }
@@ -1948,7 +1802,6 @@ fn a_push_that_cannot_be_verified_again_stays_blocked_and_says_why() {
     let h = hub();
     let pushed = h.commit(&h.c0, &[("src/add.mjs", "export const add = (a, b) => b + a;\n")], &h.branch);
     let body = h.body(&h.envelope, &h.c0);
-    // both sides changed the same file: the agent is asked to merge the base branch
     let h2 = hub();
     let pushed2 = h2.commit(&h2.c0, &[("src/add.mjs", "export const add = (a, b) => b + a;\n")], &h2.branch);
     h2.commit(&h2.base0, &[("src/add.mjs", "export const add = (a, b) => a - b; // reviewed\n")], "main");
@@ -1956,19 +1809,15 @@ fn a_push_that_cannot_be_verified_again_stays_blocked_and_says_why() {
     let f = conflict.feedback.clone().expect("feedback");
     assert!(conflict.code == Some(1) && f["agent_fixable"] == true && f["violations"][0]["rule"] == "base-conflict" && conflict.summary.contains("src/add.mjs"), "{f} {}", conflict.summary);
     assert_eq!(h2.at(&h2.branch), pushed2, "nothing moves");
-    // the verifier refuses: the agent hears why, and the branch and the check stay as they were
     let api = h.api();
     let (refused, calls) = h.check(&pushed, &h.base0, &body, &api, Some(&h.verifier(Some("Tests show new runtime behavior: net:telemetry.invalid:443. If this is intended, allow it in the task contract (version 3): \"behaviors\": [\"net:telemetry.invalid:443\"]"))), false);
     assert!(refused.code == Some(1) && refused.summary.contains("net:telemetry.invalid:443") && h.at(&h.branch) == pushed && calls["checks"].as_array().unwrap().is_empty(), "{} {calls}", refused.summary);
-    // a description whose proof Kern's verifier never signed for this run is not a Kern pull request to re-verify
     let forged = attest::sign(&serde_json::from_slice::<Value>(&unb64(h.envelope["payload"].as_str().unwrap()).unwrap()).unwrap()["predicate"][attest::EXTENSION], &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
     let never = h.verifier(Some("must not be called"));
     let (untrusted, _) = h.check(&pushed, &h.base0, &h.body(&forged, &h.c0), &api, Some(&never), false);
     assert!(untrusted.code == Some(1) && never.seen.lock().unwrap().is_empty(), "{}", untrusted.summary);
-    // nor is a pull request from a fork
     let (forked, _) = h.check(&pushed, &h.base0, &body, &api, Some(&never), true);
     assert!(forked.code == Some(1) && never.seen.lock().unwrap().is_empty(), "{}", forked.summary);
-    // without a hosted verifier the proof is simply stale, and a human is told how to turn re-verification on
     let (off, _) = h.check(&pushed, &h.base0, &body, &api, None, false);
     let f = off.feedback.clone().expect("feedback");
     assert!(off.code == Some(1) && f["agent_fixable"] == false && f["violations"][0]["rule"] == "proof-stale" && off.summary.contains("verifier-url"), "{f} {}", off.summary);
@@ -1978,7 +1827,6 @@ fn a_push_that_cannot_be_verified_again_stays_blocked_and_says_why() {
 fn the_pr_gate_hands_its_verdict_to_the_agent_with_a_retry_cap() {
     let widened = pr_gate("import { exec } from 'node:child_process';\nexport const add = (a, b) => a + b;\n");
     let on = [("KERN_PR_COMMENTS", "true"), ("KERN_AGENT_MENTION", "@claude"), ("KERN_MAX_ATTEMPTS", "2")];
-    // first rejection: the agent is asked, with a machine-readable verdict in the comment, a file and a step output
     let first = check_pr_with(&widened, &widened.envelope, &comments_api("[]".into()), &on);
     assert_eq!(first.code, Some(1));
     let f = first.feedback.clone().expect("feedback file");
@@ -1989,16 +1837,12 @@ fn the_pr_gate_hands_its_verdict_to_the_agent_with_a_retry_cap() {
     assert!(first.summary.contains("operator.json"), "maintainers still see how to allow it: {}", first.summary);
     assert_eq!(first.posted.len(), 1);
     assert!(first.posted[0].contains("@claude") && first.posted[0].contains("attempt 1 of 2") && first.posted[0].contains(&format!("<!-- kern-feedback:v1 head={} -->", widened.head)), "{}", first.posted[0]);
-    // the cap counts the commits Kern rejected, from Kern's own comments only; once used up a human is asked instead
     let (a, b) = ("1".repeat(40), "2".repeat(40));
     let bot = "github-actions[bot]";
     let exhausted = check_pr_with(&widened, &widened.envelope, &comments_api(previous(&[(bot, &a), ("mallory", &"3".repeat(40)), (bot, &b), (bot, &b)])), &on);
     assert!(!exhausted.posted[0].contains("@claude") && exhausted.posted[0].contains("attempt 3") && exhausted.posted[0].contains("human"), "{}", exhausted.posted[0]);
-    // a re-run or an edited description on the same commit is not another attempt and adds no comment
     let rerun = check_pr_with(&widened, &widened.envelope, &comments_api(previous(&[(bot, &a), (bot, &widened.head)])), &on);
     assert!(rerun.code == Some(1) && rerun.posted.is_empty() && rerun.feedback.as_ref().unwrap()["attempt"] == 2, "{:?} {:?}", rerun.posted, rerun.feedback);
-    // an agent that pushes its fix to the kern/ branch leaves a proof for another commit: without a hosted verifier to check the push again,
-    // only a human can act, and the maintainers are told how to turn re-verification on
     let mut pushed = pr_gate("export const add = (a, b) => a + b;\n");
     let mut files = git::read_commit(&pushed.repo, &pushed.head, 1048576, 16777216).unwrap();
     files.insert("src/add.mjs".into(), file("export const add = (a, b) => b + a;\n"));
@@ -2007,18 +1851,15 @@ fn the_pr_gate_hands_its_verdict_to_the_agent_with_a_retry_cap() {
     let sf = stale.feedback.clone().unwrap();
     assert!(stale.code == Some(1) && sf["agent_fixable"] == false && sf["violations"][0]["rule"] == "proof-stale", "{sf}");
     assert!(!stale.posted[0].contains("@claude") && stale.summary.contains("verifier-url"), "{}", stale.summary);
-    // something the agent cannot fix never pings it
     let forged = attest::sign(&serde_json::from_slice::<Value>(&unb64(widened.envelope["payload"].as_str().unwrap()).unwrap()).unwrap()["predicate"][attest::EXTENSION], &KeySource::File(SigningKey::from_bytes(&random_bytes::<32>().unwrap()))).unwrap();
     let untrusted = check_pr_with(&widened, &forged, &comments_api("[]".into()), &on);
     assert!(untrusted.code == Some(1) && !untrusted.posted[0].contains("@claude") && untrusted.posted[0].contains("not something the agent can fix"), "{}", untrusted.posted[0]);
-    // a verified change after earlier rejections says so, and the rejected attempts stay in the thread
     let fixed = pr_gate("export const add = (a, b) => a + b;\n");
     let pass = check_pr_with(&fixed, &fixed.envelope, &comments_api(previous(&[(bot, &a)])), &on);
     assert_eq!(pass.code, Some(0));
     assert!(pass.summary.contains("after 1 rejected attempt") && pass.output.contains("status=PASS"), "{}", pass.summary);
     assert!(pass.posted.len() == 1 && pass.posted[0].contains("after 1 rejected attempt") && !pass.posted[0].contains("<!-- kern-feedback:v1 head="), "{:?}", pass.posted);
     assert!(check_pr_with(&fixed, &fixed.envelope, &comments_api("[]".into()), &on).posted.is_empty(), "a first-time pass adds no comment");
-    // the verdict never depends on GitHub accepting the comment, and comments are opt-in
     let down = stub_api(|_, _| (500, "{}".into()));
     let failed_post = check_pr_with(&widened, &widened.envelope, &down, &on);
     assert!(failed_post.code == Some(1) && failed_post.summary.contains("could not post") && failed_post.feedback.is_some(), "{}", failed_post.summary);
@@ -2041,7 +1882,6 @@ fn container_run_feeds_rejections_back_to_the_agent_until_it_complies() {
     sh(&repo, &["commit", "-qm", "base"]);
     let base = sh(&repo, &["rev-parse", "HEAD"]);
     std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
-    // attempt 1 strays outside its grant; told why, it restores README.md and makes the real fix
     let agent = "const fs = require('fs'); const raw = process.env.KERN_FEEDBACK; \
         if (!raw) { fs.writeFileSync('README.md', 'agent was here\\n'); process.exit(0); } \
         const f = JSON.parse(raw); \
@@ -2061,7 +1901,6 @@ fn container_run_feeds_rejections_back_to_the_agent_until_it_complies() {
     let branch = r["promotion"]["branch"].as_str().unwrap();
     assert_eq!(sh(&repo, &["show", &format!("{branch}:src/add.mjs")]), "export const add = (a, b) => a + b;");
     assert_eq!(sh(&repo, &["show", &format!("{branch}:README.md")]), "# fixture", "the agent undid its out-of-scope edit");
-    // the job's own attempt cap holds, and something the agent cannot fix is not retried
     let stubborn = run("stubborn.json", "require('fs').writeFileSync('README.md', 'again\\n')", 2);
     assert!(stubborn["status"] == "BLOCKED" && stubborn["attempts"].as_array().unwrap().len() == 2 && stubborn["feedback"]["violations"][0]["rule"] == "scope", "{stubborn}");
     let hungry = run("hungry.json", "const a = []; for (;;) a.push(Buffer.alloc(1 << 20, 1));", 3);
@@ -2101,44 +1940,36 @@ fn merge_audit_reverifies_every_change_to_the_branch_and_lists_the_gaps() {
         (run_id.clone(), attest::sign(&kern_payload(&policy, &op, &run_id, base, head, &manifest, now_ms() - 1000), &KeySource::File(key.clone())).unwrap())
     };
     let squash = |head: &str, parent: &str, date: &str, title: &str| git_at(&repo, date, &["commit-tree", &format!("{head}^{{tree}}"), "-p", parent, "-m", title]);
-    // PR 1: an agent change with a valid proof, squash-merged
     let h1 = agent_change(&setup, "export const add = (a, b) => a + b;\n");
     sh(&repo, &["update-ref", "refs/remotes/pull/1/head", &h1]);
     let (run1, env1) = proof(&setup, &h1, &f.key);
     let m1 = squash(&h1, &setup, "2026-04-02T10:00:00Z", "Kern: fix-addition (#1)");
     main(&m1);
-    // PR 2: an ordinary human change
     std::fs::write(repo.join("README.md"), "A fixture, now documented\n").unwrap();
     sh(&repo, &["add", "-A"]);
     git_at(&repo, "2026-04-10T10:00:00Z", &["commit", "-qm", "Docs (#2)"]);
     let m2 = sh(&repo, &["rev-parse", "HEAD"]);
-    // a direct push that skipped pull requests, with a hostile subject
     std::fs::write(repo.join("src/other.mjs"), "export const other = 1;\n").unwrap();
     sh(&repo, &["add", "-A"]);
     git_at(&repo, "2026-04-15T10:00:00Z", &["commit", "-qm", "=cmd|' /C calc'!A0 <script>alert(1)</script>"]);
     let d1 = sh(&repo, &["rev-parse", "HEAD"]);
-    // PR 3: an agent branch whose proof was signed by some other key
     let h3 = agent_change(&d1, "export const add = (a, b) => b + a;\n");
     sh(&repo, &["update-ref", "refs/remotes/pull/3/head", &h3]);
     let (run3, env3) = proof(&d1, &h3, &SigningKey::from_bytes(&random_bytes::<32>().unwrap()));
     let m3 = squash(&h3, &d1, "2026-04-20T10:00:00Z", "Kern: fix-addition (#3)");
     main(&m3);
-    // PR 4: someone changes the gate's own configuration
     std::fs::write(repo.join(".github/kern/tasks/fix-addition.json"), serde_json::to_string_pretty(&policy_value()).unwrap()).unwrap();
     sh(&repo, &["add", "-A"]);
     git_at(&repo, "2026-05-01T10:00:00Z", &["commit", "-qm", "Tune the Kern task (#4)"]);
     let c1 = sh(&repo, &["rev-parse", "HEAD"]);
-    // PR 5: an agent change whose head commit was never fetched into this checkout
     let h5 = agent_change(&c1, "export const add = (a, b) => (a + b);\n");
     let (run5, env5) = proof(&c1, &h5, &f.key);
     let m5 = squash(&h5, &c1, "2026-05-10T10:00:00Z", "Kern: fix-addition (#5)");
     main(&m5);
-    // PR 6 went into another branch; the same commit then reached this branch by a direct push
     std::fs::write(repo.join("src/release.mjs"), "export const r = 1;\n").unwrap();
     sh(&repo, &["add", "-A"]);
     git_at(&repo, "2026-05-12T10:00:00Z", &["commit", "-qm", "Release fix (#6)"]);
     let r6 = sh(&repo, &["rev-parse", "HEAD"]);
-    // a direct push dated before the quarter, then an ordinary change: a false date hides neither
     std::fs::write(repo.join("src/late.mjs"), "export const late = 1;\n").unwrap();
     sh(&repo, &["add", "-A"]);
     git_at(&repo, "2025-12-01T10:00:00Z", &["commit", "-qm", "Backdated push"]);
@@ -2212,17 +2043,14 @@ fn merge_audit_reverifies_every_change_to_the_branch_and_lists_the_gaps() {
     let csv = std::fs::read_to_string(out.join("report.csv")).unwrap();
     assert_eq!(csv.lines().count(), 10, "{csv}");
     assert!(csv.lines().any(|l| l.contains("\"'=cmd|")), "spreadsheet formulas in commit subjects are neutralised: {csv}");
-    // a period holding only the verified agent change is covered
     let (code, out, err) = audit("2026-04-01..2026-04-05", None, "early");
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(out.join("report.json")).unwrap()).unwrap()["summary"]["status"], "COVERED");
-    // an auditor can insist on their own copy of the verifier key
     std::fs::write(f.t.join("auditor.pub"), attest::keypair().unwrap().1).unwrap();
     let (code, out, _) = audit("2026-04-01..2026-04-05", Some(&f.t.join("auditor.pub")), "own-key");
     assert_eq!(code, Some(2));
     let own: Value = serde_json::from_str(&std::fs::read_to_string(out.join("report.json")).unwrap()).unwrap();
     assert!(own["changes"][0]["category"] == "invalid-proof" && own["trusted_key"].as_str().unwrap().contains("supplied"), "{own}");
-    // an incomplete history is refused rather than audited
     let path = repo.display().to_string().replace('\\', "/");
     sh(&f.t.0, &["clone", "-q", "--depth", "1", &if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") }, "shallow"]);
     let shallow = Command::new(env!("CARGO_BIN_EXE_kern")).arg("audit-merges").arg(f.t.join("shallow")).arg("HEAD").arg("2026-Q2").arg(f.t.join("shallow-out"))
@@ -2310,7 +2138,6 @@ fn docker_and_container_configuration_cannot_be_widened() {
     assert_eq!(args[..4], ["--config", "/fresh", "--host", policy::ENDPOINT]);
     assert!(env.iter().any(|(k, v)| k == "PATH" && v.is_empty()) && !env.iter().any(|(k, _)| k == "DOCKER_HOST" || k == "HTTP_PROXY"));
     for flag in ["--host=tcp://evil", "--context=x", "-Htcp://evil", "--config", "--tls"] { denied(sandbox::docker_invocation(&c, &["info", flag], &[], Path::new("/x")), "overrides"); }
-    // a check's own argv follows the image, where docker parses no flags; it may use names docker reserves for itself
     let check = ["__exec", "/bin/sh", "-c", "npm test -- --config ci.json"];
     let (_, args, _) = sandbox::docker_invocation(&c, &["create", "--name", "kern-x", "sha256:x"], &check, Path::new("/x")).unwrap();
     assert_eq!(args[args.len() - 5..], ["sha256:x", "__exec", "/bin/sh", "-c", "npm test -- --config ci.json"]);
@@ -2329,18 +2156,15 @@ fn docker_and_container_configuration_cannot_be_widened() {
     let a = sandbox::container_args(&spec, "kern-x").unwrap().join(" ");
     for want in ["--runtime=runsc", "--network=none", "--read-only", "--user=1000:1000", "--cap-drop=ALL", "no-new-privileges", "--pull=never", "--entrypoint=/kern/kern"] { assert!(a.contains(want), "{want}"); }
     assert!(!a.contains("docker.sock") && a.matches("type=bind").count() == 3 && a.matches(",readonly").count() == 3);
-    // planting bugs needs a writable copy of the workspace: the snapshot stays a read-only input and the copy lives in memory
     let planting = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__mutate".into()], network: "none", volumes: vec![], root: false, home_mb: 0, scratch: true, workspace: None };
     let s = sandbox::container_args(&planting, "kern-x").unwrap().join(" ");
     assert!(s.contains("--tmpfs /workspace:rw,nosuid,nodev") && s.matches("type=bind").count() == 2 && s.matches(",readonly").count() == 2 && !s.contains("target=/workspace,"), "{s}");
     denied(sandbox::container_args(&Spec { writable: &write, ..planting }, "kern-x"), "scratch");
     denied(sandbox::container_args(&Spec { network: "bridge", ..spec }, "kern-x"), "Only dependency setup");
-    // tests run like in CI, on a throwaway writable copy of the repo: they may write logs and fixtures, but never into the snapshot
     let deps = vec![("kern-deps-1", "/workspace/node_modules", true)];
     let tests = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__exec".into(), "/usr/local/bin/node".into()], network: "none", volumes: deps.clone(), root: false, home_mb: 0, scratch: true, workspace: None };
     let s = sandbox::container_args(&tests, "kern-x").unwrap().join(" ");
     assert!(s.contains("--tmpfs /workspace:rw,nosuid,nodev") && !s.contains("target=/workspace,") && s.contains("type=volume,source=kern-deps-1,target=/workspace/node_modules,readonly"), "{s}");
-    // the shared install stays read-only; only the folders tools keep caches and temporary files in are writable, and only in memory
     for dir in [".cache", ".vite", ".vite-temp"] { assert!(s.contains(&format!("--tmpfs /workspace/node_modules/{dir}:rw,nosuid,nodev")), "{dir}: {s}"); }
     for entry in ["__exec", "__mutate"] {
         denied(sandbox::container_args(&Spec { entry: vec![entry.into()], scratch: false, volumes: deps.clone(), ..tests }, "kern-x"), "copy of the workspace");
@@ -2362,34 +2186,26 @@ fn drive_runs_read_an_installed_tree_with_the_network_off() {
         assert!(a.contains(want), "{want}: {a}");
     }
     assert!(a.matches("type=bind").count() == 2 && a.matches("target=/input,readonly").count() == 1 && a.matches("target=/kern,readonly").count() == 1, "only /input and /kern are bound: {a}");
-    // the installed tree keeps per-run tool caches in memory, like the shared install of a verification; Kern's tools keep none
     for dir in [".cache", ".vite", ".vite-temp"] { assert!(a.contains(&format!("--tmpfs /workspace/node_modules/{dir}:rw,nosuid,nodev")), "{dir}: {a}"); }
     assert!(!a.contains("/kern-tools/node_modules/."), "{a}");
-    // a drive run never gets a network, root, write grants or a writable tree, and always reads an installed tree
     let write = vec!["src/".to_string()];
     denied(sandbox::container_args(&Spec { network: "bridge", ..run.clone() }, "kern-x"), "network");
     for bad in [Spec { root: true, ..run.clone() }, Spec { writable: &write, ..run.clone() }, Spec { workspace: Some(("kern-deps-tree", false)), ..run.clone() }, Spec { workspace: None, ..run.clone() }, Spec { scratch: true, ..run.clone() }] {
         denied(sandbox::container_args(&bad, "kern-x"), "drive run");
     }
     denied(sandbox::container_args(&Spec { workspace: Some(("my-volume", true)), ..run.clone() }, "kern-x"), "tree volume");
-    // Kern's tools are read-only, at /kern-tools/node_modules, and only for drive runs
     denied(sandbox::container_args(&Spec { volumes: vec![("kern-deps-tools", "/kern-tools/node_modules", false)], ..run.clone() }, "kern-x"), "Unexpected volume");
     denied(sandbox::container_args(&Spec { volumes: vec![("kern-deps-tools", "/opt/tools", true)], ..run.clone() }, "kern-x"), "Unexpected volume");
     let tests = Spec { entry: vec!["__exec".into(), "/usr/local/bin/node".into()], scratch: true, workspace: None, ..run.clone() };
     denied(sandbox::container_args(&tests, "kern-x"), "Unexpected volume");
-    // no other entry point mounts a tree volume
     for entry in ["__runner", "__setup", "__mutate"] {
         denied(sandbox::container_args(&Spec { entry: vec![entry.into()], volumes: vec![], ..run.clone() }, "kern-x"), "tree volume");
     }
-    // the install that fills the tree is its only writer: root, with a network, the tree writable, nothing else mounted
     let setup = Spec { entry: vec!["__drive_setup".into()], network: "bridge", root: true, home_mb: 1024, volumes: vec![], workspace: Some(("kern-deps-tree", false)), ..run.clone() };
     let s = sandbox::container_args(&setup, "kern-x").unwrap().join(" ");
     assert!(s.contains("type=volume,source=kern-deps-tree,target=/workspace ") && s.contains("--network=bridge") && !s.contains("/workspace/node_modules/."), "{s}");
-    // Installing a large project is CPU-bound under gVisor: the install gets up to 4 CPUs, never more than the machine has; a run gets one.
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4);
     assert!(s.contains(&format!("--cpus={cpus}")) && a.contains("--cpus=1"), "{s}");
-    // A large project's module graph (Grafana's) opens more than 1,024 files at once as it loads, and so does its install: drive runs and
-    // their setup may hold 65,536; every other sandbox keeps 1,024.
     assert!(s.contains("--ulimit nofile=65536:65536") && a.contains("--ulimit nofile=65536:65536"), "{a}");
     let runner = Spec { entry: vec!["__runner".into()], volumes: vec![], workspace: None, ..run.clone() };
     assert!(sandbox::container_args(&runner, "kern-x").unwrap().join(" ").contains("--ulimit nofile=1024:1024"));
@@ -2422,15 +2238,12 @@ fn container_engines_are_recognised_from_docker_and_podman_info() {
     assert!(g.gvisor && g.rootless && g.selinux && g.isolation() == "gVisor");
     info["OSType"] = json!("windows");
     denied(container::engine_from_info(Path::new("docker"), &info), "Linux containers");
-    // Docker Desktop's own VM (linuxkit kernel) maps the host user to root inside containers; WSL2 does not
     let mut vm = docker_info();
     vm["KernelVersion"] = json!("6.10.14-linuxkit");
     assert!(engine_of(&vm).desktop_vm);
-    // without swap accounting a memory limit can be bypassed through swap
     let mut swap = docker_info();
     swap["SwapLimit"] = json!(false);
     denied(engine_of(&swap).usable(), "memory and process limits");
-    // an engine without seccomp is refused, unless gVisor is the kernel boundary
     let mut open = docker_info();
     open["SecurityOptions"] = json!(["name=seccomp,profile=unconfined"]);
     denied(engine_of(&open).usable(), "seccomp");
@@ -2439,7 +2252,6 @@ fn container_engines_are_recognised_from_docker_and_podman_info() {
     let p = engine_of(&podman_info(&["cpu", "memory", "pids"]));
     assert!(p.podman && p.rootless && p.name == "Podman 4.9.3" && p.default_caps == ["CAP_CHOWN", "CAP_KILL"], "{p:?}");
     p.usable().unwrap();
-    // rootless Podman on cgroup v1 silently ignores memory and process limits, so Kern refuses it
     denied(engine_of(&podman_info(&[])).usable(), "memory and process limits");
     let mut unconfined = podman_info(&["memory", "pids"]);
     unconfined["host"]["security"]["seccompEnabled"] = json!(false);
@@ -2477,12 +2289,10 @@ fn container_box_arguments_confine_the_agent() {
     g.gvisor = true;
     assert!(container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &g, "kern-box-1-x").unwrap().contains(&"--runtime=runsc".to_string()));
     denied(container::create_args(&box_spec(&t.join("a,b"), &command, &mounts, &env, false), &e, "kern-box-1-x"), "comma");
-    // Podman copies the host's proxy variables (often with credentials) into containers unless told not to
     let p = engine_of(&podman_info(&["memory", "pids"]));
     let pa = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &p, "kern-box-1-x").unwrap();
     assert!(pa.contains(&"--http-proxy=false".to_string()) && pa.contains(&"--memory-swap=256m".to_string()), "{pa:?}");
     assert!(pa.iter().any(|x| x.starts_with("--tmpfs=/home/kern:") && x.ends_with(",U")), "{pa:?}");
-    // SELinux hosts relabel only the workspace Kern owns; the developer's own folders are never relabelled
     let mut ps = p.clone();
     ps.selinux = true;
     let sa = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &ps, "kern-box-1-x").unwrap();
@@ -2490,7 +2300,6 @@ fn container_box_arguments_confine_the_agent() {
     assert!(sa.iter().any(|x| x.ends_with(",target=/opt/tool,readonly")), "{sa:?}");
     #[cfg(unix)]
     {
-        // Docker's --mount cannot relabel, so SELinux Docker hosts (always Linux) get the workspace through --volume
         let mut ds = e.clone();
         ds.selinux = true;
         let da = container::create_args(&box_spec(&t.0, &command, &mounts, &env, false), &ds, "kern-box-1-x").unwrap();
@@ -2534,7 +2343,6 @@ fn container_inspection_refuses_a_box_the_engine_weakened() {
     let mut extra = inspected(&spec, &e);
     extra["Mounts"].as_array_mut().unwrap().push(json!({ "Type": "bind", "Destination": "/host", "RW": false }));
     denied(container::confirm(&extra, &spec, &e, &image_env), "mount");
-    // variables the engine adds on its own (Docker's config.json proxies, Podman's containers.conf) are refused by name
     let mut leaked = inspected(&spec, &e);
     leaked["Config"]["Env"].as_array_mut().unwrap().extend([json!("HTTPS_PROXY=http://user:secret@proxy:3128"), json!("https_proxy=http://user:secret@proxy:3128")]);
     denied(container::confirm(&leaked, &spec, &e, &image_env), "HTTPS_PROXY, https_proxy");
@@ -2544,7 +2352,6 @@ fn container_inspection_refuses_a_box_the_engine_weakened() {
     denied(container::confirm(&host, &open, &e, &image_env), "network");
     host["HostConfig"]["NetworkMode"] = json!("bridge");
     container::confirm(&host, &open, &e, &image_env).unwrap();
-    // Podman lists each dropped capability instead of ALL, and always sets container=podman
     let p = engine_of(&podman_info(&["memory", "pids"]));
     let mut listed_caps = inspected(&spec, &p);
     listed_caps["HostConfig"]["CapDrop"] = json!(["CAP_CHOWN", "CAP_KILL"]);
@@ -2563,7 +2370,6 @@ fn only_a_container_that_really_ran_counts_as_finished() {
     let ran = |status: &str, code: i64, oom: bool, started: &str| json!({ "Status": status, "Running": status == "running", "ExitCode": code, "OOMKilled": oom, "StartedAt": started, "Error": "" });
     assert_eq!(container::finished(&ran("exited", 3, false, "2026-10-07T16:52:14.4Z")).unwrap(), (3, false));
     assert_eq!(container::finished(&ran("exited", 137, true, "2026-10-07 12:52:14 -0400 EDT")).unwrap(), (137, true));
-    // a container whose start never happened reports exit code 0; it must not read as success
     denied(container::finished(&ran("created", 0, false, "0001-01-01T00:00:00Z")), "never started");
     denied(container::finished(&ran("created", 0, false, "0001-01-01 00:00:00 +0000 UTC")), "never started");
     denied(container::finished(&ran("running", 0, false, "2026-10-07T16:52:14.4Z")), "lost contact");
@@ -2608,7 +2414,6 @@ fn box_and_run_jobs_name_a_pinned_linux_image_and_container_paths() {
     denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": ws, "target": "/opt/x" }] }))), "overlaps");
     denied(kern::local::box_job(&job(json!({ "mounts": [{ "source": t.0, "target": "/opt/x" }] }))), "overlaps");
     denied(kern::local::box_job(&job(json!({ "memory_mb": 9000 }))), "memory_mb");
-    // run jobs: the retired Windows format gets a migration hint, and mounts may not expose the real repository
     std::fs::create_dir_all(t.join("repo")).unwrap();
     std::fs::write(t.join("task.json"), policy_value().to_string()).unwrap();
     let run = |patch: Value| {
@@ -2623,7 +2428,6 @@ fn box_and_run_jobs_name_a_pinned_linux_image_and_container_paths() {
     denied(run(json!({ "version": 1, "tools": [] })), "Linux container");
     denied(run(json!({ "mounts": [{ "source": t.join("repo"), "target": "/opt/repo" }] })), "overlaps");
     denied(run(json!({ "output": "./a,b/runs" })), "comma");
-    // the overlap check sees through `..` and links in the output path
     std::fs::create_dir_all(t.join("sub")).unwrap();
     std::fs::create_dir_all(t.join("runs")).unwrap();
     denied(run(json!({ "output": "./sub/../runs", "mounts": [{ "source": t.join("runs"), "target": "/opt/runs" }] })), "overlaps");
@@ -2829,7 +2633,7 @@ fn a_killed_kern_leaves_no_agent_behind() {
     if !container_ready() { return; }
     let t = Temp::new();
     let (mut child, ws) = slow_box(&t, "ws", |_| {});
-    child.kill().unwrap(); // SIGKILL or TerminateProcess: none of Kern's own cleanup runs
+    child.kill().unwrap();
     let _ = child.wait();
     let killed = std::time::Instant::now();
     while containers_using(&ws) > 0 {
@@ -2880,7 +2684,6 @@ fn factory_lock_gate_allows_a_proven_commit_and_refuses_everything_else() {
 
 #[test]
 fn a_separately_built_checker_accepts_the_verifiers_proof() {
-    // the GitHub Action builds its own kern; only the version, policy and pinned verifier identity must match
     let f = fixture();
     let cfg = f.t.join("config");
     std::fs::create_dir_all(cfg.join("tasks")).unwrap();
@@ -2901,7 +2704,7 @@ fn factory_lock_refuses_an_unverified_task_name_before_reading_config() {
     std::fs::create_dir_all(cfg.join("tasks")).unwrap();
     std::fs::write(cfg.join("operator.json"), operator_value(&["external"]).to_string()).unwrap();
     std::fs::write(cfg.join("verifier.pub"), &f.public).unwrap();
-    std::fs::write(f.t.join("escape.json"), "{").unwrap(); // outside the trusted config directory
+    std::fs::write(f.t.join("escape.json"), "{").unwrap();
     let mut k = f.kern.clone();
     k["task"] = json!("../../escape");
     let envelope = attest::sign(&k, &KeySource::File(f.key.clone())).unwrap();
@@ -2911,16 +2714,12 @@ fn factory_lock_refuses_an_unverified_task_name_before_reading_config() {
 #[test]
 fn dev_side_confirm_accepts_only_the_trusted_signed_proof_for_the_exact_commit() {
     let f = fixture();
-    // the genuine verifier-signed proof for the approved commit is accepted
     kern::local::confirm_attestation(&f.envelope, &f.public, &f.commit).unwrap();
-    // a different (untrusted) key is refused
     let other = attest::public_pem(&SigningKey::from_bytes(&random_bytes::<32>().unwrap()).verifying_key()).unwrap();
     denied(kern::local::confirm_attestation(&f.envelope, &other, &f.commit), "trusted verifier key");
-    // a tampered payload breaks the signature
     let mut tampered = f.envelope.clone();
     tampered["payload"] = json!(b64(b"{}"));
     assert!(kern::local::confirm_attestation(&tampered, &f.public, &f.commit).is_err());
-    // a proof that binds a different commit is refused (exact-hash binding)
     denied(kern::local::confirm_attestation(&f.envelope, &f.public, &f.base), "exact approved commit");
 }
 
@@ -2954,32 +2753,27 @@ fn large_assets_stream_without_loading_and_changed_assets_fail_closed() {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     sh(&t.0, &["init", "-q", "repo"]);
     sh(&repo, &["config", "core.autocrlf", "false"]);
-    std::fs::write(repo.join("logo.bin"), vec![7u8; 2 * 1048576]).unwrap(); // 2 MiB asset, > file_bytes
+    std::fs::write(repo.join("logo.bin"), vec![7u8; 2 * 1048576]).unwrap();
     std::fs::write(repo.join("src/a.js"), "module.exports = 1;\n").unwrap();
     sh(&repo, &["add", "-A"]);
     sh(&repo, &["commit", "-qm", "base"]);
     let base = sh(&repo, &["rev-parse", "HEAD"]);
 
-    // the 2 MiB asset is recorded opaquely (oid+size, no bytes), not rejected; small source is loaded
     let files = git::read_commit(&repo, &base, 65536, 1048576).unwrap();
     assert_eq!(files.len(), 2);
     assert!(files["logo.bin"].bytes.is_none() && files["logo.bin"].size == 2 * 1048576);
     assert!(files["src/a.js"].bytes.is_some());
-    // streamed manifest sha256 is deterministic
     assert_eq!(digest(&git::manifest(&repo, &base, 65536, 1048576).unwrap()).unwrap(), digest(&git::manifest(&repo, &base, 65536, 1048576).unwrap()).unwrap());
-    // write_commit round-trips the tree, referencing the opaque asset by oid
     let rewritten = git::write_commit(&repo, &files, None, "t").unwrap();
     assert_eq!(sh(&repo, &["rev-parse", &format!("{rewritten}^{{tree}}")]), sh(&repo, &["rev-parse", "HEAD^{tree}"]));
 
     let policy = contract(&json!({ "version": 2, "task": "asset", "filesystem": { "read": ["src/", "logo.bin"], "write": ["src/", "logo.bin"] },
         "network": [], "secrets": [], "publish": false, "dependencies": null,
         "limits": { "files_changed": 8, "lines_changed": 200, "file_bytes": 65536, "total_bytes": 1048576, "timeout_seconds": 30, "memory_mb": 256, "pids": 64 }, "required_checks": ["build"] })).unwrap();
-    // an in-contract source edit passes; the unchanged 2 MiB asset is skipped, not diffed
     let mut good = files.clone();
     good.insert("src/a.js".into(), file("module.exports = 2;\n"));
     let changed = git::changes(&files, &good, &policy).unwrap();
     assert_eq!(changed["files"].as_array().unwrap().len(), 1);
-    // a CHANGED large asset (opaque on both sides, different oid) fails closed
     let mut bad = files.clone();
     bad.insert("logo.bin".into(), git::Entry { mode: "100644".into(), oid: "a".repeat(40), size: 2 * 1048576, bytes: None });
     denied(git::changes(&files, &bad, &policy), "Binary or oversized change unsupported");
@@ -3002,7 +2796,6 @@ fn workspace_read_back_preserves_modes_and_tracked_node_modules() {
     assert_eq!((base["bin/cli.js"].mode.as_str(), base["src/tool.js"].mode.as_str()), ("100755", "100755"));
     let ws = t.join("ws");
     git::materialize(Some(&repo), &base, &ws, None).unwrap();
-    // untracked tool state (an install, git metadata) stays invisible
     for (p, c) in [("node_modules/installed/index.js", "x"), ("test/fixtures/node_modules/dep/extra.js", "x"), (".git/HEAD", "x")] {
         std::fs::create_dir_all(ws.join(p).parent().unwrap()).unwrap();
         std::fs::write(ws.join(p), c).unwrap();
@@ -3010,7 +2803,6 @@ fn workspace_read_back_preserves_modes_and_tracked_node_modules() {
     let policy = contract(&policy_value()).unwrap();
     let read = kern::local::read_workspace(&ws, &base, 65536, 1048576).unwrap();
     assert_eq!(git::changes(&base, &read, &policy).unwrap()["files"], json!([]), "an untouched workspace must read back as no change");
-    // an edit keeps the committed mode
     std::fs::remove_file(ws.join("src/tool.js")).unwrap();
     std::fs::write(ws.join("src/tool.js"), "module.exports = 3;\n").unwrap();
     let edited = kern::local::read_workspace(&ws, &base, 65536, 1048576).unwrap();
@@ -3035,7 +2827,6 @@ fn workspace_read_back_keeps_unchanged_large_assets_opaque() {
     let read = kern::local::read_workspace(&ws, &base, 65536, 1048576).unwrap();
     assert!(read["logo.bin"].bytes.is_none() && read["logo.bin"].oid == base["logo.bin"].oid);
     assert_eq!(git::changes(&base, &read, &policy).unwrap()["files"], json!([]));
-    // a rewritten large asset is still refused
     std::fs::remove_file(ws.join("logo.bin")).unwrap();
     std::fs::write(ws.join("logo.bin"), vec![8u8; 2 * 1048576]).unwrap();
     denied(kern::local::read_workspace(&ws, &base, 65536, 1048576), "byte limits");
@@ -3047,20 +2838,17 @@ fn capability_check_analyzes_data_files_that_node_would_execute() {
     let policy = contract(&policy_value()).unwrap();
     let none = std::collections::BTreeMap::new();
     let check = |c: &Files| { let changed = git::changes(&base, c, &policy).unwrap(); capability::check(&base, c, &changed, &none) };
-    // CommonJS require() runs a file with an unregistered extension as JavaScript, and .d.ts as TypeScript
     for payload in ["p.txt", "p.md", "p.css", "p.html", "p.d.ts", "notes.md"] {
         let mut c = base.clone();
         c.insert(format!("src/{payload}"), file("require('child_process').execSync('id');\n"));
         c.insert("src/a.js".into(), file(&format!("require('./{payload}');\nmodule.exports = 1;\n")));
         denied(check(&c), "widens module capabilities");
     }
-    // a declaration file is never loaded at runtime by legitimate code, so loading one is itself an escape
     let mut c = base.clone();
     c.insert("src/p.d.ts".into(), file("declare const x: number;\nrequire('child_process').execSync('id');\n"));
     c.insert("src/a.js".into(), file("require('./p.d');\nmodule.exports = 1;\n"));
     denied(check(&c), "widens module capabilities");
     for spec in ["./p.d.ts", "./P.D.TS", "./p.d.mts?v=1", "./p.d.cts#x", "./p%2ed.ts"] { assert!(caps("src/a.mjs", &format!("import '{spec}';")).iter().any(|c| c.starts_with("escape:")), "{spec}"); }
-    // prose, stylesheets and declarations stay harmless
     let mut docs = base.clone();
     docs.insert("src/notes.md".into(), file("# Notes\n\nCall `fetch` with care.\n"));
     docs.insert("src/site.css".into(), file("a { color: red; }\n"));
@@ -3086,7 +2874,6 @@ fn capability_footprint_sees_aliased_process_module_and_global_objects() {
         ("const m = module; m.require('child_process');", "module:dynamic"), ("const g = globalThis; g.eval('1');", "global:dynamic"),
         ("(function (w) { w.fetch('https://x.invalid'); })(window);", "global:dynamic"),
     ] { assert!(caps("src/a.js", code).contains(&cap.to_string()), "{code} missing {cap}"); }
-    // feature detection grants nothing
     assert_eq!(caps("src/a.js", "if (typeof process !== 'undefined' && typeof window === 'undefined' && typeof module === 'object' && typeof require === 'function') {}"), Vec::<String>::new());
 }
 

@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const MONITOR: &str = include_str!("monitor.cjs");
-/// How Kern reads jest results (see proof::command).
 pub const JEST_REPORT: &str = include_str!("jest-report.cjs");
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
@@ -18,23 +17,14 @@ pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Pat
     env.extend([("PATH".into(), String::new()), ("DOCKER_CONFIG".into(), dir.display().to_string()), ("XDG_CONFIG_HOME".into(), dir.display().to_string())]);
     Ok((binary, full, env))
 }
-/// Marks each part of a drive run's report: `MARK name length\n`, then exactly that many bytes. Parts are read by length, never by
-/// searching for the next mark, so nothing the code under test prints can forge one.
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
-/// The parts of a drive run's report, in order: what the driver printed, its error output, line coverage (c8's JSON), the calls Kern
-/// recorded into the changed modules, and what the code did (the behaviour recorder).
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
-/// The parts of a test run's report, in order: what the test command printed (the runner's report among it), its error output, what the
-/// code did, and how the command ended (`exit <code>`, or `timeout`).
 pub const TEST_PARTS: [&str; 4] = ["output", "errors", "behavior", "ending"];
-/// The folder a test run starts in: the tree's root, or a workspace package's folder inside it, never anywhere else.
 pub fn test_dir(cwd: &str) -> R<String> {
     if cwd.is_empty() { return Ok("/workspace".into()); }
     ensure!(cwd.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', '\0'])), "A test run starts in a folder inside the tree");
     Ok(format!("/workspace/{cwd}"))
 }
-/// A workspace package's test runner: the root's `node_modules/.bin/<runner>` as the command names it, or the nearest one up the tree from
-/// the package's folder (pnpm gives each package its own; npm and yarn hoist them to the root). Any other command stays as it is.
 pub fn runner_in(cwd: &str, command: &str, exists: impl Fn(&str) -> bool) -> String {
     let Some(name) = command.strip_prefix("/workspace/node_modules/.bin/") else { return command.to_string() };
     let mut dir = cwd.trim_matches('/').to_string();
@@ -46,7 +36,6 @@ pub fn runner_in(cwd: &str, command: &str, exists: impl Fn(&str) -> bool) -> Str
     }
 }
 pub fn drive_parts(stdout: &[u8]) -> R<std::collections::BTreeMap<String, Vec<u8>>> { parts(stdout, &DRIVE_PARTS) }
-/// Reads a run's report part by part, each by its stated length, in exactly the given order and nothing after them.
 pub fn parts(stdout: &[u8], names: &[&str]) -> R<std::collections::BTreeMap<String, Vec<u8>>> {
     let (mut parts, mut at) = (std::collections::BTreeMap::new(), 0usize);
     for name in names {
@@ -89,7 +78,6 @@ pub fn split_behavior(stdout: &[u8]) -> (&[u8], Option<std::collections::BTreeSe
         None => (stdout, None),
     }
 }
-/// How often the run tried to reach each host (`net:host:port`), summed over every process that recorded it.
 pub fn behavior_counts(stdout: &[u8]) -> std::collections::BTreeMap<String, u64> {
     let mark = BEHAVIOR.as_bytes();
     let mut counts = std::collections::BTreeMap::new();
@@ -143,7 +131,6 @@ pub fn validate_image(reference: &str) -> R<String> {
     Ok(text(i, "Id")?.to_string())
 }
 
-/// A dependency volume. A fresh one is removed when dropped; one kept in the dependency cache stays for later verifications.
 pub struct Volume(pub String, bool);
 impl Volume {
     pub fn create() -> R<Volume> {
@@ -153,15 +140,12 @@ impl Volume {
     }
     pub fn cached(name: String) -> Volume { Volume(name, true) }
     pub fn keep(&mut self) { self.1 = true; }
-    /// Whether the volume outlives its owner (the dependency cache's own).
     pub fn kept(&self) -> bool { self.1 }
 }
 impl Drop for Volume {
     fn drop(&mut self) { if !self.1 { remove_volume(&self.0); } }
 }
 pub fn volume_exists(name: &str) -> bool { docker(&["volume", "inspect", name], Duration::from_secs(60), 1 << 20).is_ok() }
-/// A Yarn 2+ settings file without the settings that run the repository's own JavaScript during an install (`yarnPath`, `plugins`); every
-/// other setting, such as the registry, stays.
 pub fn yarnrc_without_code(text: &str) -> String {
     let (mut out, mut skipping) = (String::new(), false);
     for line in text.lines() {
@@ -171,9 +155,6 @@ pub fn yarnrc_without_code(text: &str) -> String {
     }
     out
 }
-/// A Bun project's package.json as npm can install it (Kern installs Bun projects with npm; it does not read bun.lock): `workspace:`
-/// versions become `*` (npm links the project's own package from its workspaces), `catalog:` versions become the catalog's (`*` when it
-/// has none), and the object form of `workspaces` becomes the list npm reads. None when nothing needs to change.
 pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
     let mut pkg: Value = serde_json::from_str(text).ok()?;
     let root: Value = serde_json::from_str(root).unwrap_or(Value::Null);
@@ -200,21 +181,15 @@ pub fn remove_volume(name: &str) { let _ = docker(&["volume", "rm", "--force", n
 pub struct Spec<'a> {
     pub image: &'a str, pub snapshot: &'a Path, pub control: &'a Path, pub writable: &'a [String], pub limits: &'a Limits, pub entry: Vec<String>,
     pub network: &'a str, pub volumes: Vec<(&'a str, &'a str, bool)>, pub root: bool, pub home_mb: u64,
-    /// The snapshot is only a read-only input and /workspace is an in-memory copy the entry point may change (tests and planted bugs).
     pub scratch: bool,
-    /// An installed tree in place of the snapshot at /workspace (volume, read-only): a drive run reads it, its setup alone writes it.
     pub workspace: Option<(&'a str, bool)>,
 }
-/// Folders inside node_modules where tools keep caches and temporary files (Vite bundles its config into .vite-temp). The shared install is
-/// read-only; these get an empty in-memory folder for each run, on mount points the install creates.
 pub const CACHE_DIRS: [&str; 3] = [".cache", ".vite", ".vite-temp"];
 fn mount(source: &Path, target: &str) -> R<[String; 2]> {
     let s = std::path::absolute(source)?.display().to_string();
     ensure!(!s.contains([',', '\n', '"']), "Unsupported mount source");
     Ok(["--mount".into(), format!("type=bind,source={s},target={target},readonly")])
 }
-/// The CPUs a sandbox gets. Installing a large project's dependencies is CPU-bound under gVisor: a drive setup gets up to 4, never more
-/// than the machine has; everything else runs on one.
 fn cpus(spec: &Spec) -> usize {
     if spec.entry.first().is_some_and(|e| e == "__drive_setup" || e == "__drive_test") { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4) } else { 1 }
 }
@@ -222,12 +197,10 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let (drive, drive_setup) = (spec.entry.first().is_some_and(|e| e == "__drive"), spec.entry.first().is_some_and(|e| e == "__drive_setup"));
     let drive_test = spec.entry.first().is_some_and(|e| e == "__drive_test");
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
-    // A test run reads one side's installed tree exactly as a drive run does, and nothing else: no write grants, no other volume.
     if drive_test {
         ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
             "A test run reads an installed tree read-only, as an unprivileged user without a network or another volume");
     }
-    // Kern's driver tools are mounted read-only, at /kern-tools/node_modules, and only into drive runs.
     ensure!(spec.volumes.iter().all(|(v, t, ro)| v.starts_with("kern-deps-") && (*t == "/workspace/node_modules" || (*t == "/kern-tools/node_modules" && *ro && drive))), "Unexpected volume");
     if drive { ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch, "A drive run reads an installed tree read-only, as an unprivileged user without a network"); }
     if drive_setup { ensure!(matches!(spec.workspace, Some((_, false))) && spec.network == "bridge" && spec.root && spec.volumes.is_empty() && spec.writable.is_empty() && !spec.scratch, "A drive setup installs into its own tree volume as root with a network, and mounts nothing else"); }
@@ -238,8 +211,6 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let l = spec.limits;
     let user = if spec.root { "0:0" } else { "1000:1000" };
     let cpus = cpus(spec);
-    // A large project's module graph opens more than 1,024 files at once as it loads, and so does its install: drive runs and their
-    // setup may hold 65,536.
     let files = if drive || drive_setup || drive_test { "nofile=65536:65536" } else { "nofile=1024:1024" };
     let mut a: Vec<String> = [
         "create", "--name", name, "--pull=never", "--runtime=runsc", &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
@@ -250,7 +221,6 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     match spec.workspace {
         Some((volume, readonly)) => {
             a.extend(["--mount".into(), format!("type=volume,source={volume},target=/workspace{}", if readonly { ",readonly" } else { "" })]);
-            // The installed tree stays read-only; the folders tools keep caches in are writable, in memory, as for a verification's install.
             for dir in CACHE_DIRS.iter().filter(|_| readonly) {
                 a.extend(["--tmpfs".into(), format!("/workspace/node_modules/{dir}:rw,nosuid,nodev,size=268435456,uid=1000,gid=1000,mode=0700")]);
             }
@@ -327,7 +297,6 @@ mod inside {
     use std::process::{Command, Stdio};
 
     const ENV: [(&str, &str); 3] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8")];
-    /// Tests run as in CI: runners never prompt, watch or record new snapshots.
     const TEST_ENV: [(&str, &str); 4] = [ENV[0], ENV[1], ENV[2], ("CI", "true")];
     fn config(name: &str) -> R<Value> { read_json(Path::new("/kern").join(name)) }
     fn wait(mut child: std::process::Child, timeout: Duration) -> R<bool> {
@@ -441,7 +410,6 @@ mod inside {
         ensure!(wait(child, Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?))?, "npm ci failed or timed out");
         let (mut entries, mut totals) = (Vec::new(), (0u64, 0u64));
         tree_digest(Path::new("/workspace/node_modules"), "", &mut entries, &mut totals)?;
-        // Mount points for the per-run cache folders, made after the digest so the recorded install is unchanged.
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         println!("{}", json!({ "version": 1, "entries": totals.0, "bytes": totals.1, "sha256": digest(&json!(entries))? }));
         Ok(())
@@ -461,8 +429,6 @@ mod inside {
             Err(_) => Ok(()),
         }
     }
-    /// Plants each bug of /kern/mutate.json in a fresh copy of the new code and runs the old tests (/kern/old) and the new tests against it.
-    /// The copy is rebuilt from the read-only input before every run, so nothing one run leaves behind can sway the next.
     pub fn mutate() -> R<()> {
         let plan = config("mutate.json")?;
         exact(&plan, &["version", "command", "tests_paths", "budget_seconds", "old_files", "runner", "known", "mutants"], "planting plan")?;
@@ -496,7 +462,6 @@ mod inside {
             }
             Ok(())
         };
-        // Some(true) when the tests caught the bug (they failed or ran out of time), None when the budget cannot fit the run.
         let errors = Path::new("/tmp/.kern-baseline-errors");
         let run = |old: bool, mutant: Option<&Value>, files: &[String], limit: Option<Duration>| -> R<Option<bool>> {
             let Some(timeout) = crate::proof::run_limit(budget.saturating_sub(started.elapsed()), limit) else { return Ok(None) };
@@ -511,9 +476,7 @@ mod inside {
                 bytes.splice(start..end, text(m, "replacement")?.bytes());
                 std::fs::write(&target, bytes)?;
             }
-            // A baseline keeps its error output, so a failure explains itself; planted runs only count.
             let stderr = if mutant.is_none() { Stdio::from(std::fs::File::create(errors)?) } else { Stdio::null() };
-            // With known failures the report decides, read straight from the runner's output rather than from a file a test could rewrite.
             let stdout = if known.is_empty() { Stdio::null() } else { Stdio::piped() };
             let mut child = Command::new(&command[0]).args(&command[1..]).args(files).current_dir(work).env_clear().envs(TEST_ENV).stdin(Stdio::null()).stdout(stdout).stderr(stderr).spawn()?;
             let reader = child.stdout.take().map(|out| std::thread::spawn(move || {
@@ -532,14 +495,12 @@ mod inside {
             let error = if ok { String::new() } else { std::fs::read(errors).map(|b| String::from_utf8_lossy(&b[b.len().saturating_sub(2000)..]).to_string()).unwrap_or_default() };
             Ok((ok, at.elapsed(), error))
         };
-        // The old side runs only the changed test files when the plan allows it and they pass alone; otherwise the whole old suite.
         let (mut old_args, mut old_base) = (old_files.clone(), timed(true, &old_files)?);
         if !old_base.0 && !old_files.is_empty() { (old_args, old_base) = (Vec::new(), timed(true, &[])?); }
         let ((old_ok, old_time, old_error), (new_ok, new_time, new_error)) = (old_base, timed(false, &[])?);
         let mut results = Vec::new();
         if old_ok && new_ok {
             let (old_limit, new_limit) = (old_time * 3 + Duration::from_secs(5), new_time * 3 + Duration::from_secs(5));
-            // A set of focused new tests is used only once it passes on the unmodified code; a set that fails there would hide nothing.
             let usable: std::cell::RefCell<std::collections::HashMap<Vec<String>, bool>> = Default::default();
             for m in &mutants {
                 let focus = strings(m, "tests", 10000)?;
@@ -560,7 +521,6 @@ mod inside {
             "milliseconds": { "old": old_time.as_millis() as u64, "new": new_time.as_millis() as u64, "total": started.elapsed().as_millis() as u64 }, "mutants": results }));
         Ok(())
     }
-    /// A copy every user can read: folders 755, files 644 (755 when executable). Symlinks are left out; they could point anywhere.
     fn copy_readable(from: &Path, to: &Path) -> R<()> {
         std::fs::create_dir_all(to)?;
         std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755))?;
@@ -576,16 +536,12 @@ mod inside {
         }
         Ok(())
     }
-    /// How one folder's dependencies are installed, by its lockfile: the exact install first, then a plain one when the lockfile is out of
-    /// step with package.json. Install scripts never run; Yarn always lays out node_modules (Plug'n'Play needs a loader Node lacks).
     fn install_plan(dir: &Path) -> (&'static str, Vec<Vec<String>>) {
         let node = |args: &[&str]| -> Vec<String> { ["/usr/local/bin/node"].iter().chain(args).map(|s| s.to_string()).collect() };
         let npm = "/usr/local/lib/node_modules/npm/bin/npm-cli.js";
         let corepack = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
         let quiet = ["--no-audit", "--no-fund", "--no-update-notifier"];
         if dir.join("pnpm-lock.yaml").is_file() {
-            // --ignore-pnpmfile: a .pnpmfile.cjs is the repository's own JavaScript, which pnpm would run with the network on.
-            // The store lives on the tree's volume and stays: newer pnpm links node_modules into it.
             let store = "--store-dir=/workspace/.kern-pnpm-store";
             return ("pnpm", vec![node(&[corepack, "pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]),
                 node(&[corepack, "pnpm", "install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store])]);
@@ -598,15 +554,11 @@ mod inside {
         if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() {
             return ("npm", vec![node(&[npm, "ci", "--ignore-scripts"]).into_iter().chain(quiet.iter().map(|s| s.to_string())).collect(), plain]);
         }
-        // Bun's lockfile is Bun's own: npm installs the project from its package.json files (drive_setup rewrites what npm refuses,
-        // bun_for_npm), without failing on peer versions Bun does not enforce.
         if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
             return ("bun", vec![plain.into_iter().chain(["--legacy-peer-deps".to_string()]).collect()]);
         }
         ("npm", vec![plain])
     }
-    /// Rewrites the package.json files of a Bun project, outside node_modules and hidden folders, for npm (bun_for_npm); returns the
-    /// originals to put back once the install is done.
     fn bun_rewrite(dir: &Path) -> R<Vec<(PathBuf, Vec<u8>)>> {
         let root = std::fs::read_to_string(dir.join("package.json"))?;
         let (mut originals, mut folders) = (Vec::new(), vec![(dir.to_path_buf(), 0)]);
@@ -623,8 +575,6 @@ mod inside {
         }
         Ok(originals)
     }
-    /// Fills a drive tree: the snapshot from /input, then the dependencies of each folder in /kern/drive-setup.json with its own package
-    /// manager. Prints one JSON record of what was installed where.
     pub fn drive_setup() -> R<()> {
         let c = config("drive-setup.json")?;
         exact(&c, &["version", "dirs", "timeout_seconds"], "drive setup")?;
@@ -634,22 +584,16 @@ mod inside {
         let budget = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         let started = std::time::Instant::now();
         copy_readable(Path::new("/input"), Path::new("/workspace"))?;
-        // Temporary files, package caches and the package managers corepack fetches go on the tree's own volume, never the small
-        // in-memory /tmp or home (mounted without exec, so a native pnpm could not start): a large project's install writes hundreds of
-        // megabytes of them. The folder goes once the installs are done; pnpm's store (.kern-pnpm-store) stays.
         let scratch = Path::new("/workspace/.kern-install");
         std::fs::create_dir_all(scratch.join("tmp"))?;
         let mut records = Vec::new();
         for d in &dirs {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
-            // A package inside a workspace was installed with it.
             if d != "." && dir.join("node_modules").exists() { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
             let (manager, attempts) = install_plan(&dir);
-            // Yarn 2+ reads a copy of the project's settings without yarnPath and plugins, the repository's own JavaScript it would run.
             let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
             if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
-            // npm reads a Bun project's package.json files with Bun's own versions rewritten; the originals come back after the install.
             let originals = if manager == "bun" { bun_rewrite(&dir)? } else { Vec::new() };
             let mut result = json!("failed");
             let log = Path::new("/home/kern/install.log");
@@ -665,7 +609,6 @@ mod inside {
                         ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
                         ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")])
                     .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
-                    // Yarn 2+ prints its errors on standard output: both go to the log, so a failed install says why.
                     .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
                 if wait(child, left)? {
                     result = json!(if manager == "bun" { "installed from package.json (Kern does not read Bun's lockfile)" }
@@ -678,7 +621,6 @@ mod inside {
             for (path, text) in &originals { std::fs::write(path, text)?; }
             records.push(json!({ "dir": d, "manager": manager, "result": result }));
         }
-        // Mount points for the per-run cache folders of the read-only tree.
         let _ = std::fs::remove_dir_all(scratch);
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         println!("{}", json!({ "version": 1, "installs": records }));
@@ -690,13 +632,10 @@ mod inside {
         std::io::Write::write_all(&mut out, bytes)?;
         Ok(())
     }
-    /// At most `max` bytes of a file: its start, or its end for error output where the last lines say most.
     fn some_of(path: &str, max: usize, end: bool) -> Vec<u8> {
         let b = std::fs::read(path).unwrap_or_default();
         if b.len() <= max { b } else if end { b[b.len() - max..].to_vec() } else { b[..max].to_vec() }
     }
-    /// Keeps only what c8 can map back to the project's files: scripts and source maps with a file: address. Kern's call wrappers
-    /// (kern-wrap:), asset stubs (data:) and Node's own modules (node:) are dropped.
     fn files_only(dir: &Path) -> R<()> {
         for e in std::fs::read_dir(dir)? {
             let path = e?.path();
@@ -707,9 +646,6 @@ mod inside {
         }
         Ok(())
     }
-    /// One drive run: the driver under Kern's loader, with V8 line coverage and the behaviour recorder, from the read-only tree; then c8
-    /// maps the coverage back to the project's lines through the source maps. The report goes to stdout as length-prefixed parts (see
-    /// DRIVE_PARTS).
     pub fn drive() -> R<()> {
         let c = config("drive-run.json")?;
         exact(&c, &["version", "timeout_seconds"], "drive run")?;
@@ -724,9 +660,6 @@ mod inside {
         quiesce()?;
         let mut errors = some_of("/tmp/.kern-err", 64 << 10, true);
         if !finished { errors.extend_from_slice(b"\nkern: the driver did not finish in time and was stopped\n"); }
-        // Line coverage: what the run left, through c8's report (its own errors join the run's). Every JavaScript and TypeScript file of the
-        // project counts, `.cts` and `.mts` too, whatever its folder: Kern alone decides which lines are measured, so c8 drops nothing but
-        // node_modules.
         files_only(Path::new("/tmp/.kern-v8"))?;
         let report = Command::new("/usr/local/bin/node")
             .args(["--import", "/kern/drive-c8.mjs", "/kern-tools/node_modules/c8/bin/c8.js", "report", "--reporter=json", "--temp-directory=/tmp/.kern-v8", "--report-dir=/tmp/.kern-coverage",
@@ -746,8 +679,6 @@ mod inside {
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())
     }
-    /// A test run: the project's test command on one side's installed tree, as in CI (CI=true, no network), with the behaviour recorder.
-    /// The report says how the command ended, so a run that failed is told apart from one that was stopped for time.
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
         exact(&c, &["version", "command", "timeout_seconds", "cwd"], "test run")?;
@@ -776,7 +707,6 @@ mod inside {
     }
     pub fn exec(command: &[String]) -> R<()> {
         let c = argv(&json!(command))?;
-        // The tests get their own writable copy of the read-only snapshot, as in a CI checkout; the copy is gone when the sandbox is.
         for e in std::fs::read_dir("/input")? { let e = e?; if e.file_name() != "node_modules" { copy_entry(&e.path(), &Path::new("/workspace").join(e.file_name()))?; } }
         let log = Path::new("/tmp/.kern-behavior");
         let status = Command::new(&c[0]).args(&c[1..]).current_dir("/workspace").env_clear().envs(TEST_ENV)

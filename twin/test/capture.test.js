@@ -30,9 +30,6 @@ test('a capture names its route, its customer segment and the version that serve
 });
 
 test('a capture records the url and method as the request arrived, even when the app rewrites req.url while routing', async () => {
-  // Express strips a mount prefix from req.url while a sub-router handles the request (app.use('/v1', router) leaves req.url as '/crawl')
-  // and does not restore it when the router sends the response. The capture must record the url the request arrived with, or a ghost
-  // replays the wrong path and the route no longer matches.
   let copy;
   const listener = wrapListener((req, res) => {
     req.url = '/crawl';
@@ -82,7 +79,6 @@ test('a body read through events keeps its request: the calls the app makes afte
     assert.deepEqual(await (await post(shop.url, { amount: 25 })).json(), { paid: true });
     await shop.twin.idle();
     const stats = shop.twin.stats();
-    // Unrecorded, the charge would be missing from the real run while the old ghost makes it: "not compared" (unfaithful).
     assert.deepEqual([stats.same, stats.notCompared], [1, 0], JSON.stringify(stats));
     await shop.close();
   } finally {

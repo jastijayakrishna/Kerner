@@ -9,7 +9,6 @@ import { app } from './helpers.js';
 
 const options = (name) => ({ old: app(name, 'old'), candidate: app(name, 'new'), timeoutMs: 3000, startMs: 20000, queueLimit: 10, ghostMemoryMb: 256, maxRestarts: 5, log: null });
 
-/** A request as the real app served it: what came in, what went out, and no outgoing calls. */
 function served(url, answer) {
   return {
     start: 1760000000000,
@@ -50,19 +49,15 @@ test('a change that answers the same is counted as the same', async () => {
 test('a ghost that failed after it answered is restarted with its pair before the next request, so nothing is judged on what the failure left', async () => {
   const pair = new Coordinator(options('late-crash'));
   await pair.start();
-  // Each request's audit ends about 60 ms after its answer; the new version's then throws, between two requests.
   const settle = () => new Promise((resolve) => setTimeout(resolve, 1000));
   pair.submit(served('/', { open: 0 }));
   await pair.idle();
   await settle();
-  // The failure itself is a crash on the request that left the work running.
   assert.deepEqual([pair.counts.same, pair.counts.different], [1, 1], JSON.stringify(pair.differences()));
   pair.submit(served('/', { open: 0 }));
   await pair.idle();
-  // The next request is judged on a fresh pair: its answers are the same (nothing it left, such as `open`, shows).
   assert.equal(pair.counts.same, 2, JSON.stringify(pair.differences()));
   assert.ok(pair.differences().every((d) => d.details.every((detail) => detail.path === 'after the answer')), JSON.stringify(pair.differences()));
-  // A known case's check runs on the pair the same way.
   await settle();
   const judged = await pair.check({ ...served('/', { open: 0 }), route: 'GET /' });
   assert.equal(judged.outcome, 'same', JSON.stringify(judged));
@@ -71,8 +66,6 @@ test('a ghost that failed after it answered is restarted with its pair before th
 });
 
 test('a ghost pair that was replaced can no longer mark the new pair for a restart', async () => {
-  // A process ghost's last messages are read after it has stopped. Here the candidate reports itself broken without end until its pair
-  // restarts, and the coordinator's thread is busy (as when it judges large bodies), so those messages keep coming after the new pair is up.
   const pair = new Coordinator({ ...options('flood'), ghosts: 'process', maxRestarts: 50 });
   await pair.start();
   const busy = setInterval(() => {
@@ -95,7 +88,6 @@ test('a ghost pair that was replaced can no longer mark the new pair for a resta
 });
 
 test('a known case on which both versions hang is not counted as passed: it was never compared', async () => {
-  // Both ghosts run the version that never answers.
   const pair = new Coordinator({ ...options('hang'), old: app('hang', 'new'), timeoutMs: 300 });
   await pair.start();
   const judged = await pair.check({ ...served('/?n=3', { n: 3, total: 6 }), route: 'GET /' });
@@ -105,8 +97,6 @@ test('a known case on which both versions hang is not counted as passed: it was 
 });
 
 test('running ghosts never keep the app\'s process alive', () => {
-  // An app that closes its server expects its process to end; ghosts that are still running must not hold it open.
-  // The child runs from a file: ghosts inherit Node's flags, and --input-type (needed for -e) is refused for a ghost's file.
   const file = join(tmpdir(), `kern-twin-alive-${process.pid}.mjs`);
   writeFileSync(file, `
 import { Coordinator } from ${JSON.stringify(new URL('../src/coordinator.js', import.meta.url).href)};
@@ -123,7 +113,6 @@ console.log(pair.disabled ?? 'running');
 });
 
 test('a ghost\'s output never reaches the app\'s own logs', () => {
-  // Ghost logs mixed into production logs would repeat every sampled request's log lines, written by code that served nobody.
   const file = join(tmpdir(), `kern-twin-quiet-${process.pid}.mjs`);
   writeFileSync(file, `
 import { Coordinator } from ${JSON.stringify(new URL('../src/coordinator.js', import.meta.url).href)};
@@ -152,7 +141,6 @@ test('a version that fails after it has answered, in work the request left runni
   await pair.start();
   pair.submit(served('/report', { open: 0 }));
   await pair.idle();
-  // The new version's audit fails about 60 ms after its answer, after its result: it is judged before the next request.
   await new Promise((resolve) => setTimeout(resolve, 1000));
   pair.submit(served('/next', { open: 0 }));
   await pair.idle();

@@ -1,24 +1,14 @@
-//! The receipt: the one thing a customer reads about a pull request. One answer first (nothing unexpected, needs a look, or blocked), then
-//! every item behind it, then what stayed the same, then what Kern could not check. It is built from the parts `kern check` runs (the
-//! static rules, the project's tests on the old and the new code, and, with an AI key, every changed line run both ways), posted as one
-//! comment that is edited in place, with one commit status, `Kern`. A maintainer approves a "needs a look" receipt with `/kern approve`;
-//! nothing approves a blocked one.
 use crate::github::Api;
 use crate::ensure;
 use crate::util::*;
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// Marks Kern's receipt comment, so a later run edits it instead of adding another.
 pub const MARK: &str = "<!-- kern-receipt -->";
-/// Starts the hidden line that carries the seal and GitHub's signature over it.
 pub const SEAL_MARK: &str = "<!-- kern-seal ";
-/// Only a comment this account wrote counts as Kern's: anyone can paste the mark into a comment of their own.
 fn author() -> String { crate::github::env("KERN_COMMENT_AUTHOR").unwrap_or_else(|| "github-actions[bot]".into()) }
-/// At most this many items of one kind are listed; the rest are counted. The receipt.json artifact has them all.
 const SHOWN: usize = 15;
 
-/// Untrusted text (a test name, a path, a value from the code) as an inline code span that nothing in it can break out of.
 fn code(s: &str, n: usize) -> String {
     let flat: String = s.chars().map(|c| match c { '`' => '\'', '<' => '‹', c if c.is_control() => ' ', c => c }).collect();
     let flat = flat.trim();
@@ -28,8 +18,6 @@ fn code(s: &str, n: usize) -> String {
 fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() }
 fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
 
-/// What the behaviour runs found, sorted by whether the pull request describes it: (described, not mentioned). Kern's own record of calls
-/// and behaviour is what counts; what the driver printed counts only when there is no record, as in drive's own comment.
 fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
     if !report.is_object() { return (Vec::new(), Vec::new()); }
     let items = crate::drive::difference_items(report);
@@ -44,15 +32,11 @@ fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
     (described, surprises)
 }
 
-/// Builds the receipt from drive.json (the commits and what could not be measured), the static rules, the tests' comparison and what the
-/// behaviour runs did (`status`: RAN, NO_DRIVER, NOTHING_TO_RUN, OFF or FAILED; `report`: drive's merged report when they ran).
 pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
     let (mut blocked, mut look) = (Vec::new(), Vec::new());
-    // Blocked: something that worked before is broken, or the tests were made to pass instead of the code. A fix clears these, never a vote.
     for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
     for t in strings(&tests["new_problems"]) { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}", code(&t, 200)))); }
     for x in rules["tricks"].as_array().into_iter().flatten() { blocked.push(item("trick", format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))))); }
-    // Needs a look: behaviour nobody mentioned, new powers, tests that stopped running, and the files that steer builds, secrets and agents.
     let (described, surprises) = behaviour_items(&behaviour["report"]);
     let sorted = behaviour["report"]["sorted"].is_object();
     for s in &surprises { look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
@@ -66,7 +50,6 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run"), ("protected", "protected", "is a CI, secret or configuration file")] {
         for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", path_of(x)))); }
     }
-    // One decision for one dependency change, however many manifests and lockfiles it touches: what moved, then where.
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
     if !deps.is_empty() {
         let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
@@ -89,7 +72,6 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": report["coverage"]["percent"], "lines": lines, "described": described, "not_mentioned": surprises },
         "rules": rules, "not_checked": not_checked })
 }
-/// Kern's own words (a check's reason) with anything that could act as markup made inert.
 fn plain(s: &str) -> String { s.chars().map(|c| match c { '<' => '‹', '`' => '\'', c if c.is_control() => ' ', c => c }).take(400).collect() }
 
 fn plural(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
@@ -98,7 +80,6 @@ fn list(md: &mut String, items: &[Value]) {
     if items.len() > SHOWN { md.push_str(&format!("- … and {} more in Kern's receipt.json\n", items.len() - SHOWN)); }
 }
 
-/// The receipt as the pull request shows it. `drive_comment` is kern drive's own comment, folded away under the answer.
 pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let blocked = r["blocked"].as_array().cloned().unwrap_or_default();
     let look = r["look"].as_array().cloned().unwrap_or_default();
@@ -106,7 +87,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let behaviour = &r["behaviour"];
     let tests_ran = tests["status"] == "RAN";
     let behaviour_ran = behaviour["status"] == "RAN";
-    // A change with no code, tests or package.json in it has nothing to install or run: that is a full check, not a partial one.
     let nothing = tests["status"] == "NOTHING_TO_RUN";
     let mut md = String::from(MARK);
     md.push('\n');
@@ -183,7 +163,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     md
 }
 
-/// Writes receipt.json and receipt.md into `out`, replacing earlier ones.
 pub fn write(out: &Path, r: &Value, drive_comment: Option<&str>) -> R<()> {
     std::fs::create_dir_all(out)?;
     std::fs::write(out.join("receipt.json"), format!("{}\n", serde_json::to_string_pretty(r)?))?;
@@ -191,15 +170,11 @@ pub fn write(out: &Path, r: &Value, drive_comment: Option<&str>) -> R<()> {
     Ok(())
 }
 
-/// What GitHub signs: the pull request, both commits, the answer, and the fingerprint of the whole receipt.
 pub fn seal(r: &Value, repository: &str, number: u64) -> R<Value> {
     Ok(json!({ "v": 1, "repository": repository, "pull": number, "base": r["base"], "head": r["head"], "decision": r["decision"], "receipt_sha256": digest(r)? }))
 }
-/// The hidden line that carries a seal and its token in the comment.
 pub fn seal_line(seal: &Value, token: &str) -> String { format!("{SEAL_MARK}{} -->", json!({ "seal": seal, "token": token })) }
 
-/// In Kern's workflow: GitHub signs the receipt's seal. The token's audience is the seal's fingerprint, so it vouches for this seal and no
-/// other, and GitHub adds who made it: Kern's workflow at its commit, in this repository, in this run. Writes seal.json next to the receipt.
 pub fn sign(out: &Path, repository: &str, number: u64) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     let s = seal(&read_json(out.join("receipt.json"))?, repository, number)?;
@@ -208,23 +183,17 @@ pub fn sign(out: &Path, repository: &str, number: u64) -> R<Value> {
     Ok(json!({ "status": "SIGNED", "decision": s["decision"], "head": s["head"] }))
 }
 
-/// Whether GitHub signed this seal for Kern's own workflow in `repository`: the token's signature (GitHub's published keys), its audience
-/// (this seal's fingerprint), its repository, and its workflow, which must be Kern's at a branch or tag of Kern's repository. A bare commit
-/// or a pull request's ref could name a commit from a fork of Kern, which anyone can make. Returns the token's claims.
 pub fn signed(seal: &Value, token: &str, jwks: &Value, repository: &str) -> R<Value> {
     let claims = crate::oidc::verify(token, jwks, &crate::oidc::audience(seal)?, crate::oidc::WORKFLOW, Some(repository))?;
     kern_workflow(&claims)?;
     Ok(claims)
 }
-/// The token's workflow is Kern's, at a branch or tag of Kern's own repository.
 pub fn kern_workflow(claims: &Value) -> R<()> {
     let at = claims["job_workflow_ref"].as_str().and_then(|r| r.strip_prefix(crate::oidc::WORKFLOW)).unwrap_or("");
     ensure!(at.starts_with("refs/heads/") || at.starts_with("refs/tags/"), "The receipt was not signed by Kern's workflow at a branch or tag of Kern's repository ({})", code(at, 80));
     Ok(())
 }
 
-/// `kern receipt verify`: Kern's receipt on the pull request, and whether GitHub's signature over its seal holds; with the job's receipt.json,
-/// also whether that file is the receipt the seal names.
 pub fn verify(api: &Api, repository: &str, number: u64, jwks: &Value, receipt: Option<&Value>) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     let Some(c) = kern_comment(api, repository, number)? else { return Ok(json!({ "status": "NO_RECEIPT" })) };
@@ -272,8 +241,6 @@ fn description(r: &Value) -> String {
     }
 }
 
-/// Posts the receipt in `out` on the pull request, or edits Kern's earlier comment there, and sets the `Kern` status on its head. A
-/// receipt for a commit that is no longer the pull request's head is never posted (a re-run, or a newer push that overtook it).
 pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     let r = read_json(out.join("receipt.json"))?;
@@ -281,7 +248,6 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
     let now = head_of(api, repository, number)?;
     if now != head { return Ok(json!({ "status": "STALE", "checked": head, "head": now })); }
     let mut body = std::fs::read_to_string(out.join("receipt.md"))?;
-    // Only a signed receipt says it is signed (a pull request from a fork gets no OIDC token), and how anyone can check it.
     if let Ok(s) = read_json(out.join("seal.json")) {
         body += &format!("<sub>Signed by GitHub for Kern's own workflow. Anyone can check this receipt: `kern receipt verify {repository} {number}`</sub>\n{}\n",
             seal_line(&s["seal"], s["token"].as_str().unwrap_or("")));
@@ -295,8 +261,6 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
     Ok(json!({ "status": posted, "state": state, "decision": r["decision"] }))
 }
 
-/// `/kern approve` from `login`: allowed for people who can merge (write, maintain or admin), for the receipt of the current head, when it is
-/// Kern's (GitHub's signature over its seal holds: `check`) and says "needs a look". Sets the status to success and notes who approved.
 pub fn approve(api: &Api, repository: &str, number: u64, login: &str, check: &dyn Fn(&Value, &str) -> R<()>) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     ensure!(!login.is_empty() && login.len() <= 100 && login.chars().all(|c| c.is_ascii_alphanumeric() || "-_[]".contains(c)), "Expected a GitHub login");

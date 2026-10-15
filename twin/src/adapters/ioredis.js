@@ -3,23 +3,14 @@ import { revive } from '../serialize.js';
 import { mine } from '../turn.js';
 import { CALL_BYTES, spend } from '../capture.js';
 
-// ioredis.
-// - In the app's thread, every command of a sampled request is written down at Redis.prototype.sendCommand (pipelines and transactions
-//   send theirs through it too), with the raw reply as the server sent it, before ioredis transforms it.
-// - In a ghost, no client connects: it is ready at once, and each command is answered from the recording. Its raw reply goes through
-//   ioredis's own transformation once, as a real reply would.
-// Redis Cluster and subscriber mode are not covered.
 const PATCHED = Symbol.for('kern.twin.ioredis');
 const WATCHED = Symbol.for('kern.twin.ioredis.command');
 
 const redisOf = (module) => module.default ?? module.Redis ?? module;
 
-/** Writes down one command and its raw reply. A command sent again (from the offline queue) is written down once. */
 function watch(sampled, command, installedLimit) {
-  // The limit of the twin whose request this is: ioredis is patched once per process, by the first twin.
   const maxBodyBytes = sampled.maxBodyBytes ?? installedLimit;
   const args = [...(command.args ?? [])];
-  // Named before anything is changed: a command that cannot be named (an argument with no text form) is left exactly as it was.
   const call = { kind: 'redis', key: redisKey(command.name, args), write: redisIsWrite(command.name), command: String(command.name), args, reply: null, error: null };
   command[WATCHED] = true;
   sampled.io.push(call);
@@ -38,7 +29,6 @@ function watch(sampled, command, installedLimit) {
       if (size > maxBodyBytes) sampled.problem ??= 'a Redis reply over the limit';
       else spend(sampled, size);
     } catch {
-      // A reply JSON cannot show is still copied between threads as it is.
     }
     settle();
     return resolve(value);
@@ -60,7 +50,6 @@ function record({ appRequire, current, maxBodyBytes }) {
       try {
         watch(sampled, command, maxBodyBytes);
       } catch {
-        // The command goes to ioredis untouched, and the app gets ioredis's own answer; the request is not copied.
         sampled.problem ??= 'a Redis command Kern could not name';
       }
     }
@@ -71,7 +60,6 @@ function record({ appRequire, current, maxBodyBytes }) {
 
 function replay({ appRequire, take, wrote, note }) {
   const proto = redisOf(appRequire('ioredis')).prototype;
-  // A ghost's client never connects: it is ready at once.
   proto.connect = function ghostConnect(callback) {
     if (this.status !== 'ready') {
       this.setStatus('connect');
@@ -85,7 +73,6 @@ function replay({ appRequire, take, wrote, note }) {
     this.setStatus('end');
   };
   proto.sendCommand = function ghostSendCommand(command) {
-    // A command the current turn did not send waits forever (turn.js): its promise never settles.
     if (!mine()) return command.promise;
     command.setReplyContext?.(this.condition ?? this.options);
     const key = redisKey(command.name, command.args ?? []);

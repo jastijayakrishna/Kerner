@@ -10,7 +10,6 @@ import { commentBody, forAgent, toFeedback } from '../src/feedback.js';
 
 const cli = fileURLToPath(new URL('../bin/kern-twin.js', import.meta.url));
 const base = { version: 1, candidate: 'sha256:abc', segment: 'all', adapters: ['fetch'], overlay: false, lines: {}, scrubbed: true, opaque: [] };
-// What a case that reproduces holds to run again: its world, request and recording, and both answers.
 const replayable = (method, url, oldStatus, newStatus) => ({
   world: { start: 1, seed: 1 }, request: { method, url, headers: {}, body: new Uint8Array() }, io: [],
   old: { status: oldStatus, headers: {}, body: new Uint8Array(), effects: [], events: [] }, new: { status: newStatus, headers: {}, body: new Uint8Array(), effects: [], events: [] },
@@ -36,7 +35,6 @@ test('cases become kern-feedback/v1 instructions: the agent fixes what it may, a
   assert.match(door.instruction, /A person must decide/);
   assert.match(stub.instruction, /A person must look/);
   assert.equal(toFeedback([cases[0]], {}).agent_fixable, true);
-  // As in Kern: the full verdict holds the hints on how a person could allow a difference, and the copy an agent reads never does.
   assert.equal(crash.allow, `allow: [{ route: 'POST /limit', kinds: ["crash"] }]`);
   const agent = forAgent(feedback);
   assert.ok(!hidden(agent), JSON.stringify(agent));
@@ -52,7 +50,6 @@ test('cases become kern-feedback/v1 instructions: the agent fixes what it may, a
 });
 
 test("a route with a pipe in it stays in its own cell of the comment's table", () => {
-  // In a GitHub table a | ends a cell even inside code formatting, unless it is written \|.
   const body = commentBody([{ ...cases[0], route: 'GET /a|b' }], 'a'.repeat(40));
   const row = body.split('\n').find((line) => line.includes('GET /a'));
   assert.equal(row.split(/(?<!\\)\|/).length - 2, 4, row);

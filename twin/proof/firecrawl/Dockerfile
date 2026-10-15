@@ -1,5 +1,3 @@
-# firecrawl's API at pull request #2638's merge (new) and at the commit before it (old), built the way firecrawl builds it (pnpm, and
-# Rust for its native module), with the Kern twin and the proof kit beside it. The build context is twin/.
 FROM docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 RUN apt-get update && apt-get install -y --no-install-recommends curl build-essential pkg-config python3 git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
