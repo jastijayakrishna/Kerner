@@ -1,0 +1,268 @@
+# Kern: one receipt on every pull request.
+#
+# Called from a repository's own workflow (see examples/kern.yml). Everything runs on that repository's runner: Kern hosts nothing, and a
+# public repository pays nothing. Each pull request gets one comment, the receipt, edited in place on every push, and one commit status,
+# `Kern`. A maintainer approves a "needs a look" receipt by commenting `/kern approve`.
+name: Kern
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: Optional. Lets Kern run every changed line on the old and the new code (Claude Code in a locked-down mode writes the driver)
+        required: false
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: Optional, in place of ANTHROPIC_API_KEY. A Claude subscription token from `claude setup-token`
+        required: false
+
+permissions: {}
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+      id-token: write
+    concurrency:
+      group: kern-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      HAS_AI: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    steps:
+      - name: Mark the pull request as being checked
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -d '{"state":"pending","context":"Kern","description":"Checking what this change does when it runs"}' > /dev/null || true
+
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Kern builds the exact version of itself whose workflow this is: GitHub names it in the job's own OIDC token (job_workflow_ref and
+      # job_workflow_sha), so the workflow and the binary can never drift apart.
+      - name: Which Kern
+        id: which
+        run: |
+          set -euo pipefail
+          sha=""; ref=""
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=kern-version" | jq -r .value)
+            claims=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+' | awk '{ while (length($0) % 4) $0 = $0 "="; print }' | base64 -d)
+            sha=$(printf '%s' "$claims" | jq -r '.job_workflow_sha // empty')
+            ref=$(printf '%s' "$claims" | jq -r '.job_workflow_ref // empty')
+          fi
+          if [ -z "$sha" ]; then
+            # No OIDC token (a pull request from a fork, or no id-token: write): the calling workflow names the version it pinned.
+            caller="repo/${GITHUB_WORKFLOW_REF#*/*/}"
+            sha=$(grep -oE 'jastijayakrishna/Kerner/\.github/workflows/kern\.yml@[A-Za-z0-9._/-]+' "${caller%@*}" 2>/dev/null | head -n 1 | cut -d@ -f2) || true
+            sha=${sha:-main}
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Kern at ${ref:-main} ($sha)"
+
+      - name: Check out Kern
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jastijayakrishna/Kerner
+          ref: ${{ steps.which.outputs.sha }}
+          path: .kern
+          persist-credentials: false
+
+      - name: Kern's build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .kern/target
+          key: kern-${{ runner.os }}-${{ hashFiles('.kern/Cargo.lock', '.kern/src/**') }}
+          restore-keys: kern-${{ runner.os }}-
+
+      - name: Build Kern
+        id: install
+        working-directory: .kern
+        env:
+          KERN_VERSION: ""
+          KERN_SOURCE: ${{ github.workspace }}/.kern
+          KERN_STATIC: "true"
+          BUILD_FROM_SOURCE: "true"
+        run: bash scripts/install-kern.sh
+
+      - name: gVisor
+        run: |
+          for tool in docker git jq curl; do command -v "$tool" > /dev/null || { echo "::error::Kern needs $tool on the runner"; exit 1; }; done
+          if ! docker info --format '{{json .Runtimes}}' | grep '"runsc"' > /dev/null; then
+            command -v apt-get > /dev/null || { echo "::error::Docker has no gVisor runtime (runsc) and this runner is not Ubuntu or Debian: install gVisor for Docker first"; exit 1; }
+            curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+              | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+            sudo apt-get update -qq && sudo apt-get install -y -qq runsc > /dev/null
+            sudo runsc install && sudo systemctl restart docker
+          fi
+
+      - name: Sandbox
+        env:
+          KERN_BIN: ${{ steps.install.outputs.bin }}
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/kern" && rm -rf "$W" && mkdir -p "$W/checks" && cd "$W"
+          real() { readlink -f "$(command -v "$1")"; }
+          hash() { sha256sum "$1" | cut -d' ' -f1; }
+          runsc=$(readlink -f "$(docker info --format '{{json .Runtimes.runsc}}' | jq -r .path)")
+          printf '{"host":"github-actions","deployment":"single-vm","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
+          jq -n --arg docker "$(real docker)" --arg git "$(real git)" --arg runsc "$runsc" --arg version "$("$runsc" --version)" --arg policy "$W/host-policy.json" \
+            --arg dh "$(hash "$(real docker)")" --arg gh "$(hash "$(real git)")" --arg rh "$(hash "$runsc")" --arg ph "$(hash host-policy.json)" \
+            '{ version: 1, role: "verifier", docker: { file: $docker, sha256: $dh, endpoint: "unix:///var/run/docker.sock" }, git: { file: $git, sha256: $gh },
+               runtime: { file: $runsc, sha256: $rh, version: $version, arguments: [] }, host_policy: { file: $policy, sha256: $ph } }' > verifier.json
+          "$KERN_BIN" --control verifier.json doctor > doctor.json || { cat doctor.json; exit 1; }
+          docker pull -q node:22-bookworm-slim > /dev/null
+          printf '{"version":1,"cases":[{"command":["/usr/local/bin/npm","test"],"stdout":null}]}\n' > checks/test-suite.json
+          jq -n --arg image "$(docker image inspect --format '{{.Id}}' node:22-bookworm-slim)" --arg builder "$(jq -r .builder.sha256 doctor.json)" \
+            --argjson check "$("$KERN_BIN" pin-check test-suite checks/test-suite.json)" --arg repo "$GITHUB_REPOSITORY" \
+            '{ version: 3, repository: $repo, deployment: "single-vm", executors: ["external"], image: $image,
+               builders: { executor: null, verifier: $builder }, checks: [$check], registry: null, permissions: {} }' > operator.json
+
+      - name: Claude Code
+        if: env.HAS_AI == 'true'
+        env:
+          VERSION: 2.1.292
+        run: |
+          case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) echo "::error::No Claude Code build for $(uname -m)"; exit 1 ;; esac
+          # The platform package is the standalone binary: npm checks it against the registry's digest and runs no install script.
+          d="$RUNNER_TEMP/claude-code" && rm -rf "$d" && mkdir -p "$d" && cd "$d"
+          npm pack --silent "@anthropic-ai/claude-code-linux-$arch@$VERSION" > /dev/null
+          tar -xzf ./*.tgz && rm -f ./*.tgz && chmod +x package/claude
+          echo "$d/package" >> "$GITHUB_PATH"
+
+      - name: Check
+        id: check
+        env:
+          KERN_BIN: ${{ steps.install.outputs.bin }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/kern"
+          [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
+          [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
+          # The old code is where the pull request's branch left its base: the merge base, not the base branch's newest commit.
+          repo="$GITHUB_WORKSPACE/repo"
+          base=$(git -C "$repo" merge-base "$BASE_SHA" "$HEAD_SHA")
+          jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$W/pr.md"
+          "$KERN_BIN" --control "$W/verifier.json" check "$repo" "$base" "$HEAD_SHA" "$W/out" "$W/operator.json" "$W/pr.md" | tee "$W/check.json"
+          cat "$W/out/receipt.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign
+        if: always() && steps.check.outcome == 'success'
+        env:
+          KERN_BIN: ${{ steps.install.outputs.bin }}
+        run: |
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then "$KERN_BIN" receipt sign "$RUNNER_TEMP/kern/out" "$GITHUB_REPOSITORY" "$NUMBER"
+          else echo "::notice::No id-token: write permission, so the receipt is not signed and cannot be approved"; fi
+
+      - name: Post
+        if: always() && steps.check.outcome == 'success'
+        env:
+          KERN_BIN: ${{ steps.install.outputs.bin }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if ! "$KERN_BIN" receipt post "$RUNNER_TEMP/kern/out" "$GITHUB_REPOSITORY" "$NUMBER"; then
+            echo "::warning::Kern could not post its receipt. A pull request from a fork gets a read-only token; the receipt is in this job's summary."
+          fi
+
+      - name: Say so if Kern could not finish
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -d "{\"state\":\"error\",\"context\":\"Kern\",\"description\":\"Kern could not finish; see the job log\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}" > /dev/null || true
+
+      - name: Keep the receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kern-receipt-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/kern/out/receipt.json
+            ${{ runner.temp }}/kern/out/receipt.md
+            ${{ runner.temp }}/kern/out/seal.json
+            ${{ runner.temp }}/kern/check.json
+          if-no-files-found: ignore
+
+      - name: Clean
+        if: always()
+        env:
+          KERN_BIN: ${{ steps.install.outputs.bin }}
+        run: |
+          W="$RUNNER_TEMP/kern"
+          if [ -f "$W/out/setup.json" ] && [ -x "$KERN_BIN" ]; then "$KERN_BIN" --control "$W/verifier.json" drive clean "$W/out" > /dev/null || true; fi
+
+  approve:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/kern approve')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      pull-requests: write
+      issues: write
+      statuses: write
+      id-token: write
+    steps:
+      - name: Which Kern
+        id: which
+        run: |
+          set -euo pipefail
+          sha=""
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=kern-version" | jq -r .value)
+            sha=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+' | awk '{ while (length($0) % 4) $0 = $0 "="; print }' | base64 -d | jq -r '.job_workflow_sha // empty')
+          fi
+          echo "sha=${sha:-main}" >> "$GITHUB_OUTPUT"
+      - name: Check out Kern
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jastijayakrishna/Kerner
+          ref: ${{ steps.which.outputs.sha }}
+          path: .kern
+          persist-credentials: false
+      - name: Kern's build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .kern/target
+          key: kern-${{ runner.os }}-${{ hashFiles('.kern/Cargo.lock', '.kern/src/**') }}
+          restore-keys: kern-${{ runner.os }}-
+      - name: Build Kern
+        id: install
+        working-directory: .kern
+        env:
+          KERN_VERSION: ""
+          KERN_SOURCE: ${{ github.workspace }}/.kern
+          KERN_STATIC: "true"
+          BUILD_FROM_SOURCE: "true"
+        run: bash scripts/install-kern.sh
+      - name: Approve
+        env:
+          KERN_BIN: ${{ steps.install.outputs.bin }}
+          GITHUB_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+          LOGIN: ${{ github.event.comment.user.login }}
+        run: '"$KERN_BIN" receipt approve "$GITHUB_REPOSITORY" "$NUMBER" "$LOGIN"'
