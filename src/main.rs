@@ -9,6 +9,19 @@ use std::path::Path;
 
 const HELP: &str = "kern 0.3 - admission control for AI-written code
 
+Check (one receipt on every pull request; Kern's GitHub workflow, .github/workflows/kern.yml, runs these):
+  check <repo> <base> <head> <out-dir> <operator.json> [description.md]
+                                  verifier side (--control verifier.json): the rules, the project's tests on the old and the
+                                  new code and, with an AI key, every changed line run both ways; writes receipt.json and
+                                  receipt.md (KERN_CHECK_AI=0 skips the AI part; it takes kern drive's agent settings)
+  receipt sign <out-dir> <owner/repo> <pr-number>
+                                  in Kern's workflow: GitHub signs the receipt's seal (OIDC); writes seal.json
+  receipt post <out-dir> <owner/repo> <pr-number>
+                                  post the receipt or edit Kern's earlier one, and set the Kern status (GITHUB_TOKEN)
+  receipt approve <owner/repo> <pr-number> <login>
+                                  /kern approve: someone who can merge approves a signed \"needs a look\" receipt
+  receipt verify <owner/repo> <pr-number> [receipt.json]
+                                  check a receipt's signature with GitHub's keys, and receipt.json against its seal
 Setup:
   profile <operator-template.json> <public.pem>        verifier side: export a verifier profile
   init <repo-dir> <profile.json|https://verifier> <owner/kern@sha> [task]
@@ -69,6 +82,15 @@ fn count(args: &[String], n: usize) -> R<()> {
 }
 fn promotion(a: &[String]) -> R<(std::path::PathBuf, Value, kern::policy::Contract, kern::policy::Operator, Value, String)> {
     Ok((Path::new(&a[0]).join("objects.git"), read_json(&a[1])?, contract(&read_json(&a[2])?)?, operator(&read_json(&a[3])?)?, read_json(&a[4])?, std::fs::read_to_string(&a[5])?))
+}
+/// The agent that writes drivers (KERN_DRIVE_AGENT, a JSON array; or Claude Code with KERN_DRIVE_MODEL) and how many rounds it may take.
+fn drive_agent() -> R<(Vec<String>, usize)> {
+    let agent: Vec<String> = match std::env::var("KERN_DRIVE_AGENT") {
+        Ok(v) => serde_json::from_str(&v).map_err(|_| Denied("KERN_DRIVE_AGENT must be a JSON array of strings".into()))?,
+        Err(_) => kern::drive::default_agent(&std::env::var("KERN_DRIVE_MODEL").ok().filter(|m| !m.is_empty()).unwrap_or_else(|| "sonnet".into()))?,
+    };
+    let rounds = std::env::var("KERN_DRIVE_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=5).contains(n)).unwrap_or(3);
+    Ok((agent, rounds))
 }
 fn cli() -> R<(Option<Value>, i32)> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -170,6 +192,46 @@ fn cli() -> R<(Option<Value>, i32)> {
             (Some(json!({ "status": report["summary"]["status"], "summary": report["summary"], "files": files })), code)
         }
         "report" => { count(a, 2)?; std::fs::write(&a[1], kern::audit::report(Path::new(&a[0]))?)?; (Some(json!({ "report": std::path::absolute(&a[1])? })), 0) }
+        "check" => {
+            ensure!(a.len() == 5 || a.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
+            let pr = a.get(5).map(std::fs::read_to_string).transpose()?;
+            let (agent, rounds) = drive_agent()?;
+            // The AI part runs when a key or an agent of your own is there; KERN_CHECK_AI=0 turns it off, =1 turns it on (a logged-in Claude Code).
+            let wanted = std::env::var("KERN_CHECK_AI").ok();
+            let ai_on = wanted.as_deref() != Some("0") && (wanted.as_deref() == Some("1") || ["KERN_DRIVE_AGENT", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())));
+            let ai = kern::check::Ai { agent: &agent, rounds };
+            (Some(kern::check::check(Path::new(&a[0]), &a[1], &a[2], Path::new(&a[3]), &operator(&read_json(&a[4])?)?, pr.as_deref(), ai_on.then_some(&ai))?), 0)
+        }
+        "receipt" => {
+            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected receipt sign, post, approve or verify; see kern --help".into()))?;
+            let number = |s: &String| s.parse::<u64>().map_err(|_| Denied("Expected a pull request number".into()));
+            match sub.as_str() {
+                "sign" => {
+                    count(rest, 3)?;
+                    (Some(kern::receipt::sign(Path::new(&rest[0]), &rest[1], number(&rest[2])?)?), 0)
+                }
+                "post" => {
+                    count(rest, 3)?;
+                    (Some(kern::receipt::post(&kern::github::Api::from_env("post Kern's receipt on the pull request")?, Path::new(&rest[0]), &rest[1], number(&rest[2])?)?), 0)
+                }
+                "approve" => {
+                    count(rest, 3)?;
+                    let api = kern::github::Api::from_env("approve Kern's receipt")?;
+                    let jwks = kern::oidc::jwks()?;
+                    let check = |seal: &Value, token: &str| kern::receipt::signed(seal, token, &jwks, &rest[0]).map(|_| ());
+                    (Some(kern::receipt::approve(&api, &rest[0], number(&rest[1])?, &rest[2], &check)?), 0)
+                }
+                "verify" => {
+                    ensure!(rest.len() == 2 || rest.len() == 3, "Expected the repository, the pull request number and an optional receipt.json");
+                    let api = kern::github::Api::from_env("read Kern's receipt on the pull request")?;
+                    let receipt = rest.get(2).map(read_json).transpose()?;
+                    let v = kern::receipt::verify(&api, &rest[0], number(&rest[1])?, &kern::oidc::jwks()?, receipt.as_ref())?;
+                    let code = if v["status"] == "VERIFIED" { 0 } else { 1 };
+                    (Some(v), code)
+                }
+                other => kern::deny!("Unknown receipt command {other}; see kern --help"),
+            }
+        }
         "drive" => {
             let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected drive prepare, run, auto, sort, post or clean; see kern --help".into()))?;
             match sub.as_str() {
@@ -187,11 +249,7 @@ fn cli() -> R<(Option<Value>, i32)> {
                 "auto" => {
                     ensure!(rest.len() == 5 || rest.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
                     let pr = rest.get(5).map(std::fs::read_to_string).transpose()?;
-                    let agent: Vec<String> = match std::env::var("KERN_DRIVE_AGENT") {
-                        Ok(v) => serde_json::from_str(&v).map_err(|_| Denied("KERN_DRIVE_AGENT must be a JSON array of strings".into()))?,
-                        Err(_) => kern::drive::default_agent(&std::env::var("KERN_DRIVE_MODEL").ok().filter(|m| !m.is_empty()).unwrap_or_else(|| "sonnet".into()))?,
-                    };
-                    let rounds = std::env::var("KERN_DRIVE_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=5).contains(n)).unwrap_or(3);
+                    let (agent, rounds) = drive_agent()?;
                     (Some(kern::drive::auto(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), &operator(&read_json(&rest[4])?)?, pr.as_deref(), &agent, rounds)?), 0)
                 }
                 "post" => {

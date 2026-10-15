@@ -256,6 +256,11 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     // A clear receipt says what it checked, and so never reads as more than it is.
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
     assert!(md.contains("Nothing unexpected") && md.contains("no test runner Kern can read") && md.contains("Not run"), "{md}");
+    assert!(md.contains("in the rules it checked"), "a receipt whose tests did not run says it covers the rules only:\n{md}");
+    // A change with no code in it (docs only) had nothing to run: that is a whole check, not a partial one.
+    let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches no code, tests or package.json" });
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
+    assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");
     // Hostile names from a pull request cannot break out of their code spans.
     let mut t = clean_tests();
     t["broke"] = json!(["a `b` <script>"]);
@@ -361,4 +366,100 @@ fn approval_needs_write_access_a_signed_receipt_and_never_unblocks() {
     let (r, log) = run("maintain", "look", true);
     assert_eq!(r["status"], "APPROVED", "{r}");
     assert!(success(&log), "{log:?}");
+}
+
+fn oidc_keys() -> Value { serde_json::from_str(include_str!("fixtures/oidc/jwks.json")).unwrap() }
+/// A seal and the token a test key signed over it, as GitHub signs one for Kern's workflow (fixtures/oidc/README.md).
+fn signed_fixture(name: &str) -> (Value, String) {
+    let all: Value = serde_json::from_str(include_str!("fixtures/oidc/tokens.json")).unwrap();
+    (all["seals"][name].clone(), all[name].as_str().unwrap().to_string())
+}
+
+#[test]
+fn only_kern_at_a_branch_or_tag_of_its_own_repository_signs_a_receipt() {
+    let keys = oidc_keys();
+    let (seal, token) = signed_fixture("full-valid");
+    assert_eq!(receipt::signed(&seal, &token, &keys, "acme/shop").unwrap()["run_id"], "123");
+    denied(receipt::signed(&seal, &token, &keys, "acme/other"), "repository");
+    let mut edited = seal.clone();
+    edited["decision"] = json!("clear");
+    denied(receipt::signed(&edited, &token, &keys, "acme/shop"), "audience");
+    // Kern's workflow at a bare commit or at a pull request's ref can be a fork's copy of it, which anyone can write.
+    for name in ["full-bare-sha", "full-pull-ref"] {
+        let (seal, token) = signed_fixture(name);
+        denied(receipt::signed(&seal, &token, &keys, "acme/shop"), "branch or tag");
+    }
+    assert!(receipt::kern_workflow(&json!({ "job_workflow_ref": "jastijayakrishna/Kerner/.github/workflows/kern.yml@refs/tags/v0.1.0" })).is_ok());
+    denied(receipt::kern_workflow(&json!({})), "branch or tag");
+}
+
+/// A pull request #7 whose head is the fixture seals' head, with Kern's receipt carrying `name`'s seal and token (or `author`'s copy of it).
+fn signed_pull(name: &str, author: &'static str, permission: &'static str) -> (String, Seen) {
+    let (seal, token) = signed_fixture(name);
+    let body = format!("<!-- kern-receipt -->\n### ⚠️ Kern: 1 thing needs a look\n\n{}\n", receipt::seal_line(&seal, &token));
+    let comments = json!([{ "id": 9, "user": { "login": author }, "body": body, "html_url": "https://github.com/acme/shop/pull/7#c9" }]).to_string();
+    stub_github(move |m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/repos/acme/shop/collaborators/") => (200, format!(r#"{{"permission":"{permission}"}}"#)),
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, comments.clone()),
+        ("POST", _) | ("PATCH", _) => (201, "{}".into()),
+        _ => (404, "{}".into()),
+    })
+}
+
+#[test]
+fn approve_checks_github_s_real_signature() {
+    let keys = oidc_keys();
+    let approve = |name: &str| {
+        let (url, seen) = signed_pull(name, "github-actions[bot]", "write");
+        let check = |seal: &Value, token: &str| receipt::signed(seal, token, &keys, "acme/shop").map(|_| ());
+        let r = receipt::approve(&kern::github::Api::new(&url, "t").unwrap(), "acme/shop", 7, "maria", &check).unwrap();
+        let log = seen.lock().unwrap().clone();
+        (r, log.iter().any(|(m, p, b)| m == "POST" && p.contains("/statuses/2222222222222222222222222222222222222222") && b.contains("\"state\":\"success\"")))
+    };
+    let (r, success) = approve("full-valid");
+    assert_eq!((r["status"].as_str(), success), (Some("APPROVED"), true), "{r}");
+    let (r, success) = approve("full-blocked");
+    assert_eq!((r["status"].as_str(), success), (Some("BLOCKED"), false), "{r}");
+    for name in ["full-bare-sha", "full-pull-ref"] {
+        let (r, success) = approve(name);
+        assert_eq!((r["status"].as_str(), success), (Some("UNVERIFIED"), false), "{name}: {r}");
+    }
+}
+
+#[test]
+fn verify_reads_kern_s_receipt_and_checks_its_signature() {
+    let keys = oidc_keys();
+    let verify = |name: &str, author: &'static str, receipt: Option<&Value>| {
+        let (url, _) = signed_pull(name, author, "read");
+        receipt::verify(&kern::github::Api::new(&url, "t").unwrap(), "acme/shop", 7, &keys, receipt).unwrap()
+    };
+    let v = verify("full-valid", "github-actions[bot]", None);
+    assert_eq!((v["status"].as_str(), v["decision"].as_str(), v["current"].as_bool(), v["run"].as_str()), (Some("VERIFIED"), Some("look"), Some(true), Some("123")), "{v}");
+    assert!(v["workflow"].as_str().unwrap().ends_with("kern.yml@refs/heads/one"), "{v}");
+    // receipt.json from the job's artifact must be the receipt the seal names.
+    assert_eq!(verify("full-valid", "github-actions[bot]", Some(&json!({ "decision": "clear" })))["status"], "INVALID");
+    assert_eq!(verify("full-bare-sha", "github-actions[bot]", None)["status"], "INVALID");
+    // Anyone can paste Kern's mark and seal into a comment of their own; only Kern's account's comment is the receipt.
+    assert_eq!(verify("full-valid", "mallory", None)["status"], "NO_RECEIPT");
+}
+
+#[test]
+fn sign_asks_github_for_a_token_over_the_receipt_s_seal() {
+    let dir = receipt_dir(clean_tests());
+    let (url, seen) = stub_github(|m, p| if m == "GET" && p.starts_with("/token") { (200, r#"{"value":"signed-by-github"}"#.into()) } else { (404, "{}".into()) });
+    // SAFETY: no other test in this file reads these variables.
+    unsafe {
+        std::env::set_var("ACTIONS_ID_TOKEN_REQUEST_URL", format!("{url}/token?api-version=2.0"));
+        std::env::set_var("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "bearer-for-this-job");
+    }
+    assert_eq!(receipt::sign(&dir.0, "acme/shop", 7).unwrap()["status"], "SIGNED");
+    let s = read_json(dir.0.join("seal.json")).unwrap();
+    let r = read_json(dir.0.join("receipt.json")).unwrap();
+    assert_eq!(s["token"], "signed-by-github");
+    assert_eq!(s["seal"], receipt::seal(&r, "acme/shop", 7).unwrap());
+    assert_eq!(s["seal"]["receipt_sha256"], digest(&r).unwrap());
+    let fingerprint = kern::oidc::audience(&s["seal"]).unwrap().trim_start_matches("kern-receipt:").to_string();
+    let asked = seen.lock().unwrap()[0].1.clone();
+    assert!(asked.starts_with("/token?api-version=2.0&audience=kern-receipt") && asked.ends_with(&fingerprint), "{asked}");
 }

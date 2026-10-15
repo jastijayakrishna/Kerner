@@ -93,12 +93,14 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let behaviour = &r["behaviour"];
     let tests_ran = tests["status"] == "RAN";
     let behaviour_ran = behaviour["status"] == "RAN";
+    // A change with no code, tests or package.json in it has nothing to install or run: that is a full check, not a partial one.
+    let nothing = tests["status"] == "NOTHING_TO_RUN";
     let mut md = String::from(MARK);
     md.push('\n');
     md += &match r["decision"].as_str() {
         Some("blocked") => format!("### ❌ Kern: Blocked — {}\n\n", plural(blocked.len(), "problem to fix", "problems to fix")),
         Some("look") => format!("### ⚠️ Kern: {} a look\n\n", plural(look.len(), "thing needs", "things need")),
-        _ if tests_ran || behaviour_ran => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
+        _ if tests_ran || behaviour_ran || nothing => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
         _ => "### ✅ Kern: Nothing unexpected in the rules it checked\n\nNot run: the project's tests and its changed code (see below), so this receipt covers the rules only.\n\n".to_string(),
     };
     if !blocked.is_empty() {
@@ -124,6 +126,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }
         md += &line;
         md += "\n";
+    } else if nothing {
+        md += "- ✅ Tests: nothing to run — this change touches no code, tests or package.json\n";
     } else {
         md += &format!("- ⏭️ Tests: Not run — {}\n", plain(tests["why"].as_str().unwrap_or("Kern found no tests it can run")));
     }
@@ -177,6 +181,47 @@ pub fn seal(r: &Value, repository: &str, number: u64) -> R<Value> {
 }
 /// The hidden line that carries a seal and its token in the comment.
 pub fn seal_line(seal: &Value, token: &str) -> String { format!("{SEAL_MARK}{} -->", json!({ "seal": seal, "token": token })) }
+
+/// In Kern's workflow: GitHub signs the receipt's seal. The token's audience is the seal's fingerprint, so it vouches for this seal and no
+/// other, and GitHub adds who made it: Kern's workflow at its commit, in this repository, in this run. Writes seal.json next to the receipt.
+pub fn sign(out: &Path, repository: &str, number: u64) -> R<Value> {
+    ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
+    let s = seal(&read_json(out.join("receipt.json"))?, repository, number)?;
+    let token = crate::oidc::request(&crate::oidc::audience(&s)?)?;
+    std::fs::write(out.join("seal.json"), format!("{}\n", serde_json::to_string_pretty(&json!({ "seal": s, "token": token }))?))?;
+    Ok(json!({ "status": "SIGNED", "decision": s["decision"], "head": s["head"] }))
+}
+
+/// Whether GitHub signed this seal for Kern's own workflow in `repository`: the token's signature (GitHub's published keys), its audience
+/// (this seal's fingerprint), its repository, and its workflow, which must be Kern's at a branch or tag of Kern's repository. A bare commit
+/// or a pull request's ref could name a commit from a fork of Kern, which anyone can make. Returns the token's claims.
+pub fn signed(seal: &Value, token: &str, jwks: &Value, repository: &str) -> R<Value> {
+    let claims = crate::oidc::verify(token, jwks, &crate::oidc::audience(seal)?, crate::oidc::WORKFLOW, Some(repository))?;
+    kern_workflow(&claims)?;
+    Ok(claims)
+}
+/// The token's workflow is Kern's, at a branch or tag of Kern's own repository.
+pub fn kern_workflow(claims: &Value) -> R<()> {
+    let at = claims["job_workflow_ref"].as_str().and_then(|r| r.strip_prefix(crate::oidc::WORKFLOW)).unwrap_or("");
+    ensure!(at.starts_with("refs/heads/") || at.starts_with("refs/tags/"), "The receipt was not signed by Kern's workflow at a branch or tag of Kern's repository ({})", code(at, 80));
+    Ok(())
+}
+
+/// `kern receipt verify`: Kern's receipt on the pull request, and whether GitHub's signature over its seal holds; with the job's receipt.json,
+/// also whether that file is the receipt the seal names.
+pub fn verify(api: &Api, repository: &str, number: u64, jwks: &Value, receipt: Option<&Value>) -> R<Value> {
+    ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
+    let Some(c) = kern_comment(api, repository, number)? else { return Ok(json!({ "status": "NO_RECEIPT" })) };
+    let Some((seal, token)) = read_seal_line(c["body"].as_str().unwrap_or("")) else { return Ok(json!({ "status": "UNSIGNED", "comment": c["html_url"] })) };
+    if seal["repository"] != repository || seal["pull"] != number { return Ok(json!({ "status": "INVALID", "why": "the seal is for another pull request" })); }
+    let claims = match signed(&seal, &token, jwks, repository) { Ok(c) => c, Err(e) => return Ok(json!({ "status": "INVALID", "why": e.0 })) };
+    if let Some(r) = receipt && seal["receipt_sha256"] != digest(r)?.as_str() {
+        return Ok(json!({ "status": "INVALID", "why": "receipt.json is not the receipt this seal names" }));
+    }
+    let head = head_of(api, repository, number)?;
+    Ok(json!({ "status": "VERIFIED", "decision": seal["decision"], "head": seal["head"], "base": seal["base"], "current": seal["head"] == head.as_str(),
+        "workflow": claims["job_workflow_ref"], "run": claims["run_id"], "signed_at": claims["iat"], "receipt_checked": receipt.is_some(), "comment": c["html_url"] }))
+}
 fn read_seal_line(body: &str) -> Option<(Value, String)> {
     let line = body.lines().rev().find(|l| l.starts_with(SEAL_MARK))?;
     let v: Value = serde_json::from_str(line.strip_prefix(SEAL_MARK)?.strip_suffix(" -->")?).ok()?;

@@ -23,4 +23,5 @@ pub mod drive;
 pub mod suite;
 pub mod rules;
 pub mod receipt;
+pub mod check;
 pub mod twin;

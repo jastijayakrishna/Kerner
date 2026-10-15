@@ -82,6 +82,8 @@ jobs:
         run: chmod +x bin/kern && KERN_BIN="$PWD/bin/kern" sh scripts/e2e-gvisor.sh
       - name: Drive end to end on gVisor
         run: KERN_BIN="$PWD/bin/kern" sh scripts/e2e-drive.sh
+      - name: Check end to end on gVisor
+        run: KERN_BIN="$PWD/bin/kern" sh scripts/e2e-check.sh
       - name: Installer
         run: |
           # The release installer, run against this build as a local release: it must install a kern that runs.
