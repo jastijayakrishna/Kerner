@@ -95,6 +95,20 @@ fn a_runner_that_found_no_tests_on_either_side_did_not_test_anything() {
 }
 
 #[test]
+fn a_test_named_with_the_time_it_ran_is_the_same_test_on_both_sides() {
+    let before = report(&[("t > throws for Thu Oct 15 2026 19:50:54 GMT+0000", 1, 0, 0), ("t > adds 1 and 2", 1, 0, 0)], &[]);
+    let after = report(&[("t > throws for Thu Oct 15 2026 19:52:07 GMT+0000", 1, 0, 0), ("t > adds 1 and 2", 1, 0, 0)], &[]);
+    let c = suite::compare(&before, &after, None);
+    assert!(names(&c, "gone").is_empty() && names(&c, "added").is_empty(), "{c}");
+    assert_eq!(c["kept"], 2, "{c}");
+    let after = report(&[("t > throws for Thu Oct 15 2026 19:52:07 GMT+0000", 0, 1, 0), ("t > adds 1 and 2", 1, 0, 0)], &[]);
+    assert_eq!(names(&suite::compare(&before, &after, None), "broke").len(), 1, "a renamed-by-the-clock test that now fails still blocks");
+    let after = report(&[("t > adds 3 and 4", 1, 0, 0)], &[]);
+    let c = suite::compare(&report(&[("t > adds 1 and 2", 1, 0, 0)], &[]), &after, None);
+    assert!(names(&c, "gone").is_empty() && names(&c, "added").is_empty(), "only digits differ, so it is the same test: {c}");
+}
+
+#[test]
 fn a_test_the_change_adds_that_fails_needs_a_look() {
     let before = report(&[("t > adds", 1, 0, 0)], &[]);
     let after = report(&[("t > adds", 1, 0, 0), ("t > new and red", 0, 1, 0), ("t > new and green", 1, 0, 0)], &[]);

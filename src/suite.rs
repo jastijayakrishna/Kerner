@@ -32,7 +32,42 @@ fn sum(r: &Report) -> Value {
 
 fn count(r: &Report, k: &str) -> proof::Count { r.tests.get(k).copied().unwrap_or_default() }
 
+fn masked(name: &str) -> String {
+    let (mut out, mut digit) = (String::new(), false);
+    for c in name.chars() {
+        if c.is_ascii_digit() { if !digit { out.push('#'); } digit = true; } else { out.push(c); digit = false; }
+    }
+    out
+}
+
+fn paired(before: &Report, after: &Report) -> std::collections::BTreeMap<String, String> {
+    let mut by_mask: std::collections::BTreeMap<String, Vec<&String>> = std::collections::BTreeMap::new();
+    for k in before.tests.keys().filter(|k| !after.tests.contains_key(*k)) { by_mask.entry(masked(k)).or_default().push(k); }
+    let (mut map, mut used) = (std::collections::BTreeMap::new(), BTreeSet::new());
+    for k in after.tests.keys().filter(|k| !before.tests.contains_key(*k)) {
+        if let Some(b) = by_mask.get(&masked(k)).and_then(|c| c.iter().find(|b| !used.contains(**b))) {
+            used.insert(*b);
+            map.insert(k.clone(), (*b).clone());
+        }
+    }
+    map
+}
+
+fn renamed(r: &Report, map: &std::collections::BTreeMap<String, String>) -> Report {
+    let mut out = Report { tests: std::collections::BTreeMap::new(), problems: r.problems.clone() };
+    for (k, c) in &r.tests {
+        let e = out.tests.entry(map.get(k).cloned().unwrap_or_else(|| k.clone())).or_default();
+        e.passed += c.passed;
+        e.failed += c.failed;
+        e.skipped += c.skipped;
+    }
+    out
+}
+
 pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value {
+    let map = paired(before, after);
+    let (after, again) = (renamed(after, &map), again.map(|g| renamed(g, &map)));
+    let (after, again) = (&after, again.as_ref());
     let keys: BTreeSet<&String> = before.tests.keys().chain(after.tests.keys()).collect();
     let (mut kept, mut broke, mut flaky, mut gone, mut newly_skipped, mut added, mut already_failing) = (0u64, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut new_failing = Vec::new();
