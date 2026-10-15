@@ -440,7 +440,7 @@ impl Count {
     pub fn ran(self) -> u32 { self.passed + self.failed }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Report { pub tests: BTreeMap<String, Count>, pub problems: Vec<String> }
+pub struct Report { pub tests: BTreeMap<String, Count>, pub problems: Vec<String>, pub why: BTreeMap<String, String> }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Status { Passed, Failed, Skipped }
 impl Report {
@@ -452,6 +452,17 @@ impl Report {
     fn sum(&self) -> Count { self.tests.values().fold(Count::default(), |a, c| Count { passed: a.passed + c.passed, failed: a.failed + c.failed, skipped: a.skipped + c.skipped }) }
 }
 fn rel(path: &str) -> String { path.strip_prefix("/workspace/").unwrap_or(path).to_string() }
+pub fn first_lines(message: &str) -> String {
+    let mut clean = String::new();
+    let mut chars = message.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' { if chars.peek() == Some(&'[') { chars.next(); for d in chars.by_ref() { if d.is_ascii_alphabetic() { break; } } } continue; }
+        clean.push(c);
+    }
+    let lines: Vec<&str> = clean.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("at ")).take(2).collect();
+    let joined = lines.join(" / ");
+    if joined.chars().count() > 300 { format!("{}…", joined.chars().take(299).collect::<String>()) } else { joined }
+}
 
 pub fn read_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
     if runner == Runner::Node { return tap(out); }
@@ -488,7 +499,12 @@ fn mocha(v: &Value) -> Option<Report> {
     let mut r = Report::default();
     for k in passes { r.add(k, Status::Passed); }
     for k in pending { r.add(k, Status::Skipped); }
-    for k in failures { if known.contains(&k) { r.add(k, Status::Failed) } else { r.problems.push(k) } }
+    for (k, t) in failures.into_iter().zip(v.get("failures")?.as_array()?) {
+        if known.contains(&k) { r.add(k, Status::Failed); continue; }
+        let message = t.get("err").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("");
+        if !message.is_empty() { r.why.insert(k.clone(), first_lines(message)); }
+        r.problems.push(k);
+    }
     Some(r)
 }
 fn jest(v: &Value) -> Option<Report> {
@@ -504,7 +520,11 @@ fn jest(v: &Value) -> Option<Report> {
             failed |= status == Status::Failed;
             r.add(format!("{name} > {}", path.join(" > ")), status);
         }
-        if file.get("status").and_then(Value::as_str) == Some("failed") && !failed { r.problems.push(name); }
+        if file.get("status").and_then(Value::as_str) == Some("failed") && !failed {
+            let message = file.get("message").or_else(|| file.get("failureMessage")).and_then(Value::as_str).unwrap_or("");
+            if !message.is_empty() { r.why.insert(name.clone(), first_lines(message)); }
+            r.problems.push(name);
+        }
     }
     Some(r)
 }

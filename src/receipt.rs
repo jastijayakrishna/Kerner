@@ -43,8 +43,9 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or("")))));
     }
     for t in strings(&tests["new_problems"]) {
-        if added(&t) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}", code(&t, 200)))); }
-        else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}", code(&t, 200)))); }
+        let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
+        if added(&t) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200)))); }
+        else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200)))); }
     }
     for x in rules["tricks"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");

@@ -79,7 +79,7 @@ fn paired(before: &Report, after: &Report) -> std::collections::BTreeMap<String,
 }
 
 fn renamed(r: &Report, map: &std::collections::BTreeMap<String, String>) -> Report {
-    let mut out = Report { tests: std::collections::BTreeMap::new(), problems: r.problems.clone() };
+    let mut out = Report { tests: std::collections::BTreeMap::new(), problems: r.problems.clone(), why: r.why.clone() };
     for (k, c) in &r.tests {
         let e = out.tests.entry(map.get(k).cloned().unwrap_or_else(|| k.clone())).or_default();
         e.passed += c.passed;
@@ -127,8 +127,9 @@ pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value
             "new_failing": new_failing });
     }
     let new_problems: Vec<&String> = after.problems.iter().filter(|p| !before.problems.contains(*p) && again.is_none_or(|a| a.problems.contains(*p))).collect();
+    let problem_why: serde_json::Map<String, Value> = new_problems.iter().filter_map(|p| again.unwrap_or(after).why.get(*p).or_else(|| after.why.get(*p)).map(|w| ((*p).clone(), json!(w)))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(again.unwrap_or(after)), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
-        "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems })
+        "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems, "problem_why": problem_why })
 }
 
 pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> String {
@@ -214,6 +215,7 @@ fn absorb(into: &mut Report, from: Report, dir: &str, runner: Runner) {
         e.skipped += c.skipped;
     }
     into.problems.extend(from.problems.into_iter().map(name));
+    into.why.extend(from.why.into_iter().map(|(k, v)| (name(k), v)));
 }
 
 pub const LATE: &str = "Kern's time for this check ran out before these tests could run";

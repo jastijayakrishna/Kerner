@@ -67,7 +67,7 @@ fn missed_tricks(t: &Temp, base: &str, cases: &[(&str, &str)]) -> Vec<String> {
 fn report(tests: &[(&str, u32, u32, u32)]) -> Report {
     let mut t = BTreeMap::new();
     for (k, passed, failed, skipped) in tests { t.insert(k.to_string(), Count { passed: *passed, failed: *failed, skipped: *skipped }); }
-    Report { tests: t, problems: Vec::new() }
+    Report { tests: t, problems: Vec::new(), why: BTreeMap::new() }
 }
 
 #[test]

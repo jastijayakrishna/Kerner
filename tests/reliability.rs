@@ -54,7 +54,7 @@ fn operator() -> policy::Operator {
 fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str]) -> Report {
     let mut t = BTreeMap::new();
     for (k, passed, failed, skipped) in tests { t.insert(k.to_string(), Count { passed: *passed, failed: *failed, skipped: *skipped }); }
-    Report { tests: t, problems: problems.iter().map(|p| p.to_string()).collect() }
+    Report { tests: t, problems: problems.iter().map(|p| p.to_string()).collect(), why: BTreeMap::new() }
 }
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
@@ -334,4 +334,21 @@ fn a_text_file_the_code_reads_is_not_documentation() {
     assert_ne!(tests_after(&files, &[("src/allowlist.txt", "example.com\nevil.example\n")]), json!("NOTHING_TO_RUN"),
         "the code reads allowlist.txt, so a change to it changes what the code does and the tests must run");
     assert_eq!(tests_after(&files, &[("README.md", "# shop\n\nAdds up baskets.\n")]), json!("NOTHING_TO_RUN"), "no code reads the README");
+}
+
+#[test]
+fn a_blocked_test_file_says_why_it_no_longer_runs() {
+    let report = |message: &str| -> Vec<u8> {
+        let status = if message.is_empty() { "passed" } else { "failed" };
+        let assertions = if message.is_empty() { json!([{ "ancestorTitles": [], "title": "carts", "status": "passed" }]) } else { json!([]) };
+        json!({ "numTotalTests": 1, "testResults": [
+            { "name": "/workspace/test/total.test.js", "status": "passed", "message": "", "assertionResults": [{ "ancestorTitles": [], "title": "adds", "status": "passed" }] },
+            { "name": "/workspace/test/cart.test.js", "status": status, "message": message, "assertionResults": assertions }
+        ] }).to_string().into_bytes()
+    };
+    let before = kern::proof::read_report(policy::Runner::Vitest, &report("")).unwrap();
+    let after = kern::proof::read_report(policy::Runner::Vitest, &report("\u{1b}[31mError: Cannot find module '../src/cart.js'\u{1b}[39m\n  imported from test/cart.test.js\n    at resolve (node:internal)")).unwrap();
+    let tests = suite::compare(&before, &after, Some(&after));
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &tests, &off()), None);
+    assert!(md.contains("test/cart.test.js") && md.contains("Cannot find module") && !md.contains("\u{1b}"), "a block names the error, without terminal colours:\n{md}");
 }

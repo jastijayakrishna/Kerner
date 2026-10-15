@@ -64,7 +64,7 @@ use std::collections::BTreeMap;
 fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str]) -> Report {
     let mut t = BTreeMap::new();
     for (k, passed, failed, skipped) in tests { t.insert(k.to_string(), Count { passed: *passed, failed: *failed, skipped: *skipped }); }
-    Report { tests: t, problems: problems.iter().map(|p| p.to_string()).collect() }
+    Report { tests: t, problems: problems.iter().map(|p| p.to_string()).collect(), why: BTreeMap::new() }
 }
 fn names(v: &serde_json::Value, key: &str) -> Vec<String> { v[key].as_array().unwrap_or_else(|| panic!("{key}: {v}")).iter().map(|x| x.as_str().unwrap().to_string()).collect() }
 
