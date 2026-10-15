@@ -1055,23 +1055,48 @@ pub fn setup(out: &Path, op: &crate::policy::Operator, until: u64) -> R<Value> {
     std::fs::create_dir(&root)?;
     let mut sides = serde_json::Map::new();
     let mut volumes = Vec::new();
-    for side in ["old", "new"] {
-        let (volume, entry) = install_side(out, op, &d, side, side, until)?;
-        sides.insert(side.into(), entry);
+    let installed: Vec<R<(crate::sandbox::Volume, Value)>> = if total_mb().is_some_and(|m| m >= TOGETHER_MB) {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = ["old", "new"].iter().map(|side| { let d = &d; s.spawn(move || install_side(out, op, d, side, side, until)) }).collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(Denied("Setting up one side stopped unexpectedly".into())))).collect()
+        })
+    } else {
+        let mut v = Vec::new();
+        for side in ["old", "new"] { v.push(Ok(install_side(out, op, &d, side, side, until)?)); }
+        v
+    };
+    for (side, r) in ["old", "new"].iter().zip(installed) {
+        let (volume, entry) = r?;
+        sides.insert((*side).into(), entry);
         volumes.push(volume);
     }
+    for v in &mut volumes { v.keep(); }
+    let s = json!({ "version": 1, "old": sides["old"], "new": sides["new"], "tools": null });
+    write_json(out.join("setup.json"), &s)?;
+    Ok(s)
+}
+
+const TOGETHER_MB: u64 = 12 * 1024;
+fn total_mb() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    info.lines().find_map(|l| l.strip_prefix("MemTotal:")).and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok()).map(|kb| kb / 1024)
+}
+
+fn tools_volume(out: &Path, op: &crate::policy::Operator) -> R<String> {
+    let mut s = read_own(out.join("setup.json"))?;
+    if let Some(v) = s["tools"]["volume"].as_str() { return Ok(v.to_string()); }
     let mut public = op.clone();
     public.registry = Some("registry.npmjs.org".into());
-    let tools_root = root.join("tools");
-    std::fs::create_dir(&tools_root)?;
+    let tools_root = out.join("sandbox").join("tools");
+    if tools_root.exists() { std::fs::remove_dir_all(&tools_root)?; }
+    std::fs::create_dir_all(&tools_root)?;
     let deps = crate::flow::install_dependencies(&tools(), &public, &tools_root, &op.image)?;
     let mut volume = deps.volume;
     let cached = volume.kept();
     volume.keep();
-    for v in &mut volumes { v.keep(); }
-    let s = json!({ "version": 1, "old": sides["old"], "new": sides["new"], "tools": { "volume": volume.0, "cached": cached } });
+    s["tools"] = json!({ "volume": volume.0, "cached": cached });
     write_json(out.join("setup.json"), &s)?;
-    Ok(s)
+    Ok(volume.0.clone())
 }
 
 pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path, until: u64) -> R<Value> {
@@ -1099,7 +1124,7 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path, until: u64) 
     put_stubs(&dir, 0o644)?;
     let input = dir.join("input");
     std::fs::create_dir(&input)?;
-    let tools_volume = s["tools"]["volume"].as_str().unwrap_or("").to_string();
+    let tools_volume = tools_volume(out, op)?;
     let limits = run_limits();
     let one = |side: &str, k: u32| -> R<Run> {
         let control = dir.join(format!("control-{side}-{k}"));
