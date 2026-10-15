@@ -103,6 +103,25 @@ fn a_test_that_fails_once_is_flaky_not_broken() {
 }
 
 #[test]
+fn a_test_run_without_results_says_how_it_ended_and_what_it_printed_last() {
+    // mongoose's tests fetch a MongoDB server first: with the network off they stop before mocha writes its report.
+    let errors = b"[31mError: getaddrinfo ENOTFOUND fastdl.mongodb.org[0m
+    at GetAddrInfoReqWrap.onlookup (node:dns:120:26)
+
+";
+    let why = kern::suite::no_results("the output contains no mocha report", b"exit 1", errors, b"");
+    assert!(why.starts_with("the output contains no mocha report (exit 1)"), "{why}");
+    assert!(why.contains("ENOTFOUND fastdl.mongodb.org") && !why.contains(''), "the last lines it printed, without terminal colours: {why}");
+    // Nothing on stderr: the end of what it printed on stdout.
+    let why = kern::suite::no_results("the output contains no vitest report", b"exit 1", b"", b"line one
+Error: Failed to load url @cloudflare/workers-shared (resolved id: @cloudflare/workers-shared)
+");
+    assert!(why.contains("Failed to load url @cloudflare/workers-shared"), "{why}");
+    let long = "x".repeat(5000);
+    assert!(kern::suite::no_results("no report", b"exit 1", long.as_bytes(), b"").chars().count() <= 600);
+}
+
+#[test]
 fn detect_finds_vitest_jest_mocha_and_node_test() {
     let runner = |pkg: &str| suite::detect(Some(pkg.as_bytes())).map(|t| (t.runner.name(), t.command));
     assert_eq!(runner(r#"{"devDependencies":{"vitest":"3"}}"#).unwrap(), ("vitest", vec!["/workspace/node_modules/.bin/vitest".to_string(), "run".into()]));

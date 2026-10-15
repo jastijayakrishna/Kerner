@@ -69,6 +69,32 @@ pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value
         "newly_skipped": newly_skipped, "added": added, "already_failing": already_failing, "new_problems": new_problems })
 }
 
+/// Why a run gave no results, in words a customer can act on: the reader's reason, how the command ended, and the last lines it printed
+/// (on stderr, or else stdout), without terminal colours, in at most 600 characters. A test suite that needs the network, a database or
+/// a build first says so in those lines.
+pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> String {
+    let text = |b: &[u8]| -> String {
+        let s = String::from_utf8_lossy(b);
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            // An ANSI escape: ESC [ ... final byte.
+            if c == '\u{1b}' { if chars.peek() == Some(&'[') { chars.next(); for d in chars.by_ref() { if d.is_ascii_alphabetic() { break; } } } continue; }
+            out.push(if c.is_control() && c != '\n' { ' ' } else { c });
+        }
+        out
+    };
+    let source = if errors.iter().any(|b| !b.is_ascii_whitespace()) { text(errors) } else { text(output) };
+    let last: Vec<&str> = source.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    // The first line of the error, and what follows it, rather than the stack's last frame.
+    let from = last.iter().rposition(|l| !l.starts_with("at ")).unwrap_or(0).saturating_sub(1);
+    let tail = last[from..].iter().take(3).copied().collect::<Vec<_>>().join(" / ");
+    let mut s = format!("{why} ({})", String::from_utf8_lossy(ending).trim());
+    if !tail.is_empty() { s += &format!("; the last lines it printed: {tail}"); }
+    if s.chars().count() > 600 { s = format!("{}…", s.chars().take(599).collect::<String>()); }
+    s
+}
+
 /// One run of a side's tests in its sandbox: the runner's report, or why there is none.
 fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, label: &str) -> R<Result<Report, String>> {
     let control = out.join(format!("tests-{label}"));
@@ -89,7 +115,7 @@ fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, label: &str)
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
     if parts["ending"] == b"timeout" { return Ok(Err(format!("the tests did not finish in {} minutes", TIMEOUT_SECONDS / 60))); }
-    Ok(proof::read_report(tests.runner, &parts["output"]))
+    Ok(proof::read_report(tests.runner, &parts["output"]).map_err(|why| no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])))
 }
 
 /// Runs the project's tests on the old and the new code, each on its installed tree (`drive::setup` first if needed), and compares them.
