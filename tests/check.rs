@@ -424,9 +424,12 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let md = receipt::markdown(&r, None);
     let first = md.lines().find(|l| !l.trim().is_empty() && !l.starts_with("<!--")).unwrap();
     assert!(first.contains("Blocked") && first.contains("Kern"), "the first line is the answer: {first}");
-    for want in ["t > rounds to cents", "package.json", "12 tests passed before and still pass", "vitest", "set aside", "/kern approve", "Add an AI key"] {
+    for want in ["t > rounds to cents", "package.json", "❌ Tests: 1 that passed before now fails; 12 still pass (vitest)", "set aside", "/kern approve", "Add an AI key",
+        "**What Kern checked**"] {
         assert!(md.contains(want), "{want}:\n{md}");
     }
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None);
+    assert!(md.contains("✅ Tests: 12 that passed before still pass (vitest)") && !md.contains("now fail"), "{md}");
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
     assert!(md.contains("Nothing unexpected") && md.contains("no test runner Kern can read") && md.contains("Not run"), "{md}");
     assert!(md.contains("in the rules it checked"), "a receipt whose tests did not run says it covers the rules only:\n{md}");

@@ -63,7 +63,7 @@ For example, from a real run on the demo repository:
 ```text
 ⚠️ Kern: 1 thing needs a look
 - src/version.js can now do something it could not before: node:child_process
-✅ Tests: 12 tests passed before and still pass (vitest)
+✅ Tests: 12 that passed before still pass (vitest)
 ✅ No skipped, focused or removed tests
 ```
 
