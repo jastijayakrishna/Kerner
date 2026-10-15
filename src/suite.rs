@@ -162,7 +162,12 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let total = |r: &Report| r.tests.values().map(|c| c.total()).sum::<u32>();
     let passed = |r: &Report| r.tests.values().map(|c| c.passed).sum::<u32>();
     if total(before) == 0 && total(after) == 0 && after.problems.iter().all(|p| before.problems.contains(p)) {
-        return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
+        let why = match before.problems.iter().find(|p| before.why.contains_key(*p)).or(before.problems.first()) {
+            None => "the test runner ran but found no tests on either side".to_string(),
+            Some(first) => format!("none of the {} test files could load on the old or the new code (they may need a build or generated files first); {first}: {}",
+                before.problems.len(), before.why.get(first).map_or("no error was given", String::as_str)),
+        };
+        return json!({ "status": "NOT_RUN", "why": why });
     }
     if total(before) > 0 && passed(before) == 0 {
         return json!({ "status": "NOT_RUN", "why": "no test passed on the old code here (they may need the network, a database or a build first), so the tests showed nothing",

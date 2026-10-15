@@ -428,3 +428,13 @@ fn a_failure_that_shows_only_when_files_run_together_still_blocks() {
     assert_eq!(c["broke"], json!(["a.test.ts > shares state"]), "it passes alone but fails again in the whole suite: the change broke it through state the files share: {c}");
     assert_eq!(c["flaky"], json!(["b.test.ts > flakes"]), "{c}");
 }
+
+#[test]
+fn tests_that_cannot_load_on_either_side_are_named_as_such_with_the_first_error() {
+    let mut before = report(&[], &["components/table.test.tsx", "components/form.test.tsx"]);
+    before.why.insert("components/form.test.tsx".into(), "Cannot find module './version' from 'components/version/index.tsx'".into());
+    let c = suite::compare(&before, &before.clone(), None);
+    assert_eq!(c["status"], "NOT_RUN");
+    let why = c["why"].as_str().unwrap();
+    assert!(why.contains("2 test files") && why.contains("components/form.test.tsx") && why.contains("Cannot find module"), "the tests did not go missing: none of them could load, and the receipt says why: {why}");
+}
