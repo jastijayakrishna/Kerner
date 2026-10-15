@@ -95,6 +95,29 @@ fn a_runner_that_found_no_tests_on_either_side_did_not_test_anything() {
 }
 
 #[test]
+fn every_runner_writes_its_report_to_a_file_kern_names() {
+    let tests = |runner: &str| kern::suite::detect(Some(format!(r#"{{"devDependencies":{{"{runner}":"1.0.0"}}}}"#).as_bytes())).unwrap();
+    let joined = |runner: &str| kern::suite::test_command(&tests(runner)).join(" ");
+    assert!(joined("vitest").contains("--outputFile=/tmp/.kern-report.json"), "{}", joined("vitest"));
+    assert!(joined("mocha").contains("--reporter-option output=/tmp/.kern-report.json"), "{}", joined("mocha"));
+    let node = kern::suite::test_command(&kern::suite::detect(Some(br#"{"scripts":{"test":"node --test"}}"#)).unwrap()).join(" ");
+    assert!(node.contains("--test-reporter=tap --test-reporter-destination=/tmp/.kern-report.json"), "{node}");
+    assert_eq!(kern::suite::test_command(&tests("jest")), kern::proof::command(&tests("jest")), "jest writes the file through Kern's own results processor");
+}
+
+#[test]
+fn tests_that_run_on_the_old_code_but_give_nothing_on_the_new_code_block() {
+    let mut t = clean_tests();
+    t["run_broke"] = json!([{ "dir": "", "why": "the tests did not finish in 15 minutes" }]);
+    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-run-broke".to_string()]), "{r}");
+    let broke = json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [{ "dir": "packages/kit", "why": "exit 137" }] });
+    let r = receipt::build(&drive_json(), &clean_rules(), &broke, &off());
+    let md = receipt::markdown(&r, None);
+    assert!(r["decision"] == "blocked" && md.contains("packages/kit") && md.contains("❌ Tests"), "{md}");
+}
+
+#[test]
 fn a_test_named_with_the_time_it_ran_is_the_same_test_on_both_sides() {
     let before = report(&[("t > throws for Thu Oct 15 2026 19:50:54 GMT+0000", 1, 0, 0), ("t > adds 1 and 2", 1, 0, 0)], &[]);
     let after = report(&[("t > throws for Thu Oct 15 2026 19:52:07 GMT+0000", 1, 0, 0), ("t > adds 1 and 2", 1, 0, 0)], &[]);

@@ -38,6 +38,10 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let tests_deleted = changed.iter().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path));
     let added = |p: &str| !tests_deleted && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
     for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
+    for x in tests["run_broke"].as_array().into_iter().flatten() {
+        let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
+        blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or("")))));
+    }
     for t in strings(&tests["new_problems"]) {
         if added(&t) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}", code(&t, 200)))); }
         else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}", code(&t, 200)))); }
@@ -158,6 +162,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         for n in tests["not_run"].as_array().into_iter().flatten() {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
         }
+    } else if tests["status"] == "BROKE" {
+        md += "- ❌ Tests: they run on the old code but give no results on the new code (see above)\n";
     } else if nothing {
         md += "- ✅ Tests: nothing to run — this change touches only documentation\n";
     } else {

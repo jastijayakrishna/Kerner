@@ -8,6 +8,18 @@ use std::path::Path;
 const FOLDERS: [&str; 11] = ["test", "tests", "__tests__", "spec", "specs", "e2e", "__e2e__", "cypress", "playwright", "__mocks__", "__fixtures__"];
 const NAMES: [&str; 4] = [".test.", ".spec.", ".e2e.", ".cy."];
 const TIMEOUT_SECONDS: u64 = 900;
+pub const REPORT: &str = "/tmp/.kern-report.json";
+
+pub fn test_command(tests: &Tests) -> Vec<String> {
+    let mut c = proof::command(tests);
+    match tests.runner {
+        Runner::Vitest => c.push(format!("--outputFile={REPORT}")),
+        Runner::Mocha => c.extend(["--reporter-option".to_string(), format!("output={REPORT}")]),
+        Runner::Node => { if let Some(at) = c.iter().position(|a| a == "--test-reporter=tap") { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
+        Runner::Jest => {}
+    }
+    c
+}
 
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
     let (name, command) = crate::init::runner(package)?;
@@ -130,7 +142,7 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
 fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str) -> R<Result<(Report, Vec<String>), String>> {
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": proof::command(tests), "timeout_seconds": TIMEOUT_SECONDS, "cwd": dir }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": TIMEOUT_SECONDS, "cwd": dir }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: TIMEOUT_SECONDS + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
@@ -215,28 +227,39 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
     let (mut before, mut after, mut again) = (Report::default(), Report::default(), Report::default());
-    let (mut ran, mut rerun, mut all_new, mut wrote_code) = (Vec::new(), false, Vec::new(), BTreeSet::new());
+    let (mut ran, mut rerun, mut all_new, mut wrote_code, mut run_broke) = (Vec::new(), false, Vec::new(), BTreeSet::new(), Vec::new());
     for suite in &suites {
         let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let at = now_ms();
         let first = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"))?;
         timed(format!("new{label}"), at);
-        let new = match first {
-            Ok((r, created)) => { wrote_code.extend(created); r }
-            Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") })); continue; }
-        };
-        let old = match &suite.old {
-            None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
+        let old_run = match &suite.old {
+            None => None,
             Some(t) => {
                 let at = now_ms();
                 let run = run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))?;
                 timed(format!("old{label}"), at);
-                match run {
-                    Ok((r, _)) => r,
-                    Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+                Some(run.map(|(r, _)| r))
+            }
+        };
+        let new = match first {
+            Ok((r, created)) => { wrote_code.extend(created); r }
+            Err(why) => {
+                if !matches!(old_run, Some(Ok(_))) {
+                    not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") }));
+                    continue;
+                }
+                match run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))? {
+                    Ok((r, created)) => { wrote_code.extend(created); r }
+                    Err(again) => { run_broke.push(json!({ "dir": suite.dir, "why": again })); continue; }
                 }
             }
+        };
+        let old = match old_run {
+            None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
+            Some(Ok(r)) => r,
+            Some(Err(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
         };
         let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new {
@@ -251,6 +274,9 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
         absorb(&mut after, new, &suite.dir, suite.new.runner);
         ran.push(if suite.dir.is_empty() { suite.new.runner.name().to_string() } else { format!("{} in {}", suite.new.runner.name(), suite.dir) });
     }
+    if ran.is_empty() && !run_broke.is_empty() {
+        return Ok(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": run_broke, "not_run": not_run, "seconds": seconds }));
+    }
     if ran.is_empty() {
         let why = not_run.first().and_then(|n| n["why"].as_str()).unwrap_or("no test run gave results").to_string();
         return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.runner.name(), "why": why, "not_run": not_run, "seconds": seconds }));
@@ -261,6 +287,7 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
         c["wrote_code"] = json!(wrote_code);
     }
     c["not_run"] = json!(not_run);
+    c["run_broke"] = json!(run_broke);
     c["seconds"] = json!(seconds);
     if !all_new.is_empty() { c["note"] = json!(format!("the old code had no test runner Kern can read in {}, so those tests are all new", all_new.join(", "))); }
     Ok(c)

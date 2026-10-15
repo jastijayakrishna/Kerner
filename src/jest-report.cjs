@@ -8,6 +8,9 @@ module.exports = (results) => {
       assertionResults: (file.testResults || []).map((t) => ({ ancestorTitles: t.ancestorTitles, title: t.title, status: t.status })),
     })),
   };
+  if (process.env.KERN_REPORT) {
+    try { require('fs').writeFileSync(process.env.KERN_REPORT, JSON.stringify(report)); } catch {}
+  }
   process.stdout.write(`\n${JSON.stringify(report)}\n`);
   return results;
 };

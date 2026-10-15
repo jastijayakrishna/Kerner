@@ -216,8 +216,8 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
         "create", "--name", name, "--pull=never", "--runtime=runsc", &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
         "--ulimit", files, "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777",
     ].iter().map(|s| s.to_string()).collect();
+    a.extend(["--tmpfs".to_string(), format!("/tmp:rw,noexec,nosuid,nodev,size={},mode=1777", if drive_test { 1u64 << 30 } else { 64 << 20 })]);
     match spec.workspace {
         Some((volume, readonly)) => {
             a.extend(["--mount".into(), format!("type=volume,source={volume},target=/workspace{}", if readonly { ",readonly" } else { "" })]);
@@ -732,7 +732,7 @@ mod inside {
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         clear_added(Path::new("/workspace"));
         let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC")
-            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior")
+            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
             .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
         let started = std::time::Instant::now();
         let ending = loop {
@@ -741,7 +741,8 @@ mod inside {
             std::thread::sleep(Duration::from_millis(100));
         };
         quiesce()?;
-        part("output", &some_of("/tmp/.kern-test-out", 32 << 20, false))?;
+        let report = some_of("/tmp/.kern-report.json", 64 << 20, false);
+        part("output", &if report.iter().any(|b| !b.is_ascii_whitespace()) { report } else { some_of("/tmp/.kern-test-out", 32 << 20, true) })?;
         part("errors", &some_of("/tmp/.kern-test-err", 64 << 10, true))?;
         part("behavior", &some_of("/tmp/.kern-behavior", 4 << 20, false))?;
         let mut created = Vec::new();
