@@ -34,7 +34,9 @@ fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
 
 pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
     let (mut blocked, mut look, mut new_tests) = (Vec::new(), Vec::new(), Vec::new());
-    let added = |p: &str| rules["changed"].as_array().into_iter().flatten().any(|c| c["path"] == p && c["operation"] == "add");
+    let changed = rules["changed"].as_array().cloned().unwrap_or_default();
+    let tests_deleted = changed.iter().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path));
+    let added = |p: &str| !tests_deleted && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
     for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
     for t in strings(&tests["new_problems"]) {
         if added(&t) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}", code(&t, 200)))); }
@@ -43,8 +45,9 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for x in rules["tricks"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");
         let reach = x["why"].as_str().is_some_and(|w| w.starts_with("Code outside the tests"));
-        if x["operation"] == "add" && reach { new_tests.push(item("new-runner-reach", format!("{}: a file this change adds, outside the test folders, uses the test runner; if it is a test, Kern does not run it", code(path, 160)))); }
-        else if x["operation"] == "add" { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
+        let added_file = x["operation"] == "add" && !tests_deleted;
+        if added_file && reach { new_tests.push(item("new-runner-reach", format!("{}: a file this change adds, outside the test folders, uses the test runner; if it is a test, Kern does not run it", code(path, 160)))); }
+        else if added_file { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
         else { blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""))))); }
     }
     let (described, surprises) = behaviour_items(&behaviour["report"]);

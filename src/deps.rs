@@ -60,9 +60,21 @@ const REGISTRIES: [&str; 2] = ["registry.npmjs.org", "registry.yarnpkg.com"];
 fn host(url: &str) -> Option<String> {
     url.split_once("://").and_then(|(_, rest)| rest.split(['/', '?', '#']).next()).filter(|h| !h.is_empty()).map(str::to_ascii_lowercase)
 }
+fn legacy(prefix: &str, deps: &Value, out: &mut Vec<(String, Value)>) {
+    for (name, entry) in deps.as_object().into_iter().flatten() {
+        let key = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let mut own = entry.clone();
+        if let Some(o) = own.as_object_mut() { o.remove("dependencies"); o.insert("name".into(), Value::String(name.clone())); }
+        out.push((key.clone(), own));
+        legacy(&key, &entry["dependencies"], out);
+    }
+}
 fn entries(lock: &Value) -> Vec<(String, Value)> {
     let packages = lock["packages"].as_object().cloned().unwrap_or_default();
-    if packages.is_empty() { lock["dependencies"].as_object().cloned().unwrap_or_default().into_iter().collect() } else { packages.into_iter().filter(|(k, _)| !k.is_empty()).collect() }
+    if !packages.is_empty() { return packages.into_iter().filter(|(k, _)| !k.is_empty()).collect(); }
+    let mut out = Vec::new();
+    legacy("", &lock["dependencies"], &mut out);
+    out
 }
 pub fn lock_surprises(old: &Value, new: &Value) -> Vec<String> {
     let before: BTreeMap<String, Value> = entries(old).into_iter().collect();

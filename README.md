@@ -75,8 +75,9 @@ What Kern checks on every pull request:
 2. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
-3. **New powers.** Changed code (not tests) that newly starts programs, reaches the network, reads environment variables or runs `eval`
-   needs a look. Ordinary imports, such as a UI library or a project's own modules, are not powers.
+3. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
+   the tests that newly reads environment variables, needs a look. Ordinary imports, such as a UI library or a project's own modules,
+   are not powers.
 4. **Files that steer everything else.** CI, secret and configuration files, test runner settings, and the files that instruct coding
    agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
 5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). A lockfile entry that now downloads a package from

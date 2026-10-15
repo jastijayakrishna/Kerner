@@ -9,7 +9,7 @@ use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::GetSpan;
-use oxc_syntax::operator::UnaryOperator;
+use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 use oxc_syntax::symbol::SymbolId;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -61,8 +61,39 @@ fn root<'b, 'a>(e: &'b Expression<'a>) -> &'b Expression<'a> {
 fn literal(e: &Expression) -> Option<String> {
     match unwrap(e) {
         Expression::StringLiteral(s) => Some(s.value.to_string()),
-        Expression::TemplateLiteral(t) => t.single_quasi().map(|q| q.to_string()),
+        Expression::TemplateLiteral(t) => {
+            let mut out = String::new();
+            for (i, q) in t.quasis.iter().enumerate() {
+                out.push_str(q.value.cooked.as_ref()?.as_str());
+                if let Some(e) = t.expressions.get(i) { out.push_str(&literal(e)?); }
+            }
+            Some(out)
+        }
+        Expression::BinaryExpression(b) if b.operator == BinaryOperator::Addition => Some(literal(&b.left)? + &literal(&b.right)?),
         _ => None,
+    }
+}
+fn chain_selector(e: &Expression) -> Option<(String, String)> {
+    let (mut props, mut at) = (Vec::new(), unwrap(e));
+    loop {
+        match at {
+            Expression::StaticMemberExpression(m) => { props.push(m.property.name.to_string()); at = unwrap(&m.object); }
+            Expression::ComputedMemberExpression(m) => { props.push(literal(&m.expression).unwrap_or_default()); at = unwrap(&m.object); }
+            Expression::CallExpression(c) => at = unwrap(&c.callee),
+            Expression::Identifier(id) => return props.into_iter().rev().find(|p| SELECTORS.contains(&p.as_str())).map(|p| (id.name.to_string(), p)),
+            _ => return None,
+        }
+    }
+}
+fn test_shaped(args: &[Argument]) -> bool {
+    args.first().and_then(Argument::as_expression).and_then(literal).is_some() && matches!(args.get(1), Some(Argument::ArrowFunctionExpression(_) | Argument::FunctionExpression(_)))
+}
+fn truthy(e: &Expression) -> bool {
+    match unwrap(e) {
+        Expression::BooleanLiteral(b) => b.value,
+        Expression::NumericLiteral(n) => n.value != 0.0,
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => literal(e).is_some_and(|s| !s.is_empty()),
+        _ => false,
     }
 }
 
@@ -137,6 +168,16 @@ impl Scan<'_> {
             }
         }
         None
+    }
+    fn runner(&self, e: &Expression) -> Option<String> {
+        match unwrap(e) {
+            Expression::Identifier(id) => match self.symbol(id) {
+                Some(s) => self.suites.get(&s).cloned(),
+                None => SUITES.contains(&id.name.as_str()).then(|| id.name.to_string()),
+            },
+            Expression::StaticMemberExpression(m) => self.runner(&m.object).or_else(|| self.suite(e)),
+            _ => None,
+        }
     }
     fn framework(&self, e: &Expression) -> bool {
         matches!(unwrap(e), Expression::CallExpression(c) if matches!(&c.callee, Expression::Identifier(id) if id.name == "require" && self.global(id))
@@ -270,8 +311,15 @@ impl<'a> Visit<'a> for Scan<'_> {
                 self.found.push(name.clone());
                 if let Some(t) = &title { self.found.push(format!("{name}('{t}')")); }
             }
-            let selected = self.selector(&it.callee);
+            let mut selected = self.selector(&it.callee);
+            if selected.is_none() && test_shaped(&it.arguments) && let Some((name, prop)) = chain_selector(&it.callee) {
+                self.found.push(format!("{name}.{prop}"));
+                selected = Some((name, prop));
+            }
             if let (Some((suite, prop)), Some(t)) = (&selected, &title) { self.found.push(format!("{suite}.{prop}('{t}')")); }
+            if let Expression::ComputedMemberExpression(m) = unwrap(&it.callee) && literal(&m.expression).is_none() && let Some(r) = self.runner(&m.object) {
+                self.found.push(format!("{r}[a computed name]"));
+            }
             let suite = renamed.is_some() || selected.is_some() || self.suite(&it.callee).is_some();
             for arg in it.arguments.iter().filter(|_| suite) {
                 if let Some(skip) = self.unconditional_skip(arg) {
@@ -282,7 +330,11 @@ impl<'a> Visit<'a> for Scan<'_> {
                 for property in &options.properties {
                     let ObjectPropertyKind::ObjectProperty(p) = property else { continue };
                     let Some(key) = p.key.static_name() else { continue };
-                    if SELECTORS.contains(&key.as_ref()) && !matches!(&p.value, Expression::BooleanLiteral(b) if !b.value) { self.found.push(format!("the {key} option")); }
+                    let marked = match key.as_ref() {
+                        "skip" | "todo" => truthy(&p.value),
+                        k => SELECTORS.contains(&k) && !matches!(unwrap(&p.value), Expression::BooleanLiteral(b) if !b.value),
+                    };
+                    if marked { self.found.push(format!("the {key} option")); }
                 }
             }
         } else if let Expression::StaticMemberExpression(m) = unwrap(&it.callee)

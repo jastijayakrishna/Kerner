@@ -249,17 +249,18 @@ fn dependency_changes_say_which_packages_moved_and_a_lockfile_that_points_elsewh
 }
 
 #[test]
-fn ordinary_imports_and_test_files_are_no_new_power() {
+fn ordinary_imports_are_no_new_power_and_a_test_may_read_its_environment() {
     let (t, base) = project();
     let head = commit(&t, &[
         ("src/card.jsx", "import React from 'react';\nimport { total } from '@/lib/total';\nimport path from 'node:path';\nexport const Card = () => React.createElement('b', null, path.basename(String(total)));\n"),
-        ("test/net.test.js", "import { execSync } from 'node:child_process';\nimport { test } from 'vitest';\ntest('runs', () => execSync('true'));\n"),
+        ("test/env.test.js", "import { test } from 'vitest';\ntest('reads its settings', () => process.env.CI);\n"),
+        ("test/cli.test.js", "import { execSync } from 'node:child_process';\nimport { test } from 'vitest';\ntest('runs', () => execSync('true'));\n"),
         ("src/send.js", "import axios from 'axios';\nexport const send = (x) => axios.post('https://example.invalid', x);\n"),
     ], &[]);
     let r = kern::rules::rules(&t.0, &base, &head).unwrap();
     let powers: Vec<String> = r["powers"].as_array().unwrap().iter().map(|p| format!("{} {}", p["path"].as_str().unwrap(), p["added"])).collect();
-    assert_eq!(powers.len(), 1, "only the network package counts: {powers:?}");
-    assert!(powers[0].starts_with("src/send.js") && powers[0].contains("axios"), "{powers:?}");
+    assert_eq!(powers.len(), 2, "the network package, and a test that starts programs: {powers:?}");
+    assert!(powers.iter().any(|p| p.starts_with("src/send.js") && p.contains("axios")) && powers.iter().any(|p| p.starts_with("test/cli.test.js") && p.contains("child_process")), "{powers:?}");
 }
 
 #[test]
@@ -354,6 +355,42 @@ fn moving_a_skip_to_another_test_is_a_trick_and_a_query_s_skip_is_not() {
     assert!(moved.iter().any(|w| w.contains("test.skip('adds')")), "the skip moved from one test to another: {moved:?}");
     let query = tricks_for(&t, &mid, "import { test } from 'vitest';\ntest.skip('needs the network', () => {});\ntest('adds', async () => { await Model.find().skip(10).limit(5); });\n");
     assert!(query.is_empty(), "a database query's skip is not a test trick: {query:?}");
+}
+
+#[test]
+fn a_conditional_skip_option_is_allowed_but_focusing_never_is() {
+    let (t, base) = project();
+    let head = "import { test } from 'node:test';\n";
+    assert!(tricks_for(&t, &base, &format!("{head}test('adds', {{ skip: process.platform === 'win32' }}, () => {{}});\n")).is_empty(), "a skip on another platform is no trick");
+    for body in ["test('adds', { skip: true }, () => {});", "test('adds', { skip: 'not ready' }, () => {});", "const yes = true;\ntest('adds', { only: yes }, () => {});"] {
+        assert!(!tricks_for(&t, &base, &format!("{head}{body}\n")).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_skip_moved_into_a_renamed_test_file_still_blocks() {
+    let (t, base) = project();
+    let head = commit(&t, &[("test/sum.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest.skip('adds', () => expect(total([1, 2])).toBe(3));\n")],
+        &["test/total.test.js"]);
+    let rules = kern::rules::rules(&t.0, &base, &head).unwrap();
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!(r["decision"], "blocked", "deleting a test file and adding a renamed one cannot turn a skipped test into a look: {r}");
+}
+
+#[test]
+fn an_npm_6_lockfile_is_checked_down_to_its_nested_packages() {
+    let lock = |host: &str| json!({ "lockfileVersion": 1, "dependencies": { "a": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+        "dependencies": { "b": { "version": "2.0.0", "resolved": format!("https://{host}/b/-/b-2.0.0.tgz") } } } } });
+    let out = kern::deps::lock_surprises(&lock("registry.npmjs.org"), &lock("evil.example"));
+    assert!(out.iter().any(|w| w.contains("evil.example") && w.contains("b 2.0.0")), "{out:?}");
+}
+
+#[test]
+fn cloud_and_messaging_sdks_count_as_reaching_the_network() {
+    for p in ["package:@aws-sdk/client-s3", "package:@slack/web-api", "package:@octokit/request", "package:openai", "package:stripe", "package:form-data", "package:gaxios"] {
+        assert!(kern::rules::risky(p), "{p}");
+    }
+    for p in ["package:react", "package:lodash", "package:@tanstack/react-query", "package:zod"] { assert!(!kern::rules::risky(p), "{p}"); }
 }
 
 #[test]

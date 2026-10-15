@@ -8,6 +8,7 @@ use oxc_parser::Parser;
 use oxc_semantic::{SemanticBuilder, Scoping};
 use oxc_span::SourceType;
 use oxc_syntax::scope::ScopeFlags;
+use oxc_syntax::symbol::SymbolId;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,10 +62,20 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-struct Footprint<'s> { file: &'s str, caps: BTreeSet<String>, scoping: &'s Scoping, strict: bool, global_this: bool, method_next: bool }
+struct Footprint<'s> { file: &'s str, caps: BTreeSet<String>, scoping: &'s Scoping, strict: bool, global_this: bool, method_next: bool, aliases: BTreeSet<SymbolId> }
 impl Footprint<'_> {
     fn add(&mut self, c: String) { self.caps.insert(c); }
     fn global(&self, id: &IdentifierReference) -> bool { id.reference_id.get().is_none_or(|r| self.scoping.get_reference(r).symbol_id().is_none()) }
+    fn alias(&self, id: &IdentifierReference) -> bool {
+        id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()).is_some_and(|s| self.aliases.contains(&s))
+    }
+    fn global_object(&self, e: &Expression) -> bool {
+        matches!(strip(e), Expression::Identifier(id) if (self.global(id) && GLOBALS.contains(&id.name.as_str())) || self.alias(id))
+    }
+    fn global_member(&mut self, prop: &str) {
+        if CODE_GLOBALS.contains(&prop) { self.add(format!("code:{prop}")); }
+        if NETWORK.contains(&prop) || prop == "require" || prop == "process" { self.add(format!("global:{prop}")); }
+    }
     fn module(&mut self, spec: &str) {
         if spec.starts_with('/') || spec.contains('\\') { return self.add(format!("escape:{spec}")); }
         if spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../") {
@@ -134,6 +145,17 @@ impl<'a> Visit<'a> for Footprint<'_> {
         self.method_next = false;
     }
     fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let Some(init) = &it.init && self.global_object(init) {
+            match &it.id {
+                BindingPattern::BindingIdentifier(b) => { if let Some(s) = b.symbol_id.get() { self.aliases.insert(s); } }
+                BindingPattern::ObjectPattern(o) => {
+                    for p in &o.properties {
+                        match p.key.static_name() { Some(k) => self.global_member(&k), None => self.add("global:computed".into()) }
+                    }
+                }
+                _ => self.add("global:computed".into()),
+            }
+        }
         self.visit_binding_pattern(&it.id);
         if let Some(init) = &it.init {
             let name = if let BindingPattern::BindingIdentifier(b) = &it.id { Some(b.name.as_str()) } else { None };
@@ -170,14 +192,14 @@ impl<'a> Visit<'a> for Footprint<'_> {
         let prop = it.property.name.as_str();
         if let Some((_, kind)) = REACH.iter().find(|(p, _)| *p == prop) { self.add(format!("{kind}:{prop}")); }
         let this_global = self.global_this && matches!(strip(&it.object), Expression::ThisExpression(_));
-        if this_global || matches!(&it.object, Expression::Identifier(obj) if self.global(obj)) {
-            let o = if let Expression::Identifier(obj) = &it.object { obj.name.as_str() } else { "globalThis" };
+        let aliased = matches!(&it.object, Expression::Identifier(obj) if self.alias(obj));
+        if this_global || aliased || matches!(&it.object, Expression::Identifier(obj) if self.global(obj)) {
+            let o = match &it.object { Expression::Identifier(obj) if !aliased => obj.name.as_str(), _ => "globalThis" };
             if o == "process" { if PROCESS.contains(&prop) { self.add(format!("process:{prop}")); } return; }
             if o == "module" { if MODULE.contains(&prop) { self.add(format!("module:{prop}")); } return; }
             if o == "require" { return self.add(format!("require:{}", if word(prop) { prop } else { "computed" })); }
             if GLOBALS.contains(&o) {
-                if CODE_GLOBALS.contains(&prop) { self.add(format!("code:{prop}")); }
-                if NETWORK.contains(&prop) || prop == "require" || prop == "process" { self.add(format!("global:{prop}")); }
+                self.global_member(prop);
                 return;
             }
         }
@@ -188,8 +210,9 @@ impl<'a> Visit<'a> for Footprint<'_> {
         let prop = literal(&it.expression);
         if let Some(p) = prop && let Some((_, kind)) = REACH.iter().find(|(r, _)| *r == p) { self.add(format!("{kind}:{p}")); }
         let this_global = self.global_this && matches!(strip(&it.object), Expression::ThisExpression(_));
-        if this_global || matches!(&it.object, Expression::Identifier(obj) if self.global(obj)) {
-            let o = if let Expression::Identifier(obj) = &it.object { obj.name.as_str() } else { "globalThis" };
+        let aliased = matches!(&it.object, Expression::Identifier(obj) if self.alias(obj));
+        if this_global || aliased || matches!(&it.object, Expression::Identifier(obj) if self.global(obj)) {
+            let o = match &it.object { Expression::Identifier(obj) if !aliased => obj.name.as_str(), _ => "globalThis" };
             let handled = match o {
                 "process" => { self.add(format!("process:{}", prop.filter(|p| word(p)).unwrap_or("computed"))); true }
                 "module" => { self.add(format!("module:{}", prop.filter(|p| word(p)).unwrap_or("computed"))); true }
@@ -223,7 +246,7 @@ fn parse(name: &str, source: &str, st: SourceType) -> Option<BTreeSet<String>> {
     if parsed.fatal_error || !parsed.diagnostics.is_empty() { return None; }
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
     let esm = matches!(extension(name), "mjs" | "mts");
-    let mut v = Footprint { file: name, caps: BTreeSet::new(), scoping: semantic.scoping(), strict: esm, global_this: !esm, method_next: false };
+    let mut v = Footprint { file: name, caps: BTreeSet::new(), scoping: semantic.scoping(), strict: esm, global_this: !esm, method_next: false, aliases: BTreeSet::new() };
     v.visit_program(&parsed.program);
     Some(v.caps)
 }

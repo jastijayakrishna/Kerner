@@ -14,12 +14,16 @@ const LARGEST: u64 = 1 << 20;
 const LARGEST_LOCKFILE: u64 = 64 << 20;
 fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
 const RISKY_BUILTINS: [&str; 15] = ["child_process", "cluster", "worker_threads", "vm", "net", "tls", "dgram", "dns", "http", "https", "http2", "inspector", "wasi", "module", "repl"];
-const RISKY_PACKAGES: [&str; 26] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
-    "socket.io-client", "execa", "cross-spawn", "shelljs", "zx", "node-pty", "vm2", "isolated-vm", "dotenv", "puppeteer", "simple-git", "ssh2", "nodemailer", "basic-ftp"];
+const RISKY_PACKAGES: [&str; 46] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
+    "socket.io-client", "execa", "cross-spawn", "shelljs", "zx", "node-pty", "vm2", "isolated-vm", "dotenv", "puppeteer", "simple-git", "ssh2", "nodemailer", "basic-ftp",
+    "ofetch", "wretch", "redaxios", "gaxios", "form-data", "make-fetch-happen", "request-promise", "http-proxy", "socket.io", "mqtt", "amqplib", "kafkajs", "openai",
+    "stripe", "twilio", "resend", "firebase", "firebase-admin", "googleapis", "ssh2-sftp-client"];
+const RISKY_SCOPES: [&str; 12] = ["@aws-sdk/", "@google-cloud/", "@azure/", "@slack/", "@octokit/", "@sendgrid/", "@anthropic-ai/", "@supabase/", "@grpc/",
+    "@mailchimp/", "@twilio/", "@vercel/blob"];
 pub fn risky(capability: &str) -> bool {
     match capability.split_once(':') {
         Some(("node", m)) => RISKY_BUILTINS.contains(&m),
-        Some(("package", p)) => RISKY_PACKAGES.contains(&p),
+        Some(("package", p)) => RISKY_PACKAGES.contains(&p) || RISKY_SCOPES.iter().any(|s| p.starts_with(s)),
         Some(("global", g)) => g != "dynamic",
         _ => true,
     }
@@ -82,13 +86,14 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let none = BTreeMap::new();
     let test_files = crate::suite::test_paths(&paths);
     let is_test = |p: &str| test_files.iter().any(|t| if t.ends_with('/') { p.starts_with(t.as_str()) } else { p == t });
-    for (p, op) in inspected.iter().filter(|(p, _)| !is_test(p)) {
+    for (p, op) in &inspected {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
+        let test = is_test(p);
         match crate::capability::check(&old, &new, &one, &none) {
             Ok(_) => {}
             Err(e) => match widened(&e.0) {
                 Some(list) => powers.extend(list.into_iter().filter_map(|mut x| {
-                    let added: Vec<Value> = x["added"].as_array().into_iter().flatten().filter(|c| c.as_str().is_some_and(risky)).cloned().collect();
+                    let added: Vec<Value> = x["added"].as_array().into_iter().flatten().filter(|c| c.as_str().is_some_and(|c| risky(c) && !(test && c == "process:env"))).cloned().collect();
                     if added.is_empty() { return None; }
                     x["added"] = json!(added);
                     Some(x)
