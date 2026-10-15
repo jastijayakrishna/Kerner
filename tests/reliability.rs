@@ -301,3 +301,22 @@ fn a_check_killed_while_it_set_up_leaves_a_record_that_clean_reads() {
     assert_eq!(r["removed"], json!([]), "only Kern's own volume names reach docker: {r}");
     assert!(!t.0.join("volumes.txt").exists(), "the record is gone once the volumes are");
 }
+
+#[test]
+fn a_change_to_how_the_tests_run_needs_a_look_and_a_dependency_bump_does_not() {
+    let settings = |base: &str, head: &str| -> Vec<Value> {
+        let t = Temp::new();
+        let (r, b) = repo(&t, &[("package.json", base), ("src/math.js", MATH)]);
+        let h = commit(&r, &[("package.json", head)]);
+        kern::rules::rules(&r, &b, &h).unwrap()["settings"].as_array().cloned().unwrap_or_default()
+    };
+    let script = |test: &str, vitest: &str| format!(r#"{{"name":"shop","scripts":{{"test":"{test}"}},"devDependencies":{{"vitest":"{vitest}"}}}}"#);
+    assert!(settings(&script("vitest run", "3.2.0"), &script("vitest run", "3.2.4")).is_empty(), "a version bump leaves how the tests run alone");
+    assert!(settings(&script("vitest run", "3.2.0"), &script("vitest", "3.2.0")).is_empty(), "vitest and vitest run run the same tests");
+    let changed = settings(&script("vitest run", "3.2.0"), &script("vitest run --config fake.config.js", "3.2.0"));
+    assert_eq!(changed.len(), 1, "a pull request that points the tests at another config changes which tests run: {changed:?}");
+    assert_eq!(changed[0]["path"], "package.json");
+    let jest = |block: &str| format!(r#"{{"name":"shop","scripts":{{"test":"jest"}},"devDependencies":{{"jest":"30.0.0"}},"jest":{block}}}"#);
+    assert_eq!(settings(&jest(r#"{"testEnvironment":"node"}"#), &jest(r#"{"testEnvironment":"node","setupFiles":["./quiet.js"]}"#)).len(), 1,
+        "jest settings kept in package.json decide which tests run as much as jest.config.js does");
+}

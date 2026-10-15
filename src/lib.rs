@@ -20,6 +20,7 @@ pub mod init;
 pub mod serve;
 pub mod reverify;
 pub mod drive;
+pub mod script;
 pub mod suite;
 pub mod rules;
 pub mod receipt;

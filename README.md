@@ -70,8 +70,9 @@ For example, from a real run on the demo repository:
 
 What Kern checks on every pull request:
 
-1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests in a sealed sandbox
-   (gVisor) with the network off. A test that passed before and fails now blocks. It must fail twice, so a flaky test is called flaky,
+1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests the way its own `test`
+   script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
+   package, each changed package's own script), in a sealed sandbox (gVisor) with the network off. A test that passed before and fails now blocks. It must fail twice, so a flaky test is called flaky,
    not broken. A test that stops running, or is newly skipped, needs a look. Tests that already failed before the change are set aside.
 2. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
@@ -79,8 +80,8 @@ What Kern checks on every pull request:
 3. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
    the tests that newly reads environment variables, needs a look. Ordinary imports, such as a UI library or a project's own modules,
    are not powers.
-4. **Files that steer everything else.** CI, secret and configuration files, test runner settings, and the files that instruct coding
-   agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
+4. **Files that steer everything else.** CI, secret and configuration files, test runner settings (the test script in `package.json`
+   included), and the files that instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
 5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). A lockfile entry that now downloads a package from
    somewhere other than its own registry tarball needs a look.
 6. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs

@@ -26,6 +26,19 @@ pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
     Some(Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(name)?, command, edits: Edits::Checked })
 }
 
+pub type Env = std::collections::BTreeMap<String, String>;
+pub enum Plan { Run(Tests, Env), Packages, Nothing }
+
+pub fn plan(package: Option<&[u8]>) -> Plan {
+    let parsed = package.and_then(|b| serde_json::from_slice::<Value>(b).ok());
+    match parsed.as_ref().map(crate::script::found) {
+        Some(crate::script::Found::Run(i)) => Plan::Run(Tests { paths: Vec::new(), kind: Kind::Feature, runner: i.runner, command: i.command, edits: Edits::Checked }, i.env),
+        Some(crate::script::Found::Packages) => Plan::Packages,
+        _ => detect(package).map_or(Plan::Nothing, |t| Plan::Run(t, Env::new())),
+    }
+}
+fn ready(p: Plan) -> Option<(Tests, Env)> { match p { Plan::Run(t, e) => Some((t, e)), _ => None } }
+
 fn test_grant(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('/').collect();
     let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
@@ -141,13 +154,13 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
 
 pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Late }
 
-fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str, until: u64) -> R<Side> {
+fn run_side(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     let seconds = within(until, TIMEOUT_SECONDS);
     if seconds < 60 { return Ok(Side::Late); }
     let cut = seconds < TIMEOUT_SECONDS;
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
@@ -190,7 +203,7 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
     out.into_iter().collect()
 }
 
-struct Suite { dir: String, old: Option<Tests>, new: Tests }
+struct Suite { dir: String, old: Option<(Tests, Env)>, new: (Tests, Env) }
 
 fn absorb(into: &mut Report, from: Report, dir: &str, runner: Runner) {
     let name = |k: String| if runner == Runner::Node && !dir.is_empty() { format!("{dir}: {k}") } else { k };
@@ -214,16 +227,16 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         crate::git::git(repo, &["show", &format!("{commit}:{path}")], None).ok()
     };
     let mut not_run = Vec::new();
-    let suites: Vec<Suite> = match detect(manifest(head, "").as_deref()) {
-        Some(new) => vec![Suite { dir: String::new(), old: detect(manifest(base, "").as_deref()), new }],
-        None => {
+    let suites: Vec<Suite> = match plan(manifest(head, "").as_deref()) {
+        Plan::Run(t, env) => vec![Suite { dir: String::new(), old: ready(plan(manifest(base, "").as_deref())), new: (t, env) }],
+        Plan::Packages | Plan::Nothing => {
             let changed = crate::rules::changed(repo, base, head)?;
             let paths: Vec<&str> = changed.iter().map(|(p, _)| p.as_str()).collect();
             let mut list = Vec::new();
             for dir in packages(&paths, |dir| manifest(head, dir).is_some() || manifest(base, dir).is_some()) {
-                let Some(new) = detect(manifest(head, &dir).as_deref()) else { continue };
+                let Some(new) = ready(plan(manifest(head, &dir).as_deref())) else { continue };
                 if list.len() == MAX_PACKAGES { not_run.push(json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") })); continue; }
-                list.push(Suite { old: detect(manifest(base, &dir).as_deref()), dir, new });
+                list.push(Suite { old: ready(plan(manifest(base, &dir).as_deref())), dir, new });
             }
             list
         }
@@ -245,13 +258,14 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let at = now_ms();
-        let first = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"), until)?;
+        let new_side = (&suite.new.0, &suite.new.1);
+        let first = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new{label}"), until)?;
         timed(format!("new{label}"), at);
         let at = now_ms();
         let old_run = match &suite.old {
             None => None,
-            Some(t) if !matches!(first, Side::Late) => {
-                let run = run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"), until)?;
+            Some((t, env)) if !matches!(first, Side::Late) => {
+                let run = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old{label}"), until)?;
                 timed(format!("old{label}"), at);
                 Some(run)
             }
@@ -268,7 +282,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     continue;
                 }
                 let at = now_ms();
-                let again = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"), until)?;
+                let again = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until)?;
                 timed(format!("new-again{label}"), at);
                 match again {
                     Side::Ran(r, created) => { wrote_code.extend(created); r }
@@ -287,7 +301,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new {
             let at = now_ms();
-            let r = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"), until)?;
+            let r = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until)?;
             timed(format!("new-again{label}"), at);
             match r {
                 Side::Ran(r, created) => { wrote_code.extend(created); Some(r) }
@@ -296,17 +310,18 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
         } else { None };
         rerun |= second.is_some();
-        absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);
-        absorb(&mut before, old, &suite.dir, suite.new.runner);
-        absorb(&mut after, new, &suite.dir, suite.new.runner);
-        ran.push(if suite.dir.is_empty() { suite.new.runner.name().to_string() } else { format!("{} in {}", suite.new.runner.name(), suite.dir) });
+        let runner = suite.new.0.runner;
+        absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, runner);
+        absorb(&mut before, old, &suite.dir, runner);
+        absorb(&mut after, new, &suite.dir, runner);
+        ran.push(if suite.dir.is_empty() { runner.name().to_string() } else { format!("{} in {}", runner.name(), suite.dir) });
     }
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": run_broke, "not_run": not_run, "seconds": seconds }));
     }
     if ran.is_empty() {
         let why = not_run.first().and_then(|n| n["why"].as_str()).unwrap_or("no test run gave results").to_string();
-        return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.runner.name(), "why": why, "not_run": not_run, "seconds": seconds }));
+        return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.0.runner.name(), "why": why, "not_run": not_run, "seconds": seconds }));
     }
     let mut c = compare(&before, &after, rerun.then_some(&again));
     if c["status"] == "RAN" {

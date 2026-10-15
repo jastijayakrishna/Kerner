@@ -112,7 +112,10 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         }
     }
     let package = new.get("package.json").and_then(|e| e.bytes.clone());
-    let mut tests = crate::suite::detect(package.as_deref()).unwrap_or(Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::Node, command: Vec::new(), edits: Edits::Checked });
+    let mut tests = match crate::suite::plan(package.as_deref()) {
+        crate::suite::Plan::Run(t, _) => t,
+        _ => Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::Node, command: Vec::new(), edits: Edits::Checked },
+    };
     tests.paths = crate::suite::test_paths(&paths);
     for (p, op) in &changes {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
@@ -125,6 +128,12 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     }
     let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p)).map(|(p, _)| json!({ "path": p })).collect();
     let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
+    for (p, op) in changes.iter().filter(|(p, op)| base_name(p) == "package.json" && *op != "delete") {
+        if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
+            && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
+            settings.push(json!({ "path": p, "operation": op, "why": "the test script or the test settings in package.json change" }));
+        }
+    }
     let mut lockfile = Vec::new();
     for d in dependencies.iter_mut() {
         let p = d["path"].as_str().unwrap_or("").to_string();

@@ -723,16 +723,26 @@ mod inside {
     }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env"], "test run")?;
         ensure!(c["version"] == 1, "Unsupported test run");
+        let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
+        ensure!(vars.len() <= 32, "Invalid test run environment");
+        let mut env = Vec::new();
+        for (k, v) in vars {
+            let v = v.as_str().filter(|v| v.len() <= 4096 && !v.contains('\0')).ok_or_else(|| Denied("Invalid test run environment".into()))?;
+            ensure!(crate::script::env_name(k), "Invalid test run environment");
+            env.push((k.clone(), v.to_string()));
+        }
+        let options = env.iter().find(|(k, _)| k == "NODE_OPTIONS").map_or_else(String::new, |(_, v)| format!(" {v}"));
+        env.retain(|(k, _)| k != "NODE_OPTIONS");
         let mut command = argv(&c["command"])?;
         let cwd = text(&c, "cwd")?;
         let dir = super::test_dir(cwd)?;
         command[0] = super::runner_in(cwd, &command[0], |p| Path::new(p).exists());
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         clear_added(Path::new("/workspace"));
-        let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC")
-            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
+        let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env)
+            .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
             .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
         let started = std::time::Instant::now();
         let ending = loop {
