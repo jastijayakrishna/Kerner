@@ -13,6 +13,7 @@ const AGENT_FOLDERS: [&str; 3] = [".cursor", ".claude", ".windsurf"];
 const LARGEST: u64 = 1 << 20;
 const LARGEST_LOCKFILE: u64 = 64 << 20;
 const SIBLINGS: usize = 200;
+const LARGEST_CODE: u64 = 16 << 20;
 fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
 const RISKY_BUILTINS: [&str; 15] = ["child_process", "cluster", "worker_threads", "vm", "net", "tls", "dgram", "dns", "http", "https", "http2", "inspector", "wasi", "module", "repl"];
 const RISKY_PACKAGES: [&str; 46] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
@@ -51,9 +52,13 @@ pub fn changed(repo: &Path, base: &str, head: &str) -> R<Vec<(String, &'static s
 fn files_for(repo: &Path, commit: &str, wanted: &BTreeSet<String>) -> R<Files> {
     let items = crate::drive::listing(repo, commit)?;
     let mut files: Files = items.iter().map(|i| (i.path.clone(), Entry { mode: i.mode.clone(), oid: i.oid.clone(), size: i.size, bytes: None })).collect();
-    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && (i.size <= LARGEST || (npm_lockfile(&i.path) && i.size <= LARGEST_LOCKFILE))
-        && matches!(i.mode.as_str(), "100644" | "100755")).collect();
-    crate::drive::blobs(repo, &load, |item, bytes| { if let Some(e) = files.get_mut(&item.path) { e.bytes = Some(bytes.to_vec()); } Ok(()) })?;
+    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && (i.size <= LARGEST || (npm_lockfile(&i.path) && i.size <= LARGEST_LOCKFILE)
+        || (is_code(&i.path) && i.size <= LARGEST_CODE)) && matches!(i.mode.as_str(), "100644" | "100755")).collect();
+    crate::drive::blobs(repo, &load, |item, bytes| {
+        let text = if is_code(&item.path) && std::str::from_utf8(bytes).is_err() { String::from_utf8_lossy(bytes).into_owned().into_bytes() } else { bytes.to_vec() };
+        if let Some(e) = files.get_mut(&item.path) { e.bytes = Some(text); }
+        Ok(())
+    })?;
     Ok(files)
 }
 
@@ -118,6 +123,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             else { not_checked.push(item); }
         }
     }
+    let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p)).map(|(p, _)| json!({ "path": p })).collect();
     let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
     let mut lockfile = Vec::new();
     for d in dependencies.iter_mut() {
@@ -136,5 +142,5 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
-        "lockfile": lockfile, "agent_notes": agent_notes, "not_checked": not_checked }))
+        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "not_checked": not_checked }))
 }

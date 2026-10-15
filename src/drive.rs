@@ -380,23 +380,31 @@ pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path, pr: Option<&str>
     }
     let count = |side: &str| files.iter().map(|f| f[side].as_array().map_or(0, Vec::len)).sum::<usize>();
     let totals = json!({ "new": count("new"), "old": count("old") });
+    let gitlink = |p: &str| [&old_at, &new_at].iter().any(|at| at.get(p).is_some_and(|i| i.mode == "160000"));
     let unmeasured: Vec<Value> = paths.iter().filter(|p| !files.iter().any(|f| f["path"] == p.as_str()) && !skipped.iter().any(|s| s["path"] == p.as_str()))
-        .map(|p| json!({ "path": p, "why": unmeasured_kind(p) })).collect();
+        .map(|p| json!({ "path": p, "why": if gitlink(p) { "a submodule" } else { unmeasured_kind(p) } })).collect();
     let task = out.join("task");
     std::fs::create_dir(&task)?;
     create_new(task.join("task.md"), TASK.as_bytes(), 0o644)?;
     let pr = match pr { Some(t) => t.to_string(), None => format!("# {}\n", String::from_utf8_lossy(&git(repo, &["log", "-1", "--format=%B", head], None)?).trim()) };
     create_new(task.join("pr.md"), pr.as_bytes(), 0o644)?;
-    let shown: Vec<&str> = paths.iter().map(String::as_str).filter(|p| !lockfile(p) && !binary(p) && !skipped.iter().any(|s| s["path"] == *p)).collect();
+    let bytes_of = |p: &str| [&old_at, &new_at].iter().filter_map(|at| at.get(p)).map(|i| i.size).sum::<u64>();
+    let shown: Vec<&str> = paths.iter().map(String::as_str).filter(|p| !lockfile(p) && !binary(p) && !skipped.iter().any(|s| s["path"] == *p) && bytes_of(p) <= 2 * LARGEST).collect();
     let mut patch = Vec::new();
-    let mut group: Vec<&str> = Vec::new();
+    let (mut group, mut group_bytes): (Vec<&str>, u64) = (Vec::new(), 0);
     for (i, p) in shown.iter().enumerate() {
         group.push(p);
+        group_bytes += bytes_of(p);
         let size: usize = group.iter().map(|g| g.len() + 3).sum();
-        if size > 12_000 || i + 1 == shown.len() {
+        if size > 12_000 || group_bytes > 4 * LARGEST || i + 1 == shown.len() {
             let mut args = vec!["diff", "--no-renames", "-U3", base, head, "--"];
             args.append(&mut group);
-            patch.extend(git_with(repo, &args, None, 64 << 20)?);
+            group_bytes = 0;
+            match git_with(repo, &args, None, 64 << 20) {
+                Ok(out) => patch.extend(out),
+                Err(e) if e.0.contains("exceeded") => break,
+                Err(e) => return Err(e),
+            }
             if patch.len() > 250_000 { break; }
         }
     }
@@ -929,10 +937,12 @@ pub fn install_dirs(paths: &BTreeSet<String>, code: &[String], root_package: Opt
     if let Some(y) = pnpm_workspace {
         patterns.extend(y.lines().filter_map(|l| l.trim().strip_prefix('-')).map(|p| p.trim().trim_matches(|c| c == '\'' || c == '"').to_string()));
     }
-    let member = |dir: &str| patterns.iter().filter(|p| !p.starts_with('!')).any(|p| {
+    let matches = |p: &str, dir: &str| {
         let re: String = p.trim_end_matches('/').split('/').map(|part| match part { "**" => ".*".to_string(), _ => part.split('*').map(regex_quote).collect::<Vec<_>>().join("[^/]*") }).collect::<Vec<_>>().join("/");
         glob_match(&re, dir)
-    });
+    };
+    let member = |dir: &str| patterns.iter().filter(|p| !p.starts_with('!')).any(|p| matches(p, dir))
+        && !patterns.iter().filter_map(|p| p.strip_prefix('!')).any(|p| matches(p, dir));
     let mut dirs: Vec<String> = Vec::new();
     if paths.contains("package.json") { dirs.push(".".into()); }
     for p in code {
@@ -1011,7 +1021,8 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let commit = d[if side == "old" { "base" } else { "head" }].as_str().unwrap_or("");
     let root = out.join("sandbox");
     std::fs::create_dir_all(&root)?;
-    let code: Vec<String> = d["files"].as_array().into_iter().flatten().filter_map(|f| f["path"].as_str().map(str::to_string)).collect();
+    let code: Vec<String> = ["files", "skipped", "unmeasured"].iter().flat_map(|k| d[*k].as_array().cloned().unwrap_or_default())
+        .filter(|f| f["why"] != "a submodule").filter_map(|f| f["path"].as_str().map(str::to_string)).collect();
     let tree = root.join(label);
     if tree.exists() { std::fs::remove_dir_all(&tree)?; }
     let paths = materialize(repo, commit, &tree)?;

@@ -58,6 +58,13 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
     look.extend(new_tests);
+    for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
+        look.push(item("submodule", format!("{}: a submodule this change points at other code", code(x["path"].as_str().unwrap_or(""), 160))));
+    }
+    for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["path"].as_str().is_some_and(crate::capability::is_code)) {
+        look.push(item("not-checked-code", format!("{}: Kern could not read this changed code, so its rules were not applied ({})", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or("")))));
+    }
     for t in strings(&tests["new_failing"]) { look.push(item("new-test-fails", format!("A test this change adds fails on the new code: {}", code(&t, 200)))); }
     let wrote = strings(&tests["wrote_code"]);
     if !wrote.is_empty() {
@@ -88,7 +95,9 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let lines = json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
         "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) });
     let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) }))
-        .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) }))).collect();
+        .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) })))
+        .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
+            .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).collect();
     json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "base": d["base"], "head": d["head"], "decision": decision, "blocked": blocked, "look": look, "tests": tests,
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": report["coverage"]["percent"], "lines": lines, "described": described, "not_mentioned": surprises },
         "rules": rules, "not_checked": not_checked })
@@ -114,6 +123,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     md += &match r["decision"].as_str() {
         Some("blocked") => format!("### ❌ Kern: Blocked — {}\n\n", plural(blocked.len(), "problem to fix", "problems to fix")),
         Some("look") => format!("### ⚠️ Kern: {} a look\n\n", plural(look.len(), "thing needs", "things need")),
+        _ if tests_ran && tests["not_run"].as_array().is_some_and(|n| !n.is_empty()) => "### ✅ Kern: Nothing unexpected in what it ran\n\nSome packages' tests did not run (see below).\n\n".to_string(),
         _ if tests_ran || behaviour_ran || nothing => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
         _ => "### ✅ Kern: Nothing unexpected in the rules it checked\n\nNot run: the project's tests and its changed code (see below), so this receipt covers the rules only.\n\n".to_string(),
     };
@@ -149,13 +159,16 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
         }
     } else if nothing {
-        md += "- ✅ Tests: nothing to run — this change touches no code, tests or package.json\n";
+        md += "- ✅ Tests: nothing to run — this change touches only documentation\n";
     } else {
         md += &format!("- ⏭️ Tests: Not run — {}\n", plain(tests["why"].as_str().unwrap_or("Kern found no tests it can run")));
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
-    if powers == 0 { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
-    if r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && tests["gone"].as_array().is_none_or(Vec::is_empty) && tests["newly_skipped"].as_array().is_none_or(Vec::is_empty) {
+    let unread = look.iter().any(|x| x["kind"] == "not-checked-code");
+    if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
+    let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);
+    if (tests_ran || nothing) && !unread && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
+        && none("gone") && none("newly_skipped") {
         md += "- ✅ No skipped, focused or removed tests\n";
     }
     match behaviour["status"].as_str() {
@@ -241,7 +254,7 @@ fn read_seal_line(body: &str) -> Option<(Value, String)> {
 
 fn kern_comment(api: &Api, repository: &str, number: u64) -> R<Option<Value>> {
     let who = author();
-    for page in 1..=10 {
+    for page in 1..=1000 {
         let items = api.get(&format!("/repos/{repository}/issues/{number}/comments?per_page=100&page={page}"))?.as_array().cloned().unwrap_or_default();
         if let Some(c) = items.iter().find(|c| c["body"].as_str().is_some_and(|b| b.starts_with(MARK)) && c["user"]["login"] == who.as_str()) { return Ok(Some(c.clone())); }
         if items.len() < 100 { break; }
@@ -263,7 +276,9 @@ fn description(r: &Value) -> String {
     match r["decision"].as_str() {
         Some("blocked") => format!("Blocked: {}", r["blocked"][0]["what"].as_str().unwrap_or("a problem to fix").replace('`', "")),
         Some("look") => format!("{} — approve with /kern approve", plural(n("look"), "thing needs a look", "things need a look")),
-        _ => "Nothing unexpected".to_string(),
+        _ if r["tests"]["status"] == "RAN" && r["tests"]["not_run"].as_array().is_some_and(|n| !n.is_empty()) => "Nothing unexpected in what ran; some packages' tests did not run".to_string(),
+        _ if r["tests"]["status"] == "RAN" || r["tests"]["status"] == "NOTHING_TO_RUN" => "Nothing unexpected".to_string(),
+        _ => "Nothing unexpected in the rules; the tests did not run".to_string(),
     }
 }
 

@@ -535,7 +535,7 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
     assert!(md.contains("Nothing unexpected") && md.contains("no test runner Kern can read") && md.contains("Not run"), "{md}");
     assert!(md.contains("in the rules it checked"), "a receipt whose tests did not run says it covers the rules only:\n{md}");
-    let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches no code, tests or package.json" });
+    let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");
     assert!(!md.contains("sandbox"), "nothing ran, so the receipt does not speak of a sandbox: {md}");

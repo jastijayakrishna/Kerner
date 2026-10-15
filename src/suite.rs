@@ -93,8 +93,13 @@ pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value
     }
     already_failing.extend(before.problems.iter().cloned());
     let total = |r: &Report| r.tests.values().map(|c| c.total()).sum::<u32>();
+    let passed = |r: &Report| r.tests.values().map(|c| c.passed).sum::<u32>();
     if total(before) == 0 && total(after) == 0 && after.problems.iter().all(|p| before.problems.contains(p)) {
         return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
+    }
+    if total(before) > 0 && passed(before) == 0 {
+        return json!({ "status": "NOT_RUN", "why": "no test passed on the old code here (they may need the network, a database or a build first), so the tests showed nothing",
+            "new_failing": new_failing });
     }
     let new_problems: Vec<&String> = after.problems.iter().filter(|p| !before.problems.contains(*p) && again.is_none_or(|a| a.problems.contains(*p))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(again.unwrap_or(after)), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,

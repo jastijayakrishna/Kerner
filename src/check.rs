@@ -5,10 +5,15 @@ use std::path::Path;
 
 pub struct Ai<'a> { pub agent: &'a [String], pub rounds: usize }
 
-fn runnable(d: &Value, rules: &Value) -> bool {
-    let code = d["totals"]["new"].as_u64().unwrap_or(0) + d["totals"]["old"].as_u64().unwrap_or(0) > 0;
-    let paths: Vec<&str> = rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();
-    code || !crate::suite::test_paths(&paths).is_empty() || paths.iter().any(|p| p.rsplit('/').next() == Some("package.json"))
+const DOCS: [&str; 13] = ["md", "mdx", "markdown", "txt", "rst", "adoc", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf"];
+const DOC_NAMES: [&str; 7] = ["license", "licence", "changelog", "authors", "contributors", "codeowners", "notice"];
+fn documentation(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
+    DOCS.contains(&ext) || DOC_NAMES.contains(&stem)
+}
+fn runnable(_d: &Value, rules: &Value) -> bool {
+    rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).any(|p| !documentation(p))
 }
 
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {
@@ -29,7 +34,7 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     };
     let behaved = now_ms();
     let tests = if !run {
-        json!({ "status": "NOTHING_TO_RUN", "why": "this change touches no code, tests or package.json" })
+        json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" })
     } else {
         crate::suite::run(out, op).unwrap_or_else(|e| json!({ "status": "NOT_RUN", "why": format!("Kern could not run the tests: {}", e.0) }))
     };
