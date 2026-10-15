@@ -181,7 +181,7 @@ decision late clear
 jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("time for this check ran out"))' late/receipt.json > /dev/null || { jq .tests late/receipt.json; fail "late: the run the time limit cut short was not reported as not run"; }
 
 say "Kern runs the tests the way the project's own test script does: its config, its test files and its variables"
-git init -q scripted && cd scripted
+git init -q scriptrepo && cd scriptrepo
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p spec src
 printf '%s\n' '{"name":"scripted","version":"1.0.0","private":true,"type":"module","scripts":{"test":"FLAVOR=sweet vitest run --config test.config.mjs --reporter=dot"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
@@ -192,7 +192,7 @@ git add -A && git commit -qm base && scripted_base=$(git rev-parse HEAD)
 printf '%s\n' "export const flavor = () => process.env.FLAVOR.toUpperCase();" > src/flavor.js
 git commit -qam "Shout the flavor" && git rev-parse HEAD > "$W/scripted.head"
 cd "$W"
-check scripted "$scripted_base" scripted
+check scripted "$scripted_base" scriptrepo
 decision scripted blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1)' scripted/receipt.json > /dev/null || { jq .tests scripted/receipt.json; fail "scripted: the project's own test script was not followed"; }
 
