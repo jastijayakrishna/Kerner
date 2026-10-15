@@ -249,12 +249,14 @@ fn behaviour_monitor_records_network_processes_and_environment_reads() {
     std::fs::write(t.join("monitor.cjs"), sandbox::MONITOR).unwrap();
     let script = "fetch('http://telemetry.invalid:8080/x').catch(()=>{}); require('net').connect(9, '127.0.0.1').on('error',()=>{}); \
         require('child_process').spawnSync(process.execPath, ['-v']); try { require('child_process').execSync('curl-not-installed --version', { stdio: 'ignore' }); } catch {} \
+        require('child_process').spawnSync('/opt/my tools/runner', ['-v']); try { require('child_process').execSync('\"/opt/my tools/quoted\" --flag', { stdio: 'ignore' }); } catch {} \
+        require('child_process').spawnSync('shell-command-not-installed --x', { shell: true, stdio: 'ignore' }); \
         process.env.NPM_TOKEN; Object.keys(process.env); process.env.X = '1'; delete process.env.X; setTimeout(() => {}, 300); \
         const dns = require('dns'); dns.resolveTxt('secret.exfil.invalid', () => {}); dns.promises.resolve4('p.exfil.invalid').catch(() => {}); new dns.Resolver().resolveMx('r.exfil.invalid', () => {});";
     let out = Command::new("node").arg("--require").arg(t.join("monitor.cjs")).arg("-e").arg(script).env("KERN_MONITOR", t.join("log")).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let log = std::fs::read_to_string(t.join("log")).unwrap();
-    for want in ["net:telemetry.invalid:8080", "net:loopback", "exec:node", "exec:curl-not-installed", "env:NPM_TOKEN", "env:*", "dns:secret.exfil.invalid", "dns:p.exfil.invalid", "dns:r.exfil.invalid"] { assert!(log.lines().any(|l| l == want), "missing {want} in:\n{log}"); }
+    for want in ["net:telemetry.invalid:8080", "net:loopback", "exec:node", "exec:curl-not-installed", "exec:runner", "exec:quoted", "exec:shell-command-not-installed", "env:NPM_TOKEN", "env:*", "dns:secret.exfil.invalid", "dns:p.exfil.invalid", "dns:r.exfil.invalid"] { assert!(log.lines().any(|l| l == want), "missing {want} in:\n{log}"); }
     let quiet = Command::new("node").arg("--require").arg(t.join("monitor.cjs")).arg("-e").arg("process.env.NPM_TOKEN").output().unwrap();
     assert!(quiet.status.success() && quiet.stdout.is_empty() && quiet.stderr.is_empty());
 }

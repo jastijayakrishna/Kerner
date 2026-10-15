@@ -32,7 +32,7 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
       - name: Static binary
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -115,7 +115,7 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
       - name: Installer
         shell: pwsh
         run: |
@@ -151,4 +151,4 @@ jobs:
       - name: Toolchain
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast

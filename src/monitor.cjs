@@ -18,7 +18,12 @@ if (out && !harness && !globalThis.__kernMonitor) {
   const count = (key) => { if (counted++ < 5000) { try { append(out, `count ${key}\n`); } catch {} } };
   const loopback = (h) => h == null || h === '' || /^(localhost|127(\.\d+){3}|::1|0\.0\.0\.0|::)$/i.test(String(h).replace(/^\[|\]$/g, ''));
   const target = (host, port) => (loopback(host) ? 'loopback' : `${String(host).toLowerCase()}:${port ?? ''}`);
-  const program = (file) => String(file || '').trim().split(/\s+/)[0].split(/[\\/]/).pop().replace(/\.exe$/i, '');
+  const program = (file, shell) => {
+    let s = String(file || '').trim();
+    if (shell) { const m = s.match(/^"([^"]*)"|^'([^']*)'|^(\S+)/); s = m ? m[1] ?? m[2] ?? m[3] : s; }
+    return s.split(/[\\/]/).pop().replace(/\.exe$/i, '');
+  };
+  const shellOf = (name, rest) => name === 'exec' || name === 'execSync' || rest.some((o) => o && typeof o === 'object' && !Array.isArray(o) && o.shell);
   const net = require('net');
   const connect = net.Socket.prototype.connect;
   net.Socket.prototype.connect = function (...args) {
@@ -51,7 +56,7 @@ if (out && !harness && !globalThis.__kernMonitor) {
   const cp = require('child_process');
   for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork']) {
     const f = cp[name];
-    cp[name] = function (file, ...rest) { note('exec', name === 'fork' ? 'node' : program(file)); return f.call(this, file, ...rest); };
+    cp[name] = function (file, ...rest) { note('exec', name === 'fork' ? 'node' : program(file, shellOf(name, rest))); return f.call(this, file, ...rest); };
   }
   const ws = path.resolve(process.env.KERN_WORKSPACE || '/workspace');
   const input = path.resolve(process.env.KERN_INPUT || '/input');
