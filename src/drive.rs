@@ -1095,7 +1095,10 @@ fn tools_volume(out: &Path, op: &crate::policy::Operator) -> R<String> {
     let cached = volume.kept();
     volume.keep();
     s["tools"] = json!({ "volume": volume.0, "cached": cached });
-    write_json(out.join("setup.json"), &s)?;
+    let next = out.join("setup.json.next");
+    if next.exists() { std::fs::remove_file(&next)?; }
+    write_json(&next, &s)?;
+    std::fs::rename(&next, out.join("setup.json"))?;
     Ok(volume.0.clone())
 }
 
