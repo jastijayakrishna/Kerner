@@ -576,10 +576,14 @@ mod inside {
         }
         Ok(originals)
     }
-    fn own(path: &Path) {
-        let _ = std::os::unix::fs::lchown(path, Some(1000), Some(1000));
-        if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) && let Ok(entries) = std::fs::read_dir(path) {
-            for e in entries.flatten() { own(&e.path()); }
+    fn open_up(path: &Path) {
+        let Ok(meta) = std::fs::symlink_metadata(path) else { return };
+        if meta.file_type().is_symlink() { return; }
+        let mode = meta.permissions().mode();
+        let wanted = mode | 0o666 | if meta.is_dir() || mode & 0o111 != 0 { 0o111 } else { 0 };
+        if wanted != mode { let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted)); }
+        if meta.is_dir() && let Ok(entries) = std::fs::read_dir(path) {
+            for e in entries.flatten() { open_up(&e.path()); }
         }
     }
     pub fn drive_setup() -> R<()> {
@@ -630,7 +634,7 @@ mod inside {
         }
         let _ = std::fs::remove_dir_all(scratch);
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
-        own(Path::new("/workspace"));
+        open_up(Path::new("/workspace"));
         println!("{}", json!({ "version": 1, "installs": records }));
         Ok(())
     }
