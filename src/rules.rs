@@ -5,7 +5,9 @@
 //! - `tricks`: test files that newly skip or focus tests, and code that reaches into the test runner;
 //! - `settings`: the test runner's settings, which decide which tests run and how they check results;
 //! - `protected`: CI, secret and other configuration files;
-//! - `dependencies`: dependency manifests and lockfiles;
+//! - `dependencies`: dependency manifests and lockfiles, each package.json with the packages it moves;
+//! - `lockfile`: npm lockfile entries that now install another package under a name, or download from somewhere other than the
+//!   package's own registry tarball;
 //! - `agent_notes`: the instructions coding agents read, which steer the next agent.
 use crate::capability::{is_code, is_data};
 use crate::git::{Entry, Files, git_with};
@@ -21,6 +23,9 @@ const AGENT_NOTES: [&str; 6] = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorr
 const AGENT_FOLDERS: [&str; 3] = [".cursor", ".claude", ".windsurf"];
 /// Files larger than this are named as not checked rather than read.
 const LARGEST: u64 = 1 << 20;
+/// npm lockfiles are read up to this size: a large project's runs to many megabytes.
+const LARGEST_LOCKFILE: u64 = 64 << 20;
+fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
 
 fn base_name(p: &str) -> &str { p.rsplit('/').next().unwrap_or(p) }
 fn dependency_file(p: &str) -> bool {
@@ -45,7 +50,8 @@ pub fn changed(repo: &Path, base: &str, head: &str) -> R<Vec<(String, &'static s
 fn files_for(repo: &Path, commit: &str, wanted: &BTreeSet<String>) -> R<Files> {
     let items = crate::drive::listing(repo, commit)?;
     let mut files: Files = items.iter().map(|i| (i.path.clone(), Entry { mode: i.mode.clone(), oid: i.oid.clone(), size: i.size, bytes: None })).collect();
-    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && i.size <= LARGEST && matches!(i.mode.as_str(), "100644" | "100755")).collect();
+    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && (i.size <= LARGEST || (npm_lockfile(&i.path) && i.size <= LARGEST_LOCKFILE))
+        && matches!(i.mode.as_str(), "100644" | "100755")).collect();
     crate::drive::blobs(repo, &load, |item, bytes| { if let Some(e) = files.get_mut(&item.path) { e.bytes = Some(bytes.to_vec()); } Ok(()) })?;
     Ok(files)
 }
@@ -65,7 +71,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
     let pick = |f: fn(&str) -> bool| -> Vec<Value> { changes.iter().filter(|(p, _)| f(p)).map(|(p, op)| json!({ "path": p, "operation": op })).collect() };
     let protected = pick(|p| crate::git::protected(p) && !dependency_file(p) && !agent_note(p));
-    let dependencies = pick(dependency_file);
+    let mut dependencies = pick(dependency_file);
     let agent_notes = pick(agent_note);
     // The files the checks read: every changed code or data file on both sides, and on the old side the code next to each new file, since a
     // new file is held to the powers its folder already had.
@@ -101,7 +107,24 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             else { not_checked.push(item); }
         }
     }
+    // Dependencies: which packages each package.json moves, and lockfile entries that now point somewhere else.
+    let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
+    let mut lockfile = Vec::new();
+    for d in dependencies.iter_mut() {
+        let p = d["path"].as_str().unwrap_or("").to_string();
+        let (a, b) = (json_of(&old, &p).unwrap_or_else(|| json!({})), json_of(&new, &p));
+        if base_name(&p) == "package.json" && let Some(b) = &b {
+            let moved = crate::deps::moves(&a, b);
+            if !moved.is_empty() { d["packages"] = json!(moved); }
+        }
+        if npm_lockfile(&p) && d["operation"] != "delete" {
+            match b {
+                Some(b) => lockfile.extend(crate::deps::lock_surprises(&a, &b).into_iter().map(|why| json!({ "path": p, "why": why }))),
+                None => not_checked.push(json!({ "path": p, "why": "Kern could not read this lockfile (not JSON, or larger than 64 MiB)" })),
+            }
+        }
+    }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
-        "agent_notes": agent_notes, "not_checked": not_checked }))
+        "lockfile": lockfile, "agent_notes": agent_notes, "not_checked": not_checked }))
 }

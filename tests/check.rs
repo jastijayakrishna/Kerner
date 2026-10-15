@@ -191,11 +191,30 @@ fn rules_name_ci_secret_dependency_and_agent_instruction_files() {
 }
 
 #[test]
+fn dependency_changes_say_which_packages_moved_and_a_lockfile_that_points_elsewhere_needs_a_look() {
+    let (t, base) = project();
+    let lock = |resolved: &str| format!(r#"{{"name":"shop","lockfileVersion":3,"packages":{{"":{{"name":"shop"}},"node_modules/left-pad":{{"version":"1.3.0","resolved":"{resolved}"}}}}}}"#);
+    let mid = commit(&t, &[("package.json", r#"{"name":"shop","dependencies":{"lodash":"^4.17.21"},"devDependencies":{"vitest":"3.2.0"}}"#),
+        ("package-lock.json", &lock("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"))], &[]);
+    let head = commit(&t, &[("package.json", r#"{"name":"shop","dependencies":{"left-pad":"^1.3.0"},"devDependencies":{"vitest":"4.0.18"}}"#),
+        ("package-lock.json", &lock("https://evil.example/left-pad-1.3.0.tgz"))], &[]);
+    let r = kern::rules::rules(&t.0, &mid, &head).unwrap();
+    let manifest = r["dependencies"].as_array().unwrap().iter().find(|d| d["path"] == "package.json").cloned().unwrap();
+    assert_eq!(manifest["packages"], json!(["left-pad ^1.3.0 (new)", "lodash (removed)", "vitest 3.2.0 → 4.0.18"]), "{r}");
+    let lockfile = r["lockfile"].as_array().unwrap();
+    assert!(lockfile.len() == 1 && lockfile[0]["path"] == "package-lock.json" && lockfile[0]["why"].as_str().unwrap().contains("left-pad")
+        && lockfile[0]["why"].as_str().unwrap().contains("https://evil.example/left-pad-1.3.0.tgz"), "{r}");
+    // A lockfile that only moves packages to their own registry tarballs is no surprise.
+    let r = kern::rules::rules(&t.0, &base, &mid).unwrap();
+    assert!(r["lockfile"].as_array().unwrap().is_empty(), "{r}");
+}
+
+#[test]
 fn a_change_with_no_code_has_no_powers_or_tricks() {
     let (t, base) = project();
     let head = commit(&t, &[("README.md", "# Shop\n")], &[]);
     let r = kern::rules::rules(&t.0, &base, &head).unwrap();
-    for k in ["powers", "tricks", "settings", "protected", "dependencies", "agent_notes", "not_checked"] { assert!(r[k].as_array().unwrap().is_empty(), "{k}: {r}"); }
+    for k in ["powers", "tricks", "settings", "protected", "dependencies", "lockfile", "agent_notes", "not_checked"] { assert!(r[k].as_array().unwrap().is_empty(), "{k}: {r}"); }
     assert_eq!(r["changed"].as_array().unwrap().len(), 1);
 }
 
@@ -241,6 +260,18 @@ fn decision_table() {
 }
 
 #[test]
+fn dependency_files_are_one_item_that_names_what_moved() {
+    let mut rules = clean_rules();
+    rules["dependencies"] = json!([{ "path": "package-lock.json", "operation": "modify" }, { "path": "package.json", "operation": "modify", "packages": ["vitest 3.2.4 → 4.0.18"] }]);
+    rules["lockfile"] = json!([{ "path": "package-lock.json", "why": "left-pad resolves to https://evil.example/x.tgz, not its own registry tarball" }]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!(kinds(&r, "look"), ["dependencies", "lockfile"], "{r}");
+    let what = r["look"][0]["what"].as_str().unwrap();
+    assert!(what.contains("vitest 3.2.4 → 4.0.18") && what.contains("package.json") && what.contains("package-lock.json"), "{what}");
+    assert!(r["look"][1]["what"].as_str().unwrap().contains("evil.example"), "{r}");
+}
+
+#[test]
 fn markdown_leads_with_the_answer_and_lists_every_item() {
     let mut t = clean_tests();
     t["broke"] = json!(["t > rounds to cents"]);
@@ -261,6 +292,7 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches no code, tests or package.json" });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");
+    assert!(!md.contains("sandbox"), "nothing ran, so the receipt does not speak of a sandbox: {md}");
     // Hostile names from a pull request cannot break out of their code spans.
     let mut t = clean_tests();
     t["broke"] = json!(["a `b` <script>"]);
@@ -322,6 +354,19 @@ fn a_receipt_is_posted_once_with_its_status_and_never_over_a_newer_head() {
     assert!(status.2.contains("\"context\":\"Kern\"") && status.2.contains("\"state\":\"success\""), "{}", status.2);
     let comment = log.iter().find(|(m, p, _)| m == "POST" && p.ends_with("/comments")).unwrap();
     assert!(comment.2.contains("kern-receipt"), "{}", comment.2);
+    assert!(!comment.2.contains("Signed by GitHub") && !comment.2.contains("kern-seal"), "a receipt without a seal never claims a signature: {}", comment.2);
+    // With GitHub's signature, the receipt says so and how anyone can check it.
+    std::fs::write(dir.0.join("seal.json"), json!({ "seal": { "v": 1 }, "token": "a.b.c" }).to_string()).unwrap();
+    let (url, seen) = stub_github(|m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[]".into()),
+        ("POST", _) => (201, r#"{"id":5}"#.into()),
+        _ => (404, "{}".into()),
+    });
+    receipt::post(&kern::github::Api::new(&url, "t").unwrap(), &dir.0, "acme/shop", 7).unwrap();
+    let body: Value = serde_json::from_str(&seen.lock().unwrap().iter().find(|(m, p, _)| m == "POST" && p.ends_with("/comments")).unwrap().2).unwrap();
+    let body = body["body"].as_str().unwrap();
+    assert!(body.contains("Signed by GitHub for Kern's own workflow") && body.contains("kern receipt verify acme/shop 7") && body.trim_end().ends_with("-->"), "{body}");
     // A run of an older commit never replaces what Kern said about the newer one.
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"3333333333333333333333333333333333333333"}}"#.into()),

@@ -62,10 +62,23 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
-    for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run"), ("protected", "protected", "is a CI, secret or configuration file"),
-        ("dependencies", "dependencies", "changes the project's dependencies"), ("agent_notes", "agent-notes", "changes what coding agents are told")] {
-        for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
+    for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run"), ("protected", "protected", "is a CI, secret or configuration file")] {
+        for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", path_of(x)))); }
     }
+    // One decision for one dependency change, however many manifests and lockfiles it touches: what moved, then where.
+    let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
+    if !deps.is_empty() {
+        let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
+        let mut what = String::from("The project's dependencies change");
+        if !moved.is_empty() {
+            what += &format!(": {}", moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "));
+            if moved.len() > SHOWN { what += &format!(" and {} more", moved.len() - SHOWN); }
+        }
+        look.push(item("dependencies", format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))));
+    }
+    for x in rules["lockfile"].as_array().into_iter().flatten() { look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""))))); }
+    for x in rules["agent_notes"].as_array().into_iter().flatten() { look.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
     let decision = if !blocked.is_empty() { "blocked" } else if !look.is_empty() { "look" } else { "clear" };
     let report = &behaviour["report"];
     let lines = json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
@@ -156,8 +169,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         md += "\n";
     }
     let short = |k: &str| r[k].as_str().filter(|h| h.len() >= 7).map(|h| h[..7].to_string()).unwrap_or_default();
-    md += &format!("<sub>Kern {} checked `{}` against `{}` in a sealed sandbox with the network off. Approve with `/kern approve`. The proof below is signed by GitHub for Kern's own workflow; check it with `kern receipt verify`.</sub>\n",
-        r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
+    let sandbox = if tests_ran || behaviour_ran { ", and ran the code only in a sealed sandbox with the network off" } else { "" };
+    md += &format!("<sub>Kern {} checked `{}` against `{}`{sandbox}.</sub>\n", r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
     if md.len() > 60_000 {
         let mut cut = 60_000;
         while !md.is_char_boundary(cut) { cut -= 1; }
@@ -265,7 +278,11 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
     let now = head_of(api, repository, number)?;
     if now != head { return Ok(json!({ "status": "STALE", "checked": head, "head": now })); }
     let mut body = std::fs::read_to_string(out.join("receipt.md"))?;
-    if let Ok(s) = read_json(out.join("seal.json")) { body += &format!("{}\n", seal_line(&s["seal"], s["token"].as_str().unwrap_or(""))); }
+    // Only a signed receipt says it is signed (a pull request from a fork gets no OIDC token), and how anyone can check it.
+    if let Ok(s) = read_json(out.join("seal.json")) {
+        body += &format!("<sub>Signed by GitHub for Kern's own workflow. Anyone can check this receipt: `kern receipt verify {repository} {number}`</sub>\n{}\n",
+            seal_line(&s["seal"], s["token"].as_str().unwrap_or("")));
+    }
     let (posted, url) = match kern_comment(api, repository, number)? {
         Some(c) => { api.patch(&format!("/repos/{repository}/issues/comments/{}", c["id"]), &json!({ "body": body }))?; ("UPDATED", c["html_url"].as_str().map(str::to_string)) }
         None => { let c = api.post(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": body }))?; ("POSTED", c["html_url"].as_str().map(str::to_string)) }

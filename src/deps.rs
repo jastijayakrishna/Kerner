@@ -47,6 +47,47 @@ fn tarball_of(url: &str, name: &str, version: &str) -> bool {
     plain && valid_name(name) && [name.to_string(), name.replacen('/', "%2f", 1), name.replacen('/', "%2F", 1)].iter()
         .any(|n| { let own = format!("{n}/-/{base}-{version}.tgz"); path == own || path.ends_with(&format!("/{own}")) })
 }
+/// What a change does to one package.json's dependencies, for people, sorted: `name old → new`, `name spec (new)` and `name (removed)`.
+pub fn moves(old: &Value, new: &Value) -> Vec<String> {
+    let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
+    let mut out = BTreeSet::new();
+    for s in SECTIONS {
+        let (x, y) = (old[s].as_object().cloned().unwrap_or_default(), new[s].as_object().cloned().unwrap_or_default());
+        for name in x.keys().chain(y.keys()) {
+            match (x.get(name), y.get(name)) {
+                (Some(a), Some(b)) if a != b => { out.insert(format!("{name} {} → {}", spec(a), spec(b))); }
+                (None, Some(b)) => { out.insert(format!("{name} {} (new)", spec(b))); }
+                (Some(_), None) => { out.insert(format!("{name} (removed)")); }
+                _ => {}
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+/// The locked packages a lockfile change points somewhere else: another package under a package's name, or a download that is not that
+/// package's own registry tarball of its version (someone's copy of it, a git or file source). One sentence each.
+pub fn lock_surprises(old: &Value, new: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut tarball = |name: &str, entry: &Value| {
+        if let Some(url) = entry["resolved"].as_str() {
+            let version = entry["version"].as_str().unwrap_or("");
+            if !tarball_of(url, name, version) { out.push(format!("{name} {version} downloads from {url}, which is not its own registry tarball")); }
+        }
+    };
+    let (a, b) = (old["packages"].as_object().cloned().unwrap_or_default(), new["packages"].as_object().cloned().unwrap_or_default());
+    let mut swaps = Vec::new();
+    for (key, entry) in b.iter().filter(|(k, v)| !k.is_empty() && a.get(k.as_str()) != Some(*v) && v["link"] != true) {
+        let real = entry["name"].as_str().unwrap_or_else(|| package_of(key));
+        let was = a.get(key.as_str()).map_or_else(|| package_of(key), |o| o["name"].as_str().unwrap_or_else(|| package_of(key)));
+        if was != real { swaps.push(format!("{key} installs another package: {real} in place of {was}")); continue; }
+        tarball(real, entry);
+    }
+    // Lockfiles from npm 6 list packages under `dependencies`, by name.
+    let (la, lb) = (old["dependencies"].as_object().cloned().unwrap_or_default(), new["dependencies"].as_object().cloned().unwrap_or_default());
+    if b.is_empty() { for (name, entry) in lb.iter().filter(|(k, v)| la.get(k.as_str()) != Some(*v)) { tarball(name, entry); } }
+    swaps.extend(out);
+    swaps
+}
 fn fields_changed(a: &Value, b: &Value, keep: &[&str]) -> Vec<String> {
     let keys: BTreeSet<&String> = a.as_object().into_iter().chain(b.as_object()).flat_map(|o| o.keys()).collect();
     keys.into_iter().filter(|k| !keep.contains(&k.as_str()) && a.get(k.as_str()) != b.get(k.as_str())).cloned().collect()
