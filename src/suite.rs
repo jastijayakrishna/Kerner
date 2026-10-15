@@ -174,7 +174,10 @@ fn run_side(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env
         Err(e) if e.0.contains("exceeded limits") => return Ok(Side::Nothing(format!("the run was stopped: {}", e.0))),
         Err(e) => return Err(e),
     };
-    let parts = match crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) { Ok(p) => p, Err(e) => return Ok(Side::Nothing(e.0)) };
+    let parts = match crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) {
+        Ok(p) => p,
+        Err(e) => return Ok(Side::Nothing(crate::sandbox::refusal(&run.errors).map_or(e.0, |r| format!("Kern could not run the tests in the sandbox: {r}")))),
+    };
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
     if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", TIMEOUT_SECONDS / 60)) }); }

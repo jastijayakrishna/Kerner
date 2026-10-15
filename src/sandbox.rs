@@ -243,7 +243,10 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     a.push(spec.image.into());
     Ok(a)
 }
-pub struct Execution { pub stdout: Vec<u8>, pub exit_code: i64, pub builder: (String, Value) }
+pub struct Execution { pub stdout: Vec<u8>, pub exit_code: i64, pub builder: (String, Value), pub errors: Vec<u8> }
+pub fn refusal(errors: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(errors).lines().rev().find_map(|l| serde_json::from_str::<Value>(l.trim()).ok().and_then(|v| v["reason"].as_str().map(str::to_string)))
+}
 pub fn execute(spec: &Spec) -> R<Execution> {
     let status = doctor();
     ensure!(status.ready, "Sandbox unavailable: {}", status.report["explanation"].as_str().unwrap_or("runsc not ready"));
@@ -254,7 +257,7 @@ pub fn execute(spec: &Spec) -> R<Execution> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let entry: Vec<&str> = spec.entry.iter().map(String::as_str).collect();
     docker_with(&refs, &entry, Duration::from_secs(120), 65536)?;
-    let outcome = (|| -> R<(Vec<u8>, i64)> {
+    let outcome = (|| -> R<(Vec<u8>, Vec<u8>, i64)> {
         let i = &docker_json(&["inspect", &name])?[0];
         let h = &i["HostConfig"];
         let memory = spec.limits.memory_mb * 1048576;
@@ -268,15 +271,15 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         let tree: Vec<(&str, &str, bool)> = spec.workspace.iter().map(|(v, ro)| (*v, "/workspace", *ro)).collect();
         ensure!(volumes.len() == spec.volumes.len() + tree.len() && spec.volumes.iter().chain(&tree).all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro)), "Unexpected volume mount");
         ensure!(mounts.iter().all(|m| m["Type"] == "bind" || m["Type"] == "volume" || m["Type"] == "tmpfs"), "Unexpected mount type");
-        let (_, out, _) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
+        let (_, out, err) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
         let f = &docker_json(&["inspect", &name])?[0]["State"];
         if f["OOMKilled"] == true { crate::deny!("Sandbox exceeded limits: it ran out of memory (it allows {} MiB)", spec.limits.memory_mb); }
         ensure!(f["Running"] == false && f["ExitCode"].is_i64(), "Sandbox failed or exceeded limits");
-        Ok((out, f["ExitCode"].as_i64().unwrap_or(-1)))
+        Ok((out, err[err.len().saturating_sub(65536)..].to_vec(), f["ExitCode"].as_i64().unwrap_or(-1)))
     })();
     docker(&["rm", "--force", &name], Duration::from_secs(120), 65536).map_err(|e| Denied(format!("Sandbox removal failed; no artifact accepted: {e}")))?;
-    let (stdout, exit_code) = outcome?;
-    Ok(Execution { stdout, exit_code, builder })
+    let (stdout, errors, exit_code) = outcome?;
+    Ok(Execution { stdout, exit_code, builder, errors })
 }
 pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     std::fs::create_dir(dir)?;
@@ -739,6 +742,7 @@ mod inside {
         let cwd = text(&c, "cwd")?;
         let dir = super::test_dir(cwd)?;
         command[0] = super::runner_in(cwd, &command[0], |p| Path::new(p).exists());
+        ensure!(Path::new(&command[0]).exists(), "The test runner is not installed in the project: {} does not exist (Kern needs node_modules; Yarn Plug'n'Play projects have none)", command[0]);
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         clear_added(Path::new("/workspace"));
         let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env)

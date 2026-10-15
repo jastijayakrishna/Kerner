@@ -86,10 +86,17 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
     if !deps.is_empty() {
         let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
-        let mut what = String::from("The project's dependencies change");
+        let fields: std::collections::BTreeSet<String> = deps.iter().flat_map(|d| strings(&d["fields"])).collect();
+        let only_fields = moved.is_empty() && !fields.is_empty() && deps.iter().all(|d| d["path"].as_str().is_some_and(|p| p.rsplit('/').next() == Some("package.json")));
+        let mut what = String::from(if only_fields { "package.json changes" } else { "The project's dependencies change" });
         if !moved.is_empty() {
             what += &format!(": {}", moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "));
             if moved.len() > SHOWN { what += &format!(" and {} more", moved.len() - SHOWN); }
+        }
+        if !fields.is_empty() {
+            let shown: Vec<String> = fields.iter().take(SHOWN).map(|f| code(f, 80)).collect();
+            what += &format!("{}{}", if only_fields { " " } else { "; package.json also changes " }, shown.join(", "));
+            if fields.len() > SHOWN { what += &format!(" and {} more", fields.len() - SHOWN); }
         }
         look.push(item("dependencies", format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))));
     }

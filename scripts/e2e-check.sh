@@ -196,6 +196,14 @@ check scripted "$scripted_base" scriptrepo
 decision scripted blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1)' scripted/receipt.json > /dev/null || { jq .tests scripted/receipt.json; fail "scripted: the project's own test script was not followed"; }
 
+say "A test script switched to a runner the project does not install is blocked, and the receipt says the runner is missing"
+git -C calc checkout -q -b missing "$base"
+sed -i 's/"test":"vitest run"/"test":"jest"/' calc/package.json
+git -C calc commit -qam "Run the tests with jest" && git -C calc rev-parse HEAD > missing.head && git -C calc checkout -q "$base"
+check missing "$base"
+decision missing blocked
+grep -q 'not installed' missing/receipt.md && [ "$(kinds missing settings look)" = 1 ] || { cat missing/receipt.md; fail "missing: the receipt does not say the runner is missing, or the script change is not a settings item"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

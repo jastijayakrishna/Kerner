@@ -33,6 +33,24 @@ pub fn risky(capability: &str) -> bool {
 }
 
 fn base_name(p: &str) -> &str { p.rsplit('/').next().unwrap_or(p) }
+const DEPENDENCY_SECTIONS: [&str; 4] = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+fn package_fields(a: &Value, b: &Value) -> Vec<String> {
+    let empty = serde_json::Map::new();
+    let (a, b) = (a.as_object().unwrap_or(&empty), b.as_object().unwrap_or(&empty));
+    let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let mut out = Vec::new();
+    for k in keys.into_iter().filter(|k| !DEPENDENCY_SECTIONS.contains(&k.as_str()) && a.get(*k) != b.get(*k)) {
+        match (a.get(k).and_then(Value::as_object), b.get(k).and_then(Value::as_object)) {
+            (x, y) if k == "scripts" && (x.is_some() || y.is_some()) => {
+                let (x, y) = (x.unwrap_or(&empty), y.unwrap_or(&empty));
+                let names: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+                out.extend(names.into_iter().filter(|n| x.get(*n) != y.get(*n)).map(|n| format!("scripts.{n}")));
+            }
+            _ => out.push(k.clone()),
+        }
+    }
+    out
+}
 fn joined(dir: &str, path: &str) -> Option<String> {
     if path.starts_with('/') || path.contains('\\') || path.contains('*') { return None; }
     let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
@@ -167,6 +185,8 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if base_name(&p) == "package.json" && let Some(b) = &b {
             let moved = crate::deps::moves(&a, b);
             if !moved.is_empty() { d["packages"] = json!(moved); }
+            let fields = package_fields(&a, b);
+            if !fields.is_empty() { d["fields"] = json!(fields); }
         }
         if npm_lockfile(&p) && d["operation"] != "delete" {
             match b {

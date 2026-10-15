@@ -363,3 +363,28 @@ fn a_test_counts_as_gone_only_when_it_passed_before_and_stays_gone() {
     let c = suite::compare(&before, &after, None);
     assert_eq!(c["gone"], json!(["a > passes", "b > flaky file"]), "{c}");
 }
+
+#[test]
+fn the_sandbox_says_why_it_could_not_run_the_tests() {
+    let errors = b"npm warn something\n{\"reason\":\"The test runner is not installed in the project: /workspace/node_modules/.bin/jest does not exist\",\"status\":\"DENIED\"}\n";
+    assert_eq!(kern::sandbox::refusal(errors).as_deref(), Some("The test runner is not installed in the project: /workspace/node_modules/.bin/jest does not exist"));
+    assert_eq!(kern::sandbox::refusal(b"no json here\n"), None);
+}
+
+#[test]
+fn a_package_json_change_says_what_changed_in_it() {
+    let look = |base: &str, head: &str| -> Vec<String> {
+        let t = Temp::new();
+        let (r, b) = repo(&t, &[("package.json", base), ("src/math.js", MATH)]);
+        let h = commit(&r, &[("package.json", head)]);
+        let rules = kern::rules::rules(&r, &b, &h).unwrap();
+        receipt::build(&drive_json(), &rules, &clean_tests(), &off())["look"].as_array().unwrap().iter().filter(|x| x["kind"] == "dependencies").map(|x| x["what"].as_str().unwrap().to_string()).collect()
+    };
+    let base = r#"{"name":"shop","main":"src/math.js","scripts":{"test":"vitest run","build":"tsc"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let hook = r#"{"name":"shop","main":"src/math.js","scripts":{"test":"vitest run","build":"tsc","postinstall":"node setup.js"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let items = look(base, hook);
+    assert!(items.len() == 1 && items[0].contains("scripts.postinstall") && !items[0].contains("dependencies change"), "a new install hook is named as what it is: {items:?}");
+    let bump = r#"{"name":"shop","main":"src/index.js","scripts":{"test":"vitest run","build":"tsc"},"devDependencies":{"vitest":"3.2.4"}}"#;
+    let items = look(base, bump);
+    assert!(items.len() == 1 && items[0].contains("vitest 3.2.0") && items[0].contains("main"), "{items:?}");
+}
