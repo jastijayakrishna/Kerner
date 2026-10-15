@@ -435,6 +435,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "libc",
+ "num-bigint",
  "oxc_allocator",
  "oxc_ast",
  "oxc_ast_visit",

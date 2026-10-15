@@ -9,6 +9,7 @@ pub mod attest;
 pub mod feedback;
 pub mod flow;
 pub mod github;
+pub mod oidc;
 pub mod promote;
 pub mod container;
 pub mod deps;

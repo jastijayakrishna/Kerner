@@ -11,6 +11,7 @@ ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem"] }
 getrandom = "0.4.3"
 hex = "0.4.3"
 libc = "0.2.190"
+num-bigint = "0.5.1"
 oxc_allocator = "0.152.0"
 oxc_ast = "0.152.0"
 oxc_ast_visit = "0.152.0"
