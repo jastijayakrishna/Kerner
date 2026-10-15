@@ -70,7 +70,11 @@ fn paired(before: &Report, after: &Report) -> std::collections::BTreeMap<String,
     let mut groups: std::collections::BTreeMap<String, (Vec<&String>, Vec<&String>)> = std::collections::BTreeMap::new();
     for k in before.tests.keys().filter(|k| !after.tests.contains_key(*k)) { groups.entry(masked(k)).or_default().0.push(k); }
     for k in after.tests.keys().filter(|k| !before.tests.contains_key(*k)) { groups.entry(masked(k)).or_default().1.push(k); }
-    groups.into_values().filter(|(b, a)| b.len() == a.len()).flat_map(|(b, a)| a.into_iter().zip(b).map(|(a, b)| (a.clone(), b.clone()))).collect()
+    groups.into_values().filter(|(b, a)| b.len() == a.len()).flat_map(|(mut b, mut a)| {
+        b.sort_by_key(|k| (count(before, k).failed > 0, (*k).clone()));
+        a.sort_by_key(|k| (count(after, k).failed > 0, (*k).clone()));
+        a.into_iter().zip(b).map(|(a, b)| (a.clone(), b.clone())).collect::<Vec<_>>()
+    }).collect()
 }
 
 fn renamed(r: &Report, map: &std::collections::BTreeMap<String, String>) -> Report {
@@ -105,21 +109,25 @@ pub fn focused(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
     Some(t)
 }
 fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
-pub fn worse(a: &Report, b: &Report) -> Report {
-    let mut out = a.clone();
-    for (k, c) in &b.tests {
-        let e = out.tests.entry(k.clone()).or_insert(*c);
-        e.passed = e.passed.min(c.passed);
-        e.failed = e.failed.max(c.failed);
-        e.skipped = e.skipped.max(c.skipped);
+pub fn worse(alone: &Report, whole: &Report) -> Report {
+    let mut out = whole.clone();
+    for (k, c) in out.tests.iter_mut() {
+        if let Some(a) = alone.tests.get(k) {
+            c.passed = c.passed.min(a.passed);
+            c.failed = c.failed.max(a.failed);
+            c.skipped = c.skipped.max(a.skipped);
+        }
     }
-    for p in &b.problems { if !out.problems.contains(p) { out.problems.push(p.clone()); } }
-    for (k, w) in &b.why { out.why.entry(k.clone()).or_insert_with(|| w.clone()); }
+    for p in &alone.problems { if !out.problems.contains(p) { out.problems.push(p.clone()); } }
+    for (k, w) in &alone.why { out.why.entry(k.clone()).or_insert_with(|| w.clone()); }
     out
 }
 fn repeats(old: &Report, new: &Report, again: &Report) -> bool {
-    new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).all(|(k, _)| count(again, k).failed > count(old, k).failed)
-        && new.problems.iter().filter(|p| !old.problems.contains(p)).all(|p| again.problems.contains(p))
+    let (new, again) = (renamed(new, &paired(old, new)), renamed(again, &paired(old, again)));
+    let failed = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).all(|(k, _)| count(&again, k).failed > count(old, k).failed);
+    let loaded = new.problems.iter().filter(|p| !old.problems.contains(p)).all(|p| again.problems.contains(p));
+    let missing = old.tests.iter().filter(|(k, b)| b.passed > 0 && count(&new, k).total() < b.total()).all(|(k, b)| count(&again, k).total() < b.total());
+    failed && loaded && missing
 }
 fn suspects(old: &Report, new: &Report) -> BTreeSet<String> {
     let broke = new.tests.iter().filter(|(k, c)| { let b = count(old, k); b.passed > 0 && c.failed > b.failed }).map(|(k, _)| file_of(k));
@@ -138,14 +146,14 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let mut new_failing = Vec::new();
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
-        if b.total() == 0 {
-            added.push(k.clone());
+        if b.passed == 0 && b.failed == 0 {
+            if b.total() == 0 || a.ran() > 0 { added.push(k.clone()); }
             if a.failed > 0 { new_failing.push(k.clone()); }
             continue;
         }
         if b.failed > 0 { already_failing.push(k.clone()); }
         kept += u64::from(b.passed.min(a.passed));
-        let shaky_old = alone_old.is_some_and(|o| { let o = count(o, k); o.failed > 0 || o.passed < b.passed });
+        let shaky_old = alone_old.is_some_and(|o| { let o = count(o, k); o.failed > b.failed || o.passed < b.passed });
         if b.passed > 0 && a.failed > b.failed {
             match again.map(|g| count(g, k)) {
                 Some(g) if g.failed <= b.failed && g.passed >= b.passed => { flaky.push(k.clone()); kept += u64::from(b.passed - b.passed.min(a.passed)); }
@@ -154,7 +162,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
             }
         } else if b.passed > 0 && a.skipped > b.skipped {
             newly_skipped.push(k.clone());
-        } else if b.passed > 0 && a.total() < b.total() && again.is_none_or(|g| count(g, k).total() < b.total()) && !shaky_old {
+        } else if b.passed > 0 && a.total() < b.total() && again.is_none_or(|g| count(g, k).total() < b.total()) && alone_old.is_none_or(|o| count(o, k).total() >= b.total()) {
             gone.push(k.clone());
         }
     }
@@ -308,6 +316,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
     let (mut before, mut after, mut again, mut alone_old) = (Report::default(), Report::default(), Report::default(), Report::default());
     let mut rerun_old = false;
+    let mut unconfirmed: Vec<String> = Vec::new();
     let (mut ran, mut rerun, mut all_new, mut wrote_code, mut run_broke) = (Vec::new(), false, Vec::new(), BTreeSet::new(), Vec::new());
     let mut late = false;
     for suite in &suites {
@@ -355,9 +364,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             Some(Side::Nothing(why) | Side::Slow(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
             Some(Side::Late) => continue,
         };
-        let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p))
-            || old.tests.iter().any(|(k, b)| b.passed > 0 && count(&new, k).total() < b.total());
-        let suspect = suspects(&old, &new);
+        let new_named = renamed(&new, &paired(&old, &new));
+        let fails_new = new_named.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p))
+            || old.tests.iter().any(|(k, b)| b.passed > 0 && count(&new_named, k).total() < b.total());
+        let suspect = suspects(&old, &new_named);
         let present = |r: &Report, f: &String| r.problems.contains(f) || r.tests.keys().any(|k| file_of(k) == f.as_str());
         let new_files: BTreeSet<String> = suspect.iter().filter(|f| present(&new, f)).cloned().collect();
         let old_files: BTreeSet<String> = suspect.iter().filter(|f| present(&old, f)).cloned().collect();
@@ -389,10 +399,14 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             match r {
                 Side::Ran(r, created) => { wrote_code.extend(created); second = Some(match second { Some(g) => worse(&g, &r), None => r }); }
                 Side::Late => late = true,
-                Side::Nothing(_) | Side::Slow(_) => {}
+                Side::Nothing(_) | Side::Slow(_) => second = None,
             }
         }
-        if late { not_run.push(json!({ "dir": suite.dir, "why": "Kern's time for this check ran out before it could run the failing tests again" })); continue; }
+        if late && !plan.is_empty() {
+            unconfirmed.push(suite.dir.clone());
+            second = None;
+            second_old = None;
+        }
         rerun |= second.is_some();
         rerun_old |= second_old.is_some();
         let runner = suite.new.0.runner;
@@ -410,6 +424,16 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.0.runner.name(), "why": why, "not_run": not_run, "seconds": seconds }));
     }
     let mut c = judged(&before, &after, rerun.then_some(&again), rerun_old.then_some(&alone_old));
+    if c["status"] == "RAN" && !unconfirmed.is_empty() {
+        let inside = |k: &str| unconfirmed.iter().any(|d| d.is_empty() || k.starts_with(&format!("{d}/")) || k.starts_with(&format!("{d}: ")));
+        let mut moved = Vec::new();
+        for list in ["broke", "new_problems"] {
+            let (out, keep): (Vec<Value>, Vec<Value>) = c[list].as_array().cloned().unwrap_or_default().into_iter().partition(|x| x.as_str().is_some_and(inside));
+            moved.extend(out);
+            c[list] = json!(keep);
+        }
+        c["unconfirmed"] = json!(moved);
+    }
     if c["status"] == "RAN" {
         c["runner"] = json!(ran.join(", "));
         c["wrote_code"] = json!(wrote_code);

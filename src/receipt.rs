@@ -78,6 +78,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
     }
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
+    for t in strings(&tests["unconfirmed"]) { look.push(item("test-unconfirmed", format!("This failed once, and Kern's time ran out before it could run it again: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
     for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run and how their results are read"), ("protected", "protected", "is a CI, secret or configuration file")] {
