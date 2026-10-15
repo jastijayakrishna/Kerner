@@ -34,7 +34,32 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Static binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/kern | tee /dev/stderr | grep -qE 'static(ally|-pie) linked'
+          target/x86_64-unknown-linux-musl/release/kern --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kern-linux-x64
+          path: target/x86_64-unknown-linux-musl/release/kern
+          if-no-files-found: error
+  # The twin (twin/, Node.js) in its own job: what it finds never holds up Kern's own checks, and the reverse.
+  twin:
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kern-linux-x64
+          path: bin
       - name: Twin runtime
+        timeout-minutes: 15
         run: sh twin/scripts/test-linux.sh
       # A failing test can leave a server open, and the run would then wait for the job's six-hour limit.
       - name: Twin real stacks
@@ -49,22 +74,11 @@ jobs:
       - name: Twin shop (Phase 4 acceptance)
         timeout-minutes: 15
         run: sh twin/examples/shop/run.sh
-      - name: Static binary
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-        run: |
-          cargo build --locked --release --target x86_64-unknown-linux-musl
-          file target/x86_64-unknown-linux-musl/release/kern | tee /dev/stderr | grep -qE 'static(ally|-pie) linked'
-          target/x86_64-unknown-linux-musl/release/kern --version
       - name: Twin plan end to end
         run: |
+          chmod +x bin/kern
           docker run --rm -v "$PWD:/kern" -w /kern docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 \
-            sh -c 'apt-get update -qq && apt-get install -y -qq git >/dev/null && node twin/scripts/e2e-plan.mjs --kern /kern/target/x86_64-unknown-linux-musl/release/kern'
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: kern-linux-x64
-          path: target/x86_64-unknown-linux-musl/release/kern
-          if-no-files-found: error
+            sh -c 'apt-get update -qq && apt-get install -y -qq git >/dev/null && node twin/scripts/e2e-plan.mjs --kern /kern/bin/kern'
   # The verifier for real: gVisor on a fresh machine, a throwaway setup made with Kern's own commands, and real changes
   # verified or refused, including the signed proof at the deploy gate.
   gvisor:
