@@ -42,7 +42,7 @@ pub(crate) fn origin(repo: &Path) -> R<String> {
     found.ok_or_else(|| Denied(format!("Origin {url} is not a GitHub repository")))
 }
 fn pretty(v: &Value) -> R<String> { Ok(format!("{}\n", serde_json::to_string_pretty(v)?)) }
-fn runner(package: Option<&[u8]>) -> Option<(&'static str, Vec<String>)> {
+pub(crate) fn runner(package: Option<&[u8]>) -> Option<(&'static str, Vec<String>)> {
     let pkg: Value = serde_json::from_slice(package?).ok()?;
     let has = |name: &str| ["devDependencies", "dependencies"].iter().any(|k| pkg[*k].get(name).is_some());
     let bin = |name: &str| format!("/workspace/node_modules/.bin/{name}");
