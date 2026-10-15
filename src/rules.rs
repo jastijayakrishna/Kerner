@@ -12,6 +12,7 @@ const AGENT_NOTES: [&str; 6] = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorr
 const AGENT_FOLDERS: [&str; 3] = [".cursor", ".claude", ".windsurf"];
 const LARGEST: u64 = 1 << 20;
 const LARGEST_LOCKFILE: u64 = 64 << 20;
+const SIBLINGS: usize = 200;
 fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
 const RISKY_BUILTINS: [&str; 15] = ["child_process", "cluster", "worker_threads", "vm", "net", "tls", "dgram", "dns", "http", "https", "http2", "inspector", "wasi", "module", "repl"];
 const RISKY_PACKAGES: [&str; 46] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
@@ -75,10 +76,13 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let inspected: Vec<&(String, &str)> = changes.iter().filter(|(p, op)| *op != "delete" && (is_code(p) || is_data(p))).collect();
     let mut wanted: BTreeSet<String> = changes.iter().map(|(p, _)| p.clone()).collect();
     let base_listing = crate::drive::listing(repo, base)?;
+    let mut dirs = BTreeSet::new();
     for (p, op) in &inspected {
         if *op != "add" { continue; }
         let dir = p.rsplit_once('/').map_or("", |(d, _)| d);
-        wanted.extend(base_listing.iter().filter(|i| is_code(&i.path) && i.path.rsplit_once('/').map_or("", |(d, _)| d) == dir).map(|i| i.path.clone()));
+        if !dirs.insert(dir.to_string()) { continue; }
+        wanted.extend(base_listing.iter().filter(|i| is_code(&i.path) && i.size <= LARGEST && i.path.rsplit_once('/').map_or("", |(d, _)| d) == dir)
+            .take(SIBLINGS).map(|i| i.path.clone()));
     }
     wanted.insert("package.json".into());
     let (old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);

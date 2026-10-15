@@ -109,7 +109,7 @@ pub fn test_memory_mb(meminfo: Option<&str>) -> u64 {
 
 pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = BTreeSet::new();
-    for p in changed.iter().filter(|p| !p.split('/').any(|c| c == "node_modules")) {
+    for p in changed.iter().filter(|p| !p.split('/').any(|c| c == "node_modules") && !p.chars().any(char::is_control)) {
         let mut dir = p.rsplit_once('/').map(|(d, _)| d);
         while let Some(d) = dir {
             if has_manifest(d) { out.insert(d.to_string()); break; }
@@ -178,7 +178,12 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
             },
         };
         let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
-        let second = if fails_new { run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))?.ok() } else { None };
+        let second = if fails_new {
+            match crate::drive::fresh(out, op, "new") {
+                Ok(tree) => run_side(out, op, &tree, &suite.new, &suite.dir, &format!("new-again{label}"))?.ok(),
+                Err(_) => None,
+            }
+        } else { None };
         rerun |= second.is_some();
         absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);
         absorb(&mut before, old, &suite.dir, suite.new.runner);

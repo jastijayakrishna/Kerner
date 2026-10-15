@@ -70,7 +70,34 @@ impl Footprint<'_> {
         id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()).is_some_and(|s| self.aliases.contains(&s))
     }
     fn global_object(&self, e: &Expression) -> bool {
-        matches!(strip(e), Expression::Identifier(id) if (self.global(id) && GLOBALS.contains(&id.name.as_str())) || self.alias(id))
+        match strip(e) {
+            Expression::Identifier(id) => (self.global(id) && GLOBALS.contains(&id.name.as_str())) || self.alias(id),
+            Expression::LogicalExpression(l) => self.global_object(&l.left) || self.global_object(&l.right),
+            Expression::ConditionalExpression(c) => self.global_object(&c.consequent) || self.global_object(&c.alternate),
+            Expression::SequenceExpression(s) => s.expressions.last().is_some_and(|x| self.global_object(x)),
+            Expression::AssignmentExpression(a) => self.global_object(&a.right),
+            Expression::StaticMemberExpression(m) => GLOBALS.contains(&m.property.name.as_str()) && self.global_object(&m.object),
+            Expression::TSAsExpression(x) => self.global_object(&x.expression),
+            Expression::TSSatisfiesExpression(x) => self.global_object(&x.expression),
+            Expression::TSNonNullExpression(x) => self.global_object(&x.expression),
+            Expression::AwaitExpression(x) => self.global_object(&x.argument),
+            Expression::CallExpression(c) => match strip(&c.callee) {
+                Expression::ArrowFunctionExpression(f) => match &f.body {
+                    ArrowFunctionBody::FunctionBody(b) => self.returns_global(&b.statements),
+                    other => other.as_expression().is_some_and(|x| self.global_object(x)),
+                },
+                Expression::FunctionExpression(f) => f.body.as_ref().is_some_and(|b| self.returns_global(&b.statements)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    fn returns_global(&self, statements: &[Statement]) -> bool {
+        statements.iter().any(|s| match s {
+            Statement::ReturnStatement(r) => r.argument.as_ref().is_some_and(|a| self.global_object(a)),
+            Statement::ExpressionStatement(e) => self.global_object(&e.expression),
+            _ => false,
+        })
     }
     fn global_member(&mut self, prop: &str) {
         if CODE_GLOBALS.contains(&prop) { self.add(format!("code:{prop}")); }
@@ -139,6 +166,10 @@ impl<'a> Visit<'a> for Footprint<'_> {
         self.method_next = false;
     }
     fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+        if let AssignmentTarget::AssignmentTargetIdentifier(id) = &it.left && self.global_object(&it.right)
+            && let Some(s) = id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()) {
+            self.aliases.insert(s);
+        }
         self.visit_assignment_target(&it.left);
         self.method_next = matches!(it.left, AssignmentTarget::StaticMemberExpression(_) | AssignmentTarget::ComputedMemberExpression(_)) && matches!(it.right, Expression::FunctionExpression(_));
         self.visit_expression(&it.right);

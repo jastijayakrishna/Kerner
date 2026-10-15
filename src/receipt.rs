@@ -124,7 +124,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     if tests_ran {
         let kept = tests["kept"].as_u64().unwrap_or(0) as usize;
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
-        let runner = tests["runner"].as_str().unwrap_or("tests");
+        let runner = plain(tests["runner"].as_str().unwrap_or("tests"));
         let mut line = if broke > 0 {
             format!("- ❌ Tests: {broke} that passed before now {}; {kept} still pass ({runner})", if broke == 1 { "fails" } else { "fail" })
         } else {

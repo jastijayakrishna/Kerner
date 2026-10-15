@@ -1006,31 +1006,56 @@ fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     Ok(files.iter().map(|i| i.path.clone()).collect())
 }
 
+fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str, label: &str) -> R<(crate::sandbox::Volume, Value)> {
+    let repo = Path::new(d["repo"].as_str().unwrap_or(""));
+    let commit = d[if side == "old" { "base" } else { "head" }].as_str().unwrap_or("");
+    let root = out.join("sandbox");
+    std::fs::create_dir_all(&root)?;
+    let code: Vec<String> = d["files"].as_array().into_iter().flatten().filter_map(|f| f["path"].as_str().map(str::to_string)).collect();
+    let tree = root.join(label);
+    if tree.exists() { std::fs::remove_dir_all(&tree)?; }
+    let paths = materialize(repo, commit, &tree)?;
+    let read = |p: &str| std::fs::read_to_string(tree.join(p)).ok();
+    let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
+    let control = root.join(format!("setup-{label}"));
+    if control.exists() { std::fs::remove_dir_all(&control)?; }
+    crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": 1500 }))))?;
+    let volume = crate::sandbox::Volume::create()?;
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &tree, control: &control, writable: &[], limits: &setup_limits(), entry: vec!["__drive_setup".into()],
+        network: "bridge", volumes: vec![], root: true, home_mb: 2048, scratch: false, workspace: Some((&volume.0, false)) })?;
+    ensure!(run.exit_code == 0, "Setting up the {side} code failed in the sandbox (exit code {})", run.exit_code);
+    let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
+    let _ = std::fs::remove_dir_all(&tree);
+    let _ = std::fs::remove_dir_all(&control);
+    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json") });
+    Ok((volume, entry))
+}
+
+pub fn fresh(out: &Path, op: &crate::policy::Operator, side: &str) -> R<String> {
+    let d = read_own(out.join("drive.json"))?;
+    let mut s = read_own(out.join("setup.json"))?;
+    let n = s["fresh"].as_array().map_or(0, Vec::len);
+    let (mut volume, _) = install_side(out, op, &d, side, &format!("{side}-fresh-{n}"))?;
+    let name = volume.0.clone();
+    let mut list = s["fresh"].as_array().cloned().unwrap_or_default();
+    list.push(json!(name));
+    s["fresh"] = json!(list);
+    write_json(out.join("setup.json"), &s)?;
+    volume.keep();
+    Ok(name)
+}
+
 pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
-    let repo = Path::new(d["repo"].as_str().unwrap_or(""));
     let root = out.join("sandbox");
     if root.exists() { std::fs::remove_dir_all(&root)?; }
     std::fs::create_dir(&root)?;
-    let code: Vec<String> = d["files"].as_array().into_iter().flatten().filter_map(|f| f["path"].as_str().map(str::to_string)).collect();
     let mut sides = serde_json::Map::new();
     let mut volumes = Vec::new();
-    for (side, commit) in [("old", d["base"].as_str().unwrap_or("")), ("new", d["head"].as_str().unwrap_or(""))] {
-        let tree = root.join(side);
-        let paths = materialize(repo, commit, &tree)?;
-        let read = |p: &str| std::fs::read_to_string(tree.join(p)).ok();
-        let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
-        let control = root.join(format!("setup-{side}"));
-        crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": 1500 }))))?;
-        let volume = crate::sandbox::Volume::create()?;
-        let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &tree, control: &control, writable: &[], limits: &setup_limits(), entry: vec!["__drive_setup".into()],
-            network: "bridge", volumes: vec![], root: true, home_mb: 2048, scratch: false, workspace: Some((&volume.0, false)) })?;
-        ensure!(run.exit_code == 0, "Setting up the {side} code failed in the sandbox (exit code {})", run.exit_code);
-        let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
-        sides.insert(side.into(), json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json") }));
+    for side in ["old", "new"] {
+        let (volume, entry) = install_side(out, op, &d, side, side)?;
+        sides.insert(side.into(), entry);
         volumes.push(volume);
-        let _ = std::fs::remove_dir_all(&tree);
-        let _ = std::fs::remove_dir_all(&control);
     }
     let mut public = op.clone();
     public.registry = Some("registry.npmjs.org".into());
@@ -1169,6 +1194,7 @@ pub fn package_specifier(s: &str) -> bool {
 pub fn clean(out: &Path) -> R<Value> {
     let s = read_own(out.join("setup.json"))?;
     let mut volumes: Vec<&str> = ["old", "new"].iter().filter_map(|side| s[side]["volume"].as_str()).collect();
+    volumes.extend(s["fresh"].as_array().into_iter().flatten().filter_map(Value::as_str));
     if s["tools"]["cached"] != true { volumes.extend(s["tools"]["volume"].as_str()); }
     let mut removed = Vec::new();
     for v in volumes.into_iter().filter(|v| v.starts_with("kern-deps-")) {

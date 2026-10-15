@@ -394,6 +394,26 @@ fn cloud_and_messaging_sdks_count_as_reaching_the_network() {
 }
 
 #[test]
+fn a_global_object_reached_any_way_is_the_global_itself() {
+    for (name, source) in [
+        ("or", "const g = globalThis || self;\nexport const go = (u) => g.fetch(u);\n"),
+        ("nullish", "const g = globalThis ?? window;\nexport const go = (u) => g.fetch(u);\n"),
+        ("ternary", "const g = typeof window === 'undefined' ? globalThis : window;\nexport const go = (u) => g.fetch(u);\n"),
+        ("comma", "const g = (0, globalThis);\nexport const go = (u) => g.fetch(u);\n"),
+        ("reassignment", "let g;\ng = globalThis;\nexport const go = (u) => g.fetch(u);\n"),
+        ("arrow", "const g = (() => globalThis)();\nexport const go = (u) => g.fetch(u);\n"),
+        ("function", "const g = (function () { return globalThis; })();\nexport const go = (u) => g.fetch(u);\n"),
+        ("window.self", "const g = window.self;\nexport const go = (u) => g.fetch(u);\n"),
+        ("destructured secret", "const { process: p } = globalThis || self;\nexport const key = () => p.env.SECRET;\n"),
+    ] {
+        let caps = kern::capability::footprint("src/a.js", source).unwrap();
+        assert!(caps.iter().any(|c| c == "global:fetch" || c == "global:process"), "{name}: {caps:?}");
+    }
+    let caps = kern::capability::footprint("src/a.js", "const w = window;\nexport const width = () => w.innerWidth;\n").unwrap();
+    assert!(!caps.iter().any(|c| kern::rules::risky(c)), "reading the window's size is no power: {caps:?}");
+}
+
+#[test]
 fn a_change_with_no_code_has_no_powers_or_tricks() {
     let (t, base) = project();
     let head = commit(&t, &[("README.md", "# Shop\n")], &[]);

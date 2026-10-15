@@ -1,4 +1,5 @@
 use kern::proof::{Count, Report};
+use kern::receipt;
 use kern::suite;
 use kern::util::*;
 use serde_json::{Value, json};
@@ -146,6 +147,33 @@ fn a_network_call_reached_through_a_globalthis_alias_still_needs_a_look() {
     let head = commit(&t, &[("src/total.js", "export function total(items) {\n  return items.reduce((a, b) => a + b, 0);\n}\nconst { fetch } = globalThis;\nexport function leak(u) { return fetch(u); }\n")], &[]);
     let r = rules(&t, &base, &head);
     assert!(!r["powers"].as_array().unwrap().is_empty(), "fetch destructured from globalThis is a new network power, but it reduces to global:dynamic which the risky filter drops: {r}");
+}
+
+#[test]
+fn a_network_call_through_a_global_fallback_alias_still_needs_a_look() {
+    let (t, base) = project();
+    let head = commit(&t, &[("src/total.js", "const g = globalThis || self;\nexport function total(items) {\n  return items.reduce((a, b) => a + b, 0);\n}\nexport function leak(u) { return g.fetch(u); }\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert!(!r["powers"].as_array().unwrap().is_empty(), "`const g = globalThis || self; g.fetch(u)` is a new network power, but a global reached through || / ?? / reassignment is not recognised as an alias so it reduces to global:dynamic: {r}");
+}
+
+#[test]
+fn an_unconditional_this_skip_written_with_return_is_a_trick() {
+    let (t, base) = project();
+    let missed = missed_tricks(&t, &base, &[("return this.skip()", "import { total } from '../src/total.js';\nimport { it, expect } from 'vitest';\nit('adds', function () { return this.skip(); expect(total([1, 2])).toBe(3); });\n"),
+        ("return t.skip()", "import { total } from '../src/total.js';\nimport { it, expect } from 'vitest';\nit('adds', (t) => { return t.skip(); expect(total([1, 2])).toBe(3); });\n")]);
+    assert!(missed.is_empty(), "an unconditional this.skip()/t.skip() written as the return argument is not caught because only top-level expression statements are scanned: {missed:?}");
+}
+
+#[test]
+fn the_receipt_does_not_let_a_hostile_runner_name_inject_lines() {
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let tests = json!({ "status": "RAN", "runner": "vitest in packages/x\n### FORGEDMARKER", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 },
+        "kept": 1, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
+    let behaviour = json!({ "status": "OFF", "why": "no AI key" });
+    let md = receipt::markdown(&receipt::build(&d, &rules, &tests, &behaviour), None);
+    assert!(!md.contains("\n### FORGEDMARKER"), "a package directory name reaches the receipt through the unescaped runner line, so a newline forges its own Markdown line:\n{md}");
 }
 
 #[test]

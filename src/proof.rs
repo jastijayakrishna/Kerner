@@ -138,7 +138,11 @@ impl Scan<'_> {
     }
     fn unconditional_skip<'b>(&self, arg: &'b Argument<'b>) -> Option<String> {
         let top = |statements: &'b oxc_allocator::Vec<'b, Statement<'b>>| -> Vec<&'b Expression<'b>> {
-            statements.iter().filter_map(|s| match s { Statement::ExpressionStatement(e) => Some(&e.expression), _ => None }).collect()
+            statements.iter().filter_map(|s| match s {
+                Statement::ExpressionStatement(e) => Some(&e.expression),
+                Statement::ReturnStatement(r) => r.argument.as_ref(),
+                _ => None,
+            }).collect()
         };
         let (params, calls) = match arg {
             Argument::ArrowFunctionExpression(f) => (&f.params, match &f.body {
