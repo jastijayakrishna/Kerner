@@ -147,8 +147,23 @@ decision mono blocked
 [ "$(kinds mono test-broke blocked)" = 1 ] || { jq .tests mono/receipt.json; fail "mono: expected one broken test in the package"; }
 grep -q 'packages/calc/test/total.test.js' mono/receipt.md && grep -q 'vitest in packages/calc' mono/receipt.md || { cat mono/receipt.md; fail "mono: the package's test and runner are not named"; }
 
+say "Tests cannot change committed code while they run, and code a test writes into the project needs a look"
+git -C calc checkout -q -b plants "$base"
+cat > calc/test/plant.test.js <<'EOF'
+import { test, expect } from 'vitest';
+import { writeFileSync } from 'node:fs';
+
+test('plants a module', () => { writeFileSync(new URL('../src/shadow.mjs', import.meta.url), 'export const x = 1;\n'); expect(1).toBe(1); });
+test('cannot rewrite committed code', () => { expect(() => writeFileSync(new URL('../src/total.js', import.meta.url), 'export const total = () => 0;\n')).toThrow(); });
+EOF
+git -C calc add -A && git -C calc commit -qm "Tests that write into the project" && git -C calc rev-parse HEAD > plants.head && git -C calc checkout -q "$base"
+check plants "$base"
+decision plants look
+[ "$(kinds plants wrote-code look)" = 1 ] && grep -q 'src/shadow.mjs' plants/receipt.md || { cat plants/receipt.md; fail "plants: the module a test wrote was not reported"; }
+jq -e '.tests.kept == 3 and (.tests.new_failing | length == 0)' plants/receipt.json > /dev/null || { jq .tests plants/receipt.json; fail "plants: committed code could be rewritten during a test run, or the tests did not run"; }
+
 say "The sandbox volumes are removed"
-for c in harmless breaks only power writes mono; do "$K" --control verifier.json drive clean "$W/$c" > /dev/null; done
+for c in harmless breaks only power writes mono plants; do "$K" --control verifier.json drive clean "$W/$c" > /dev/null; done
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
 

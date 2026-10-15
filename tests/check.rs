@@ -43,13 +43,14 @@ fn a_test_run_writes_only_its_own_tree_without_network() {
 #[test]
 fn a_test_run_report_is_read_by_length() {
     let mut out = Vec::new();
-    for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("ending", b"exit 1")] {
+    for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("created", b"src/total.mjs"), ("ending", b"exit 1")] {
         out.extend(format!("{}{name} {}\n", sandbox::DRIVE_MARK, body.len()).as_bytes());
         out.extend(body);
     }
     let parts = sandbox::parts(&out, &sandbox::TEST_PARTS).unwrap();
     assert_eq!(parts["ending"], b"exit 1");
     assert_eq!(parts["behavior"], b"exec:id\n");
+    assert_eq!(parts["created"], b"src/total.mjs");
     let mut forged = out.clone();
     forged.extend(b"more");
     denied(sandbox::parts(&forged, &sandbox::TEST_PARTS), "unexpected data");
@@ -81,6 +82,36 @@ fn compare_names_broken_gone_skipped_and_added_tests() {
     assert_eq!(names(&c, "new_problems"), ["t2.test.js"], "a test file that no longer loads is a failure outside any test");
     assert_eq!(c["kept"], 1, "one test passed before and still passes");
     assert!(names(&c, "flaky").is_empty());
+}
+
+#[test]
+fn a_runner_that_found_no_tests_on_either_side_did_not_test_anything() {
+    let empty = report(&[], &[]);
+    let c = suite::compare(&empty, &empty, None);
+    assert_eq!(c["status"], "NOT_RUN", "zero tests passing before and after is not a pass: {c}");
+    assert!(c["why"].as_str().unwrap().contains("found no tests"), "{c}");
+    let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
+    assert!(receipt::markdown(&r, None).contains("in the rules it checked"), "{r}");
+}
+
+#[test]
+fn a_test_the_change_adds_that_fails_needs_a_look() {
+    let before = report(&[("t > adds", 1, 0, 0)], &[]);
+    let after = report(&[("t > adds", 1, 0, 0), ("t > new and red", 0, 1, 0), ("t > new and green", 1, 0, 0)], &[]);
+    let c = suite::compare(&before, &after, None);
+    assert_eq!(names(&c, "new_failing"), ["t > new and red"], "{c}");
+    let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["new-test-fails".to_string()]), "{r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("t > new and red"), "{r}");
+}
+
+#[test]
+fn a_test_that_wrote_code_into_the_project_needs_a_look() {
+    let mut t = clean_tests();
+    t["wrote_code"] = json!(["src/total.mjs"]);
+    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["wrote-code".to_string()]), "{r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("src/total.mjs"), "{r}");
 }
 
 #[test]

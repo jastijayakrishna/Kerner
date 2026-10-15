@@ -1031,20 +1031,6 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     Ok((volume, entry))
 }
 
-pub fn fresh(out: &Path, op: &crate::policy::Operator, side: &str) -> R<String> {
-    let d = read_own(out.join("drive.json"))?;
-    let mut s = read_own(out.join("setup.json"))?;
-    let n = s["fresh"].as_array().map_or(0, Vec::len);
-    let (mut volume, _) = install_side(out, op, &d, side, &format!("{side}-fresh-{n}"))?;
-    let name = volume.0.clone();
-    let mut list = s["fresh"].as_array().cloned().unwrap_or_default();
-    list.push(json!(name));
-    s["fresh"] = json!(list);
-    write_json(out.join("setup.json"), &s)?;
-    volume.keep();
-    Ok(name)
-}
-
 pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
     let root = out.join("sandbox");
@@ -1194,7 +1180,6 @@ pub fn package_specifier(s: &str) -> bool {
 pub fn clean(out: &Path) -> R<Value> {
     let s = read_own(out.join("setup.json"))?;
     let mut volumes: Vec<&str> = ["old", "new"].iter().filter_map(|side| s[side]["volume"].as_str()).collect();
-    volumes.extend(s["fresh"].as_array().into_iter().flatten().filter_map(Value::as_str));
     if s["tools"]["cached"] != true { volumes.extend(s["tools"]["volume"].as_str()); }
     let mut removed = Vec::new();
     for v in volumes.into_iter().filter(|v| v.starts_with("kern-deps-")) {

@@ -35,9 +35,14 @@ fn count(r: &Report, k: &str) -> proof::Count { r.tests.get(k).copied().unwrap_o
 pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value {
     let keys: BTreeSet<&String> = before.tests.keys().chain(after.tests.keys()).collect();
     let (mut kept, mut broke, mut flaky, mut gone, mut newly_skipped, mut added, mut already_failing) = (0u64, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut new_failing = Vec::new();
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
-        if b.total() == 0 { added.push(k.clone()); continue; }
+        if b.total() == 0 {
+            added.push(k.clone());
+            if a.failed > 0 { new_failing.push(k.clone()); }
+            continue;
+        }
         if b.failed > 0 { already_failing.push(k.clone()); }
         kept += u64::from(b.passed.min(a.passed));
         if b.passed > 0 && a.failed > b.failed {
@@ -52,9 +57,13 @@ pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value
         }
     }
     already_failing.extend(before.problems.iter().cloned());
+    let total = |r: &Report| r.tests.values().map(|c| c.total()).sum::<u32>();
+    if total(before) == 0 && total(after) == 0 && after.problems.iter().all(|p| before.problems.contains(p)) {
+        return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
+    }
     let new_problems: Vec<&String> = after.problems.iter().filter(|p| !before.problems.contains(*p) && again.is_none_or(|a| a.problems.contains(*p))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(again.unwrap_or(after)), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
-        "newly_skipped": newly_skipped, "added": added, "already_failing": already_failing, "new_problems": new_problems })
+        "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems })
 }
 
 pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> String {
@@ -78,7 +87,7 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     s
 }
 
-fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str) -> R<Result<Report, String>> {
+fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str) -> R<Result<(Report, Vec<String>), String>> {
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
     crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": proof::command(tests), "timeout_seconds": TIMEOUT_SECONDS, "cwd": dir }))))?;
@@ -97,7 +106,8 @@ fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, l
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
     if parts["ending"] == b"timeout" { return Ok(Err(format!("the tests did not finish in {} minutes", TIMEOUT_SECONDS / 60))); }
-    Ok(proof::read_report(tests.runner, &parts["output"]).map_err(|why| no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])))
+    let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+    Ok(proof::read_report(tests.runner, &parts["output"]).map(|r| (r, created)).map_err(|why| no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])))
 }
 
 const MAX_PACKAGES: usize = 5;
@@ -165,7 +175,7 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
     let (mut before, mut after, mut again) = (Report::default(), Report::default(), Report::default());
-    let (mut ran, mut rerun, mut all_new) = (Vec::new(), false, Vec::new());
+    let (mut ran, mut rerun, mut all_new, mut wrote_code) = (Vec::new(), false, Vec::new(), BTreeSet::new());
     for suite in &suites {
         let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
@@ -173,7 +183,7 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
         let first = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"))?;
         timed(format!("new{label}"), at);
         let new = match first {
-            Ok(r) => r,
+            Ok((r, created)) => { wrote_code.extend(created); r }
             Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") })); continue; }
         };
         let old = match &suite.old {
@@ -183,7 +193,7 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
                 let run = run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))?;
                 timed(format!("old{label}"), at);
                 match run {
-                    Ok(r) => r,
+                    Ok((r, _)) => r,
                     Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
                 }
             }
@@ -191,12 +201,9 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
         let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new {
             let at = now_ms();
-            let r = match crate::drive::fresh(out, op, "new") {
-                Ok(tree) => run_side(out, op, &tree, &suite.new, &suite.dir, &format!("new-again{label}"))?.ok(),
-                Err(_) => None,
-            };
+            let r = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))?.ok();
             timed(format!("new-again{label}"), at);
-            r
+            r.map(|(r, created)| { wrote_code.extend(created); r })
         } else { None };
         rerun |= second.is_some();
         absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);
@@ -209,7 +216,10 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
         return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.runner.name(), "why": why, "not_run": not_run, "seconds": seconds }));
     }
     let mut c = compare(&before, &after, rerun.then_some(&again));
-    c["runner"] = json!(ran.join(", "));
+    if c["status"] == "RAN" {
+        c["runner"] = json!(ran.join(", "));
+        c["wrote_code"] = json!(wrote_code);
+    }
     c["not_run"] = json!(not_run);
     c["seconds"] = json!(seconds);
     if !all_new.is_empty() { c["note"] = json!(format!("the old code had no test runner Kern can read in {}, so those tests are all new", all_new.join(", "))); }

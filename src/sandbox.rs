@@ -19,7 +19,7 @@ pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Pat
 }
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
-pub const TEST_PARTS: [&str; 4] = ["output", "errors", "behavior", "ending"];
+pub const TEST_PARTS: [&str; 5] = ["output", "errors", "behavior", "created", "ending"];
 pub fn test_dir(cwd: &str) -> R<String> {
     if cwd.is_empty() { return Ok("/workspace".into()); }
     ensure!(cwd.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', '\0'])), "A test run starts in a folder inside the tree");
@@ -576,14 +576,44 @@ mod inside {
         }
         Ok(originals)
     }
-    fn open_up(path: &Path) {
+    fn lock_down(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
         if meta.file_type().is_symlink() { return; }
-        let mode = meta.permissions().mode();
-        let wanted = mode | 0o666 | if meta.is_dir() || mode & 0o111 != 0 { 0o111 } else { 0 };
+        let mode = meta.permissions().mode() & 0o7777;
+        let wanted = if meta.is_dir() { 0o1777 } else { (mode & 0o555) | 0o444 };
         if wanted != mode { let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted)); }
         if meta.is_dir() && let Ok(entries) = std::fs::read_dir(path) {
-            for e in entries.flatten() { open_up(&e.path()); }
+            for e in entries.flatten() { lock_down(&e.path()); }
+        }
+    }
+    const TEST_USER: u32 = 1000;
+    fn clear_added(path: &Path) {
+        let Ok(entries) = std::fs::read_dir(path) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+            if meta.uid() == TEST_USER {
+                let _ = if meta.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            } else if meta.is_dir() {
+                clear_added(&p);
+            }
+        }
+    }
+    const CODE: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "node"];
+    fn added_code(root: &Path, path: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(path) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+            if meta.is_dir() {
+                if name != "node_modules" && name != ".git" { added_code(root, &p, out); }
+                continue;
+            }
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+            if meta.uid() == TEST_USER && CODE.contains(&ext.as_str()) && !name.contains(".timestamp-") && out.len() < 200 {
+                out.push(p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/"));
+            }
         }
     }
     pub fn drive_setup() -> R<()> {
@@ -634,7 +664,7 @@ mod inside {
         }
         let _ = std::fs::remove_dir_all(scratch);
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
-        open_up(Path::new("/workspace"));
+        lock_down(Path::new("/workspace"));
         println!("{}", json!({ "version": 1, "installs": records }));
         Ok(())
     }
@@ -700,6 +730,7 @@ mod inside {
         let dir = super::test_dir(cwd)?;
         command[0] = super::runner_in(cwd, &command[0], |p| Path::new(p).exists());
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
+        clear_added(Path::new("/workspace"));
         let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC")
             .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior")
             .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
@@ -713,6 +744,9 @@ mod inside {
         part("output", &some_of("/tmp/.kern-test-out", 32 << 20, false))?;
         part("errors", &some_of("/tmp/.kern-test-err", 64 << 10, true))?;
         part("behavior", &some_of("/tmp/.kern-behavior", 4 << 20, false))?;
+        let mut created = Vec::new();
+        added_code(Path::new("/workspace"), Path::new("/workspace"), &mut created);
+        part("created", created.join("\n").as_bytes())?;
         part("ending", ending.as_bytes())?;
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())

@@ -58,6 +58,13 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
     look.extend(new_tests);
+    for t in strings(&tests["new_failing"]) { look.push(item("new-test-fails", format!("A test this change adds fails on the new code: {}", code(&t, 200)))); }
+    let wrote = strings(&tests["wrote_code"]);
+    if !wrote.is_empty() {
+        let shown: Vec<String> = wrote.iter().take(SHOWN).map(|p| code(p, 160)).collect();
+        let more = if wrote.len() > SHOWN { format!(" and {} more", wrote.len() - SHOWN) } else { String::new() };
+        look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
+    }
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
