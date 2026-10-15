@@ -184,39 +184,48 @@ fn run_all(scripts: &Value, args: &[Word], depth: u8) -> Found {
     if packages { Found::Packages } else { Found::Nothing }
 }
 
+const PACKAGED: [&str; 11] = ["--workspaces", "-ws", "--workspace", "--recursive", "-r", "--filter", "-F", "-C", "--dir", "--prefix", "--cwd"];
+
 fn manager(scripts: &Value, program: &str, args: &[Word], depth: u8, env: BTreeMap<String, String>) -> Found {
-    let flag = |names: &[&str]| args.iter().any(|w| names.iter().any(|n| w.text == *n || w.text.starts_with(&format!("{n}="))));
-    if flag(&["--workspaces", "-ws", "--workspace", "--recursive", "-r", "--filter", "-F"]) || (program == "yarn" && args.first().is_some_and(|w| w.text.starts_with("workspace"))) {
-        return Found::Packages;
+    let packaged = |w: &Word| { let n = w.text.split_once('=').map_or(w.text.as_str(), |(n, _)| n); PACKAGED.contains(&n) || (program == "npm" && n == "-w") };
+    if program == "yarn" && args.first().is_some_and(|w| w.text.starts_with("workspace")) { return Found::Packages; }
+    let mut k = 0;
+    while k < args.len() && args[k].text.starts_with('-') {
+        if packaged(&args[k]) { return Found::Packages; }
+        if !args[k].text.contains('=') && ["--loglevel", "--reporter"].contains(&args[k].text.as_str()) { k += 1; }
+        k += 1;
     }
-    if program == "npm" && args.iter().any(|w| w.text == "-w") { return Found::Packages; }
-    let mut k = skip_options(args, 0, &["--prefix", "-C", "--dir", "--cwd"]);
     let Some(first) = args.get(k) else { return Found::Nothing };
-    let named = match (program, first.text.as_str()) {
-        ("npm", "test" | "t" | "tst") => Some("test".to_string()),
-        ("npm", "run" | "run-script") | ("pnpm" | "yarn" | "bun", "run") => { k += 1; args.get(k).map(|w| w.text.clone()) }
-        ("npm", _) | ("bun", "test") => None,
-        (_, name) => Some(name.to_string()),
+    let (name, rest) = match (program, first.text.as_str()) {
+        ("npm", "test" | "t" | "tst") => ("test".to_string(), &args[k + 1..]),
+        ("npm", "run" | "run-script") | ("pnpm" | "yarn" | "bun", "run") => {
+            let mut j = k + 1;
+            while j < args.len() && args[j].text.starts_with('-') {
+                if packaged(&args[j]) { return Found::Packages; }
+                j += 1;
+            }
+            let Some(n) = args.get(j) else { return Found::Nothing };
+            (n.text.clone(), &args[j + 1..])
+        }
+        ("npm", _) | ("bun", "test") => return Found::Nothing,
+        (_, n) => (n.to_string(), &args[k + 1..]),
     };
-    let Some(name) = named else { return Found::Nothing };
-    let after = &args[(k + 1).min(args.len())..];
-    let extra: Vec<Word> = match program {
-        "npm" => after.iter().skip_while(|w| w.text != "--").skip(1).cloned().collect(),
-        _ => after.iter().skip(usize::from(after.first().is_some_and(|w| w.text == "--"))).cloned().collect(),
+    let extra: Vec<Word> = if program == "npm" {
+        let cut = rest.iter().position(|w| w.text == "--").unwrap_or(rest.len());
+        if rest[..cut].iter().any(packaged) { return Found::Packages; }
+        rest.get(cut + 1..).map(<[Word]>::to_vec).unwrap_or_default()
+    } else {
+        rest.iter().skip(usize::from(rest.first().is_some_and(|w| w.text == "--"))).cloned().collect()
     };
-    if scripts[&name].is_string() {
-        return match script(scripts, &name, &extra, depth + 1) {
-            Found::Run(mut i) => { for (key, value) in env { i.env.entry(key).or_insert(value); } Found::Run(i) }
-            other => other,
-        };
-    }
+    let merged = |found: Found| match found {
+        Found::Run(mut i) => { for (key, value) in env.clone() { i.env.entry(key).or_insert(value); } Found::Run(i) }
+        other => other,
+    };
+    if scripts[&name].is_string() { return merged(script(scripts, &name, &extra, depth + 1)); }
     if program == "npm" { return Found::Nothing; }
     let mut words = vec![Word { text: name, expands: false }];
     words.extend(extra);
-    match command(scripts, &words, depth + 1) {
-        Found::Run(mut i) => { for (key, value) in env { i.env.entry(key).or_insert(value); } Found::Run(i) }
-        other => other,
-    }
+    merged(command(scripts, &words, depth + 1))
 }
 
 const NODE_VALUED: [&str; 10] = ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--env-file", "--title", "--input-type"];

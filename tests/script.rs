@@ -91,3 +91,13 @@ fn what_would_change_how_kern_reads_the_results_is_left_out() {
     assert_eq!(run(json!({ "test": "PATH=/evil:$PATH KERN_REPORT=/tmp/fake LD_PRELOAD=x.so HOME=/x CI=1 jest" })), (Runner::Jest, words(&[&bin("jest")]), env(&[("CI", "1")])),
         "variables that would steer Kern or the sandbox are left out");
 }
+
+#[test]
+fn only_the_package_managers_own_options_decide_where_the_tests_run() {
+    assert_eq!(run(json!({ "test": "npm run jest -- -w 4", "jest": "jest" })), (Runner::Jest, words(&[&bin("jest"), "-w", "4"]), vec![]), "-w after -- is jest's, not npm's");
+    assert_eq!(run(json!({ "test": "npm --loglevel silent run unit", "unit": "jest" })), (Runner::Jest, words(&[&bin("jest")]), vec![]));
+    assert_eq!(run(json!({ "test": "yarn unit -r ./setup.js", "unit": "mocha" })), (Runner::Mocha, words(&[&bin("mocha"), "-r", "./setup.js"]), vec![]));
+    for script in ["pnpm -C packages/web test", "yarn --cwd web test", "npm --prefix web test", "pnpm run -r test", "npm run test --workspaces", "pnpm --filter=web test"] {
+        assert_eq!(found(&json!({ "scripts": { "test": script } })), Found::Packages, "{script}");
+    }
+}
