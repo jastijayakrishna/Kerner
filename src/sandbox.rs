@@ -270,7 +270,8 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         ensure!(mounts.iter().all(|m| m["Type"] == "bind" || m["Type"] == "volume" || m["Type"] == "tmpfs"), "Unexpected mount type");
         let (_, out, _) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
         let f = &docker_json(&["inspect", &name])?[0]["State"];
-        ensure!(f["Running"] == false && f["OOMKilled"] == false && f["ExitCode"].is_i64(), "Sandbox failed or exceeded limits");
+        if f["OOMKilled"] == true { crate::deny!("Sandbox exceeded limits: it ran out of memory (it allows {} MiB)", spec.limits.memory_mb); }
+        ensure!(f["Running"] == false && f["ExitCode"].is_i64(), "Sandbox failed or exceeded limits");
         Ok((out, f["ExitCode"].as_i64().unwrap_or(-1)))
     })();
     docker(&["rm", "--force", &name], Duration::from_secs(120), 65536).map_err(|e| Denied(format!("Sandbox removal failed; no artifact accepted: {e}")))?;

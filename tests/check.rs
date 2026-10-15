@@ -123,6 +123,16 @@ fn in_a_monorepo_the_tests_are_those_of_the_packages_a_change_touches() {
 }
 
 #[test]
+fn a_test_run_gets_three_quarters_of_the_machine_s_memory_within_bounds() {
+    assert_eq!(kern::suite::test_memory_mb(Some("MemTotal:       16374420 kB\nMemFree:  1 kB\n")), 11992);
+    assert_eq!(kern::suite::test_memory_mb(Some("MemTotal:        7340032 kB\n")), 5376);
+    assert_eq!(kern::suite::test_memory_mb(Some("MemTotal:       67108864 kB\n")), 12288);
+    assert_eq!(kern::suite::test_memory_mb(Some("MemTotal:        2097152 kB\n")), 4096);
+    assert_eq!(kern::suite::test_memory_mb(None), 4096);
+    assert_eq!(kern::suite::test_memory_mb(Some("nonsense")), 4096);
+}
+
+#[test]
 fn a_package_s_test_run_finds_its_runner_up_the_tree() {
     let at = |p: &str| ["/workspace/packages/kit/node_modules/.bin/vitest", "/workspace/node_modules/.bin/jest"].contains(&p);
     assert_eq!(kern::sandbox::runner_in("packages/kit", "/workspace/node_modules/.bin/vitest", at), "/workspace/packages/kit/node_modules/.bin/vitest");

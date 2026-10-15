@@ -84,7 +84,7 @@ fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, l
     crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": proof::command(tests), "timeout_seconds": TIMEOUT_SECONDS, "cwd": dir }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
-    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: TIMEOUT_SECONDS + 120, memory_mb: 4096, pids: 1024 };
+    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: TIMEOUT_SECONDS + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
     let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
         network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, true)) });
     let _ = std::fs::remove_dir_all(&control);
@@ -101,6 +101,11 @@ fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, l
 }
 
 const MAX_PACKAGES: usize = 5;
+
+pub fn test_memory_mb(meminfo: Option<&str>) -> u64 {
+    let total_kb = meminfo.and_then(|m| m.lines().find_map(|l| l.strip_prefix("MemTotal:"))).and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok());
+    total_kb.map_or(4096, |kb| (kb / 1024 * 3 / 4).clamp(4096, 12288))
+}
 
 pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = BTreeSet::new();
