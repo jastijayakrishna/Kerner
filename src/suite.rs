@@ -382,12 +382,12 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Side::Nothing(_) | Side::Slow(_) => {}
             }
         }
-        if !late && plan.first().is_some_and(|p| p.0 == "new-alone") && second.as_ref().is_some_and(|g| !repeats(&old, &new, g)) {
+        if !late && plan.first().is_some_and(|p| p.0 == "new-alone") && second.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
             let at = now_ms();
             let r = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until)?;
             timed(format!("new-again{label}"), at);
             match r {
-                Side::Ran(r, created) => { wrote_code.extend(created); second = second.map(|g| worse(&g, &r)); }
+                Side::Ran(r, created) => { wrote_code.extend(created); second = Some(match second { Some(g) => worse(&g, &r), None => r }); }
                 Side::Late => late = true,
                 Side::Nothing(_) | Side::Slow(_) => {}
             }
