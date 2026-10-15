@@ -14,46 +14,85 @@ A change from an AI agent can look fine and still:
 - **change more than it was asked to**: remove a safety check, charge a customer twice;
 - **break real customers** on inputs that no test ever tried.
 
-## How Kern helps: three checks at three moments
+## Add Kern to a repository: one file
 
-| When | Part of Kern | What it does | What you get |
-|---|---|---|---|
-| Before merge | **Merge gate** | Checks the change in a sealed sandbox: what it touches, any new powers, the real tests, and the old code's answers against the new code's | A signed proof. GitHub blocks the merge without it |
-| On the pull request | **`kern drive`** | Makes every changed line run, on the old and on the new code | One comment: what behaves differently, and which lines never ran |
-| In production | **Twin** | The new version answers copies of real requests in secret, beside the old version | The new version serves customers only after it has earned it, and is switched back at the first surprise |
+Save this file in your repository as `.github/workflows/kern.yml` ([examples/kern.yml](examples/kern.yml)):
 
-Each part works on its own.
-
-### 1. Merge gate: nothing merges without proof
-
-```text
-agent's change ──▶ Kern checks it in a sealed sandbox ──▶ signed proof ──▶ GitHub check "kern-verified" ──▶ merge
-                          │
-                          └── blocked? The agent gets plain instructions and tries again.
+```yaml
+name: Kern
+on:
+  pull_request:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  id-token: write
+jobs:
+  kern:
+    if: github.event_name == 'pull_request' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/kern'))
+    uses: jastijayakrishna/Kerner/.github/workflows/kern.yml@main
+    secrets: inherit
 ```
 
-Kern checks five things:
+That is the whole install. There is no sign-up and no Kern server: Kern runs on your repository's own GitHub Actions runners, and
+public repositories pay nothing for them.
 
-1. **Scope.** The change stays inside the folders the task allows, and under a size limit. CI settings and secret files are always off limits. Dependency files may change only for the packages you approve.
-2. **No new powers.** Code may not newly start programs, reach the network, read environment variables or run `eval`, unless you allow it.
-3. **Honest tests.** The project's own tests run on the exact commit, with no network. Every test that passed before must still pass. A bug fix needs a new test that fails before the fix and passes after it. Deleted, skipped and faked tests are caught.
-4. **No surprises.** Kern calls the changed functions with the same inputs on the old and the new code, and compares every answer. A new crash, a removed check, a deleted file, a page that now lets the wrong user in, slower code or more paid AI calls is blocked or shown to you.
-5. **Proof.** A separate verifier signs the result. GitHub checks the signature before merge. An audit report for any period re-checks every merged change, and maps to the SOC 2 CC8.1 and ISO 27001 change-control requirements.
+Two optional settings:
 
-Read more: [docs/merge-gate.md](docs/merge-gate.md)
+- **Require the `Kern` status** (Settings, then Branches), so nothing merges without its receipt.
+- **Add an AI key** as an Actions secret, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). Kern then also
+  runs every changed line on the old and the new code. Without a key, your code never leaves GitHub's runners.
 
-### 2. `kern drive`: see what a change does
+See it on real pull requests: [kern-check-demo](https://github.com/jastijayakrishna/kern-check-demo/pulls?q=is%3Apr).
 
-Tests only cover what someone tested. With `kern drive`, an AI agent writes a small program that makes every changed line run. By default the agent is Claude Code in a locked-down mode: it can only read and write its own task folder, and it cannot run commands or open web pages. Kern runs the program on the old and the new code, twice each, in a sealed sandbox with the network off. Then it writes one comment on the pull request:
+## What every pull request gets: one receipt
 
-- what behaves differently, with the changes the pull request does not mention listed first;
-- which changed lines never ran, so a reviewer knows exactly what is left to read.
+Kern posts one comment, the receipt, and edits it on every push. It sets one status, `Kern`. The receipt starts with the answer:
 
-It takes about 6 minutes, and about $0.27 of AI use, per pull request.
+| Answer | What it means | What you do |
+|---|---|---|
+| ✅ **Nothing unexpected** | Every test that passed before still passes, and nothing below was found | Merge as usual |
+| ⚠️ **Needs a look** | Something changed that the pull request may not mean | Look. If each item is meant, someone who can merge comments `/kern approve` |
+| ❌ **Blocked** | Something that worked before is broken, or the tests were made to pass instead of the code | Fix it. An approval cannot clear a block |
 
-Read more: [docs/drive.md](docs/drive.md)
+For example, from a real run on the demo repository:
 
-### 3. Twin: let real traffic prove the change
+```text
+⚠️ Kern: 1 thing needs a look
+- src/version.js can now do something it could not before: node:child_process
+✅ Tests: 12 tests passed before and still pass (vitest)
+✅ No skipped, focused or removed tests
+```
+
+What Kern checks on every pull request:
+
+1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests in a sealed sandbox
+   (gVisor) with the network off. A test that passed before and fails now blocks. It must fail twice, so a flaky test is called flaky,
+   not broken. A test that stops running, or is newly skipped, needs a look. Tests that already failed before the change are set aside.
+2. **Test tricks.** A test file that newly skips or focuses tests (`.only`, `.skip`), or code that reaches into the test runner, blocks.
+3. **New powers.** Changed code that newly starts programs, reaches the network, reads environment variables or runs `eval` needs a look.
+4. **Files that steer everything else.** CI, secret and configuration files, test runner settings, and the files that instruct coding
+   agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
+5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). A lockfile entry that now downloads a package from
+   somewhere other than its own registry tarball needs a look.
+6. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
+   it on the old and the new code and lists what behaves differently, with what the pull request does not mention first.
+
+GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
+so an edited comment cannot change what `kern receipt verify owner/repo 12` reports, and `/kern approve` only counts signed receipts.
+
+Read more: [docs/drive.md](docs/drive.md) for the behaviour runs, [docs/merge-gate.md](docs/merge-gate.md) for the rules behind them.
+
+## For agent pipelines: the merge gate
+
+When an agent works on a task with written limits (which folders, which packages, which powers), the merge gate checks the change
+against them in a sealed sandbox, and a separate verifier signs the result. GitHub refuses the merge without a valid proof, and an
+audit re-checks every change merged in a period. Read more: [docs/merge-gate.md](docs/merge-gate.md)
+
+## In production: the twin
 
 ```text
 customer request ──▶ old version ──▶ answer to the customer (as today)
@@ -118,7 +157,10 @@ Next steps:
 
 - Kern does not prove that code is correct or well meant. A person still decides whether a change is good.
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
-- Kern runs JavaScript and TypeScript today. Changed code in other languages is listed as "not checked", never passed quietly.
+- Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. For other projects the receipt
+  covers the rules only and says so; changed code in other languages is listed as "not checked", never passed quietly.
+- Kern runs the tests read-only. A test that writes into the project fails before and after the change, so it is set aside, not blamed.
+- A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).
 
