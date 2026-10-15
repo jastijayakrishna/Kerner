@@ -1194,7 +1194,7 @@ fn every_block_becomes_feedback_an_agent_can_act_on() {
     let mut locked = tested("bugfix");
     locked["tests"]["edits"] = json!("locked");
     check(reason(git::changes(&honest_base(), &honest_change(&[FIX, ("test/add.test.mjs", Some("// gutted\n"))]), &contract(&locked).unwrap())), "test-locked", true, Some("test/add.test.mjs"), &["`test/add.test.mjs`"]);
-    check(reason(screened("feature", &[FIX, ("test/new.test.mjs", Some("import { test } from 'node:test';\ntest.only('x', () => {});\n"))])), "test-marker", true, Some("test/new.test.mjs"), &["`test.only`"]);
+    check(reason(screened("feature", &[FIX, ("test/new.test.mjs", Some("import { test } from 'node:test';\ntest.only('x', () => {});\n"))])), "test-marker", true, Some("test/new.test.mjs"), &["`test.only('x')`"]);
     check(reason(screened("feature", &[FIX, ("test/.mocharc.json", Some("{}\n"))])), "test-config", true, Some("test/.mocharc.json"), &["`test/.mocharc.json`"]);
     check(reason(screened("feature", &[("src/add.mjs", Some("globalThis.expect = 1;\nexport const add = (a, b) => a + b;\n"))])), "test-tamper", true, Some("src/add.mjs"), &["`globalThis.expect`", "`src/add.mjs`"]);
     check(reason(screened("bugfix", &[FIX])), "test-missing", true, None, &["`test/`"]);

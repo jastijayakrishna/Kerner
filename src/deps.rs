@@ -2,7 +2,7 @@ use crate::git::Files;
 use crate::util::*;
 use crate::{deny, ensure};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MANIFEST: &str = "package.json";
 pub const LOCKFILE: &str = "package-lock.json";
@@ -56,25 +56,37 @@ pub fn moves(old: &Value, new: &Value) -> Vec<String> {
     }
     out.into_iter().collect()
 }
+const REGISTRIES: [&str; 2] = ["registry.npmjs.org", "registry.yarnpkg.com"];
+fn host(url: &str) -> Option<String> {
+    url.split_once("://").and_then(|(_, rest)| rest.split(['/', '?', '#']).next()).filter(|h| !h.is_empty()).map(str::to_ascii_lowercase)
+}
+fn entries(lock: &Value) -> Vec<(String, Value)> {
+    let packages = lock["packages"].as_object().cloned().unwrap_or_default();
+    if packages.is_empty() { lock["dependencies"].as_object().cloned().unwrap_or_default().into_iter().collect() } else { packages.into_iter().filter(|(k, _)| !k.is_empty()).collect() }
+}
 pub fn lock_surprises(old: &Value, new: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut tarball = |name: &str, entry: &Value| {
-        if let Some(url) = entry["resolved"].as_str() {
-            let version = entry["version"].as_str().unwrap_or("");
-            if !tarball_of(url, name, version) { out.push(format!("{name} {version} downloads from {url}, which is not its own registry tarball")); }
-        }
-    };
-    let (a, b) = (old["packages"].as_object().cloned().unwrap_or_default(), new["packages"].as_object().cloned().unwrap_or_default());
-    let mut swaps = Vec::new();
-    for (key, entry) in b.iter().filter(|(k, v)| !k.is_empty() && a.get(k.as_str()) != Some(*v) && v["link"] != true) {
-        let real = entry["name"].as_str().unwrap_or_else(|| package_of(key));
-        let was = a.get(key.as_str()).map_or_else(|| package_of(key), |o| o["name"].as_str().unwrap_or_else(|| package_of(key)));
+    let before: BTreeMap<String, Value> = entries(old).into_iter().collect();
+    let known: BTreeSet<String> = before.values().filter_map(|e| e["resolved"].as_str().and_then(host)).chain(REGISTRIES.iter().map(|r| r.to_string())).collect();
+    let (mut swaps, mut foreign, mut hosts) = (Vec::new(), Vec::new(), BTreeMap::<String, (usize, String)>::new());
+    for (key, entry) in entries(new).into_iter().filter(|(k, v)| before.get(k) != Some(v) && v["link"] != true) {
+        let real = entry["name"].as_str().map_or_else(|| package_of(&key).to_string(), str::to_string);
+        let was = before.get(&key).map_or_else(|| package_of(&key).to_string(), |o| o["name"].as_str().map_or_else(|| package_of(&key).to_string(), str::to_string));
         if was != real { swaps.push(format!("{key} installs another package: {real} in place of {was}")); continue; }
-        tarball(real, entry);
+        let version = entry["version"].as_str().unwrap_or("");
+        if let Some(o) = before.get(&key) && o["version"] == entry["version"] && o["integrity"].is_string() && o["integrity"] != entry["integrity"] {
+            swaps.push(format!("{real} {version} has a new checksum without a new version: the file it downloads changed"));
+        }
+        let Some(url) = entry["resolved"].as_str() else { continue };
+        if !tarball_of(url, &real, version) { foreign.push(format!("{real} {version} downloads from {url}, which is not its own registry tarball")); continue; }
+        if let Some(h) = host(url).filter(|h| !known.contains(h)) {
+            let e = hosts.entry(h).or_insert((0, format!("{real} {version}")));
+            e.0 += 1;
+        }
     }
-    let (la, lb) = (old["dependencies"].as_object().cloned().unwrap_or_default(), new["dependencies"].as_object().cloned().unwrap_or_default());
-    if b.is_empty() { for (name, entry) in lb.iter().filter(|(k, v)| la.get(k.as_str()) != Some(*v)) { tarball(name, entry); } }
-    swaps.extend(out);
+    swaps.extend(foreign);
+    for (h, (n, first)) in hosts {
+        swaps.push(format!("{} now download from {h}, a host this lockfile did not use before (first: {first})", if n == 1 { "1 package".to_string() } else { format!("{n} packages") }));
+    }
     swaps
 }
 fn fields_changed(a: &Value, b: &Value, keep: &[&str]) -> Vec<String> {

@@ -156,7 +156,7 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     if let Some(p) = shaped(r, "Test runner configuration cannot change under the test proof: ", ". It decides which tests run and how they check results; leave it unchanged") {
         return (true, vec![fix("test-config", Some(p), format!("Leave {} unchanged: the test runner's settings decide which tests run and how they check results.", code(p)))]);
     }
-    if let Some((p, m)) = shaped(r, "A test file skips or focuses tests: ", ". Every test must run, so remove it").and_then(|x| x.rsplit_once(" uses ")) {
+    if let Some((p, m)) = shaped(r, "A test file skips, focuses or inverts tests: ", ". Every test must run and check what it says, so remove it").and_then(|x| x.rsplit_once(" uses ")) {
         return (true, vec![fix("test-marker", Some(p), format!("Remove {} from {}. Every test has to run, and the result has to come from the tests themselves.", code(m), code(p)))]);
     }
     if let Some((p, m)) = shaped(r, "Code outside the tests reaches into the test runner: ", ". Code may not change how tests run or what they check, or check whether tests are running; remove it").and_then(|x| x.rsplit_once(" uses ")) {

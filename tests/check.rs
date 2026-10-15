@@ -282,6 +282,81 @@ fn a_test_file_the_change_adds_needs_a_look_where_an_existing_one_would_block() 
 }
 
 #[test]
+fn a_lockfile_names_a_new_download_host_once_and_a_checksum_that_changed_without_a_new_version() {
+    let lock = |host: &str, integrity: &str| json!({ "packages": { "": { "name": "shop" },
+        "node_modules/a": { "version": "1.0.0", "resolved": format!("https://{host}/a/-/a-1.0.0.tgz"), "integrity": integrity },
+        "node_modules/b": { "version": "2.0.0", "resolved": format!("https://{host}/b/-/b-2.0.0.tgz"), "integrity": "sha512-b" } } });
+    let moved = kern::deps::lock_surprises(&lock("registry.npmjs.org", "sha512-a"), &lock("npm.mirror.example", "sha512-a"));
+    assert_eq!(moved.len(), 1, "one line per new host, not one per package: {moved:?}");
+    assert!(moved[0].contains("2 packages") && moved[0].contains("npm.mirror.example"), "{moved:?}");
+    let swapped = kern::deps::lock_surprises(&lock("registry.npmjs.org", "sha512-a"), &lock("registry.npmjs.org", "sha512-evil"));
+    assert!(swapped.len() == 1 && swapped[0].contains("a 1.0.0") && swapped[0].contains("checksum"), "{swapped:?}");
+    assert!(kern::deps::lock_surprises(&lock("npm.corp.example", "sha512-a"), &lock("npm.corp.example", "sha512-a")).is_empty(), "a host the lockfile already used is no surprise");
+    let fresh = kern::deps::lock_surprises(&json!({}), &lock("registry.npmjs.org", "sha512-a"));
+    assert!(fresh.is_empty(), "a new lockfile on the public registry is no surprise: {fresh:?}");
+}
+
+#[test]
+fn one_rule_says_which_files_are_tests_and_production_code_cannot_hide_in_a_fixtures_folder() {
+    for test in ["test/a.js", "tests/unit/a.ts", "src/__tests__/a.ts", "e2e/checkout.js", "cypress/e2e/login.cy.ts", "playwright/home.ts", "src/a.test.ts", "src/a.spec.js",
+        "src/flow.e2e.ts", "src/api/__mocks__/client.js", "test/fixtures/data.js", "Tests/A.js"] {
+        assert!(kern::suite::is_test_path(test), "{test}");
+    }
+    for code in ["src/fixtures/payments.js", "lib/mocks/http.js", "src/helpers/money.js", "src/ab-test.js", "src/contest.js", "src/testing.js", "testimonials/a.js"] {
+        assert!(!kern::suite::is_test_path(code), "{code}");
+    }
+}
+
+#[test]
+fn a_repository_name_has_two_real_parts() {
+    for ok in ["acme/shop", "a.b/c-d_e", "acme/.github"] { assert!(kern::github::repository(ok), "{ok}"); }
+    for bad in ["../x", "acme/..", "./shop", "acme/.", "acme", "acme/shop/x", "acme/sh op", ""] { assert!(!kern::github::repository(bad), "{bad}"); }
+}
+
+fn tricks_for(t: &Temp, base: &str, text: &str) -> Vec<String> {
+    let head = commit(t, &[("test/total.test.js", text)], &[]);
+    let r = kern::rules::rules(&t.0, base, &head).unwrap();
+    git(&t.0, &["reset", "-q", "--hard", base]);
+    r["tricks"].as_array().unwrap().iter().map(|x| x["why"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn every_way_to_skip_focus_or_invert_an_existing_test_is_a_trick() {
+    let (t, base) = project();
+    let head = "import { total } from '../src/total.js';\n";
+    for (name, body) in [
+        ("mocha this.skip()", "import { it } from 'mocha';\nit('adds', function () { this.skip(); });\n"),
+        ("the test context", "import { test } from 'vitest';\ntest('adds', (t) => { t.skip(); expect(total([1, 2])).toBe(3); });\n"),
+        ("a destructured context", "import { test } from 'vitest';\ntest('adds', ({ skip }) => { skip(); });\n"),
+        ("a destructured selector", "import { test } from 'vitest';\nconst { only } = test;\nonly('adds', () => {});\n"),
+        ("a namespace import", "import * as v from 'vitest';\nv.test.skip('adds', () => {});\n"),
+        ("a required alias", "const { test: check } = require('vitest');\ncheck.skip('adds', () => {});\n"),
+        ("a chain with each", "import { it } from 'vitest';\nit.failing.each([1])('adds %i', () => {});\n"),
+        ("a computed selector", "import { test } from 'vitest';\ntest['only']('adds', () => {});\n"),
+        ("the skip option", "import { test } from 'node:test';\ntest('adds', { skip: true }, () => {});\n"),
+    ] {
+        assert!(!tricks_for(&t, &base, &format!("{head}{body}")).is_empty(), "{name} was not caught");
+    }
+    for (name, body) in [
+        ("a skip on another platform", "import { test } from 'node:test';\ntest('adds', (t) => { if (process.platform === 'win32') t.skip(); });\n"),
+        ("a method named skip", "import { test } from 'vitest';\nclass Store { skip() {} }\ntest('adds', () => { new Store().skip(); });\n"),
+    ] {
+        assert!(tricks_for(&t, &base, &format!("{head}{body}")).is_empty(), "{name} is no trick");
+    }
+}
+
+#[test]
+fn moving_a_skip_to_another_test_is_a_trick_and_a_query_s_skip_is_not() {
+    let (t, _) = project();
+    let before = "import { test } from 'vitest';\ntest.skip('needs the network', () => {});\ntest('adds', () => {});\n";
+    let mid = commit(&t, &[("test/total.test.js", before)], &[]);
+    let moved = tricks_for(&t, &mid, "import { test } from 'vitest';\ntest('needs the network', () => {});\ntest.skip('adds', () => {});\n");
+    assert!(moved.iter().any(|w| w.contains("test.skip('adds')")), "the skip moved from one test to another: {moved:?}");
+    let query = tricks_for(&t, &mid, "import { test } from 'vitest';\ntest.skip('needs the network', () => {});\ntest('adds', async () => { await Model.find().skip(10).limit(5); });\n");
+    assert!(query.is_empty(), "a database query's skip is not a test trick: {query:?}");
+}
+
+#[test]
 fn a_change_with_no_code_has_no_powers_or_tricks() {
     let (t, base) = project();
     let head = commit(&t, &[("README.md", "# Shop\n")], &[]);
@@ -308,7 +383,7 @@ fn decision_table() {
     let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
     assert_eq!((r["decision"].as_str().unwrap(), kinds(&r, "blocked")), ("blocked", vec!["test-broke".to_string()]), "{r}");
     let mut rules = clean_rules();
-    rules["tricks"] = json!([{ "path": "test/a.test.js", "why": "A test file skips or focuses tests: test/a.test.js uses only. Every test must run, so remove it" }]);
+    rules["tricks"] = json!([{ "path": "test/a.test.js", "why": "A test file skips, focuses or inverts tests: test/a.test.js uses test.only. Every test must run and check what it says, so remove it" }]);
     assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests(), &off())["decision"], "blocked");
     let mut rules = clean_rules();
     rules["powers"] = json!([{ "path": "src/total.js", "added": ["node:child_process"] }]);

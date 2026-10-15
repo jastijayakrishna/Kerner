@@ -19,7 +19,8 @@ pub use crate::policy::HONEST_FIX as CHECK;
 const HELPERS: [&str; 7] = ["fixtures", "__fixtures__", "helpers", "__helpers__", "support", "__mocks__", "mocks"];
 const RUNNER_CONFIG: [&str; 16] = [".mocharc", "mocha.opts", "jest.config", "jest.setup", "jest-setup", "setuptests", "vitest.config", "vitest.workspace", "vitest.setup", "vite.config", "ava.config", ".taprc", "karma.conf", "playwright.config", ".babelrc", "babel.config"];
 const SUITES: [&str; 6] = ["describe", "it", "test", "context", "suite", "specify"];
-const SELECTORS: [&str; 3] = ["only", "skip", "todo"];
+const SELECTORS: [&str; 7] = ["only", "skip", "todo", "skipIf", "runIf", "fails", "failing"];
+const FRAMEWORKS: [&str; 9] = ["vitest", "@jest/globals", "node:test", "mocha", "bun:test", "@playwright/test", "uvu", "ava", "tap"];
 const RENAMED: [&str; 8] = ["xit", "xdescribe", "xtest", "xcontext", "xspecify", "fit", "fdescribe", "ftest"];
 const TEST_GLOBALS: [&str; 29] = ["describe", "it", "test", "expect", "context", "suite", "specify", "before", "after", "beforeEach", "afterEach", "beforeAll", "afterAll", "setup", "teardown",
     "suiteSetup", "suiteTeardown", "jest", "vi", "xit", "xdescribe", "xtest", "xcontext", "xspecify", "fit", "fdescribe", "ftest", "mocha", "chai"];
@@ -66,9 +67,81 @@ fn literal(e: &Expression) -> Option<String> {
 }
 
 enum Write { Module(String), Symbol(SymbolId) }
-struct Scan<'s> { scoping: &'s Scoping, test: bool, found: BTreeSet<String>, bound: BTreeMap<SymbolId, String>, writes: Vec<Write> }
+struct Scan<'s> {
+    scoping: &'s Scoping, test: bool, found: Vec<String>, bound: BTreeMap<SymbolId, String>, writes: Vec<Write>,
+    suites: BTreeMap<SymbolId, String>, namespaces: BTreeSet<SymbolId>,
+}
 impl Scan<'_> {
     fn global(&self, id: &IdentifierReference) -> bool { id.reference_id.get().is_none_or(|r| self.scoping.get_reference(r).symbol_id().is_none()) }
+    fn symbol(&self, id: &IdentifierReference) -> Option<SymbolId> { id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()) }
+    fn suite(&self, e: &Expression) -> Option<String> {
+        match unwrap(e) {
+            Expression::Identifier(id) => match self.symbol(id).and_then(|s| self.suites.get(&s)) {
+                Some(name) => Some(name.clone()),
+                None => SUITES.contains(&id.name.as_str()).then(|| id.name.to_string()),
+            },
+            Expression::StaticMemberExpression(m) => self.suite(&m.object).or_else(|| {
+                let namespace = matches!(unwrap(&m.object), Expression::Identifier(id) if self.symbol(id).is_some_and(|s| self.namespaces.contains(&s)));
+                (namespace && SUITES.contains(&m.property.name.as_str())).then(|| m.property.name.to_string())
+            }),
+            Expression::ComputedMemberExpression(m) => self.suite(&m.object),
+            _ => None,
+        }
+    }
+    fn selector(&self, callee: &Expression) -> Option<(String, String)> {
+        match unwrap(callee) {
+            Expression::StaticMemberExpression(m) => {
+                let prop = m.property.name.as_str();
+                match self.suite(&m.object) {
+                    Some(suite) if SELECTORS.contains(&prop) => Some((suite, prop.to_string())),
+                    _ => self.selector(&m.object),
+                }
+            }
+            Expression::ComputedMemberExpression(m) => match (literal(&m.expression), self.suite(&m.object)) {
+                (Some(prop), Some(suite)) if SELECTORS.contains(&prop.as_str()) => Some((suite, prop)),
+                _ => self.selector(&m.object),
+            },
+            Expression::CallExpression(c) => self.selector(&c.callee),
+            _ => None,
+        }
+    }
+    fn unconditional_skip<'b>(&self, arg: &'b Argument<'b>) -> Option<String> {
+        let top = |statements: &'b oxc_allocator::Vec<'b, Statement<'b>>| -> Vec<&'b Expression<'b>> {
+            statements.iter().filter_map(|s| match s { Statement::ExpressionStatement(e) => Some(&e.expression), _ => None }).collect()
+        };
+        let (params, calls) = match arg {
+            Argument::ArrowFunctionExpression(f) => (&f.params, match &f.body {
+                ArrowFunctionBody::FunctionBody(b) => top(&b.statements),
+                other => other.as_expression().into_iter().collect(),
+            }),
+            Argument::FunctionExpression(f) => (&f.params, top(&f.body.as_ref()?.statements)),
+            _ => return None,
+        };
+        let first = params.items.first().map(|p| &p.pattern);
+        let context = match first { Some(BindingPattern::BindingIdentifier(b)) => b.symbol_id.get(), _ => None };
+        let destructured: Vec<SymbolId> = match first {
+            Some(BindingPattern::ObjectPattern(o)) => o.properties.iter().filter(|p| p.key.static_name().is_some_and(|k| k == "skip" || k == "todo"))
+                .filter_map(|p| match &p.value { BindingPattern::BindingIdentifier(b) => b.symbol_id.get(), _ => None }).collect(),
+            _ => Vec::new(),
+        };
+        for e in calls {
+            let Expression::CallExpression(c) = unwrap(e) else { continue };
+            match unwrap(&c.callee) {
+                Expression::StaticMemberExpression(m) if ["skip", "todo"].contains(&m.property.name.as_str()) => match unwrap(&m.object) {
+                    Expression::ThisExpression(_) => return Some(format!("this.{}()", m.property.name)),
+                    Expression::Identifier(id) if context.is_some() && self.symbol(id) == context => return Some(format!("the test context's {}()", m.property.name)),
+                    _ => {}
+                },
+                Expression::Identifier(id) if self.symbol(id).is_some_and(|s| destructured.contains(&s)) => return Some(format!("the test context's {}()", id.name)),
+                _ => {}
+            }
+        }
+        None
+    }
+    fn framework(&self, e: &Expression) -> bool {
+        matches!(unwrap(e), Expression::CallExpression(c) if matches!(&c.callee, Expression::Identifier(id) if id.name == "require" && self.global(id))
+            && matches!(c.arguments.first(), Some(Argument::StringLiteral(s)) if FRAMEWORKS.contains(&s.value.as_str())))
+    }
     fn module(&self, e: &Expression) -> Option<String> {
         let source = match unwrap(e) {
             Expression::CallExpression(c) if matches!(&c.callee, Expression::Identifier(id) if id.name == "require" && self.global(id)) && c.arguments.len() == 1 => match &c.arguments[0] {
@@ -98,19 +171,34 @@ impl Scan<'_> {
             "prepareStackTrace" | "captureStackTrace" if error => Some(format!("Error.{prop}")),
             _ => None,
         };
-        if let Some(f) = found { self.found.insert(f); }
+        if let Some(f) = found { self.found.push(f); }
     }
     fn member(&mut self, object: &Expression, prop: &str) {
-        if !self.test { self.caller(object, prop); }
-        if !self.test && SNIFFS.contains(&prop) { self.found.insert(prop.to_string()); }
+        if self.test {
+            if SELECTORS.contains(&prop) && let Some(suite) = self.suite(object) { self.found.push(format!("{suite}.{prop}")); }
+            return;
+        }
+        self.caller(object, prop);
+        if SNIFFS.contains(&prop) { self.found.push(prop.to_string()); }
         let Expression::Identifier(id) = unwrap(object) else { return };
         let name = id.name.as_str();
-        if self.test { if SUITES.contains(&name) && SELECTORS.contains(&prop) { self.found.insert(format!("{name}.{prop}")); } return; }
-        if self.global(id) && GLOBALS.contains(&name) && TEST_GLOBALS.contains(&prop) { self.found.insert(format!("{name}.{prop}")); }
+        if self.global(id) && GLOBALS.contains(&name) && TEST_GLOBALS.contains(&prop) { self.found.push(format!("{name}.{prop}")); }
     }
 }
 impl<'a> Visit<'a> for Scan<'_> {
     fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
+        if self.test && !it.import_kind.is_type() && FRAMEWORKS.contains(&it.source.value.as_str()) {
+            for spec in it.specifiers.iter().flatten() {
+                match spec {
+                    ImportDeclarationSpecifier::ImportSpecifier(x) => {
+                        let imported = x.imported.name();
+                        if SUITES.contains(&imported.as_str()) && let Some(id) = x.local.symbol_id.get() { self.suites.insert(id, imported.to_string()); }
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(x) => { if let Some(id) = x.local.symbol_id.get() { self.suites.insert(id, "test".into()); } }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(x) => { if let Some(id) = x.local.symbol_id.get() { self.namespaces.insert(id); } }
+                }
+            }
+        }
         if !self.test && !it.import_kind.is_type() && ASSERTIONS.contains(&it.source.value.as_str()) {
             for s in it.specifiers.iter().flatten() {
                 let local = match s { ImportDeclarationSpecifier::ImportSpecifier(x) => &x.local, ImportDeclarationSpecifier::ImportDefaultSpecifier(x) => &x.local, ImportDeclarationSpecifier::ImportNamespaceSpecifier(x) => &x.local };
@@ -120,6 +208,25 @@ impl<'a> Visit<'a> for Scan<'_> {
         walk::walk_import_declaration(self, it);
     }
     fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if self.test && let Some(init) = &it.init {
+            match &it.id {
+                BindingPattern::BindingIdentifier(b) => if let Some(id) = b.symbol_id.get() {
+                    if self.framework(init) { self.namespaces.insert(id); }
+                    else if self.selector(init).is_none() && let Some(suite) = self.suite(init) { self.suites.insert(id, suite); }
+                },
+                BindingPattern::ObjectPattern(o) => {
+                    let (suite, framework) = (self.suite(init), self.framework(init));
+                    for prop in &o.properties {
+                        let Some(key) = prop.key.static_name() else { continue };
+                        if let Some(suite) = &suite && SELECTORS.contains(&key.as_ref()) { self.found.push(format!("{suite}.{key}")); }
+                        if framework && SUITES.contains(&key.as_ref()) && let BindingPattern::BindingIdentifier(b) = &prop.value && let Some(id) = b.symbol_id.get() {
+                            self.suites.insert(id, key.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if !self.test && let (BindingPattern::BindingIdentifier(b), Some(init)) = (&it.id, &it.init) && let (Some(m), Some(id)) = (self.module(root(init)), b.symbol_id.get()) {
             self.bound.insert(id, m);
         }
@@ -157,20 +264,25 @@ impl<'a> Visit<'a> for Scan<'_> {
     }
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if self.test {
-            let suite = match unwrap(&it.callee) {
-                Expression::Identifier(id) => {
-                    if RENAMED.contains(&id.name.as_str()) { self.found.insert(id.name.to_string()); }
-                    SUITES.contains(&id.name.as_str())
-                }
-                Expression::StaticMemberExpression(m) => matches!(unwrap(&m.object), Expression::Identifier(id) if SUITES.contains(&id.name.as_str())),
-                _ => false,
-            };
+            let title = it.arguments.first().and_then(Argument::as_expression).and_then(literal);
+            let renamed = match unwrap(&it.callee) { Expression::Identifier(id) if RENAMED.contains(&id.name.as_str()) => Some(id.name.to_string()), _ => None };
+            if let Some(name) = &renamed {
+                self.found.push(name.clone());
+                if let Some(t) = &title { self.found.push(format!("{name}('{t}')")); }
+            }
+            let selected = self.selector(&it.callee);
+            if let (Some((suite, prop)), Some(t)) = (&selected, &title) { self.found.push(format!("{suite}.{prop}('{t}')")); }
+            let suite = renamed.is_some() || selected.is_some() || self.suite(&it.callee).is_some();
             for arg in it.arguments.iter().filter(|_| suite) {
+                if let Some(skip) = self.unconditional_skip(arg) {
+                    if let Some(t) = &title { self.found.push(format!("{skip} in '{t}'")); }
+                    self.found.push(skip);
+                }
                 let Argument::ObjectExpression(options) = arg else { continue };
                 for property in &options.properties {
                     let ObjectPropertyKind::ObjectProperty(p) = property else { continue };
                     let Some(key) = p.key.static_name() else { continue };
-                    if SELECTORS.contains(&key.as_ref()) && !matches!(&p.value, Expression::BooleanLiteral(b) if !b.value) { self.found.insert(format!("the {key} option")); }
+                    if SELECTORS.contains(&key.as_ref()) && !matches!(&p.value, Expression::BooleanLiteral(b) if !b.value) { self.found.push(format!("the {key} option")); }
                 }
             }
         } else if let Expression::StaticMemberExpression(m) = unwrap(&it.callee)
@@ -190,30 +302,33 @@ impl<'a> Visit<'a> for Scan<'_> {
         walk::walk_computed_member_expression(self, it);
     }
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
-        if !self.test && TEST_GLOBALS.contains(&it.name.as_str()) && self.global(it) { self.found.insert(format!("the test global {}", it.name)); }
+        if !self.test && TEST_GLOBALS.contains(&it.name.as_str()) && self.global(it) { self.found.push(format!("the test global {}", it.name)); }
     }
     fn visit_string_literal(&mut self, it: &StringLiteral<'a>) {
-        if !self.test && SNIFFS.contains(&it.value.as_str()) { self.found.insert(it.value.to_string()); }
+        if !self.test && SNIFFS.contains(&it.value.as_str()) { self.found.push(it.value.to_string()); }
     }
     fn visit_template_literal(&mut self, it: &TemplateLiteral<'a>) {
-        if !self.test && let Some(q) = it.single_quasi() && SNIFFS.contains(&q.as_str()) { self.found.insert(q.to_string()); }
+        if !self.test && let Some(q) = it.single_quasi() && SNIFFS.contains(&q.as_str()) { self.found.push(q.to_string()); }
         walk::walk_template_literal(self, it);
     }
 }
-fn markers(path: &str, source: &str, test: bool) -> R<BTreeSet<String>> {
+fn markers(path: &str, source: &str, test: bool) -> R<BTreeMap<String, usize>> {
     let attempts = crate::capability::source_types(path).ok_or_else(|| Denied(format!("Unsupported code file: {path}")))?;
     for st in attempts {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, st).parse();
         if parsed.fatal_error || !parsed.diagnostics.is_empty() { continue; }
         let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-        let mut scan = Scan { scoping: semantic.scoping(), test, found: BTreeSet::new(), bound: BTreeMap::new(), writes: Vec::new() };
+        let mut scan = Scan { scoping: semantic.scoping(), test, found: Vec::new(), bound: BTreeMap::new(), writes: Vec::new(), suites: BTreeMap::new(),
+            namespaces: BTreeSet::new() };
         scan.visit_program(&parsed.program);
         for w in std::mem::take(&mut scan.writes) {
             let module = match w { Write::Module(m) => Some(m), Write::Symbol(s) => scan.bound.get(&s).cloned() };
-            if let Some(m) = module { scan.found.insert(format!("a change to {m}")); }
+            if let Some(m) = module { scan.found.push(format!("a change to {m}")); }
         }
-        return Ok(scan.found);
+        let mut counts = BTreeMap::new();
+        for f in scan.found { *counts.entry(f).or_insert(0) += 1; }
+        return Ok(counts);
     }
     deny!("Changed code cannot be parsed for the test proof: {path}. Fix its syntax")
 }
@@ -239,14 +354,17 @@ pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -
         let found = markers(path, source, inside)?;
         let before = text_of(base, path).and_then(|s| markers(path, s, inside).ok()).unwrap_or_default();
         if inside {
-            if let Some(m) = found.difference(&before).next() { deny!("A test file skips or focuses tests: {path} uses {m}. Every test must run, so remove it") }
+            let grown: Vec<&String> = found.iter().filter(|(k, n)| before.get(*k).copied().unwrap_or(0) < **n).map(|(k, _)| k).collect();
+            if let Some(m) = grown.iter().find(|k| k.contains("('")).or(grown.first()) {
+                deny!("A test file skips, focuses or inverts tests: {path} uses {m}. Every test must run and check what it says, so remove it")
+            }
             if !helper(path) {
                 regression = true;
                 if op == "add" { new_tests.push(path.to_string()); }
             }
             continue;
         }
-        if let Some(m) = found.difference(&before).next() {
+        if let Some(m) = found.keys().find(|k| !before.contains_key(*k)) {
             deny!("Code outside the tests reaches into the test runner: {path} uses {m}. Code may not change how tests run or what they check, or check whether tests are running; remove it")
         }
     }
@@ -258,8 +376,8 @@ pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Count { pub passed: u32, pub failed: u32, pub skipped: u32 }
 impl Count {
-    fn total(self) -> u32 { self.passed + self.failed + self.skipped }
-    fn ran(self) -> u32 { self.passed + self.failed }
+    pub fn total(self) -> u32 { self.passed + self.failed + self.skipped }
+    pub fn ran(self) -> u32 { self.passed + self.failed }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report { pub tests: BTreeMap<String, Count>, pub problems: Vec<String> }

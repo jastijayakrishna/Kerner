@@ -105,7 +105,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if let Err(e) = crate::proof::screen(&old, &new, &one, &tests) {
             let item = json!({ "path": p, "operation": op, "why": e.0 });
             if e.0.starts_with("Test runner configuration cannot change") { settings.push(item); }
-            else if e.0.starts_with("A test file skips or focuses tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }
+            else if e.0.starts_with("A test file skips, focuses or inverts tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }
             else { not_checked.push(item); }
         }
     }

@@ -6,7 +6,7 @@ use std::time::Duration;
 pub fn env(key: &str) -> Option<String> { std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) }
 pub fn repository(name: &str) -> bool {
     let parts: Vec<&str> = name.split('/').collect();
-    parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.len() <= 100 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)))
+    parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && p.len() <= 100 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)))
 }
 
 pub struct Api { agent: ureq::Agent, base: String, token: String }

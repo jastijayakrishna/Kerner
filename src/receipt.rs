@@ -42,7 +42,9 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for x in rules["tricks"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");
-        if x["operation"] == "add" { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips or focuses some of its own tests", code(path, 160)))); }
+        let reach = x["why"].as_str().is_some_and(|w| w.starts_with("Code outside the tests"));
+        if x["operation"] == "add" && reach { new_tests.push(item("new-runner-reach", format!("{}: a file this change adds, outside the test folders, uses the test runner; if it is a test, Kern does not run it", code(path, 160)))); }
+        else if x["operation"] == "add" { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
         else { blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""))))); }
     }
     let (described, surprises) = behaviour_items(&behaviour["report"]);

@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-const FOLDERS: [&str; 4] = ["test", "tests", "__tests__", "spec"];
+const FOLDERS: [&str; 11] = ["test", "tests", "__tests__", "spec", "specs", "e2e", "__e2e__", "cypress", "playwright", "__mocks__", "__fixtures__"];
+const NAMES: [&str; 4] = [".test.", ".spec.", ".e2e.", ".cy."];
 const TIMEOUT_SECONDS: u64 = 900;
 
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
@@ -13,45 +14,44 @@ pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
     Some(Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(name)?, command, edits: Edits::Checked })
 }
 
-pub fn test_paths(paths: &[&str]) -> Vec<String> {
-    let mut out = BTreeSet::new();
-    for p in paths {
-        let parts: Vec<&str> = p.split('/').collect();
-        if let Some(i) = parts[..parts.len().saturating_sub(1)].iter().position(|d| FOLDERS.contains(d)) { out.insert(format!("{}/", parts[..=i].join("/"))); continue; }
-        let name = parts.last().copied().unwrap_or("");
-        if name.contains(".test.") || name.contains(".spec.") { out.insert(p.to_string()); }
-    }
-    out.into_iter().collect()
+fn test_grant(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
+    if let Some(i) = lower[..lower.len().saturating_sub(1)].iter().position(|d| FOLDERS.contains(&d.as_str())) { return Some(format!("{}/", parts[..=i].join("/"))); }
+    let name = lower.last()?;
+    NAMES.iter().any(|m| name.contains(m)).then(|| path.to_string())
 }
 
-fn failing(r: &Report, k: &str) -> bool { r.tests.get(k).is_some_and(|c| c.failed > 0) }
-fn passing(r: &Report, k: &str) -> bool { r.tests.get(k).is_some_and(|c| c.failed == 0 && c.passed > 0) }
-fn skipped_only(r: &Report, k: &str) -> bool { r.tests.get(k).is_some_and(|c| c.passed == 0 && c.failed == 0 && c.skipped > 0) }
-fn ran(r: &Report, k: &str) -> bool { r.tests.get(k).is_some_and(|c| c.passed + c.failed > 0) }
+pub fn is_test_path(path: &str) -> bool { test_grant(path).is_some() }
+
+pub fn test_paths(paths: &[&str]) -> Vec<String> { paths.iter().filter_map(|p| test_grant(p)).collect::<BTreeSet<_>>().into_iter().collect() }
 fn sum(r: &Report) -> Value {
     let (p, f, s) = r.tests.values().fold((0, 0, 0), |(p, f, s), c| (p + c.passed, f + c.failed, s + c.skipped));
     json!({ "passed": p, "failed": f, "skipped": s })
 }
 
+fn count(r: &Report, k: &str) -> proof::Count { r.tests.get(k).copied().unwrap_or_default() }
+
 pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value {
-    let keys = |r: &Report| -> BTreeSet<String> { r.tests.keys().cloned().collect() };
-    let (old, new) = (keys(before), keys(after));
-    let mut broke = Vec::new();
-    let mut flaky = Vec::new();
-    let mut kept = 0u64;
-    for k in &old {
-        if !passing(before, k) { continue; }
-        if passing(after, k) { kept += 1; continue; }
-        if !failing(after, k) { continue; }
-        match again {
-            Some(a) if passing(a, k) => { flaky.push(k.clone()); kept += 1; }
-            _ => broke.push(k.clone()),
+    let keys: BTreeSet<&String> = before.tests.keys().chain(after.tests.keys()).collect();
+    let (mut kept, mut broke, mut flaky, mut gone, mut newly_skipped, mut added, mut already_failing) = (0u64, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for k in keys {
+        let (b, a) = (count(before, k), count(after, k));
+        if b.total() == 0 { added.push(k.clone()); continue; }
+        if b.failed > 0 { already_failing.push(k.clone()); }
+        kept += u64::from(b.passed.min(a.passed));
+        if b.passed > 0 && a.failed > b.failed {
+            match again.map(|g| count(g, k)) {
+                Some(g) if g.failed <= b.failed && g.passed >= b.passed => { flaky.push(k.clone()); kept += u64::from(b.passed - b.passed.min(a.passed)); }
+                _ => broke.push(k.clone()),
+            }
+        } else if b.passed > 0 && a.skipped > b.skipped {
+            newly_skipped.push(k.clone());
+        } else if b.ran() > 0 && a.total() < b.total() {
+            gone.push(k.clone());
         }
     }
-    let gone: Vec<&String> = old.iter().filter(|k| ran(before, k) && !new.contains(*k)).collect();
-    let newly_skipped: Vec<&String> = old.iter().filter(|k| passing(before, k) && skipped_only(after, k)).collect();
-    let added: Vec<&String> = new.iter().filter(|k| !old.contains(*k)).collect();
-    let already_failing: Vec<&String> = old.iter().filter(|k| failing(before, k)).chain(before.problems.iter()).collect();
+    already_failing.extend(before.problems.iter().cloned());
     let new_problems: Vec<&String> = after.problems.iter().filter(|p| !before.problems.contains(*p) && again.is_none_or(|a| a.problems.contains(*p))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(again.unwrap_or(after)), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
         "newly_skipped": newly_skipped, "added": added, "already_failing": already_failing, "new_problems": new_problems })
@@ -177,7 +177,7 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
                 Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
             },
         };
-        let fails_new = new.tests.iter().any(|(k, c)| c.failed > 0 && passing(&old, k)) || new.problems.iter().any(|p| !old.problems.contains(p));
+        let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new { run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))?.ok() } else { None };
         rerun |= second.is_some();
         absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);

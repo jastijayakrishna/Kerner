@@ -37,12 +37,7 @@ fn paid_host(h: &str) -> bool { PAID_HOSTS.contains(&h) || h.ends_with(".openai.
 
 fn text_of<'f>(files: &'f Files, path: &str) -> Option<&'f str> { files.get(path).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) }
 fn clip(s: &str, n: usize) -> String { if s.chars().count() > n { format!("{}...", s.chars().take(n).collect::<String>()) } else { s.to_string() } }
-fn is_test(path: &str, tests: Option<&Tests>) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-    tests.is_some_and(|t| allowed(&t.paths, path)) || lower.split('/').any(|d| ["test", "tests", "__tests__", "spec", "__mocks__", "e2e", "fixtures", "__fixtures__"].contains(&d))
-        || [".test.", ".spec."].iter().any(|m| name.contains(m))
-}
+fn is_test(path: &str, tests: Option<&Tests>) -> bool { tests.is_some_and(|t| allowed(&t.paths, path)) || crate::suite::is_test_path(path) }
 pub fn probeable(path: &str, tests: Option<&Tests>) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);

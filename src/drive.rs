@@ -220,8 +220,7 @@ fn unmeasured_kind(path: &str) -> &'static str {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let dirs: Vec<String> = path.split('/').map(str::to_ascii_lowercase).collect();
     let ext = extension(path);
-    if dirs.iter().any(|d| ["test", "tests", "__tests__", "spec", "specs", "e2e", "fixtures", "__fixtures__", "__mocks__", "cypress", "playwright"].contains(&d.as_str()))
-        || [".test.", ".spec.", "-test.", "_test.", ".e2e."].iter().any(|m| name.contains(m)) { return "tests"; }
+    if crate::suite::is_test_path(path) { return "tests"; }
     if LOCKFILES.contains(&name.as_str()) || name == "package.json" { return "dependencies"; }
     if ["md", "mdx", "txt", "rst", "adoc"].contains(&ext.as_str()) || name.starts_with("license") || name.starts_with("changelog") { return "documentation"; }
     if name.contains(".config.") || name.starts_with('.') || name.starts_with("tsconfig") || name == "dockerfile" || dirs.first().is_some_and(|d| d == ".github")
