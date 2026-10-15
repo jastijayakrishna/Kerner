@@ -174,6 +174,7 @@ impl Gate {
 pub fn parallelism() -> usize { std::env::var("KERN_VERIFY_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(2) }
 
 pub fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
+pub fn within(until: u64, seconds: u64) -> u64 { seconds.min(until.saturating_sub(now_ms()) / 1000) }
 pub fn iso8601(ms: u64) -> String {
     let (secs, millis) = (ms / 1000, ms % 1000);
     let (days, rem) = ((secs / 86400) as i64, secs % 86400);

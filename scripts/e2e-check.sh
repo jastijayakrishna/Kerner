@@ -162,8 +162,25 @@ decision plants look
 [ "$(kinds plants wrote-code look)" = 1 ] && grep -q 'src/shadow.mjs' plants/receipt.md || { cat plants/receipt.md; fail "plants: the module a test wrote was not reported"; }
 jq -e '.tests.kept == 3 and (.tests.new_failing | length == 0)' plants/receipt.json > /dev/null || { jq .tests plants/receipt.json; fail "plants: committed code could be rewritten during a test run, or the tests did not run"; }
 
-say "The sandbox volumes are removed"
-for c in harmless breaks only power writes mono plants; do "$K" --control verifier.json drive clean "$W/$c" > /dev/null; done
+say "A change after which the tests give no results, where they gave results before, is blocked"
+git -C calc checkout -q -b broke "$base"
+printf '%s\n' "throw new Error('the test config cannot load');" > calc/vitest.config.mjs
+git -C calc add -A && git -C calc commit -qm "A test config that throws" && git -C calc rev-parse HEAD > broke.head && git -C calc checkout -q "$base"
+check broke "$base"
+decision broke blocked
+[ "$(kinds broke test-run-broke blocked)" = 1 ] || { jq .tests broke/receipt.json; fail "broke: tests that give nothing on the new code were not blocked"; }
+
+say "A check has one time limit, and a run it cuts short is reported as not run, never as a failure"
+git -C calc checkout -q -b late "$base"
+printf '%s\n' "import { test } from 'vitest';" '' "test('never ends', () => { for (;;) {} });" > calc/test/late.test.js
+git -C calc add -A && git -C calc commit -qm "A test that never ends" && git -C calc rev-parse HEAD > late.head && git -C calc checkout -q "$base"
+export KERN_CHECK_MINUTES=3
+check late "$base"
+unset KERN_CHECK_MINUTES
+decision late clear
+jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("time for this check ran out"))' late/receipt.json > /dev/null || { jq .tests late/receipt.json; fail "late: the run the time limit cut short was not reported as not run"; }
+
+say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
 

@@ -139,27 +139,36 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     s
 }
 
-fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str) -> R<Result<(Report, Vec<String>), String>> {
+pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Late }
+
+fn run_side(out: &Path, op: &Operator, volume: &str, tests: &Tests, dir: &str, label: &str, until: u64) -> R<Side> {
+    let seconds = within(until, TIMEOUT_SECONDS);
+    if seconds < 60 { return Ok(Side::Late); }
+    let cut = seconds < TIMEOUT_SECONDS;
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": TIMEOUT_SECONDS, "cwd": dir }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
-    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: TIMEOUT_SECONDS + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
+    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
     let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
         network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
     let _ = std::fs::remove_dir_all(&control);
     let run = match run {
         Ok(r) => r,
-        Err(e) if e.0.contains("exceeded limits") || e.0.contains("timed out") => return Ok(Err(format!("the run was stopped: {}", e.0))),
+        Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
+        Err(e) if e.0.contains("exceeded limits") => return Ok(Side::Nothing(format!("the run was stopped: {}", e.0))),
         Err(e) => return Err(e),
     };
-    let parts = match crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) { Ok(p) => p, Err(e) => return Ok(Err(e.0)) };
+    let parts = match crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) { Ok(p) => p, Err(e) => return Ok(Side::Nothing(e.0)) };
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
-    if parts["ending"] == b"timeout" { return Ok(Err(format!("the tests did not finish in {} minutes", TIMEOUT_SECONDS / 60))); }
+    if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", TIMEOUT_SECONDS / 60)) }); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
-    Ok(proof::read_report(tests.runner, &parts["output"]).map(|r| (r, created)).map_err(|why| no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])))
+    Ok(match proof::read_report(tests.runner, &parts["output"]) {
+        Ok(r) => Side::Ran(r, created),
+        Err(why) => Side::Nothing(no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])),
+    })
 }
 
 const MAX_PACKAGES: usize = 5;
@@ -194,7 +203,9 @@ fn absorb(into: &mut Report, from: Report, dir: &str, runner: Runner) {
     into.problems.extend(from.problems.into_iter().map(name));
 }
 
-pub fn run(out: &Path, op: &Operator) -> R<Value> {
+pub const LATE: &str = "Kern's time for this check ran out before these tests could run";
+
+pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let d = read_json(out.join("drive.json"))?;
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
     let (base, head) = (d["base"].as_str().unwrap_or(""), d["head"].as_str().unwrap_or(""));
@@ -223,50 +234,66 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
     let mut seconds = serde_json::Map::new();
     let mut timed = |name: String, from: u64| { seconds.insert(name, json!((now_ms() - from) / 1000)); };
     let at = now_ms();
-    if !out.join("setup.json").exists() { crate::drive::setup(out, op)?; timed("setup".into(), at); }
+    if !out.join("setup.json").exists() { crate::drive::setup(out, op, until)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
     let (mut before, mut after, mut again) = (Report::default(), Report::default(), Report::default());
     let (mut ran, mut rerun, mut all_new, mut wrote_code, mut run_broke) = (Vec::new(), false, Vec::new(), BTreeSet::new(), Vec::new());
+    let mut late = false;
     for suite in &suites {
+        if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
         let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let at = now_ms();
-        let first = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"))?;
+        let first = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"), until)?;
         timed(format!("new{label}"), at);
+        let at = now_ms();
         let old_run = match &suite.old {
             None => None,
-            Some(t) => {
-                let at = now_ms();
-                let run = run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))?;
+            Some(t) if !matches!(first, Side::Late) => {
+                let run = run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"), until)?;
                 timed(format!("old{label}"), at);
-                Some(run.map(|(r, _)| r))
+                Some(run)
             }
+            Some(_) => Some(Side::Late),
         };
+        let old_seconds = (now_ms() - at) / 1000;
+        if matches!(first, Side::Late) || matches!(old_run, Some(Side::Late)) { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+        let slow = matches!(first, Side::Slow(_)) && old_seconds * 3 > TIMEOUT_SECONDS;
         let new = match first {
-            Ok((r, created)) => { wrote_code.extend(created); r }
-            Err(why) => {
-                if !matches!(old_run, Some(Ok(_))) {
+            Side::Ran(r, created) => { wrote_code.extend(created); r }
+            Side::Nothing(why) | Side::Slow(why) => {
+                if !matches!(old_run, Some(Side::Ran(..))) || slow {
                     not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") }));
                     continue;
                 }
-                match run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))? {
-                    Ok((r, created)) => { wrote_code.extend(created); r }
-                    Err(again) => { run_broke.push(json!({ "dir": suite.dir, "why": again })); continue; }
+                let at = now_ms();
+                let again = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"), until)?;
+                timed(format!("new-again{label}"), at);
+                match again {
+                    Side::Ran(r, created) => { wrote_code.extend(created); r }
+                    Side::Late => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+                    Side::Nothing(again) | Side::Slow(again) => { run_broke.push(json!({ "dir": suite.dir, "why": again })); continue; }
                 }
             }
+            Side::Late => continue,
         };
         let old = match old_run {
             None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
-            Some(Ok(r)) => r,
-            Some(Err(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+            Some(Side::Ran(r, _)) => r,
+            Some(Side::Nothing(why) | Side::Slow(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+            Some(Side::Late) => continue,
         };
         let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new {
             let at = now_ms();
-            let r = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"))?.ok();
+            let r = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new-again{label}"), until)?;
             timed(format!("new-again{label}"), at);
-            r.map(|(r, created)| { wrote_code.extend(created); r })
+            match r {
+                Side::Ran(r, created) => { wrote_code.extend(created); Some(r) }
+                Side::Late => { late = true; not_run.push(json!({ "dir": suite.dir, "why": "Kern's time for this check ran out before it could run the failing tests again" })); continue; }
+                Side::Nothing(_) | Side::Slow(_) => None,
+            }
         } else { None };
         rerun |= second.is_some();
         absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);

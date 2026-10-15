@@ -109,7 +109,7 @@ fn a_package_whose_tests_kern_runs_gets_its_dependencies_installed() {
     assert_eq!(suite::packages(&["packages/kit/test/pad.test.js"], has), ["packages/kit"], "Kern runs the tests of packages/kit");
     let out = t.0.join("out");
     drive::prepare(&r, &base, &head, &out, None).unwrap();
-    assert!(drive::setup(&out, &operator()).is_err(), "no Docker here, so setup stops after it writes its plan");
+    assert!(drive::setup(&out, &operator(), u64::MAX).is_err(), "no Docker here, so setup stops after it writes its plan");
     let plan = read_json(out.join("sandbox").join("setup-new").join("drive-setup.json")).or_else(|_| read_json(out.join("sandbox").join("setup-old").join("drive-setup.json"))).unwrap();
     let dirs: Vec<String> = plan["dirs"].as_array().unwrap().iter().map(|d| d.as_str().unwrap().to_string()).collect();
     assert!(dirs.contains(&"packages/kit".to_string()), "Kern runs the tests of packages/kit but installs only {dirs:?}, so vitest and left-pad are missing there");
@@ -252,4 +252,52 @@ fn a_receipt_never_says_no_tests_were_removed_when_a_test_file_was_deleted() {
     let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
     let md = std::fs::read_to_string(t.0.join("out").join("receipt.md")).unwrap();
     assert!(!md.contains("No skipped, focused or removed tests"), "the change deletes test/math.test.js and the tests did not run ({}), yet the receipt says:\n{md}", out["tests"]);
+}
+
+#[test]
+fn github_hiccups_are_retried_and_a_receipt_comment_is_never_doubled() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let t = Temp::new();
+    receipt::write(&t.0, &receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None).unwrap();
+    let (pulls, created, statuses) = (std::sync::Arc::new(AtomicUsize::new(0)), std::sync::Arc::new(AtomicUsize::new(0)), std::sync::Arc::new(AtomicUsize::new(0)));
+    let (p, c, s) = (pulls.clone(), created.clone(), statuses.clone());
+    let (url, seen) = stub_github(move |m, path| match (m, path) {
+        ("GET", x) if x.starts_with("/repos/acme/shop/pulls/7") => {
+            if p.fetch_add(1, SeqCst) < 2 { (502, "{}".into()) } else { (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()) }
+        }
+        ("GET", x) if x.starts_with("/repos/acme/shop/issues/7/comments") => {
+            if c.load(SeqCst) == 0 { return (200, "[]".into()); }
+            (200, json!([{ "id": 5, "user": { "login": "github-actions[bot]" }, "body": "<!-- kern-receipt -->\nhalf", "html_url": "https://github.com/acme/shop/pull/7#c5" }]).to_string())
+        }
+        ("POST", "/repos/acme/shop/issues/7/comments") => { c.fetch_add(1, SeqCst); (502, "{}".into()) }
+        ("PATCH", "/repos/acme/shop/issues/comments/5") => (200, "{}".into()),
+        ("POST", x) if x.starts_with("/repos/acme/shop/statuses/") => if s.fetch_add(1, SeqCst) == 0 { (429, "{}".into()) } else { (201, "{}".into()) },
+        _ => (404, "{}".into()),
+    });
+    let out = receipt::post(&kern::github::Api::new(&url, "t").unwrap(), &t.0, "acme/shop", 7);
+    let log = seen.lock().unwrap().clone();
+    let out = out.unwrap_or_else(|e| panic!("two 502s and a rate limit are ordinary GitHub hiccups: {} after {log:?}", e.0));
+    assert_eq!(created.load(SeqCst), 1, "GitHub made the comment and then answered 502; asking again would post the receipt twice: {log:?}");
+    assert!(log.iter().any(|(m, p, b)| m == "PATCH" && p.ends_with("/comments/5") && b.contains("kern-receipt")), "the comment GitHub made is filled in instead: {log:?}");
+    assert_eq!(statuses.load(SeqCst), 2, "a rate-limited status is sent again: {log:?}");
+    assert_eq!(out["state"], "success", "{out}");
+}
+
+#[test]
+fn a_check_has_one_time_limit_and_each_run_gets_only_the_time_left() {
+    let now = now_ms();
+    assert_eq!(within(u64::MAX, 900), 900, "with no limit a run keeps its own");
+    let left = within(now + 120_000, 900);
+    assert!((118..=120).contains(&left), "two minutes left gives a run two minutes, not fifteen: {left}");
+    assert_eq!(within(now.saturating_sub(1), 900), 0, "a limit already passed leaves nothing");
+    assert_eq!(check::minutes(), 55, "the check ends well before the workflow's 75-minute job limit");
+}
+
+#[test]
+fn a_check_killed_while_it_set_up_leaves_a_record_that_clean_reads() {
+    let t = Temp::new();
+    std::fs::write(t.0.join("volumes.txt"), "not-a-kern-volume\nkern-deps-x;rm -rf /\n").unwrap();
+    let r = drive::clean(&t.0).unwrap();
+    assert_eq!(r["removed"], json!([]), "only Kern's own volume names reach docker: {r}");
+    assert!(!t.0.join("volumes.txt").exists(), "the record is gone once the volumes are");
 }

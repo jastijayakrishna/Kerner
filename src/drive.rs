@@ -1016,7 +1016,9 @@ fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     Ok(files.iter().map(|i| i.path.clone()).collect())
 }
 
-fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str, label: &str) -> R<(crate::sandbox::Volume, Value)> {
+fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str, label: &str, until: u64) -> R<(crate::sandbox::Volume, Value)> {
+    let seconds = within(until, 1500);
+    ensure!(seconds >= 120, "Kern's time for this check ran out before it could set up the {side} code");
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
     let commit = d[if side == "old" { "base" } else { "head" }].as_str().unwrap_or("");
     let root = out.join("sandbox");
@@ -1030,9 +1032,12 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": 1500 }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds }))))?;
     let volume = crate::sandbox::Volume::create()?;
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &tree, control: &control, writable: &[], limits: &setup_limits(), entry: vec!["__drive_setup".into()],
+    let mut ledger = std::fs::OpenOptions::new().create(true).append(true).open(out.join("volumes.txt"))?;
+    std::io::Write::write_all(&mut ledger, format!("{}\n", volume.0).as_bytes())?;
+    let limits = Limits { timeout_seconds: seconds + 300, ..setup_limits() };
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &tree, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_setup".into()],
         network: "bridge", volumes: vec![], root: true, home_mb: 2048, scratch: false, workspace: Some((&volume.0, false)) })?;
     ensure!(run.exit_code == 0, "Setting up the {side} code failed in the sandbox (exit code {})", run.exit_code);
     let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
@@ -1042,15 +1047,16 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     Ok((volume, entry))
 }
 
-pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
+pub fn setup(out: &Path, op: &crate::policy::Operator, until: u64) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
+    if out.join("volumes.txt").exists() { clean(out)?; }
     let root = out.join("sandbox");
     if root.exists() { std::fs::remove_dir_all(&root)?; }
     std::fs::create_dir(&root)?;
     let mut sides = serde_json::Map::new();
     let mut volumes = Vec::new();
     for side in ["old", "new"] {
-        let (volume, entry) = install_side(out, op, &d, side, side)?;
+        let (volume, entry) = install_side(out, op, &d, side, side, until)?;
         sides.insert(side.into(), entry);
         volumes.push(volume);
     }
@@ -1068,13 +1074,13 @@ pub fn setup(out: &Path, op: &crate::policy::Operator) -> R<Value> {
     Ok(s)
 }
 
-pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path) -> R<Value> {
+pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path, until: u64) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
     let driver_bytes = std::fs::read(driver)?;
     ensure!(driver_bytes.len() <= 1 << 20, "The driver is larger than 1 MiB");
     let (stand_ins, refused) = stubs(driver.parent().unwrap_or(Path::new(".")))?;
     let stub_names: Vec<&str> = stand_ins.iter().map(|(n, _)| n.as_str()).collect();
-    if !out.join("setup.json").exists() { setup(out, op)?; }
+    if !out.join("setup.json").exists() { setup(out, op, until)?; }
     let s = read_own(out.join("setup.json"))?;
     let rounds = out.join("rounds");
     std::fs::create_dir_all(&rounds)?;
@@ -1189,11 +1195,12 @@ pub fn package_specifier(s: &str) -> bool {
 }
 
 pub fn clean(out: &Path) -> R<Value> {
-    let s = read_own(out.join("setup.json"))?;
-    let mut volumes: Vec<&str> = ["old", "new"].iter().filter_map(|side| s[side]["volume"].as_str()).collect();
-    if s["tools"]["cached"] != true { volumes.extend(s["tools"]["volume"].as_str()); }
+    let s = if out.join("setup.json").exists() { read_own(out.join("setup.json"))? } else { Value::Null };
+    let mut volumes: BTreeSet<String> = ["old", "new"].iter().filter_map(|side| s[side]["volume"].as_str().map(str::to_string)).collect();
+    if s["tools"]["cached"] != true { volumes.extend(s["tools"]["volume"].as_str().map(str::to_string)); }
+    volumes.extend(std::fs::read_to_string(out.join("volumes.txt")).unwrap_or_default().lines().map(str::to_string));
     let mut removed = Vec::new();
-    for v in volumes.into_iter().filter(|v| v.starts_with("kern-deps-")) {
+    for v in volumes.iter().map(String::as_str).filter(|v| v.starts_with("kern-deps-") && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
         let filter = format!("volume={v}");
         if let Ok(ids) = crate::sandbox::docker(&["ps", "--all", "--quiet", "--filter", &filter, "--filter", "name=kern-"], std::time::Duration::from_secs(60), 1 << 16) {
             for id in String::from_utf8_lossy(&ids).split_whitespace() { let _ = crate::sandbox::docker(&["rm", "--force", id], std::time::Duration::from_secs(60), 4096); }
@@ -1202,7 +1209,7 @@ pub fn clean(out: &Path) -> R<Value> {
         removed.push(v.to_string());
     }
     let _ = std::fs::remove_dir_all(out.join("sandbox"));
-    std::fs::remove_file(out.join("setup.json"))?;
+    for f in ["setup.json", "volumes.txt"] { if out.join(f).exists() { std::fs::remove_file(out.join(f))?; } }
     Ok(json!({ "status": "CLEANED", "removed": removed }))
 }
 
@@ -1338,7 +1345,7 @@ pub fn agent_round(task: &Path, argv: &[String], prompt: &str, timeout: std::tim
     Ok(json!({ "exit": status.and_then(|s| s.code()), "timed_out": status.is_none(), "seconds": started.elapsed().as_secs(), "said": clip_str(said.trim(), 600) }))
 }
 #[allow(clippy::too_many_arguments)]
-pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy::Operator, pr: Option<&str>, agent: &[String], max: usize) -> R<Value> {
+pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy::Operator, pr: Option<&str>, agent: &[String], max: usize, until: u64) -> R<Value> {
     if !out.join("drive.json").exists() { prepare(repo, base, head, out, pr)?; }
     let d = read_own(out.join("drive.json"))?;
     if d["totals"]["new"] == 0 && d["totals"]["old"] == 0 {
@@ -1350,10 +1357,12 @@ pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy:
     let task = out.join("task");
     let (mut percents, mut rounds) = (Vec::new(), Vec::new());
     while another_round(&percents, max) {
-        let a = agent_round(&task, agent, if percents.is_empty() { FIRST } else { AGAIN }, std::time::Duration::from_secs(900))?;
+        let seconds = within(until, 900);
+        if seconds < 120 { rounds.push(json!({ "error": "Kern's time for this check ran out" })); break; }
+        let a = agent_round(&task, agent, if percents.is_empty() { FIRST } else { AGAIN }, std::time::Duration::from_secs(seconds))?;
         let driver = task.join("driver.mjs");
         if !driver.exists() { rounds.push(json!({ "agent": a, "error": "the agent wrote no driver.mjs" })); break; }
-        let r = run(out, op, &driver)?;
+        let r = run(out, op, &driver, until)?;
         percents.push(r["coverage"]["percent"].as_u64().unwrap_or(0));
         rounds.push(json!({ "agent": a, "run": r }));
     }
@@ -1364,10 +1373,10 @@ pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy:
     } else {
         let report = conclude(out, &d, None)?;
         percent = report["coverage"]["percent"].clone();
-        if pr.is_some_and(|p| !p.trim().is_empty()) && !difference_items(&report).is_empty() {
+        if pr.is_some_and(|p| !p.trim().is_empty()) && !difference_items(&report).is_empty() && within(until, 600) >= 60 {
             std::fs::write(task.join("differences.md"), differences_md(&report))?;
             let _ = std::fs::remove_file(task.join("verdicts.json"));
-            let a = agent_round(&task, agent, SORT, std::time::Duration::from_secs(600)).unwrap_or_else(|e| json!({ "error": e.0 }));
+            let a = agent_round(&task, agent, SORT, std::time::Duration::from_secs(within(until, 600))).unwrap_or_else(|e| json!({ "error": e.0 }));
             sorting = json!({ "agent": a, "result": sort(out, Some(&task.join("verdicts.json")))? });
         }
     }
@@ -1403,6 +1412,6 @@ fn post_to(api: &crate::github::Api, out: &Path, repository: &str, number: u64, 
     match existing {
         Some(id) => { api.patch(&format!("/repos/{repository}/issues/comments/{id}"), &json!({ "body": body }))?; Ok(json!({ "status": "UPDATED", "comment": id })) }
         None if update_only => Ok(json!({ "status": "SKIPPED", "reason": "no earlier comment of Kern's to update" })),
-        None => { let c = api.post(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": body }))?; Ok(json!({ "status": "POSTED", "comment": c["id"] })) }
+        None => { let c = api.create(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": body }))?; Ok(json!({ "status": "POSTED", "comment": c["id"] })) }
     }
 }

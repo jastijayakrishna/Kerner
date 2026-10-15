@@ -299,9 +299,20 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
         body += &format!("<sub>Signed by GitHub for Kern's own workflow. Anyone can check this receipt: `kern receipt verify {repository} {number}`</sub>\n{}\n",
             seal_line(&s["seal"], s["token"].as_str().unwrap_or("")));
     }
+    let edit = |c: &Value| -> R<(&str, Option<String>)> {
+        api.patch(&format!("/repos/{repository}/issues/comments/{}", c["id"]), &json!({ "body": body }))?;
+        Ok(("UPDATED", c["html_url"].as_str().map(str::to_string)))
+    };
+    let create = || api.create(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": body }));
     let (posted, url) = match kern_comment(api, repository, number)? {
-        Some(c) => { api.patch(&format!("/repos/{repository}/issues/comments/{}", c["id"]), &json!({ "body": body }))?; ("UPDATED", c["html_url"].as_str().map(str::to_string)) }
-        None => { let c = api.post(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": body }))?; ("POSTED", c["html_url"].as_str().map(str::to_string)) }
+        Some(c) => edit(&c)?,
+        None => match create() {
+            Ok(c) => ("POSTED", c["html_url"].as_str().map(str::to_string)),
+            Err(_) => match kern_comment(api, repository, number)? {
+                Some(c) => edit(&c)?,
+                None => ("POSTED", create()?["html_url"].as_str().map(str::to_string)),
+            },
+        },
     };
     let state = if r["decision"] == "clear" { "success" } else { "failure" };
     status(api, repository, &head, state, &description(&r), url.as_deref())?;
@@ -311,7 +322,7 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
 pub fn approve(api: &Api, repository: &str, number: u64, login: &str, check: &dyn Fn(&Value, &str) -> R<()>) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     ensure!(!login.is_empty() && login.len() <= 100 && login.chars().all(|c| c.is_ascii_alphanumeric() || "-_[]".contains(c)), "Expected a GitHub login");
-    let say = |text: &str| -> R<()> { api.post(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": text }))?; Ok(()) };
+    let say = |text: &str| -> R<()> { api.create(&format!("/repos/{repository}/issues/{number}/comments"), &json!({ "body": text }))?; Ok(()) };
     let permission = api.get(&format!("/repos/{repository}/collaborators/{login}/permission"))?;
     if !["admin", "maintain", "write"].contains(&permission["permission"].as_str().unwrap_or("")) {
         say(&format!("Kern: only people who can merge into this repository can approve its receipt; @{login} cannot."))?;

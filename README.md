@@ -38,7 +38,8 @@ jobs:
 ```
 
 That is the whole install. There is no sign-up and no Kern server: Kern runs on your repository's own GitHub Actions runners, and
-public repositories pay nothing for them.
+public repositories pay nothing for them. Keep the `permissions` as they are: Kern's jobs ask for exactly these, and GitHub does not
+start them with less (`id-token: write` is how GitHub signs each receipt).
 
 Two optional settings:
 
@@ -165,7 +166,10 @@ Next steps:
   covers the rules only and says so; changed code in other languages is listed as "not checked", never passed quietly.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
-- A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature.
+- A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so
+  Kern cannot comment or set its status there. The job fails unless the answer is ✅. If you require the `Kern` status, merge such a
+  pull request after reading that summary.
+- A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, never as passed or failed.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).
 

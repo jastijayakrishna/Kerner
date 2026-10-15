@@ -237,7 +237,7 @@ fn cli() -> R<(Option<Value>, i32)> {
                     let pr = rest.get(4).map(std::fs::read_to_string).transpose()?;
                     (Some(kern::drive::prepare(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), pr.as_deref())?), 0)
                 }
-                "run" => { count(rest, 3)?; (Some(kern::drive::run(Path::new(&rest[0]), &operator(&read_json(&rest[1])?)?, Path::new(&rest[2]))?), 0) }
+                "run" => { count(rest, 3)?; (Some(kern::drive::run(Path::new(&rest[0]), &operator(&read_json(&rest[1])?)?, Path::new(&rest[2]), u64::MAX)?), 0) }
                 "clean" => { count(rest, 1)?; (Some(kern::drive::clean(Path::new(&rest[0]))?), 0) }
                 "sort" => {
                     ensure!(rest.len() == 1 || rest.len() == 2, "Expected an output directory and optionally the agent's verdicts.json");
@@ -247,7 +247,7 @@ fn cli() -> R<(Option<Value>, i32)> {
                     ensure!(rest.len() == 5 || rest.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
                     let pr = rest.get(5).map(std::fs::read_to_string).transpose()?;
                     let (agent, rounds) = drive_agent()?;
-                    (Some(kern::drive::auto(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), &operator(&read_json(&rest[4])?)?, pr.as_deref(), &agent, rounds)?), 0)
+                    (Some(kern::drive::auto(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), &operator(&read_json(&rest[4])?)?, pr.as_deref(), &agent, rounds, u64::MAX)?), 0)
                 }
                 "post" => {
                     ensure!(rest.len() == 3 || (rest.len() == 4 && rest[3] == "update-only"), "Expected an output directory, owner/repo, a pull request number and optionally update-only");

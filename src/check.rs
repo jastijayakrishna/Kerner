@@ -5,6 +5,10 @@ use std::path::Path;
 
 pub struct Ai<'a> { pub agent: &'a [String], pub rounds: usize }
 
+const MINUTES: u64 = 55;
+const TESTS_MINUTES: u64 = 25;
+pub fn minutes() -> u64 { std::env::var("KERN_CHECK_MINUTES").ok().and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| (1..=1440).contains(m)).unwrap_or(MINUTES) }
+
 const DOCS: [&str; 13] = ["md", "mdx", "markdown", "txt", "rst", "adoc", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf"];
 const DOC_NAMES: [&str; 7] = ["license", "licence", "changelog", "authors", "contributors", "codeowners", "notice"];
 fn documentation(path: &str) -> bool {
@@ -18,6 +22,7 @@ fn runnable(_d: &Value, rules: &Value) -> bool {
 
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {
     let started = now_ms();
+    let until = started + minutes() * 60_000;
     crate::drive::prepare(repo, base, head, out, pr)?;
     let d = read_json(out.join("drive.json"))?;
     let rules = crate::rules::rules(repo, base, head)?;
@@ -26,7 +31,7 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     let behaviour = match ai {
         _ if !run => json!({ "status": "NOTHING_TO_RUN" }),
         None => json!({ "status": "OFF", "why": "no AI key" }),
-        Some(a) => match crate::drive::auto(repo, base, head, out, op, pr, a.agent, a.rounds) {
+        Some(a) => match crate::drive::auto(repo, base, head, out, op, pr, a.agent, a.rounds, until.saturating_sub(TESTS_MINUTES * 60_000).max(started)) {
             Ok(v) => json!({ "status": v["status"], "why": v["rounds"].as_array().and_then(|r| r.last()).and_then(|r| r["error"].as_str()).unwrap_or(""),
                 "report": read_json(out.join("report.json")).unwrap_or(Value::Null) }),
             Err(e) => json!({ "status": "FAILED", "why": e.0 }),
@@ -36,13 +41,15 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     let tests = if !run {
         json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" })
     } else {
-        crate::suite::run(out, op).unwrap_or_else(|e| json!({ "status": "NOT_RUN", "why": format!("Kern could not run the tests: {}", e.0) }))
+        crate::suite::run(out, op, until).unwrap_or_else(|e| json!({ "status": "NOT_RUN", "why": format!("Kern could not run the tests: {}", e.0) }))
     };
     let tested = now_ms();
     let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|_| behaviour["status"] == "RAN");
     let receipt = crate::receipt::build(&d, &rules, &tests, &behaviour);
     crate::receipt::write(out, &receipt, comment.as_deref())?;
-    Ok(json!({ "status": "CHECKED", "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
+    let keep = std::env::var("KERN_KEEP").is_ok_and(|v| v.trim() == "1");
+    let cleaned = !keep && (out.join("setup.json").exists() || out.join("volumes.txt").exists()) && crate::drive::clean(out).is_ok();
+    Ok(json!({ "status": "CHECKED", "cleaned": cleaned, "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
         "look": receipt["look"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": (now_ms() - started) / 1000,
         "phases": { "rules": (checked - started) / 1000, "behaviour": (behaved - checked) / 1000, "tests": (tested - behaved) / 1000, "tests_detail": tests["seconds"] },
         "receipt": out.join("receipt.md").display().to_string() }))

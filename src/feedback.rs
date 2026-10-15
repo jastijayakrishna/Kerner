@@ -339,7 +339,7 @@ impl Thread {
         }
         Ok(h)
     }
-    fn post(&self, body: &str) -> R<Value> { self.api.post(&self.path, &json!({ "body": body })) }
+    fn post(&self, body: &str) -> R<Value> { self.api.create(&self.path, &json!({ "body": body })) }
 }
 
 fn reverified(r: &Value, earlier: u64, head: &str) -> String {
