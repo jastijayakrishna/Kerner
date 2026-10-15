@@ -16,8 +16,12 @@ fn documentation(path: &str) -> bool {
     let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
     DOCS.contains(&ext) || DOC_NAMES.contains(&stem)
 }
-fn runnable(_d: &Value, rules: &Value) -> bool {
-    rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).any(|p| !documentation(p))
+fn runnable(repo: &Path, head: &str, rules: &Value) -> bool {
+    let paths: Vec<&str> = rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();
+    paths.iter().any(|p| !documentation(p)) || paths.iter().any(|p| {
+        let name = p.rsplit('/').next().unwrap_or(p);
+        crate::git::mentions(repo, head, name).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
+    })
 }
 
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {
@@ -26,7 +30,7 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     crate::drive::prepare(repo, base, head, out, pr)?;
     let d = read_json(out.join("drive.json"))?;
     let rules = crate::rules::rules(repo, base, head)?;
-    let run = runnable(&d, &rules);
+    let run = runnable(repo, head, &rules);
     let checked = now_ms();
     let behaviour = match ai {
         _ if !run => json!({ "status": "NOTHING_TO_RUN" }),

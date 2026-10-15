@@ -320,3 +320,18 @@ fn a_change_to_how_the_tests_run_needs_a_look_and_a_dependency_bump_does_not() {
     assert_eq!(settings(&jest(r#"{"testEnvironment":"node"}"#), &jest(r#"{"testEnvironment":"node","setupFiles":["./quiet.js"]}"#)).len(), 1,
         "jest settings kept in package.json decide which tests run as much as jest.config.js does");
 }
+
+#[test]
+fn a_text_file_the_code_reads_is_not_documentation() {
+    let allow = "import { readFileSync } from 'node:fs';\nexport const allowed = () => readFileSync(new URL('./allowlist.txt', import.meta.url), 'utf8').split('\\n');\n";
+    let tests_after = |files: &[(&str, &str)], change: &[(&str, &str)]| -> Value {
+        let t = Temp::new();
+        let (r, b) = repo(&t, files);
+        let h = commit(&r, change);
+        check::check(&r, &b, &h, &t.0.join("out"), &operator(), None, None).unwrap()["tests"].clone()
+    };
+    let files = [("package.json", PACKAGE), ("src/allow.js", allow), ("src/allowlist.txt", "example.com\n"), ("README.md", "# shop\n")];
+    assert_ne!(tests_after(&files, &[("src/allowlist.txt", "example.com\nevil.example\n")]), json!("NOTHING_TO_RUN"),
+        "the code reads allowlist.txt, so a change to it changes what the code does and the tests must run");
+    assert_eq!(tests_after(&files, &[("README.md", "# shop\n\nAdds up baskets.\n")]), json!("NOTHING_TO_RUN"), "no code reads the README");
+}
