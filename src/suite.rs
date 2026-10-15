@@ -158,7 +158,10 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
     if suites.is_empty() {
         return Ok(json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json, at the root or in a package this change touches (Kern runs vitest, jest, mocha and node --test)" }));
     }
-    if !out.join("setup.json").exists() { crate::drive::setup(out, op)?; }
+    let mut seconds = serde_json::Map::new();
+    let mut timed = |name: String, from: u64| { seconds.insert(name, json!((now_ms() - from) / 1000)); };
+    let at = now_ms();
+    if !out.join("setup.json").exists() { crate::drive::setup(out, op)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
     let (mut before, mut after, mut again) = (Report::default(), Report::default(), Report::default());
@@ -166,23 +169,34 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
     for suite in &suites {
         let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
-        let new = match run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"))? {
+        let at = now_ms();
+        let first = run_side(out, op, &volume("new"), &suite.new, &suite.dir, &format!("new{label}"))?;
+        timed(format!("new{label}"), at);
+        let new = match first {
             Ok(r) => r,
             Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") })); continue; }
         };
         let old = match &suite.old {
             None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
-            Some(t) => match run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))? {
-                Ok(r) => r,
-                Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
-            },
+            Some(t) => {
+                let at = now_ms();
+                let run = run_side(out, op, &volume("old"), t, &suite.dir, &format!("old{label}"))?;
+                timed(format!("old{label}"), at);
+                match run {
+                    Ok(r) => r,
+                    Err(why) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+                }
+            }
         };
         let fails_new = new.tests.iter().any(|(k, c)| { let b = count(&old, k); b.passed > 0 && c.failed > b.failed }) || new.problems.iter().any(|p| !old.problems.contains(p));
         let second = if fails_new {
-            match crate::drive::fresh(out, op, "new") {
+            let at = now_ms();
+            let r = match crate::drive::fresh(out, op, "new") {
                 Ok(tree) => run_side(out, op, &tree, &suite.new, &suite.dir, &format!("new-again{label}"))?.ok(),
                 Err(_) => None,
-            }
+            };
+            timed(format!("new-again{label}"), at);
+            r
         } else { None };
         rerun |= second.is_some();
         absorb(&mut again, second.unwrap_or_else(|| new.clone()), &suite.dir, suite.new.runner);
@@ -192,11 +206,12 @@ pub fn run(out: &Path, op: &Operator) -> R<Value> {
     }
     if ran.is_empty() {
         let why = not_run.first().and_then(|n| n["why"].as_str()).unwrap_or("no test run gave results").to_string();
-        return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.runner.name(), "why": why, "not_run": not_run }));
+        return Ok(json!({ "status": "NOT_RUN", "runner": suites[0].new.runner.name(), "why": why, "not_run": not_run, "seconds": seconds }));
     }
     let mut c = compare(&before, &after, rerun.then_some(&again));
     c["runner"] = json!(ran.join(", "));
     c["not_run"] = json!(not_run);
+    c["seconds"] = json!(seconds);
     if !all_new.is_empty() { c["note"] = json!(format!("the old code had no test runner Kern can read in {}, so those tests are all new", all_new.join(", "))); }
     Ok(c)
 }
