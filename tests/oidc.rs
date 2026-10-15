@@ -74,6 +74,31 @@ fn a_token_signed_by_another_key_or_algorithm_is_refused() {
     denied(check(&format!("{head}.{body}.{}", URL_SAFE_NO_PAD.encode([0xff; 256]))), "smaller than");
 }
 
+/// Tokens over a full Kern seal, for end-to-end tests of approve and verify; tokens.json keeps each one's seal under "seals".
+#[test]
+fn tokens_over_a_full_seal_are_bound_to_it_and_name_their_workflow_ref() {
+    let all: Value = serde_json::from_str(include_str!("fixtures/oidc/tokens.json")).unwrap();
+    let seals = &all["seals"];
+    let look = json!({ "v": 1, "repository": "acme/shop", "pull": 7, "base": "1".repeat(40), "head": "2".repeat(40), "decision": "look", "receipt_sha256": "3".repeat(64) });
+    let mut blocked = look.clone();
+    blocked["decision"] = json!("blocked");
+    assert_eq!((&seals["full-valid"], &seals["full-bare-sha"], &seals["full-pull-ref"], &seals["full-blocked"]), (&look, &look, &look, &blocked));
+    for (name, reference) in [("full-valid", "refs/heads/one"), ("full-bare-sha", "0123456789abcdef0123456789abcdef01234567"), ("full-pull-ref", "refs/pull/9/head"), ("full-blocked", "refs/heads/one")] {
+        let workflow = format!("{WORKFLOW}{reference}");
+        let claims = oidc::verify(&token(name), &keys(), &oidc::audience(&seals[name]).unwrap(), &workflow, Some("acme/shop")).unwrap();
+        assert_eq!((claims["job_workflow_ref"].as_str(), claims["run_id"].as_str(), claims["iss"].as_str()), (Some(workflow.as_str()), Some("123"), Some(ISSUER)), "{name}");
+    }
+    // verify checks a prefix, so with WORKFLOW alone the bare commit (which a fork could supply) and the pull request's ref pass too
+    let (aud, branch) = (oidc::audience(&look).unwrap(), format!("{WORKFLOW}refs/heads/"));
+    for name in ["full-bare-sha", "full-pull-ref"] { oidc::verify(&token(name), &keys(), &aud, WORKFLOW, Some("acme/shop")).unwrap(); }
+    // a caller that wants a branch narrows the prefix, and both are refused
+    oidc::verify(&token("full-valid"), &keys(), &aud, &branch, Some("acme/shop")).unwrap();
+    denied(oidc::verify(&token("full-bare-sha"), &keys(), &aud, &branch, Some("acme/shop")), "workflow");
+    denied(oidc::verify(&token("full-pull-ref"), &keys(), &aud, &branch, Some("acme/shop")), "workflow");
+    // a blocked decision is another seal, so another audience
+    denied(oidc::verify(&token("full-blocked"), &keys(), &aud, WORKFLOW, Some("acme/shop")), "audience");
+}
+
 /// The test key's own raw signatures over blocks a parsing verifier would take: the hash followed by garbage (Bleichenbacher 2006), and a
 /// DigestInfo without its NULL. Comparing s^e mod n with the one rebuilt block refuses both.
 #[test]
