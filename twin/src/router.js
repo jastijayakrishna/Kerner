@@ -14,6 +14,7 @@ async function load(version) {
 }
 
 const RETRY_MS = 1000;
+const WATCH_MS = 1000;
 
 async function readText(file) {
   try {
@@ -58,6 +59,7 @@ export class Router {
   #onSwitch;
   #queue = Promise.resolve(true);
   #watcher = null;
+  #settle = null;
   #seen = null;
   #unwritten = false;
   #retry = null;
@@ -167,7 +169,9 @@ export class Router {
     this.#watcher = () => {
       this.#enqueue(() => this.#follow()).catch(() => {});
     };
-    watchFile(this.#file, { interval: 1000, persistent: false }, this.#watcher);
+    watchFile(this.#file, { interval: WATCH_MS, persistent: false }, this.#watcher);
+    this.#settle = setTimeout(this.#watcher, WATCH_MS);
+    this.#settle.unref();
   }
 
   async #follow() {
@@ -189,6 +193,8 @@ export class Router {
     this.#closed = true;
     if (this.#watcher) unwatchFile(this.#file, this.#watcher);
     this.#watcher = null;
+    clearTimeout(this.#settle);
+    this.#settle = null;
     clearTimeout(this.#retry);
     this.#retry = null;
   }

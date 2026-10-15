@@ -178,6 +178,17 @@ test("the control file's watcher never rejects, even when telling the twin's thr
   }
 });
 
+test('a switch a person writes as the app starts is followed, even when the watcher takes its first look after the write', async () => {
+  const { router, file, done } = await opened();
+  try {
+    unwatchFile(file);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), serving: 'candidate', reason: 'a person switched it on' }));
+    await until(() => router.serving === 'candidate');
+  } finally {
+    done();
+  }
+});
+
 test('a person who holds the old version in the control file while it already serves is followed: the hold reaches the twin', async () => {
   const { router, told, file, done } = await opened();
   try {
