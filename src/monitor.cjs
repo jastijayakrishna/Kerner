@@ -67,7 +67,12 @@ if (out && !harness && !globalThis.__kernMonitor) {
   const tmp = path.resolve(require('os').tmpdir());
   const exists = (p) => { try { lstat(p); return true; } catch { return false; } };
   const snapshot = exists(input);
-  const within = (root, abs) => { const r = path.relative(root, abs); return r === '' ? '.' : !r.startsWith('..') && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null; };
+  // A folder reached through a link (macOS keeps temporary folders under /var, a link to /private/var) has two names, and the working
+  // directory always has the real one: a path counts as inside a folder under either name.
+  const names = (p) => { try { return [...new Set([p, fs.realpathSync(p)])]; } catch { return [p]; } };
+  const wsNames = names(ws), tmpNames = names(tmp);
+  const within1 = (root, abs) => { const r = path.relative(root, abs); return r === '' ? '.' : !r.startsWith('..') && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null; };
+  const within = (roots, abs) => { for (const root of roots) { const r = within1(root, abs); if (r !== null) return r; } return null; };
   const made = new Set();
   const where = (p) => {
     try {
@@ -77,12 +82,12 @@ if (out && !harness && !globalThis.__kernMonitor) {
   };
   const owned = (abs) => {
     if (!abs || made.has(abs)) return null;
-    const rel = within(ws, abs);
+    const rel = within(wsNames, abs);
     if (rel !== null) {
       if (rel === 'node_modules' || rel.startsWith('node_modules/')) return null;
       return (snapshot ? exists(path.join(input, rel)) : exists(abs)) ? rel : null;
     }
-    if (within(tmp, abs) !== null || abs.startsWith('/proc/') || abs.startsWith('/dev/')) return null;
+    if (within(tmpNames, abs) !== null || abs.startsWith('/proc/') || abs.startsWith('/dev/')) return null;
     return abs.split(path.sep).join('/');
   };
   const destroy = (kind, p) => { const abs = where(p); const shown = owned(abs); if (shown !== null && exists(abs)) note(kind, shown); };

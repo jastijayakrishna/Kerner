@@ -559,7 +559,9 @@ fn a_module_that_never_finishes_loading_is_not_checked_rather_than_stalling_the_
     candidate.insert("src/stuck.js".into(), file(&format!("// still stuck\n{stuck}")));
     candidate.insert("src/money.js".into(), file(&format!("// tidied\n{MONEY}")));
     let started = std::time::Instant::now();
-    let c = compare_with(&base, &candidate, &nothing_changes(), |p| p["load_ms"] = json!(1000), Default::default());
+    // 5 s: a module that never finishes still never does, while a slow machine (GitHub's Windows runners) starts a fresh worker for the
+    // healthy one in time; at 1 s it did not.
+    let c = compare_with(&base, &candidate, &nothing_changes(), |p| p["load_ms"] = json!(5000), Default::default());
     assert!(started.elapsed() < std::time::Duration::from_secs(60), "{:?}", started.elapsed());
     passed(&c);
     assert!(c.evidence["probed"]["not_loadable"][0].as_str().is_some_and(|s| s.contains("src/stuck.js") && s.contains("did not finish loading in time")), "{}", c.evidence);
@@ -989,4 +991,27 @@ fn the_monitor_records_files_the_code_deletes_or_overwrites_and_counts_calls() {
     assert!(!behavior.iter().any(|b| b.starts_with("count")), "counts are not behaviours: {behavior:?}");
     // every attempt is counted, so the cost lens can compare how often the old and the new code call a host
     assert_eq!(kern::sandbox::behavior_counts(recorded.as_bytes()).get("net:paid.example.invalid:443"), Some(&3));
+}
+
+#[test]
+fn the_monitor_knows_a_workspace_it_is_told_about_through_a_link() {
+    // macOS keeps temporary folders under /var, a link to /private/var: Node's working directory has the real name, while the folder Kern
+    // names may be the linked one. A file deleted in the workspace is that file, under either name.
+    let t = Temp::new();
+    let (real, link, input, log) = (t.join("real"), t.join("link"), t.join("input"), t.join("behavior.log"));
+    tree(&real, &[("a.txt", "a")]);
+    tree(&input, &[("a.txt", "a")]);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real).output().unwrap().status.success());
+    std::fs::write(t.join("monitor.cjs"), kern::sandbox::MONITOR).unwrap();
+    let env = [("KERN_MONITOR", log.as_path()), ("KERN_WORKSPACE", link.as_path()), ("KERN_INPUT", input.as_path())];
+    let out = node(&["--require".as_ref(), t.join("monitor.cjs").as_os_str(), "-e".as_ref(), "require('fs').unlinkSync('a.txt')".as_ref()], &real, &env);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Under the linked name alone, the workspace looked like the temporary folder it sits in, and the delete went unrecorded.
+    let recorded = format!("{}{}", kern::sandbox::BEHAVIOR, std::fs::read_to_string(&log).unwrap_or_default());
+    let (_, behavior) = kern::sandbox::split_behavior(recorded.as_bytes());
+    let behavior = behavior.unwrap();
+    assert!(behavior.contains("delete:a.txt"), "the delete was not recorded as delete:a.txt: {behavior:?}");
 }
