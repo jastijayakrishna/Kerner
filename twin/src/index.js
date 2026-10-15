@@ -2,6 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { current, loadRecord, settleLoad, wrapListener } from './capture.js';
 import { recordFetch } from './record.js';
 import { ghostEnv } from './ghost-common.js';
+import { BWRAP } from './process-ghost.js';
 import { Router } from './router.js';
 import { acceptMatcher } from './manifest.js';
 import { createRequire } from 'node:module';
@@ -200,7 +201,8 @@ class Twin {
     }
     // A sandbox that was asked for and does not work is never quietly dropped: the twin stays off and says why.
     if (this.#settings.sandbox === 'bwrap') {
-      const probe = spawnSync('bwrap', ['--unshare-user', '--unshare-net', '--ro-bind', '/', '/', 'true'], { encoding: 'utf8', timeout: 10000 });
+      // With the ghosts' own arguments: inside a container that masks parts of /proc, bwrap starts but cannot mount a fresh /proc.
+      const probe = spawnSync('bwrap', [...BWRAP, 'true'], { encoding: 'utf8', timeout: 10000 });
       if (probe.status !== 0) {
         this.#disabled = `the bwrap sandbox does not work here: ${String(probe.error?.message ?? probe.stderr ?? '').trim().slice(0, 200)}`;
         return;

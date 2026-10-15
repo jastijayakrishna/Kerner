@@ -5,7 +5,8 @@ import { answer, ask, ghostEnv, stopped } from './ghost-common.js';
 const MAIN = fileURLToPath(new URL('./process-ghost-main.js', import.meta.url));
 // Node 22.13 named the permission model's flag --permission; Node 22.12 still calls it --experimental-permission.
 const PERMISSION = process.allowedNodeEnvironmentFlags.has('--permission') ? '--permission' : '--experimental-permission';
-const BWRAP = ['--unshare-user', '--unshare-net', '--unshare-ipc', '--unshare-uts', '--unshare-pid', '--die-with-parent', '--new-session',
+/** bwrap's arguments for a ghost; the twin's start-up probe runs `true` with exactly these, so a sandbox that half works is caught there. */
+export const BWRAP = ['--unshare-user', '--unshare-net', '--unshare-ipc', '--unshare-uts', '--unshare-pid', '--die-with-parent', '--new-session',
   '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
 
 /**
