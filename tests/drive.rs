@@ -884,7 +884,8 @@ fn the_agent_sees_no_ci_token() {
 #[test]
 fn the_drive_action_builds_a_static_kern_from_its_own_source_and_keeps_tokens_from_the_agent() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let action = std::fs::read_to_string(root.join("drive/action.yml")).unwrap();
+    // A Windows checkout may give the file \r\n line endings.
+    let action = std::fs::read_to_string(root.join("drive/action.yml")).unwrap().replace("\r\n", "\n");
     let step = |name: &str| action.split(&format!("- name: {name}\n")).nth(1).unwrap_or_else(|| panic!("no step {name}")).split("\n    - name:").next().unwrap().to_string();
     // cargo and rustup read .cargo/config.toml and rust-toolchain.toml from the working directory, which holds the pull request's files.
     let install = step("Install Kern");
