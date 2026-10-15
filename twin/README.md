@@ -2,6 +2,8 @@
 
 The twin lets a new version of a Node service prove itself on real requests, and lets it serve customers only once it has.
 
+Back to the [overview](../README.md). Measured results on real apps: [docs/evidence.md](../docs/evidence.md#evidence-2026-10-11-the-twin-on-real-apps).
+
 It runs the old and the new version as ghosts:
 - After a real answer has gone out, both ghosts get a copy of the sampled request, in a sealed world where nothing real can be touched.
 - Kern compares their answers and their writes, and counts every comparison per customer segment and route.
@@ -160,7 +162,7 @@ With `cases: '.kern-twin/cases'`, every unexplained difference becomes a case:
   - In other text (XML, say) only the patterns apply, not the private names.
   - A value the app adds from its own configuration (a secret from the environment in an error message, say) is not a request value, and is not scrubbed.
 
-Then:
+Then, with your project's dependencies including the twin package (it is not published on npm yet; from a Kern checkout, `node twin/bin/kern-twin.js` runs the same commands):
 
 ```bash
 npx kern-twin test --cases .kern-twin/cases --candidate src/app.js          # fails until the new code answers as the old one did

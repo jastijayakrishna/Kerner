@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
       - name: Fetch pull request heads
         run: git fetch --no-tags origin '+refs/pull/*/head:refs/remotes/pull/*'
-      - uses: OWNER/kern@FULL_COMMIT_SHA
+      - uses: jastijayakrishna/Kerner@FULL_COMMIT_SHA
         with:
           install-only: "true"
       - name: Choose the period

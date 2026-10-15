@@ -1,5 +1,5 @@
 # Installs Kern on Windows from a GitHub release, checked against the release's SHA256SUMS. In PowerShell:
-#   irm https://github.com/OWNER/kern/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/jastijayakrishna/Kerner/releases/latest/download/install.ps1 | iex
 # $env:KERN_VERSION = 'v0.4.0' picks the release, $env:KERN_INSTALL_DIR the folder (default %LOCALAPPDATA%\Programs\kern).
 # Works in Windows PowerShell 5.1 and PowerShell 7. The release workflow writes its repository and tag into this file.
 & {

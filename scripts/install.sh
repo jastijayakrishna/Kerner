@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs Kern on Linux or macOS from a GitHub release, checked against the release's SHA256SUMS:
-#   curl -fsSL https://github.com/OWNER/kern/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/jastijayakrishna/Kerner/releases/latest/download/install.sh | sh
 # KERN_VERSION=v0.4.0 picks the release, KERN_INSTALL_DIR the folder (default ~/.local/bin). On Windows, use
 # install.ps1 from the same release in PowerShell. The release workflow writes its repository and tag into this file.
 set -eu
