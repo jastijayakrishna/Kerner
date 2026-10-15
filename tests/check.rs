@@ -239,6 +239,39 @@ fn dependency_changes_say_which_packages_moved_and_a_lockfile_that_points_elsewh
 }
 
 #[test]
+fn ordinary_imports_and_test_files_are_no_new_power() {
+    let (t, base) = project();
+    let head = commit(&t, &[
+        ("src/card.jsx", "import React from 'react';\nimport { total } from '@/lib/total';\nimport path from 'node:path';\nexport const Card = () => React.createElement('b', null, path.basename(String(total)));\n"),
+        ("test/net.test.js", "import { execSync } from 'node:child_process';\nimport { test } from 'vitest';\ntest('runs', () => execSync('true'));\n"),
+        ("src/send.js", "import axios from 'axios';\nexport const send = (x) => axios.post('https://example.invalid', x);\n"),
+    ], &[]);
+    let r = kern::rules::rules(&t.0, &base, &head).unwrap();
+    let powers: Vec<String> = r["powers"].as_array().unwrap().iter().map(|p| format!("{} {}", p["path"].as_str().unwrap(), p["added"])).collect();
+    assert_eq!(powers.len(), 1, "only the network package counts: {powers:?}");
+    assert!(powers[0].starts_with("src/send.js") && powers[0].contains("axios"), "{powers:?}");
+}
+
+#[test]
+fn a_test_file_the_change_adds_needs_a_look_where_an_existing_one_would_block() {
+    let (t, base) = project();
+    let head = commit(&t, &[("test/browser.spec.js", "import { test } from 'vitest';\ntest.skip(!process.env.BROWSER, 'needs a browser');\ntest('opens', () => {});\n")], &[]);
+    let rules = kern::rules::rules(&t.0, &base, &head).unwrap();
+    assert_eq!(rules["tricks"][0]["operation"], "add", "{rules}");
+    let mut tests = clean_tests();
+    tests["new_problems"] = json!(["test/browser.spec.js"]);
+    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    assert_eq!(r["decision"], "look", "a new test file cannot hide a test that passed before: {r}");
+    assert_eq!(kinds(&r, "look"), ["new-test-fails", "new-test-skips"], "{r}");
+    let head = commit(&t, &[("test/total.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest.skip('adds', () => expect(total([1, 2])).toBe(3));\n")], &[]);
+    let rules = kern::rules::rules(&t.0, &base, &head).unwrap();
+    let mut tests = clean_tests();
+    tests["new_problems"] = json!(["test/total.test.js"]);
+    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-file".to_string(), "trick".to_string()]), "{r}");
+}
+
+#[test]
 fn a_change_with_no_code_has_no_powers_or_tricks() {
     let (t, base) = project();
     let head = commit(&t, &[("README.md", "# Shop\n")], &[]);

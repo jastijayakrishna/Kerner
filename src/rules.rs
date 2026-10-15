@@ -13,6 +13,17 @@ const AGENT_FOLDERS: [&str; 3] = [".cursor", ".claude", ".windsurf"];
 const LARGEST: u64 = 1 << 20;
 const LARGEST_LOCKFILE: u64 = 64 << 20;
 fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
+const RISKY_BUILTINS: [&str; 15] = ["child_process", "cluster", "worker_threads", "vm", "net", "tls", "dgram", "dns", "http", "https", "http2", "inspector", "wasi", "module", "repl"];
+const RISKY_PACKAGES: [&str; 26] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
+    "socket.io-client", "execa", "cross-spawn", "shelljs", "zx", "node-pty", "vm2", "isolated-vm", "dotenv", "puppeteer", "simple-git", "ssh2", "nodemailer", "basic-ftp"];
+pub fn risky(capability: &str) -> bool {
+    match capability.split_once(':') {
+        Some(("node", m)) => RISKY_BUILTINS.contains(&m),
+        Some(("package", p)) => RISKY_PACKAGES.contains(&p),
+        Some(("global", g)) => g != "dynamic",
+        _ => true,
+    }
+}
 
 fn base_name(p: &str) -> &str { p.rsplit('/').next().unwrap_or(p) }
 fn dependency_file(p: &str) -> bool {
@@ -69,11 +80,21 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let (old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);
     let (mut powers, mut tricks, mut settings, mut not_checked) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let none = BTreeMap::new();
-    for (p, op) in &inspected {
+    let test_files = crate::suite::test_paths(&paths);
+    let is_test = |p: &str| test_files.iter().any(|t| if t.ends_with('/') { p.starts_with(t.as_str()) } else { p == t });
+    for (p, op) in inspected.iter().filter(|(p, _)| !is_test(p)) {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
         match crate::capability::check(&old, &new, &one, &none) {
             Ok(_) => {}
-            Err(e) => match widened(&e.0) { Some(list) => powers.extend(list), None => not_checked.push(json!({ "path": p, "why": e.0 })) },
+            Err(e) => match widened(&e.0) {
+                Some(list) => powers.extend(list.into_iter().filter_map(|mut x| {
+                    let added: Vec<Value> = x["added"].as_array().into_iter().flatten().filter(|c| c.as_str().is_some_and(risky)).cloned().collect();
+                    if added.is_empty() { return None; }
+                    x["added"] = json!(added);
+                    Some(x)
+                })),
+                None => not_checked.push(json!({ "path": p, "why": e.0 })),
+            },
         }
     }
     let package = new.get("package.json").and_then(|e| e.bytes.clone());
@@ -82,7 +103,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     for (p, op) in &changes {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
         if let Err(e) = crate::proof::screen(&old, &new, &one, &tests) {
-            let item = json!({ "path": p, "why": e.0 });
+            let item = json!({ "path": p, "operation": op, "why": e.0 });
             if e.0.starts_with("Test runner configuration cannot change") { settings.push(item); }
             else if e.0.starts_with("A test file skips or focuses tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }
             else { not_checked.push(item); }

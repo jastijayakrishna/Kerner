@@ -33,10 +33,18 @@ fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
 }
 
 pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
-    let (mut blocked, mut look) = (Vec::new(), Vec::new());
+    let (mut blocked, mut look, mut new_tests) = (Vec::new(), Vec::new(), Vec::new());
+    let added = |p: &str| rules["changed"].as_array().into_iter().flatten().any(|c| c["path"] == p && c["operation"] == "add");
     for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
-    for t in strings(&tests["new_problems"]) { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}", code(&t, 200)))); }
-    for x in rules["tricks"].as_array().into_iter().flatten() { blocked.push(item("trick", format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))))); }
+    for t in strings(&tests["new_problems"]) {
+        if added(&t) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}", code(&t, 200)))); }
+        else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}", code(&t, 200)))); }
+    }
+    for x in rules["tricks"].as_array().into_iter().flatten() {
+        let path = x["path"].as_str().unwrap_or("");
+        if x["operation"] == "add" { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips or focuses some of its own tests", code(path, 160)))); }
+        else { blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""))))); }
+    }
     let (described, surprises) = behaviour_items(&behaviour["report"]);
     let sorted = behaviour["report"]["sorted"].is_object();
     for s in &surprises { look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
@@ -44,6 +52,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let caps: Vec<String> = strings(&p["added"]).iter().map(|c| code(c, 80)).collect();
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
+    look.extend(new_tests);
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);

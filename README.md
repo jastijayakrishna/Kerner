@@ -72,8 +72,10 @@ What Kern checks on every pull request:
 1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests in a sealed sandbox
    (gVisor) with the network off. A test that passed before and fails now blocks. It must fail twice, so a flaky test is called flaky,
    not broken. A test that stops running, or is newly skipped, needs a look. Tests that already failed before the change are set aside.
-2. **Test tricks.** A test file that newly skips or focuses tests (`.only`, `.skip`), or code that reaches into the test runner, blocks.
-3. **New powers.** Changed code that newly starts programs, reaches the network, reads environment variables or runs `eval` needs a look.
+2. **Test tricks.** An existing test file that newly skips or focuses tests (`.only`, `.skip`), or code that reaches into the test runner,
+   blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
+3. **New powers.** Changed code (not tests) that newly starts programs, reaches the network, reads environment variables or runs `eval`
+   needs a look. Ordinary imports, such as a UI library or a project's own modules, are not powers.
 4. **Files that steer everything else.** CI, secret and configuration files, test runner settings, and the files that instruct coding
    agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
 5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). A lockfile entry that now downloads a package from
