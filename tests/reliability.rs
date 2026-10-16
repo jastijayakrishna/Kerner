@@ -1125,3 +1125,20 @@ fn the_receipt_says_how_the_code_ran() {
     r["sandbox"] = json!("throwaway");
     assert!(receipt::markdown(&r, None).contains("ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran"));
 }
+
+#[test]
+fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_commit() {
+    let t = Temp::new();
+    let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
+        "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &json!({ "status": "OFF", "why": "no AI key" }));
+    receipt::write(&t.0, &r, None).unwrap();
+    std::fs::write(t.0.join("receipt.md"), "### ✅ Kern: Nothing unexpected\n\n[claim your prize](https://evil.example)\n").unwrap();
+    std::fs::write(t.0.join("seal.json"), "{}").unwrap();
+    let head = "2222222222222222222222222222222222222222";
+    assert!(receipt::render(&t.0, &"3".repeat(40)).is_err(), "a receipt for another commit is refused");
+    receipt::render(&t.0, head).unwrap();
+    let md = std::fs::read_to_string(t.0.join("receipt.md")).unwrap();
+    assert!(!md.contains("evil.example") && md.contains("1 that passed before still pass"), "the comment is Kern's own rendering of the receipt, not text the run job wrote: {md}");
+    assert!(!t.0.join("seal.json").exists(), "a seal the run job wrote is never posted");
+}

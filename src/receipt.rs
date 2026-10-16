@@ -392,6 +392,18 @@ pub fn seal(r: &Value, repository: &str, number: u64) -> R<Value> {
 }
 pub fn seal_line(seal: &Value, token: &str) -> String { format!("{SEAL_MARK}{} -->", json!({ "seal": seal, "token": token })) }
 
+pub fn render(out: &Path, head: &str) -> R<Value> {
+    ensure!(head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit()), "Expected the pull request's head commit");
+    let path = out.join("receipt.json");
+    ensure!(std::fs::metadata(&path)?.len() <= 8 << 20, "The receipt is larger than 8 MiB");
+    let r = read_json(&path)?;
+    ensure!(r["version"] == 1 && r["head"].as_str() == Some(head), "The receipt is not for this pull request's head commit");
+    ensure!(matches!(r["decision"].as_str(), Some("clear" | "look" | "blocked")), "The receipt has no decision");
+    let _ = std::fs::remove_file(out.join("seal.json"));
+    let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|c| r["behaviour"]["status"] == "RAN" && c.len() <= 256 << 10);
+    write(out, &r, comment.as_deref())?;
+    Ok(json!({ "status": "RENDERED", "decision": r["decision"], "head": head }))
+}
 pub fn sign(out: &Path, repository: &str, number: u64) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
     let s = seal(&read_json(out.join("receipt.json"))?, repository, number)?;

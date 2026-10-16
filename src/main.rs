@@ -208,6 +208,10 @@ fn cli() -> R<(Option<Value>, i32)> {
                     count(rest, 3)?;
                     (Some(kern::receipt::sign(Path::new(&rest[0]), &rest[1], number(&rest[2])?)?), 0)
                 }
+                "render" => {
+                    count(rest, 2)?;
+                    (Some(kern::receipt::render(Path::new(&rest[0]), &rest[1])?), 0)
+                }
                 "post" => {
                     count(rest, 3)?;
                     (Some(kern::receipt::post(&kern::github::Api::from_env("post Kern's receipt on the pull request")?, Path::new(&rest[0]), &rest[1], number(&rest[2])?)?), 0)
