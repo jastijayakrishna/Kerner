@@ -211,12 +211,17 @@ pub fn early_stop(started_ms: u64, now_ms: u64, timeout: u64, progress: &str) ->
         if let Ok(at) = at.parse::<u64>() && seen.insert(path) { times.push(at.saturating_sub(started_ms) / 1000); }
     }
     let (elapsed, done) = (now_ms.saturating_sub(started_ms) / 1000, times.len() as u64);
-    if total < 10 || done >= total || elapsed < (timeout / 10).max(10) { return None; }
+    if total < 10 || done >= total || elapsed < (timeout / 6).max(10) { return None; }
     if done == 0 { return (total >= 20 && 2 * elapsed >= timeout).then(|| format!("stalled {elapsed}")); }
     let span = elapsed.saturating_sub(times.iter().copied().min().unwrap_or(0));
-    if done < 3 || span < 10 { return None; }
-    let projected = elapsed + (total - done) * span / (done - 1);
-    (projected > 2 * timeout).then(|| format!("projected {projected} {elapsed}"))
+    if done < 10 || span < 30 { return None; }
+    let left = total - done;
+    let window = (elapsed / 3).max(30);
+    let recent = times.iter().filter(|t| **t + window >= elapsed).count() as u64;
+    let steady = elapsed + left * span / (done - 1);
+    let lately = if recent >= 3 { elapsed + left * window / recent } else { steady };
+    let projected = steady.min(lately);
+    (projected > 4 * timeout).then(|| format!("projected {projected} {elapsed}"))
 }
 pub fn first_error(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|l| {

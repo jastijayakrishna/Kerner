@@ -737,7 +737,7 @@ fn a_failed_install_is_named_as_the_reason_the_tests_did_not_run() {
 fn a_runner_that_stops_before_any_test_is_told_apart_from_one_that_finds_none() {
     assert!(suite::stopped_early(b"exit 1", b"Error: FRONT_DATABASE_URI must be set to a test DB", b"{}"), "dust's global setup threw, and the receipt said the runner found no tests");
     assert!(suite::stopped_early(b"exit 0", b"Error: nuxt-module-build failed: Error: spawnSync pnpm ENOENT", b"{}"));
-    assert!(suite::stopped_early(b"exit 1", b"", b"{}"));
+    assert!(!suite::stopped_early(b"exit 1", b"", b"{\"numTotalTests\":0,\"testResults\":[]}"), "jest exits 1 when no test is related to ant-design's docs theme; no error, no crash");
     assert!(!suite::stopped_early(b"exit 1", b"No tests found, exiting with code 1", b"{}"), "a package with no tests left is the old finding, not a crash");
     assert!(!suite::stopped_early(b"exit 1", b"", b"No test files found, exiting with code 1"));
     assert!(!suite::stopped_early(b"exit 0", b"", b"{}"), "MetaMask's github-tools has no jest tests and passes with none");
@@ -751,8 +751,12 @@ fn a_suite_on_course_to_take_far_longer_than_its_limit_is_stopped_early_and_one_
         std::iter::once(format!("total {total}")).chain(done.iter().map(|(ms, p)| format!("done {} {p}", start + ms))).collect::<Vec<_>>().join("\n")
     };
     let metamask: Vec<(u64, String)> = (0..40).map(|i| (60_000 + i * 3_000, format!("/workspace/ui/t{i}.test.ts"))).collect();
-    assert_eq!(early_stop(start, start + 180_000, 900, &lines(2000, &metamask)).as_deref(), Some("projected 6210 180"),
+    assert_eq!(early_stop(start, start + 180_000, 900, &lines(2000, &metamask)).as_deref(), Some("projected 6060 180"),
         "metamask-extension ran 15 minutes, then its related tests 15 more, and gave nothing");
+    let ghost: Vec<(u64, String)> = (0..15).map(|i| (60_000 + i * 3_500, format!("/workspace/ghost/core/t{i}.test.js"))).collect();
+    assert_eq!(early_stop(start, start + 112_000, 900, &lines(700, &ghost)), None, "Ghost's suite starts slowly and finished in 453 seconds; an early guess must not stop it");
+    let speeding: Vec<(u64, String)> = (0..10).map(|i| (60_000 + i * 10_000, format!("/w/slow{i}.test.js"))).chain((0..100).map(|i| (150_000 + i * 600, format!("/w/fast{i}.test.js")))).collect();
+    assert_eq!(early_stop(start, start + 210_000, 900, &lines(3000, &speeding)), None, "the recent pace wins when the run is speeding up");
     let quick_after_slow_start: Vec<(u64, String)> = (0..120).map(|i| (300_000 + i * 100, format!("/workspace/t{i}.test.ts"))).collect();
     assert_eq!(early_stop(start, start + 312_000, 900, &lines(3000, &quick_after_slow_start)), None, "five minutes of start-up, then ten files a second: done in about ten minutes");
     assert_eq!(early_stop(start, start + 450_000, 900, &lines(500, &[])).as_deref(), Some("stalled 450"), "loreai printed only warnings for 30 minutes");

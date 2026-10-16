@@ -620,7 +620,8 @@ pub fn guessed(package: &Value) -> Option<String> {
 pub fn stopped_early(ending: &[u8], errors: &[u8], output: &[u8]) -> bool {
     let (errors, output) = (String::from_utf8_lossy(errors), String::from_utf8_lossy(output));
     let empty = [&errors, &output].iter().any(|t| t.contains("No tests found") || t.contains("No test files found"));
-    !empty && (ending != b"exit 0" || crate::sandbox::first_error(&errors).is_some())
+    let _ = ending;
+    !empty && crate::sandbox::first_error(&errors).is_some()
 }
 fn install_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Value> {
     let applies = |d: &str| d == "." || d == dir || dir.starts_with(&format!("{d}/"));
@@ -927,11 +928,18 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
+                let (mut tests, mut phase, mut repairable, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), true, true, Vec::new());
+                let run = loop {
                 let at = now_ms();
-                let mut run = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                timed(format!("old{label}"), at);
+                let run = run_side(out, op, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Nothing(e.0));
+                timed(phase.clone(), at);
                 old_seconds = (now_ms() - at) / 1000;
-                if let Some(why) = cannot_load(Some(&run)) {
+                if !pending.is_empty() {
+                    if cannot_load(Some(&run)).is_some() { tried = format!(" (even after Kern ran {} first)", pending.join(", ")); } else { built = std::mem::take(&mut pending); }
+                    pending.clear();
+                }
+                if repairable && let Some(why) = cannot_load(Some(&run)) {
+                    repairable = false;
                     let missing = missing_packages(&why);
                     let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
                     let compiled = why.contains("No test files found");
@@ -944,28 +952,27 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                         let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
                         let on_old = prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until);
                         let on_new = prepare(out, op, &volume("new"), &repair_steps(&workspace(repo, head), &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
+                        timed(format!("prepare{label}"), at);
                         match (on_old, on_new) {
                             (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
                             (Ok(_), Err(e)) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
                             (Ok(lo), Ok(ln)) => {
                                 if let Some(u) = uneven_steps(&lo, &ln) { uneven_why = Some(u); }
-                                let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                                old_seconds = (now_ms() - at) / 1000;
-                                if cannot_load(Some(&again)).is_some() { tried = format!(" (even after Kern ran {} first)", names.join(", ")); } else { built = names; }
-                                run = again;
+                                pending = names;
+                                phase = phase.replacen("old", "old-built", 1);
+                                continue;
                             }
                         }
-                        timed(format!("old-built{label}"), at);
                     }
                 }
-                if let Side::Slow(why) = &run && tried.is_empty() && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
+                if narrowable && let Side::Slow(why) = &run && tried.is_empty() && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
+                    narrowable = false;
                     whole_why = whole(why);
-                    let at = now_ms();
-                    run = run_side(out, op, &volume("old"), (&o, env), &suite.dir, &format!("old-related{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                    timed(format!("old-related{label}"), at);
-                    old_seconds = (now_ms() - at) / 1000;
-                    narrowed = Some(n);
+                    (tests, phase, narrowed) = (o, format!("old-related{label}"), Some(n));
+                    continue;
                 }
+                break run;
+                };
                 Some(run)
             }
         };
@@ -975,6 +982,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             Some(Side::Slow(why)) => {
                 let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{more}") }));
+                continue;
+            }
+            Some(Side::Ran(r, _)) if narrowed.is_some() && r.tests.is_empty() && r.problems.is_empty() => {
+                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} were not run: {whole_why}, and no test is related to the changed files") }));
                 continue;
             }
             Some(Side::Ran(r, _)) if r.tests.values().all(|c| c.passed == 0) && (!r.tests.is_empty() || !r.problems.is_empty()) => {
