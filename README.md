@@ -76,7 +76,9 @@ What Kern checks on every pull request:
    blocks, but only when it fails again when Kern runs its file alone on the new code, and not when the old code runs that file alone.
    A failure that shows only when the whole suite runs needs a look; one that does not repeat is called flaky. A test that stops running,
    or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside, and so is a new
-   test that fails here with the same error as they do (the sandbox lacks something, not the change). A project setting that stops
+   test that fails here with the same error as they do (the sandbox lacks something, not the change). A block needs proof from both
+   sides: a test file with no record of passing on the old code, or a failure on sides Kern could not set up the same way (installs,
+   Linux parts, a build step), needs a look instead. A project setting that stops
    at the first failure or shuffles the order is turned off, so both sides run the whole suite in the same order. The old code's tests
    run first: when they cannot load because a package of the same repository was never built, or because the steps the test script
    names before its runner (`npm run build &&`, a `pre` script) did not run, Kern runs that build script or those steps as the test user
@@ -96,9 +98,16 @@ What Kern checks on every pull request:
 4. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
    templates aside), test runner settings (the test script in `package.json` included), and the files that instruct coding agents
    (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
-5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). A lockfile entry that now downloads a package from
-   somewhere other than its own registry tarball needs a look.
-6. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
+5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
+   that has been on npm for a week needs no look; a release less than a week old is named, because that is where hijacked packages
+   show up. A new package, a major update and a lockfile entry that downloads a package from somewhere other than its own registry
+   tarball need a look.
+6. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
+   run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
+   published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
+   the package says it supports (`engines.node`, checked against Node's own documentation); and HTML that adds inline styles or scripts
+   that a Content-Security-Policy in the same change forbids.
+7. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
    it on the old and the new code and lists what behaves differently, with what the pull request does not mention first.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
