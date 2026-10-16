@@ -67,7 +67,7 @@ fn as_run_gives(r: &Path, base: &str, head: &str, package: &str, old: &Report, n
     let changes = kern::rules::changed(r, base, head).unwrap();
     let rules = kern::rules::rules(r, base, head).unwrap();
     let mut tests = suite::compare(old, new, Some(new));
-    let keep = suite::kept_plan(r, (base, head), &changes, old, |_| true);
+    let keep = suite::kept_plan(r, (base, head), &changes, old, "");
     let side = runner(package);
     let tree = git(r, &["ls-tree", "-r", "--name-only", head]);
     let taken = keep.files.keys().any(|k| tree.lines().any(|l| l == k.as_str()));
@@ -84,7 +84,7 @@ fn as_run_gives(r: &Path, base: &str, head: &str, package: &str, old: &Report, n
         out
     };
     let first = if keep.run.is_empty() { Ok(Report::default()) }
-        else if suite::focused(&side, &keep.run, "").is_none() { Err(suite::SINGLE_FILES.to_string()) }
+        else if suite::kept_focus(&side, &keep.run, "").is_none() { Err(suite::SINGLE_FILES.to_string()) }
         else if taken { Err("A test run file may not replace a project file".to_string()) }
         else { Ok(suite::unkept(&run(&keep.run, true), &keep.back)) };
     let second = first.as_ref().ok().map(|f| suite::rewritten(old, f, None)).filter(|c| !c.is_empty()).map(|candidates| {

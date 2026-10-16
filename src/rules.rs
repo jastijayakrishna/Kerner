@@ -28,6 +28,7 @@ pub fn risky(capability: &str) -> bool {
         Some(("node", m)) => RISKY_BUILTINS.contains(&m),
         Some(("package", p)) => RISKY_PACKAGES.contains(&p) || RISKY_SCOPES.iter().any(|s| p.starts_with(s)),
         Some(("global", g)) => g != "dynamic",
+        Some(("bun" | "deno", m)) => !["argv", "args", "version", "revision", "main", "mainModule", "nanoseconds", "inspect", "deepEquals", "escapeHTML", "stringWidth", "sleep", "sleepSync", "build", "noColor"].contains(&m),
         _ => true,
     }
 }
@@ -184,7 +185,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     wanted.extend(manifests.iter().cloned());
     let mut configs: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.clone()).filter(|p| runner_config(p)).take(MANIFESTS).collect();
     wanted.extend(configs.iter().cloned());
-    let moved = renames(repo, base, head)?;
+    let moved: Vec<(String, String, bool)> = renames(repo, base, head)?.into_iter().filter(|(from, to, _)| is_code(from) == is_code(to)).collect();
     let (mut old, mut new) = (files_from(&base_listing), files_from(&head_listing));
     fill(repo, &mut old, &base_listing, &wanted)?;
     fill(repo, &mut new, &head_listing, &wanted)?;
@@ -200,11 +201,12 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     fill(repo, &mut old, &base_listing, &scripted)?;
     fill(repo, &mut new, &head_listing, &scripted)?;
     configs.extend(named.iter().filter(|p| is_code(p) || p.ends_with(".json")).cloned());
-    let mut moved_to = BTreeSet::new();
+    let (mut moved_to, mut based) = (BTreeSet::new(), BTreeSet::new());
     for (from, to, _) in &moved {
         if crate::suite::is_test_path(from) == crate::suite::is_test_path(to) && let Some(e) = old.get(from).cloned() && !old.contains_key(to) {
             old.insert(to.clone(), e);
             moved_to.insert(to.clone());
+            based.insert(from.clone());
         }
     }
     let moved_from: BTreeSet<&String> = moved.iter().map(|(from, _, _)| from).collect();
@@ -237,7 +239,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                 for files in [&mut old, &mut new] { if let Some(e) = files.get(p).cloned() { files.insert(twin.clone(), e); } }
                 twins.push((twin, op, p.clone()));
             }
-            None => not_checked.push(json!({ "path": p, "why": format!("a script run by {}, which Kern does not read", line.trim()), "code": true })),
+            None => not_checked.push(json!({ "path": p, "why": format!("a script run by {}, which Kern does not read", line.trim()), "code": "other" })),
         }
     }
     let none = BTreeMap::new();
@@ -257,7 +259,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                     x["path"] = json!(real);
                     Some(x)
                 })),
-                None => not_checked.push(json!({ "path": real, "why": e.0 })),
+                None => not_checked.push(if p == real { json!({ "path": real, "why": e.0 }) } else { json!({ "path": real, "why": e.0, "code": "js" }) }),
             },
         }
     }
@@ -267,9 +269,15 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         _ => Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::Node, command: Vec::new(), edits: Edits::Checked },
     };
     tests.paths = crate::suite::test_paths(&paths);
+    let mut pool = BTreeMap::new();
+    for (p, _) in changes.iter().filter(|(p, op)| *op == "delete" && is_code(p) && crate::suite::is_test_path(p) && !based.contains(p)) {
+        if let Some(text) = old.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) {
+            for (m, n) in crate::proof::test_markers(p, text) { *pool.entry(m).or_insert(0) += n; }
+        }
+    }
     for (p, op) in &changes {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
-        if let Err(e) = crate::proof::screen(&old, &new, &one, &tests) {
+        if let Err(e) = crate::proof::screen_with(&old, &new, &one, &tests, &pool) {
             let item = json!({ "path": p, "operation": if moved_to.contains(p) { "modify" } else { op }, "why": e.0 });
             if e.0.starts_with("Test runner configuration cannot change") || (mentioned(&named, p) && e.0.starts_with("Code outside the tests reaches into the test runner")) { settings.push(item); }
             else if e.0.starts_with("A test file skips, focuses or inverts tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }

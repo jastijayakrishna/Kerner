@@ -21,7 +21,7 @@ const BUILTINS: [&str; 47] = [
     "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib", "test", "sqlite", "sea", "quic", "_http_agent",
 ];
 const GLOBALS: [&str; 4] = ["globalThis", "global", "window", "self"];
-const NETWORK: [&str; 7] = ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "importScripts", "Worker", "SharedWorker"];
+const NETWORK: [&str; 9] = ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "importScripts", "Worker", "SharedWorker", "Bun", "Deno"];
 const REACH: [(&str, &str); 8] = [("mainModule", "process"), ("getBuiltinModule", "process"), ("dlopen", "process"), ("_linkedBinding", "process"), ("_load", "module"), ("_compile", "module"), ("_resolveFilename", "module"), ("sendBeacon", "global")];
 const PROCESS: [&str; 10] = ["binding", "_linkedBinding", "dlopen", "getBuiltinModule", "mainModule", "env", "kill", "chdir", "setuid", "setgid"];
 const MODULE: [&str; 5] = ["require", "constructor", "_load", "_compile", "_resolveFilename"];
@@ -46,7 +46,7 @@ pub fn valid(c: &str) -> bool {
         Some(("escape", p)) => !p.is_empty(),
         Some(("url", s)) => !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+.-".contains(&b)),
         Some(("import", "computed")) | Some(("timer", "string")) => true,
-        Some(("require" | "code" | "process" | "module" | "global", w)) => word(w),
+        Some(("require" | "code" | "process" | "module" | "global" | "bun" | "deno", w)) => word(w),
         _ => false,
     }
 }
@@ -229,6 +229,7 @@ impl<'a> Visit<'a> for Footprint<'_> {
             if o == "process" { if PROCESS.contains(&prop) { self.add(format!("process:{prop}")); } return; }
             if o == "module" { if MODULE.contains(&prop) { self.add(format!("module:{prop}")); } return; }
             if o == "require" { return self.add(format!("require:{}", if word(prop) { prop } else { "computed" })); }
+            if o == "Bun" || o == "Deno" { return self.add(format!("{}:{}", o.to_ascii_lowercase(), if prop == "$" { "shell" } else if word(prop) { prop } else { "computed" })); }
             if GLOBALS.contains(&o) {
                 self.global_member(prop);
                 return;
@@ -248,6 +249,7 @@ impl<'a> Visit<'a> for Footprint<'_> {
                 "process" => { self.add(format!("process:{}", prop.filter(|p| word(p)).unwrap_or("computed"))); true }
                 "module" => { self.add(format!("module:{}", prop.filter(|p| word(p)).unwrap_or("computed"))); true }
                 "require" => { self.add("require:computed".into()); true }
+                "Bun" | "Deno" => { self.add(format!("{}:{}", o.to_ascii_lowercase(), prop.filter(|p| word(p)).unwrap_or("computed"))); true }
                 g if GLOBALS.contains(&g) => { self.add("global:computed".into()); true }
                 _ => false,
             };
@@ -284,7 +286,7 @@ fn parse(name: &str, source: &str, st: SourceType) -> Option<BTreeSet<String>> {
 pub fn source_types(name: &str) -> Option<Vec<SourceType>> {
     let st = SourceType::from_path(name).ok()?;
     Some(match extension(name) {
-        "js" => vec![st, st.with_module(false), st.with_jsx(true), st.with_module(false).with_jsx(true)],
+        "js" => vec![st, st.with_module(false), st.with_commonjs(true), st.with_jsx(true), st.with_module(false).with_jsx(true)],
         "jsx" => vec![st, st.with_module(false)],
         _ => vec![st],
     })

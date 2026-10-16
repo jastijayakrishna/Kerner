@@ -511,7 +511,34 @@ fn a_change_to_tests_and_docs_alone_puts_nothing_back_and_raises_no_test_data_lo
     let head = commit(&r, &[("test/helpers.js", "export const items = () => [1, 2];\nexport const none = () => [];\n"), ("test/total.test.js", &format!("{test}test('adds none', () => expect(total([])).toBe(0));\n")),
         ("README.md", "# shop\n\nAdds things.\n")]);
     let old = report(&[("test/total.test.js > adds", 1, 0, 0)], &[]);
-    let keep = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, |_| true);
+    let keep = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, "");
     assert!(keep.run.is_empty() && keep.data.is_empty() && keep.skipped.is_empty(),
         "the change adds a test, a helper and a line to the README; no code changes, so the old tests on the new code are the old tests on the old code, which passed: nothing to put back and nothing to look at: run {:?} data {:?}", keep.run, keep.data);
+}
+
+#[test]
+fn the_old_copy_of_a_test_follows_moved_modules_and_reads_its_old_data() {
+    let t = Temp::new();
+    let test = "import { total } from '../src/total';\nimport { sum } from '../src/sum.js';\nimport { lib } from '../src/lib';\nimport { readFileSync } from 'node:fs';\nimport { test, expect } from 'vitest';\nconst cases = JSON.parse(readFileSync(new URL('./fixtures/cases.json', import.meta.url), 'utf8'));\nconst note = './not a path';\nconst gone = '../src/nowhere.js';\ntest('adds', () => expect(total([2, 3]) + sum([]) + lib + cases.length).toBe(6));\n";
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"shop","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#),
+        ("src/total.ts", "export const total = (xs: number[]) => xs.reduce((a, b) => a + b, 0);\n"), ("src/sum.ts", "export const sum = (xs: number[]) => xs.length;\n"),
+        ("src/lib/index.ts", "export const lib = 1;\n"), ("test/fixtures/cases.json", "[1]\n"), ("test/total.test.ts", test)]);
+    git(&r, &["mv", "src/total.ts", "src/add.ts"]);
+    git(&r, &["mv", "src/sum.ts", "src/count.ts"]);
+    git(&r, &["mv", "src/lib", "src/core"]);
+    let head = commit(&r, &[("test/total.test.ts", &test.replace("../src/total'", "../src/add'").replace("../src/sum.js", "../src/count.js").replace("../src/lib'", "../src/core'")),
+        ("test/fixtures/cases.json", "[1, 2]\n"), ("src/add.ts", "export const total = (xs: number[]) => xs.reduce((a, b) => a + b, 1);\n")]);
+    let old = report(&[("test/total.test.ts > adds", 1, 0, 0)], &[]);
+    let keep = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, "");
+    let copy = "test/total.kern-kept.test.ts";
+    let new_text = keep.files.get(copy).unwrap_or_else(|| panic!("the edited test is put back: {:?}", keep.files.keys()));
+    for (what, want) in [("an import without its extension follows the rename", "'../src/add'"), ("a .js import of a TypeScript file keeps its .js", "'../src/count.js'"),
+        ("a folder import follows the folder", "'../src/core'"), ("the test reads its old data", "'./fixtures/cases.kern-kept.json'"),
+        ("a string that is no path stays", "'./not a path'"), ("a path to nothing stays", "'../src/nowhere.js'")] {
+        assert!(new_text.contains(want), "{what}: {want} in\n{new_text}");
+    }
+    assert_eq!(keep.files.get("test/fixtures/cases.kern-kept.json").map(String::as_str), Some("[1]\n"), "the old data is put back beside the new");
+    let old_text = &keep.old_files[copy];
+    assert!(old_text.contains("'../src/total'") && old_text.contains("'../src/sum.js'") && old_text.contains("'./fixtures/cases.kern-kept.json'"), "on the old code the copy keeps the old paths:\n{old_text}");
+    assert!(keep.data.is_empty(), "the data file is checked through the old test, so it needs no look: {:?}", keep.data);
 }

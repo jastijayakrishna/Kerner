@@ -78,7 +78,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
         look.push(item("submodule", format!("{}: a submodule this change points at other code", code(x["path"].as_str().unwrap_or(""), 160))));
     }
-    for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["path"].as_str().is_some_and(crate::capability::is_code)) {
+    for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["code"] == "js" || x["path"].as_str().is_some_and(crate::capability::is_code)) {
         look.push(item("not-checked-code", format!("{}: Kern could not read this changed code, so its rules were not applied ({})", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or("")))));
     }
     for t in strings(&tests["new_failing"]) { look.push(item("new-test-fails", format!("A test this change adds fails on the new code: {}", code(&t, 200)))); }
@@ -207,7 +207,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             let passed = if edited > 0 { format!("; the old versions of {edited} others still pass") } else { String::new() };
             md += &format!("- ⚠️ Edited tests: Kern could not run the old versions of {} on the new code (see above){passed}\n", plural(unchecked, "edited test file", "edited test files"));
         }
-        else if edited > 0 { md += &format!("- ✅ Edited tests: the old versions of {} still pass on the new code\n", plural(edited, "edited test file", "edited test files")); }
+        else if edited > 0 { md += &format!("- ✅ Edited tests: their old versions still pass on the new code ({})\n", plural(edited, "test file", "test files")); }
     } else if tests["status"] == "BROKE" {
         md += "- ❌ Tests: they run on the old code but give no results on the new code (see above)\n";
     } else if nothing {
@@ -217,7 +217,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(other_language));
-    let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"] == true);
+    let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"].is_string());
     let skipped_code = r["drive_skipped"].as_bool() == Some(true);
     if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
     let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);

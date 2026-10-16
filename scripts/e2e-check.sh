@@ -230,7 +230,7 @@ printf '%s\n' "test('discount of 200', () => expect(discount(200)).toBe(180));" 
 git -C calc commit -qam "Shorter names, and one more test" && git -C calc rev-parse HEAD > edits.head && git -C calc checkout -q "$base"
 check edits "$base"
 decision edits clear
-grep -q 'the old versions of 1 edited test file still pass' edits/receipt.md || { cat edits/receipt.md; fail "edits: the old version of the edited test file did not run on the new code"; }
+grep -q 'their old versions still pass on the new code (1 test file)' edits/receipt.md || { cat edits/receipt.md; fail "edits: the old version of the edited test file did not run on the new code"; }
 
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)

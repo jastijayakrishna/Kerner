@@ -412,7 +412,29 @@ fn runner_config(name: &str) -> bool {
 }
 fn helper(path: &str) -> bool { path.split('/').map(str::to_ascii_lowercase).any(|d| HELPERS.contains(&d.as_str())) }
 
-pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -> R<Value> {
+pub fn literals(path: &str, source: &str) -> Vec<(usize, usize, String)> {
+    struct Strings(Vec<(usize, usize, String)>);
+    impl<'a> Visit<'a> for Strings {
+        fn visit_string_literal(&mut self, it: &StringLiteral<'a>) { self.0.push((it.span.start as usize + 1, (it.span.end as usize).saturating_sub(1), it.value.to_string())); }
+        fn visit_template_literal(&mut self, it: &TemplateLiteral<'a>) {
+            if let Some(q) = it.single_quasi() { self.0.push((it.span.start as usize + 1, (it.span.end as usize).saturating_sub(1), q.to_string())); }
+            walk::walk_template_literal(self, it);
+        }
+    }
+    for st in crate::capability::source_types(path).unwrap_or_default() {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, st).parse();
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() { continue; }
+        let mut s = Strings(Vec::new());
+        s.visit_program(&parsed.program);
+        s.0.sort();
+        return s.0;
+    }
+    Vec::new()
+}
+pub fn test_markers(path: &str, source: &str) -> BTreeMap<String, usize> { markers(path, source, true).unwrap_or_default() }
+pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -> R<Value> { screen_with(base, candidate, changed, tests, &BTreeMap::new()) }
+pub fn screen_with(base: &Files, candidate: &Files, changed: &Value, tests: &Tests, pool: &BTreeMap<String, usize>) -> R<Value> {
     let (mut new_tests, mut changed_tests, mut deleted_tests, mut regression) = (Vec::new(), Vec::new(), Vec::new(), false);
     for f in changed["files"].as_array().into_iter().flatten() {
         let (path, op) = (f["path"].as_str().unwrap_or(""), f["operation"].as_str().unwrap_or(""));
@@ -429,7 +451,8 @@ pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -
         if op == "delete" || !is_code(path) { continue; }
         let source = text_of(candidate, path).ok_or_else(|| Denied(format!("Changed file cannot be read as text: {path}")))?;
         let found = markers(path, source, inside)?;
-        let before = text_of(base, path).and_then(|s| markers(path, s, inside).ok()).unwrap_or_default();
+        let mut before = text_of(base, path).and_then(|s| markers(path, s, inside).ok()).unwrap_or_default();
+        if inside { for (m, n) in pool { *before.entry(m.clone()).or_insert(0) += n; } }
         if inside {
             let kinds = |m: &BTreeMap<String, usize>| -> BTreeMap<String, usize> {
                 let mut out = BTreeMap::new();
