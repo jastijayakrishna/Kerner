@@ -637,3 +637,10 @@ fn the_packages_a_test_needs_are_built_after_the_ones_they_need() {
     assert_eq!(steps, [("packages/core".to_string(), "build".to_string()), ("packages/ui".to_string(), "build".to_string()), (String::new(), "pretest".to_string())],
         "ui needs core built first; app is not needed; types has nothing to build; the root's pretest runs last, as npm test would run it");
 }
+
+#[test]
+fn the_build_steps_reach_the_sandbox_under_a_name_it_accepts() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/suite.rs")).unwrap();
+    let name = src.split("process.env.").nth(1).and_then(|s| s.split(')').next()).unwrap_or("");
+    assert!(kern::script::env_name(name), "the test run refuses variable {name:?}, so the build step would never run (KERN_ names are Kern's own)");
+}

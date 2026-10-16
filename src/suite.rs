@@ -719,13 +719,13 @@ pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: O
     if let Some(dir) = pretest { order.push((dir.to_string(), "pretest".into())); }
     order
 }
-const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.KERN_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
+const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.PREPARE_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
 fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
     let seconds = within(until, 480);
     crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
     let control = out.join(format!("prepare-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    let env: Env = [("KERN_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
+    let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
     crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {} }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
@@ -847,7 +847,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Some(run)
             }
         };
-        let mut built = Vec::new();
+        let (mut built, mut tried) = (Vec::new(), String::new());
         if let (Some((t, env)), Some(why)) = (&suite.old, cannot_load(old_run.as_ref())) && narrowed.is_none() {
             let missing = missing_packages(&why);
             let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
@@ -855,14 +855,21 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref());
             if !steps.is_empty() {
                 let at = now_ms();
-                if prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until).is_ok() {
-                    let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                    old_seconds = (now_ms() - at) / 1000;
-                    if cannot_load(Some(&again)).is_none() {
-                        let new_steps = repair_steps(&workspace(repo, head), &missing, pretest.as_deref());
-                        if prepare(out, op, &volume("new"), &new_steps, &format!("new{label}"), until).is_ok() {
-                            built = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
+                let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
+                match prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until) {
+                    Err(e) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
+                    Ok(_) => {
+                        let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
+                        old_seconds = (now_ms() - at) / 1000;
+                        if cannot_load(Some(&again)).is_some() {
+                            tried = format!(" (even after Kern ran {} first)", names.join(", "));
                             old_run = Some(again);
+                        } else {
+                            let new_steps = repair_steps(&workspace(repo, head), &missing, pretest.as_deref());
+                            match prepare(out, op, &volume("new"), &new_steps, &format!("new{label}"), until) {
+                                Ok(_) => { built = names; old_run = Some(again); }
+                                Err(e) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
+                            }
                         }
                     }
                 }
@@ -871,14 +878,14 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-            Some(Side::Nothing(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+            Some(Side::Nothing(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
             Some(Side::Slow(why)) => {
                 let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{more}") }));
                 continue;
             }
             Some(Side::Ran(r, _)) if r.tests.values().all(|c| c.passed == 0) && (!r.tests.is_empty() || !r.problems.is_empty()) => {
-                not_run.push(json!({ "dir": suite.dir, "why": judged(r, &Report::default(), None, None)["why"] }));
+                not_run.push(json!({ "dir": suite.dir, "why": format!("{}{tried}", judged(r, &Report::default(), None, None)["why"].as_str().unwrap_or("")) }));
                 continue;
             }
             _ => {}
