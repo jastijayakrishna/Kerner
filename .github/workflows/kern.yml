@@ -46,9 +46,28 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: repo
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: The commit it branched from
+        id: base
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          fetch() { git -C repo -c "http.$GITHUB_SERVER_URL/.extraheader=$auth" fetch --quiet --no-tags "$@"; }
+          base=$(curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" | jq -r '.merge_base_commit.sha // empty') || base=""
+          if [[ "$base" =~ ^[0-9a-f]{40}$ ]] && fetch --depth=1 origin "$base"; then
+            echo "Kern compares $HEAD_SHA with $base, where it branched off"
+          else
+            fetch --unshallow origin || true
+            fetch origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base=$(git -C repo merge-base "$BASE_SHA" "$HEAD_SHA" 2> /dev/null) || base=$(git -C repo merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
 
       - name: Which Kern
         id: which
@@ -166,6 +185,8 @@ jobs:
         id: check
         env:
           KERN_BIN: ${{ steps.install.outputs.bin }}
+          KERN_KEEP: ${{ runner.environment == 'github-hosted' && '1' || '0' }}
+          BASE: ${{ steps.base.outputs.sha }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
@@ -174,7 +195,7 @@ jobs:
           [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
           [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
           repo="$GITHUB_WORKSPACE/repo"
-          base=$(git -C "$repo" merge-base "$BASE_SHA" "$HEAD_SHA" 2> /dev/null) || base=$(git -C "$repo" merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          base="$BASE"
           jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$W/pr.md"
           "$KERN_BIN" --control "$W/verifier.json" check "$repo" "$base" "$HEAD_SHA" "$W/out" "$W/operator.json" "$W/pr.md" | tee "$W/check.json"
           cat "$W/out/receipt.md" >> "$GITHUB_STEP_SUMMARY"
