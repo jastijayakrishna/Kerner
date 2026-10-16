@@ -1162,3 +1162,51 @@ fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_com
     assert!(!md.contains("evil.example") && md.contains("1 that passed before still pass"), "the comment is Kern's own rendering of the receipt, not text the run job wrote: {md}");
     assert!(!t.0.join("seal.json").exists(), "a seal the run job wrote is never posted");
 }
+
+fn listed(c: &Value, key: &str) -> Vec<String> { c[key].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() }
+
+#[test]
+fn babylonjs_18161_a_test_in_a_file_that_was_flaky_in_the_same_check_cannot_prove_a_break() {
+    let file = "packages/dev/loaders/test/unit/Interactivity/flow nodes.test.ts";
+    let (gate, throttle, delay) = (format!("{file} > Flow Nodes > flow/multiGate with random"), format!("{file} > Flow Nodes > flow/throttle"), format!("{file} > Flow Nodes > flow/cancelDelay"));
+    let other = "src/other.test.ts > adds";
+    let all = |g: (u32, u32), t: (u32, u32), d: (u32, u32), o: (u32, u32)| report(&[(&gate, g.0, g.1, 0), (&throttle, t.0, t.1, 0), (&delay, d.0, d.1, 0), (other, o.0, o.1, 0)], &[]);
+    let (pass, fail) = ((1, 0), (0, 1));
+    let c = suite::verdict(&all(pass, pass, pass, pass), &all(fail, fail, fail, fail), Some(&all(fail, pass, pass, fail)), Some(&all(fail, pass, fail, fail)), Some(&all(pass, pass, pass, pass)), false);
+    assert_eq!(listed(&c, "broke"), [other], "{c}");
+    assert_eq!(listed(&c, "unsteady"), [gate], "BabylonJS#18161 was blocked on a timing test whose file flipped other tests in the same check: {c}");
+}
+
+#[test]
+fn a_test_that_passes_when_the_whole_suite_runs_again_cannot_prove_a_break_even_after_failing_alone() {
+    let (api, pool) = ("src/api.test.ts > answers", "src/db.test.ts > keeps one pool");
+    let both = |a: (u32, u32), p: (u32, u32)| report(&[(api, a.0, a.1, 0), (pool, p.0, p.1, 0)], &[]);
+    let (pass, fail) = ((1, 0), (0, 1));
+    let c = suite::verdict(&both(pass, pass), &both(fail, fail), Some(&both(fail, pass)), Some(&both(pass, fail)), Some(&both(pass, pass)), false);
+    assert!(listed(&c, "broke").is_empty(), "the api test passed in one of the three new runs, so the change cannot have broken it for sure: {c}");
+    assert_eq!(listed(&c, "unsteady"), [api], "{c}");
+    assert_eq!(listed(&c, "together"), [pool], "{c}");
+}
+
+#[test]
+fn a_hook_that_fails_in_a_file_that_was_flaky_in_the_same_check_cannot_prove_a_break() {
+    let (answers, retries) = ("test/server.test.js > answers", "test/server.test.js > retries");
+    let hook = "test/server.test.js > \"after all\" hook in \"server\"";
+    let run = |r: (u32, u32), problems: &[&str]| report(&[(answers, 1, 0, 0), (retries, r.0, r.1, 0)], problems);
+    let (pass, fail) = ((1, 0), (0, 1));
+    let c = suite::verdict(&run(pass, &[]), &run(fail, &[hook]), Some(&run(pass, &[hook])), Some(&run(pass, &[hook])), Some(&run(pass, &[])), false);
+    assert!(listed(&c, "new_problems").is_empty(), "a teardown hook failing in a file whose tests pass and fail by chance is no proof: {c}");
+    assert_eq!(listed(&c, "unsteady"), [hook], "{c}");
+}
+
+#[test]
+fn a_receipt_never_shows_a_tests_check_mark_next_to_failures_it_could_not_prove() {
+    for kind in ["unsteady", "uneven", "unproven"] {
+        let mut t = clean_tests();
+        t[kind] = json!(["src/total.test.ts > adds"]);
+        let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+        let md = receipt::markdown(&r, None);
+        assert_eq!(r["decision"], "look", "{kind}: {r}");
+        assert!(!md.contains("- ✅ Tests:"), "{kind}: a look says a test fails on the new code, so the Tests line cannot carry a check mark:\n{md}");
+    }
+}

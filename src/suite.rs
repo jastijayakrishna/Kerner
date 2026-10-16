@@ -244,20 +244,56 @@ pub fn related(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
     Some(t)
 }
 
+pub fn verdict(old: &Report, new: &Report, alone: Option<&Report>, whole: Option<&Report>, old_alone: Option<&Report>, unconfirmed: bool) -> Value {
+    steady(if unconfirmed { judged(old, new, None, None) } else { confirmed(old, new, alone, whole, old_alone) })
+}
+fn listed(v: &Value, k: &str) -> Vec<String> { v[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() }
 pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole: Option<&Report>, alone_old: Option<&Report>) -> Value {
     let (Some(a), Some(w)) = (alone, whole) else { return judged(before, after, alone.or(whole), alone_old) };
     let mut c = judged(before, after, Some(a), alone_old);
     let wide = judged(before, after, Some(w), alone_old);
     if c["status"] != "RAN" || wide["status"] != "RAN" { return c; }
-    let list = |v: &Value, k: &str| -> Vec<String> { v[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() };
-    let narrow: BTreeSet<String> = list(&c, "broke").into_iter().chain(list(&c, "new_problems")).collect();
-    let together: Vec<String> = list(&wide, "broke").into_iter().chain(list(&wide, "new_problems")).filter(|k| !narrow.contains(k)).collect();
-    let mut gone = list(&c, "gone");
-    for g in list(&wide, "gone") { if !gone.contains(&g) { gone.push(g); } }
-    let flaky: Vec<String> = list(&c, "flaky").into_iter().filter(|k| !together.contains(k) && !gone.contains(k)).collect();
+    let narrow: BTreeSet<String> = listed(&c, "broke").into_iter().chain(listed(&c, "new_problems")).collect();
+    let together: Vec<String> = listed(&wide, "broke").into_iter().chain(listed(&wide, "new_problems")).filter(|k| !narrow.contains(k)).collect();
+    let passed_again: BTreeSet<String> = listed(&wide, "flaky").into_iter().collect();
+    let mut unsteady = Vec::new();
+    for l in ["broke", "new_problems"] {
+        let (moved, held): (Vec<String>, Vec<String>) = listed(&c, l).into_iter().partition(|k| passed_again.contains(k));
+        c[l] = json!(held);
+        unsteady.extend(moved);
+    }
+    let mut gone = listed(&c, "gone");
+    for g in listed(&wide, "gone") { if !gone.contains(&g) { gone.push(g); } }
+    let mut flaky = listed(&c, "flaky");
+    for f in listed(&wide, "flaky") { if !flaky.contains(&f) { flaky.push(f); } }
+    flaky.retain(|k| !together.contains(k) && !gone.contains(k) && !unsteady.contains(k));
     c["together"] = json!(together);
     c["gone"] = json!(gone);
     c["flaky"] = json!(flaky);
+    c["unsteady"] = json!(unsteady);
+    c
+}
+pub const LISTS: [&str; 16] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
+    "same_failure", "uneven", "unproven", "unsteady"];
+pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
+pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String, unconfirmed: bool, uneven: bool) {
+    for l in LISTS {
+        let target = if (l == "broke" || l == "new_problems") && unconfirmed { "unconfirmed" } else if (l == "broke" || l == "new_problems") && uneven { "uneven" } else { l };
+        let items: Vec<Value> = c[l].as_array().into_iter().flatten().filter_map(Value::as_str).map(|k| json!(named(k))).collect();
+        if let Some(a) = merged.get_mut(target).and_then(Value::as_array_mut) { a.extend(items); }
+    }
+    if let Some(why) = merged.get_mut("problem_why") { for (k, w) in c["problem_why"].as_object().into_iter().flatten() { why[named(k)] = w.clone(); } }
+}
+pub fn steady(mut c: Value) -> Value {
+    let shaky: BTreeSet<String> = listed(&c, "flaky").iter().chain(&listed(&c, "unsteady")).map(|k| file_of(k).to_string()).collect();
+    if shaky.is_empty() || c["status"] != "RAN" { return c; }
+    let mut unsteady = listed(&c, "unsteady");
+    for l in ["broke", "new_problems"] {
+        let (moved, held): (Vec<String>, Vec<String>) = listed(&c, l).into_iter().partition(|k| shaky.contains(file_of(k)));
+        c[l] = json!(held);
+        unsteady.extend(moved);
+    }
+    c["unsteady"] = json!(unsteady);
     c
 }
 
@@ -993,8 +1029,6 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     if !out.join("setup.json").exists() { crate::drive::setup(out, op, until)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
-    const LISTS: [&str; 15] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
-        "same_failure", "uneven", "unproven"];
     let mut merged = serde_json::Map::new();
     for l in LISTS { merged.insert(l.into(), json!([])); }
     merged.insert("uneven_why".into(), json!([]));
@@ -1178,9 +1212,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
         }
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
-        let mut c = if unconfirmed { judged(&old, &new, None, None) } else { confirmed(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref()) };
+        let mut c = verdict(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref(), unconfirmed);
         let runner = suite.new.0.runner;
-        let named = |k: &str| if runner == Runner::Node && !suite.dir.is_empty() && !k.contains(" > ") { format!("{}: {k}", suite.dir) } else { k.to_string() };
+        let named = |k: &str| in_suite(runner, &suite.dir, k);
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
         if c["status"] != "RAN" {
             not_run.push(json!({ "dir": suite.dir, "why": c["why"] }));
@@ -1205,12 +1239,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         if let Some(u) = &uneven_why && ["broke", "new_problems"].iter().any(|l| c[*l].as_array().is_some_and(|a| !a.is_empty())) && let Some(a) = merged["uneven_why"].as_array_mut() {
             a.push(json!(u));
         }
-        for l in LISTS.iter() {
-            let target: &str = if unconfirmed && (*l == "broke" || *l == "new_problems") { "unconfirmed" } else if uneven_why.is_some() && (*l == "broke" || *l == "new_problems") { "uneven" } else { l };
-            let items = list(&c[*l]);
-            if let Some(a) = merged[target].as_array_mut() { a.extend(items); }
-        }
-        for (k, w) in c["problem_why"].as_object().into_iter().flatten() { merged["problem_why"][named(k)] = w.clone(); }
+        fold(&mut merged, &c, &named, unconfirmed, uneven_why.is_some());
         for (i, (side, field)) in [("before", "passed"), ("before", "failed"), ("before", "skipped"), ("after", "passed"), ("after", "failed"), ("after", "skipped")].iter().enumerate() {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }

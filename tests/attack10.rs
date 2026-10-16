@@ -94,8 +94,9 @@ fn a_test_that_fails_whole_and_whose_file_does_not_load_alone_is_not_flaky() {
     let whole_again = report(&[(cart, 1, 0, 0)], &[]);
     let alone_old = report(&[(cart, 1, 0, 0)], &[]);
     let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
-    assert_eq!(names(&c, "broke"), [cart],
-        "the test fails on the whole run; alone its file no longer loads on the new code while the old code alone loads and passes it; the whole rerun passes it. The alone run may only add failures, and its failure here is the file's, which worse() keeps as a problem the first run did not have and never turns into a failure of the test, so the test is called flaky: {c}");
+    assert!(names(&c, "flaky").is_empty(), "the alone run's load failure counts against the test, so it is never waved through as flaky: {c}");
+    assert_eq!((names(&c, "broke"), names(&c, "unsteady")), (vec![], vec![cart.to_string()]),
+        "the test fails on the whole run and its file does not load alone, but the whole rerun passes it, so it did not fail in every new run: a look, never a block (CLAUDE.md, the single verdict): {c}");
 }
 
 #[test]
@@ -123,8 +124,8 @@ fn a_numbered_test_that_fails_alone_keeps_that_failure_when_the_whole_rerun_pass
     let whole_again = report(&[("src/api.test.ts > answers on port 52019", 1, 0, 0), (pool, 0, 1, 0)], &[]);
     let alone_old = report(&[("src/api.test.ts > answers on port 41500", 1, 0, 0), (pool, 1, 0, 0)], &[]);
     let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
-    assert_eq!((names(&c, "broke"), names(&c, "together")), (vec![port.to_string()], vec![pool.to_string()]),
-        "the port test fails on the whole run and again when its file runs alone; the pool test does not repeat alone, so the whole suite runs again and worse() merges the two reruns, where the alone run may only add failures. worse() matches the alone run by its raw name, which carries another random port, so the alone failure is dropped and the test is called flaky: {c}");
+    assert_eq!((names(&c, "broke"), names(&c, "unsteady"), names(&c, "together")), (vec![], vec![port.to_string()], vec![pool.to_string()]),
+        "the port test fails on the whole run and again alone, under a new random port each time, so the alone failure must still be matched to it and never dropped as flaky; the whole rerun passes it, so it did not fail in every new run and needs a look, not a block: {c}");
 }
 
 #[test]

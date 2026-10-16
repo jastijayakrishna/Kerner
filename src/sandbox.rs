@@ -265,37 +265,79 @@ pub fn version_key(v: &str) -> (Vec<u64>, bool, String) {
     let (core, pre) = v.split_once('-').unwrap_or((v, ""));
     (core.split('.').map(|p| p.parse().unwrap_or(0)).collect(), pre.is_empty(), pre.to_string())
 }
+const VERSION_DIRS_COUNT_MAX: usize = 50_000;
+const VERSION_DEPTH_COUNT_MAX: u32 = 32;
+const PACKAGE_JSON_BYTES_MAX: u64 = 1 << 20;
 pub fn installed_versions(root: &Path, names: &[&str]) -> Vec<String> {
     fn version(dir: &Path, name: &str) -> Option<String> {
-        let v: Value = serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
+        let file = dir.join("package.json");
+        if std::fs::metadata(&file).ok()?.len() > PACKAGE_JSON_BYTES_MAX { return None; }
+        let v: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
         v["version"].as_str().filter(|s| v["name"] == name && plain_version(s)).map(str::to_string)
     }
-    fn dirs(dir: &Path, budget: &mut usize) -> Vec<(String, PathBuf)> {
-        if *budget == 0 { return Vec::new(); }
-        *budget -= 1;
+    fn dirs(dir: &Path, dirs_left: &mut usize) -> Vec<(String, PathBuf)> {
+        if *dirs_left == 0 { return Vec::new(); }
+        *dirs_left -= 1;
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
         entries.flatten().filter(|e| e.file_type().is_ok_and(|k| k.is_dir())).map(|e| (e.file_name().to_string_lossy().to_string(), e.path())).collect()
     }
-    fn modules(dir: &Path, names: &[&str], depth: u32, budget: &mut usize, found: &mut std::collections::BTreeSet<String>) {
-        if depth > 32 { return; }
-        for (name, path) in dirs(dir, budget) {
+    fn modules(dir: &Path, names: &[&str], depth: u32, dirs_left: &mut usize, found: &mut std::collections::BTreeSet<String>) {
+        if depth > VERSION_DEPTH_COUNT_MAX { return; }
+        for (name, path) in dirs(dir, dirs_left) {
             if names.contains(&name.as_str()) { found.extend(version(&path, &name)); }
-            let inner: Vec<PathBuf> = if name.starts_with('@') || name == ".pnpm" { dirs(&path, budget).into_iter().map(|(_, p)| p.join("node_modules")).collect() } else { vec![path.join("node_modules")] };
-            for n in inner.into_iter().filter(|n| n.is_dir()) { modules(&n, names, depth + 1, budget, found); }
+            let inner: Vec<PathBuf> = if name.starts_with('@') || name == ".pnpm" { dirs(&path, dirs_left).into_iter().map(|(_, p)| p.join("node_modules")).collect() } else { vec![path.join("node_modules")] };
+            for n in inner.into_iter().filter(|n| n.is_dir()) { modules(&n, names, depth + 1, dirs_left, found); }
         }
     }
-    fn tree(dir: &Path, names: &[&str], depth: u32, budget: &mut usize, found: &mut std::collections::BTreeSet<String>) {
-        if depth > 32 { return; }
-        for (name, path) in dirs(dir, budget) {
-            if name == "node_modules" { modules(&path, names, depth + 1, budget, found); }
-            else if ![".git", ".kern-install", ".kern-pnpm-store"].contains(&name.as_str()) { tree(&path, names, depth + 1, budget, found); }
+    fn tree(dir: &Path, names: &[&str], depth: u32, dirs_left: &mut usize, found: &mut std::collections::BTreeSet<String>) {
+        if depth > VERSION_DEPTH_COUNT_MAX { return; }
+        for (name, path) in dirs(dir, dirs_left) {
+            if name == "node_modules" { modules(&path, names, depth + 1, dirs_left, found); }
+            else if ![".git", ".kern-install", ".kern-pnpm-store"].contains(&name.as_str()) { tree(&path, names, depth + 1, dirs_left, found); }
         }
     }
-    let (mut budget, mut found) = (50_000usize, std::collections::BTreeSet::new());
-    tree(root, names, 0, &mut budget, &mut found);
+    let (mut dirs_left, mut found) = (VERSION_DIRS_COUNT_MAX, std::collections::BTreeSet::new());
+    tree(root, names, 0, &mut dirs_left, &mut found);
     let mut list: Vec<String> = found.into_iter().collect();
     list.sort_by_key(|v| version_key(v));
     list
+}
+const RESTORE_ENTRIES_COUNT_MAX: usize = 4_000_000;
+pub fn restore(committed: &Path, tree: &Path, keep: &[PathBuf]) -> R<()> {
+    fn clear(dir: &Path, keep: &[PathBuf]) -> R<()> {
+        for e in std::fs::read_dir(dir)?.flatten() {
+            let path = e.path();
+            if keep.contains(&path) { continue; }
+            let kind = e.file_type()?;
+            if kind.is_dir() && keep.iter().any(|k| k.starts_with(&path)) { clear(&path, keep)?; }
+            else if kind.is_dir() { std::fs::remove_dir_all(&path)?; }
+            else { std::fs::remove_file(&path)?; }
+        }
+        Ok(())
+    }
+    fn copy(from: &Path, to: &Path, keep: &[PathBuf], entries_left: &mut usize) -> R<()> {
+        std::fs::create_dir_all(to)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(to, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+        for e in std::fs::read_dir(from)?.flatten() {
+            ensure!(*entries_left > 0, "The committed tree holds more than {RESTORE_ENTRIES_COUNT_MAX} entries");
+            *entries_left -= 1;
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            if keep.contains(&dst) { continue; }
+            let meta = std::fs::symlink_metadata(&src)?;
+            if meta.is_dir() { copy(&src, &dst, keep, entries_left)?; continue; }
+            if !meta.is_file() { continue; }
+            std::fs::copy(&src, &dst)?;
+            #[cfg(unix)]
+            std::fs::set_permissions(&dst, std::os::unix::fs::PermissionsExt::from_mode(if std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0 { 0o755 } else { 0o644 }))?;
+        }
+        Ok(())
+    }
+    if tree.is_dir() { clear(tree, keep)?; }
+    copy(committed, tree, keep, &mut RESTORE_ENTRIES_COUNT_MAX.clone())
+}
+pub fn with_workspace(dir: &str, has_node_modules: bool, records: &[Value]) -> bool {
+    dir != "." && has_node_modules && records.iter().any(|r| r["dir"] == "." && r["result"].as_str().is_some_and(|s| s.starts_with("installed")))
 }
 pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
     let (manager, attempts) = install_plan(dir);
@@ -765,21 +807,6 @@ mod inside {
             "milliseconds": { "old": old_time.as_millis() as u64, "new": new_time.as_millis() as u64, "total": started.elapsed().as_millis() as u64 }, "mutants": results }));
         Ok(())
     }
-    fn copy_readable(from: &Path, to: &Path) -> R<()> {
-        std::fs::create_dir_all(to)?;
-        std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755))?;
-        for e in std::fs::read_dir(from)? {
-            let e = e?;
-            let (src, dst) = (e.path(), to.join(e.file_name()));
-            let meta = std::fs::symlink_metadata(&src)?;
-            if meta.is_dir() { copy_readable(&src, &dst)?; }
-            else if meta.is_file() {
-                std::fs::copy(&src, &dst)?;
-                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(if meta.mode() & 0o111 != 0 { 0o755 } else { 0o644 }))?;
-            }
-        }
-        Ok(())
-    }
     fn bun_rewrite(dir: &Path) -> R<Vec<(PathBuf, Vec<u8>)>> {
         let root = std::fs::read_to_string(dir.join("package.json"))?;
         let (mut originals, mut folders) = (Vec::new(), vec![(dir.to_path_buf(), 0)]);
@@ -846,63 +873,17 @@ mod inside {
         for d in dirs.iter().filter(|d| *d != ".") { file_path(d)?; }
         let budget = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         let started = std::time::Instant::now();
-        copy_readable(Path::new("/input"), Path::new("/workspace"))?;
+        super::restore(Path::new("/input"), Path::new("/workspace"), &[])?;
         let scratch = Path::new("/workspace/.kern-install");
         std::fs::create_dir_all(scratch.join("tmp"))?;
-        let mut records = Vec::new();
+        let (mut records, mut dirty) = (Vec::new(), false);
         for d in &dirs {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
-            if d != "." && dir.join("node_modules").exists() { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
-            let (manager, mut attempts) = super::install_plan_for(&dir, scripts);
-            let bundled = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
-            if attempts.iter().any(|(argv, _)| argv.iter().any(|a| a == bundled)) && !Path::new(bundled).exists() {
-                let own = scratch.join("corepack/node_modules/corepack/dist/corepack.js");
-                if !own.exists() {
-                    let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &scratch.join("corepack").to_string_lossy(),
-                        super::COREPACK, "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier"]).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
-                }
-                for (argv, _) in attempts.iter_mut() { for a in argv.iter_mut() { if a == bundled { *a = own.to_string_lossy().to_string(); } } }
-            }
-            let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
-            if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
-            let originals = if manager == "bun" { bun_rewrite(&dir)? } else { Vec::new() };
-            let mut result = json!("failed");
-            let log = Path::new("/home/kern/install.log");
-            for (argv, said) in &attempts {
-                let left = budget.saturating_sub(started.elapsed());
-                if left.is_zero() { result = json!("out of time"); break; }
-                let log_file = std::fs::File::create(log)?;
-                let child = Command::new(&argv[0]).args(&argv[1..]).current_dir(&dir).env_clear()
-                    .envs(super::INSTALL_ENV)
-                    .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
-                    .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
-                if wait(child, left)? { result = json!(said); break; }
-                let text = std::fs::read(log).unwrap_or_default();
-                let tail = String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim().to_string();
-                let first = super::first_error(&String::from_utf8_lossy(&text)).map(|f| f.chars().take(300).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
-                result = json!(format!("failed: {}{tail}", first.map_or(String::new(), |f| format!("{f}\n…\n"))));
-            }
-            for (path, text) in &originals { std::fs::write(path, text)?; }
-            let mut parts = Vec::new();
-            if result.as_str().is_some_and(|r| r.starts_with("installed")) && manager != "pnpm" {
-                let dest = scratch.join("parts");
-                std::fs::create_dir_all(&dest)?;
-                for (name, spec) in super::missing_platform_parts(&dir.join("node_modules")) {
-                    if budget.saturating_sub(started.elapsed()).is_zero() { break; }
-                    let packed = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "pack", &format!("{name}@{spec}"), "--ignore-scripts", "--silent"])
-                        .arg(format!("--pack-destination={}", dest.display())).current_dir(&dir).env_clear()
-                        .envs([("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("npm_config_cache", "/workspace/.kern-install/npm"),
-                            ("npm_config_loglevel", "error"), ("TMPDIR", "/workspace/.kern-install/tmp")]).stdin(Stdio::null()).output()?;
-                    let file = String::from_utf8_lossy(&packed.stdout).lines().last().unwrap_or("").trim().to_string();
-                    if !packed.status.success() || file.is_empty() || file.contains('/') { continue; }
-                    let target = dir.join("node_modules").join(&name);
-                    std::fs::create_dir_all(&target)?;
-                    let unpacked = Command::new("/bin/tar").arg("-xzf").arg(dest.join(&file)).arg("-C").arg(&target).args(["--strip-components=1", "--no-same-owner"]).status()?;
-                    if unpacked.success() { parts.push(format!("{name}@{spec}")); }
-                }
-            }
-            records.push(json!({ "dir": d, "manager": manager, "result": result, "parts": parts }));
+            if super::with_workspace(d, dir.join("node_modules").exists(), &records) { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
+            let keep: Vec<PathBuf> = [scratch.to_path_buf(), PathBuf::from("/workspace/.kern-pnpm-store")].into_iter()
+                .chain(records.iter().filter_map(|r| r["dir"].as_str()).filter(|r| *r != ".").map(|r| Path::new("/workspace").join(r))).collect();
+            records.push(install_dir(d, &dir, scripts, (budget, started), &keep, &mut dirty)?);
         }
         let _ = std::fs::remove_dir_all(scratch);
         let playwright = if browsers { super::installed_versions(Path::new("/workspace"), &["playwright", "playwright-core"]) } else { Vec::new() };
@@ -910,6 +891,63 @@ mod inside {
         lock_down(Path::new("/workspace"));
         println!("{}", json!({ "version": 1, "installs": records, "browsers": playwright }));
         Ok(())
+    }
+    fn install_dir(d: &str, dir: &Path, scripts: bool, (budget, started): (Duration, std::time::Instant), keep: &[PathBuf], dirty: &mut bool) -> R<Value> {
+        let scratch = Path::new("/workspace/.kern-install");
+        let (manager, mut attempts) = super::install_plan_for(dir, scripts);
+        let bundled = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
+        if attempts.iter().any(|(argv, _)| argv.iter().any(|a| a == bundled)) && !Path::new(bundled).exists() {
+            let own = scratch.join("corepack/node_modules/corepack/dist/corepack.js");
+            if !own.exists() {
+                let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &scratch.join("corepack").to_string_lossy(),
+                    super::COREPACK, "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier"]).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            }
+            for (argv, _) in attempts.iter_mut() { for a in argv.iter_mut() { if a == bundled { *a = own.to_string_lossy().to_string(); } } }
+        }
+        let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
+        let committed = if d == "." { PathBuf::from("/input") } else { Path::new("/input").join(d) };
+        let (mut result, mut originals) = (json!("failed"), Vec::new());
+        let log = Path::new("/home/kern/install.log");
+        for (argv, said) in &attempts {
+            let left = budget.saturating_sub(started.elapsed());
+            if left.is_zero() { result = json!("out of time"); break; }
+            if *dirty { super::restore(&committed, dir, keep)?; }
+            *dirty = true;
+            if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
+            originals = if manager == "bun" { bun_rewrite(dir)? } else { Vec::new() };
+            let log_file = std::fs::File::create(log)?;
+            let child = Command::new(&argv[0]).args(&argv[1..]).current_dir(dir).env_clear()
+                .envs(super::INSTALL_ENV)
+                .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
+                .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
+            if wait(child, left)? { result = json!(said); break; }
+            let text = std::fs::read(log).unwrap_or_default();
+            let tail = String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim().to_string();
+            let first = super::first_error(&String::from_utf8_lossy(&text)).map(|f| f.chars().take(300).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
+            result = json!(format!("failed: {}{tail}", first.map_or(String::new(), |f| format!("{f}\n…\n"))));
+        }
+        for (path, text) in &originals { std::fs::write(path, text)?; }
+        let parts = if result.as_str().is_some_and(|r| r.starts_with("installed")) && manager != "pnpm" { platform_parts(dir, (budget, started))? } else { Vec::new() };
+        Ok(json!({ "dir": d, "manager": manager, "result": result, "parts": parts }))
+    }
+    fn platform_parts(dir: &Path, (budget, started): (Duration, std::time::Instant)) -> R<Vec<String>> {
+        let dest = Path::new("/workspace/.kern-install/parts");
+        std::fs::create_dir_all(dest)?;
+        let mut parts = Vec::new();
+        for (name, spec) in super::missing_platform_parts(&dir.join("node_modules")) {
+            if budget.saturating_sub(started.elapsed()).is_zero() { break; }
+            let packed = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "pack", &format!("{name}@{spec}"), "--ignore-scripts", "--silent"])
+                .arg(format!("--pack-destination={}", dest.display())).current_dir(dir).env_clear()
+                .envs([("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("npm_config_cache", "/workspace/.kern-install/npm"),
+                    ("npm_config_loglevel", "error"), ("TMPDIR", "/workspace/.kern-install/tmp")]).stdin(Stdio::null()).output()?;
+            let file = String::from_utf8_lossy(&packed.stdout).lines().last().unwrap_or("").trim().to_string();
+            if !packed.status.success() || file.is_empty() || file.contains('/') { continue; }
+            let target = dir.join("node_modules").join(&name);
+            std::fs::create_dir_all(&target)?;
+            let unpacked = Command::new("/bin/tar").arg("-xzf").arg(dest.join(&file)).arg("-C").arg(&target).args(["--strip-components=1", "--no-same-owner"]).status()?;
+            if unpacked.success() { parts.push(format!("{name}@{spec}")); }
+        }
+        Ok(parts)
     }
     fn part(name: &str, bytes: &[u8]) -> R<()> {
         let mut out = std::io::stdout().lock();

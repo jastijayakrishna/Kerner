@@ -171,6 +171,8 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
             None => blocked.push(item("types-broke", what)),
         }
     }
+    look.extend(per_file("test-unsteady", strings(&tests["unsteady"]), "This failed on the new code, but not in every run of it, or tests in the same file passed and failed by chance during this check, so Kern does not block on it",
+        "tests failed on the new code, but not in every run of it, or tests in the same files passed and failed by chance during this check, so Kern does not block on them"));
     look.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests",
         "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests"));
     look.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));
@@ -266,14 +268,14 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"));
         let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
-        let doubtful = look.iter().any(|x| x["kind"] == "test-unconfirmed" || x["kind"] == "test-together");
+        let doubtful = look.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven"].iter().any(|k| x["kind"] == *k));
         let mut line = if broke > 0 || files > 0 {
             let mut what = Vec::new();
             if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }
             if files > 0 { what.push(format!("{files} test {} no longer {}", if files == 1 { "file" } else { "files" }, if files == 1 { "loads" } else { "load" })); }
             format!("- ❌ Tests: {}; {kept} still pass ({runner})", what.join(", "))
         } else if doubtful {
-            format!("- ⚠️ Tests: {kept} that passed before still pass, and some that failed once could not be run again ({runner})")
+            format!("- ⚠️ Tests: {kept} that passed before still pass, and some failures Kern could not prove or rule out need a look ({runner})")
         } else {
             format!("- ✅ Tests: {kept} that passed before still pass ({runner})")
         };

@@ -31,3 +31,4 @@ pub mod nodeapi;
 pub mod surface;
 pub mod csp;
 pub mod types;
+pub mod replay;
