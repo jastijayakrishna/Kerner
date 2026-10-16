@@ -15,11 +15,11 @@ fn every_test_and_its_checks_are_listed_under_its_full_name() {
         it('is there', () => { expect(x).toBeDefined(); assert(y); });\n\
         it('uses a helper', () => { expectValid(x); });\n";
     let found = cases("test/run.test.ts", source).unwrap();
-    assert_eq!(found["cancel > sweeps running entries"], Case { checks: 2, weak: 0 });
-    assert_eq!(found["cancel > errors > marks failed"], Case { checks: 1, weak: 0 });
-    assert_eq!(found["adds %i"], Case { checks: 1, weak: 0 });
-    assert_eq!(found["is there"], Case { checks: 2, weak: 2 });
-    assert_eq!(found["uses a helper"], Case { checks: 1, weak: 0 }, "a helper named like a check counts as one");
+    assert_eq!(found["cancel > sweeps running entries"], Case { checks: 2, weak: 0, runs: 1 });
+    assert_eq!(found["cancel > errors > marks failed"], Case { checks: 1, weak: 0, runs: 1 });
+    assert_eq!(found["adds %i"], Case { checks: 1, weak: 0, runs: 1 }, "a one-row table runs once");
+    assert_eq!(found["is there"], Case { checks: 2, weak: 2, runs: 1 });
+    assert_eq!(found["uses a helper"], Case { checks: 1, weak: 0, runs: 1 }, "a helper named like a check counts as one");
     assert_eq!(found.len(), 5);
 }
 
@@ -61,4 +61,15 @@ fn ordinary_edits_to_tests_are_not_weakening() {
     assert_eq!(both(old, more), kern::weaken::Weakened::default(), "a changed expected value is a rewrite, which the test runs judge; more tests and checks are not weaker");
     let helper = "it('totals', () => { checkTotal(items, 42); });\n";
     assert_eq!(both(old, helper), kern::weaken::Weakened::default(), "a check moved into a helper still checks");
+}
+
+#[test]
+fn tests_folded_into_a_table_are_not_removed_ones() {
+    let old = "it('adds 1', () => expect(f(1)).toBe(2));\nit('adds 2', () => expect(f(2)).toBe(3));\nit('adds 3', () => expect(f(3)).toBe(4));\n";
+    let table = "it.each([[1, 2], [2, 3], [3, 4]])('adds %i', (a, b) => expect(f(a)).toBe(b));\n";
+    assert_eq!(both(old, table).removed, 0, "clerk#9585 turned three tests into one it.each of three rows");
+    let shorter = "it.each([[1, 2]])('adds %i', (a, b) => expect(f(a)).toBe(b));\n";
+    assert_eq!(both(old, shorter).removed, 2, "a table with fewer rows does run fewer cases");
+    let unknown = "it.each(rows)('adds %i', (a, b) => expect(f(a)).toBe(b));\n";
+    assert_eq!(both(old, unknown).removed, 0, "when Kern cannot count the rows it claims nothing");
 }

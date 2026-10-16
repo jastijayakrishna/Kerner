@@ -12,7 +12,7 @@ const WEAK_ASSERTS: [&str; 5] = ["ok", "isOk", "exists", "isDefined", "isNotNull
 const HELPERS: [&str; 6] = ["expect", "assert", "check", "verify", "should", "ensure"];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Case { pub checks: usize, pub weak: usize }
+pub struct Case { pub checks: usize, pub weak: usize, pub runs: usize }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Weakened { pub removed: usize, pub missing: Vec<String>, pub emptied: Vec<String>, pub loosened: Vec<String> }
@@ -51,6 +51,20 @@ fn negated(e: &Expression) -> bool {
         _ => false,
     }
 }
+fn rows(callee: &Expression) -> Option<usize> {
+    match strip(callee) {
+        Expression::CallExpression(c) => match strip(&c.callee) {
+            Expression::StaticMemberExpression(m) if m.property.name == "each" => match c.arguments.first().and_then(Argument::as_expression).map(strip) {
+                Some(Expression::ArrayExpression(a)) => Some(a.elements.len()),
+                _ => Some(0),
+            },
+            other => rows(other),
+        },
+        Expression::StaticMemberExpression(m) => rows(&m.object),
+        Expression::TaggedTemplateExpression(t) => match strip(&t.tag) { Expression::StaticMemberExpression(m) if m.property.name == "each" => Some(0), _ => None },
+        _ => None,
+    }
+}
 fn title(args: &[Argument]) -> Option<String> {
     match strip(args.first()?.as_expression()?) {
         Expression::StringLiteral(s) => Some(s.value.to_string()),
@@ -76,11 +90,12 @@ fn check(call: &CallExpression) -> Option<bool> {
     }
 }
 
-struct Walk { path: Vec<String>, current: Option<String>, cases: BTreeMap<String, Case> }
+struct Walk { path: Vec<String>, current: Option<String>, cases: BTreeMap<String, Case>, unknown: bool }
 impl<'a> Visit<'a> for Walk {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if self.current.is_none() && let (Some(name), Some(t)) = (root(&it.callee), title(&it.arguments)) {
             if GROUPS.contains(&name.as_str()) {
+                if rows(&it.callee).is_some() { self.unknown = true; }
                 self.path.push(t);
                 walk::walk_call_expression(self, it);
                 self.path.pop();
@@ -88,7 +103,9 @@ impl<'a> Visit<'a> for Walk {
             }
             if CASES.contains(&name.as_str()) {
                 let key = self.path.iter().chain(std::iter::once(&t)).cloned().collect::<Vec<_>>().join(" > ");
-                self.cases.entry(key.clone()).or_default();
+                let runs = rows(&it.callee).unwrap_or(1);
+                if runs == 0 { self.unknown = true; }
+                self.cases.entry(key.clone()).or_default().runs += runs.max(1);
                 self.current = Some(key);
                 walk::walk_call_expression(self, it);
                 self.current = None;
@@ -108,8 +125,9 @@ pub fn cases(path: &str, source: &str) -> Option<BTreeMap<String, Case>> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, st).parse();
         if parsed.fatal_error || !parsed.diagnostics.is_empty() { return None; }
-        let mut w = Walk { path: Vec::new(), current: None, cases: BTreeMap::new() };
+        let mut w = Walk { path: Vec::new(), current: None, cases: BTreeMap::new(), unknown: false };
         w.visit_program(&parsed.program);
+        if w.unknown { for c in w.cases.values_mut() { c.runs = 0; } }
         Some(w.cases)
     })
 }
@@ -118,8 +136,12 @@ pub fn leaf(key: &str) -> &str { key.rsplit(" > ").next().unwrap_or(key) }
 
 pub fn compare(old: &BTreeMap<String, Case>, new: &BTreeMap<String, Case>, elsewhere: &BTreeSet<String>) -> Weakened {
     let missing: Vec<String> = old.keys().filter(|k| !new.contains_key(*k) && !elsewhere.contains(leaf(k))).cloned().collect();
-    let added = new.keys().filter(|k| !old.contains_key(*k)).count();
-    let removed = missing.len().saturating_sub(added);
+    let countable = old.values().chain(new.values()).all(|c| c.runs > 0);
+    let lost: usize = missing.iter().map(|k| old[k].runs).sum();
+    let gained: usize = new.iter().filter(|(k, _)| !old.contains_key(*k)).map(|(_, c)| c.runs).sum::<usize>()
+        + old.iter().filter_map(|(k, o)| new.get(k).map(|n| n.runs.saturating_sub(o.runs))).sum::<usize>();
+    let shrunk: usize = old.iter().filter_map(|(k, o)| new.get(k).map(|n| o.runs.saturating_sub(n.runs))).sum();
+    let removed = if countable { (lost + shrunk).saturating_sub(gained) } else { 0 };
     let kept = |f: &dyn Fn(&Case, &Case) -> bool| -> Vec<String> { old.iter().filter_map(|(k, o)| new.get(k).filter(|n| f(o, n)).map(|_| k.clone())).collect() };
     Weakened {
         removed,
