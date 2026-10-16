@@ -791,3 +791,13 @@ fn vitests_banners_and_stack_lines_are_not_quoted_as_the_error() {
     assert!(why.contains("SHOP_DATABASE_URL must be set to a test database"), "the e2e crash case quoted vitest's banner instead: {why}");
     assert!(!why.contains("Unhandled Error \u{23af}") && !why.contains("CAC.run"), "{why}");
 }
+
+#[test]
+fn a_vitest_that_does_not_know_one_of_kerns_options_runs_again_without_only_that_one() {
+    let s = |l: &[&str]| -> Vec<String> { l.iter().map(|x| x.to_string()).collect() };
+    let command = s(&["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache", "--bail=0", "--sequence.shuffle=false"]);
+    assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--sequence`"), Some(command[..5].to_vec()));
+    assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--sequence.shuffle`"), Some(command[..5].to_vec()));
+    assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--bail`"), Some(s(&["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache", "--sequence.shuffle=false"])));
+    assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--color`"), None, "only Kern's own options are dropped");
+}

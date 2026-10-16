@@ -15,10 +15,10 @@ pub const REPORT: &str = "/tmp/.kern-report.json";
 pub fn test_command(tests: &Tests) -> Vec<String> {
     let mut c = proof::command(tests);
     match tests.runner {
-        Runner::Vitest => c.extend([format!("--outputFile={REPORT}"), crate::sandbox::PROGRESS_ARGS[0].to_string()]),
+        Runner::Vitest => c.extend([format!("--outputFile={REPORT}"), "--bail=0".into(), "--sequence.shuffle=false".into(), crate::sandbox::PROGRESS_ARGS[0].to_string()]),
         Runner::Mocha => c.extend(["--reporter-option".to_string(), format!("output={REPORT}")]),
         Runner::Node => { if let Some(at) = c.iter().position(|a| a == "--test-reporter=tap") { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
-        Runner::Jest => c.extend(crate::sandbox::PROGRESS_ARGS[1..].iter().map(|a| a.to_string())),
+        Runner::Jest => c.extend(std::iter::once("--bail=false").chain(crate::sandbox::PROGRESS_ARGS[1..].iter().copied()).map(str::to_string)),
     }
     c
 }
@@ -891,21 +891,16 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     if !steps.is_empty() {
                         let at = now_ms();
                         let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
-                        match prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until) {
-                            Err(e) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
-                            Ok(_) => {
+                        let on_old = prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until);
+                        let on_new = prepare(out, op, &volume("new"), &repair_steps(&workspace(repo, head), &missing, pretest.as_deref()), &format!("new{label}"), until);
+                        match (on_old, on_new) {
+                            (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
+                            (Ok(_), Err(e)) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
+                            (Ok(_), Ok(_)) => {
                                 let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
                                 old_seconds = (now_ms() - at) / 1000;
-                                if cannot_load(Some(&again)).is_some() {
-                                    tried = format!(" (even after Kern ran {} first)", names.join(", "));
-                                } else {
-                                    let new_steps = repair_steps(&workspace(repo, head), &missing, pretest.as_deref());
-                                    match prepare(out, op, &volume("new"), &new_steps, &format!("new{label}"), until) {
-                                        Ok(_) => built = names,
-                                        Err(e) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
-                                    }
-                                }
-                                if tried.is_empty() || cannot_load(Some(&again)).is_some() { run = again; }
+                                if cannot_load(Some(&again)).is_some() { tried = format!(" (even after Kern ran {} first)", names.join(", ")); } else { built = names; }
+                                run = again;
                             }
                         }
                         timed(format!("old-built{label}"), at);

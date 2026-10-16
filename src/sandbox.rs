@@ -194,10 +194,13 @@ pub fn yarnrc_without_code(text: &str) -> String {
 pub fn locked_mode(mode: u32, dir: bool) -> u32 { if dir { 0o1777 } else { (mode & 0o755) | 0o444 } }
 pub const PROGRESS_ARGS: [&str; 3] = ["--reporter=/kern/vitest-progress.mjs", "--reporters=default", "--reporters=/kern/jest-progress.cjs"];
 pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> {
-    let drop: &[&str] = if errors.contains("Unknown option `--cache`") { &["--no-cache"] }
-        else if errors.contains("/kern/vitest-progress.mjs") || errors.contains("/kern/jest-progress.cjs") { &PROGRESS_ARGS }
-        else { &[] };
-    let shorter: Vec<String> = command.iter().filter(|a| !drop.contains(&a.as_str())).cloned().collect();
+    let unknown = |arg: &str| {
+        let name = arg.trim_start_matches("--").trim_start_matches("no-").split('=').next().unwrap_or("");
+        [name, name.split('.').next().unwrap_or("")].iter().any(|n| errors.contains(&format!("Unknown option `--{n}`")))
+    };
+    let progress = errors.contains("/kern/vitest-progress.mjs") || errors.contains("/kern/jest-progress.cjs");
+    let shorter: Vec<String> = command.iter().filter(|a| !(["--no-cache", "--bail=0", "--sequence.shuffle=false"].contains(&a.as_str()) && unknown(a))
+        && !(progress && PROGRESS_ARGS.contains(&a.as_str()))).cloned().collect();
     (shorter.len() < command.len()).then_some(shorter)
 }
 pub fn early_stop(started_ms: u64, now_ms: u64, timeout: u64, progress: &str) -> Option<String> {

@@ -339,6 +339,43 @@ for runner in vitest jest; do
     || { jq .tests "early-$runner/receipt.json"; fail "early-$runner: the run was not stopped early, so its progress was not read"; }
 done
 
+say "A suite whose config stops at its first failure is still run whole, so a test the change breaks is found"
+git init -q bailrepo && cd bailrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"bail","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' 'export default { test: { bail: process.env.CI ? 1 : 0, fileParallelism: false, sequence: { shuffle: true } } };' > vitest.config.js
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' "const padding = \"$(printf 'x%.0s' $(seq 1 600))\";" '' 'test("needs a service that is not here", () => expect(padding.length + process.env.NOT_HERE).toBe("600yes"));' > test/a-service.test.js
+for i in 1 2 3; do printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' "test(\"total $i\", () => expect(total([{ price: $i, qty: 2 }])).toBe($(( i * 2 ))));" > "test/total-$i.test.js"; done
+git add -A && git commit -qm base && bail_base=$(git rev-parse HEAD)
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/bail.head"
+cd "$W"
+check bail "$bail_base" bailrepo
+decision bail blocked
+jq -e '.tests.status == "RAN" and .tests.before.passed == 3 and (.tests.broke | length == 3)' bail/receipt.json > /dev/null || { jq .tests bail/receipt.json; fail "bail: the suite stopped at its first failure, so the broken tests were not all found"; }
+
+say "A build Kern runs for one package's tests is run on both sides, so a later package never sees it on one side only"
+git init -q mirrorrepo && cd mirrorrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/lib/src packages/ghost packages/a/test packages/a/src packages/b/test packages/b/src
+printf '%s\n' '{"name":"mirror","private":true,"type":"module","workspaces":["packages/*"],"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' '{"name":"@m/lib","version":"1.0.0","type":"module","main":"dist/index.js","scripts":{"build":"node build.mjs"}}' > packages/lib/package.json
+printf '%s\n' "import { mkdirSync, copyFileSync } from 'node:fs';" "mkdirSync(new URL('./dist/', import.meta.url), { recursive: true });" "copyFileSync(new URL('./src/index.js', import.meta.url), new URL('./dist/index.js', import.meta.url));" > packages/lib/build.mjs
+printf '%s\n' "export const add = (a, b) => a + b;" > packages/lib/src/index.js
+printf '%s\n' '{"name":"@m/ghost","version":"1.0.0","type":"module","main":"dist/index.js","dependencies":{"@m/lib":"1.0.0"}}' > packages/ghost/package.json
+for p in a b; do printf '%s\n' "{\"name\":\"@m/$p\",\"version\":\"1.0.0\",\"type\":\"module\",\"scripts\":{\"test\":\"vitest run\"},\"dependencies\":{\"@m/lib\":\"1.0.0\",\"@m/ghost\":\"1.0.0\"}}" > "packages/$p/package.json"; printf '%s\n' "export const name = '$p';" > "packages/$p/src/name.js"; done
+printf '%s\n' "import { test, expect } from 'vitest';" "import { add } from '@m/lib';" "import { ghost } from '@m/ghost';" '' "test('adds', () => expect(add(2, 3) + ghost).toBe(5));" > packages/a/test/add.test.js
+printf '%s\n' "import { test, expect } from 'vitest';" "import { add } from '@m/lib';" '' "test('adds', () => expect(add(2, 3)).toBe(5));" > packages/b/test/add.test.js
+printf 'dist/\n' > .gitignore
+git add -A && git commit -qm base && mirror_base=$(git rev-parse HEAD)
+sed -i "s/'a'/'aa'/" packages/a/src/name.js && sed -i "s/'b'/'bb'/" packages/b/src/name.js
+git commit -qam "Longer names" && git rev-parse HEAD > "$W/mirror.head"
+cd "$W"
+check mirror "$mirror_base" mirrorrepo
+jq -e '.decision != "blocked" and (.tests.runner | test("vitest in packages/b"))' mirror/receipt.json > /dev/null || { jq '{decision, tests}' mirror/receipt.json; fail "mirror: a build run for packages/a on the old side only made packages/b look broken on the new side"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
