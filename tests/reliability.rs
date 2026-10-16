@@ -448,3 +448,17 @@ fn a_test_counts_as_newly_skipped_only_when_the_rerun_skips_it_too_and_the_old_c
     let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
     assert_eq!(c["newly_skipped"], json!(["t/b.test.ts > really skipped"]), "a hook that fails at random makes vitest skip a suite's tests: {c}");
 }
+
+#[test]
+fn a_receipt_never_says_tests_still_pass_when_no_test_could_load_on_the_old_code() {
+    let mut before = report(&[], &["app/a.test.ts", "app/b.test.ts"]);
+    before.why.insert("app/a.test.ts".into(), "Cannot use import statement outside a module".into());
+    let mut after = before.clone();
+    after.problems.push("app/new.test.ts".into());
+    let c = suite::compare(&before, &after, Some(&after));
+    assert_eq!(c["status"], "NOT_RUN", "nothing loaded on the old code, so there was nothing to compare: {c}");
+    assert!(c["why"].as_str().unwrap().contains("could load"), "{c}");
+    assert_eq!(c["new_failing"], json!(["app/new.test.ts"]), "a test file the change adds that does not run is still listed: {c}");
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &c, &off()), None);
+    assert!(!md.contains("still pass"), "{md}");
+}

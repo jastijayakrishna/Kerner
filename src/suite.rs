@@ -171,17 +171,17 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     already_failing.extend(before.problems.iter().cloned());
     let total = |r: &Report| r.tests.values().map(|c| c.total()).sum::<u32>();
     let passed = |r: &Report| r.tests.values().map(|c| c.passed).sum::<u32>();
-    if total(before) == 0 && total(after) == 0 && after.problems.iter().all(|p| before.problems.contains(p)) {
-        let why = match before.problems.iter().find(|p| before.why.contains_key(*p)).or(before.problems.first()) {
-            None => "the test runner ran but found no tests on either side".to_string(),
-            Some(first) => format!("none of the {} test files could load on the old or the new code (they may need a build or generated files first); {first}: {}",
-                before.problems.len(), before.why.get(first).map_or("no error was given", String::as_str)),
-        };
-        return json!({ "status": "NOT_RUN", "why": why });
+    if total(before) == 0 && total(after) == 0 && before.problems.is_empty() && after.problems.is_empty() {
+        return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
     }
-    if total(before) > 0 && passed(before) == 0 {
-        return json!({ "status": "NOT_RUN", "why": "no test passed on the old code here (they may need the network, a database or a build first), so the tests showed nothing",
-            "new_failing": new_failing });
+    if passed(before) == 0 && (total(before) > 0 || !before.problems.is_empty()) {
+        let why = match before.problems.iter().find(|p| before.why.contains_key(*p)).or(before.problems.first()).filter(|_| total(before) == 0) {
+            Some(first) => format!("none of the {} test files could load on the old code (they may need a build or generated files first); {first}: {}",
+                before.problems.len(), before.why.get(first).map_or("no error was given", String::as_str)),
+            None => "no test passed on the old code here (they may need the network, a database or a build first), so the tests showed nothing".to_string(),
+        };
+        new_failing.extend(after.problems.iter().filter(|p| !before.problems.contains(*p)).cloned());
+        return json!({ "status": "NOT_RUN", "why": why, "new_failing": new_failing });
     }
     let candidates: Vec<&String> = after.problems.iter().filter(|p| !before.problems.contains(*p)).collect();
     let (new_problems, unsteady): (Vec<&String>, Vec<&String>) = candidates.into_iter()
