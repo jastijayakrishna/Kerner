@@ -16,7 +16,7 @@ pub fn test_command(tests: &Tests) -> Vec<String> {
     let mut c = proof::command(tests);
     match tests.runner {
         Runner::Vitest => c.extend([format!("--outputFile={REPORT}"), "--bail=0".into(), "--sequence.shuffle=false".into(), crate::sandbox::PROGRESS_ARGS[0].to_string()]),
-        Runner::Mocha => c.extend(["--reporter-option".to_string(), format!("output={REPORT}")]),
+        Runner::Mocha => c.extend(["--reporter-options".to_string(), format!("output={REPORT}")]),
         Runner::Node => { if let Some(at) = c.iter().position(|a| a == "--test-reporter=tap") { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
         Runner::Jest => c.extend(std::iter::once("--bail=false").chain(crate::sandbox::PROGRESS_ARGS[1..].iter().copied()).map(str::to_string)),
     }

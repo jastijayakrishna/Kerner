@@ -118,7 +118,7 @@ fn every_runner_writes_its_report_to_a_file_kern_names() {
     let tests = |runner: &str| kern::suite::detect(Some(format!(r#"{{"devDependencies":{{"{runner}":"1.0.0"}}}}"#).as_bytes())).unwrap();
     let joined = |runner: &str| kern::suite::test_command(&tests(runner)).join(" ");
     assert!(joined("vitest").contains("--outputFile=/tmp/.kern-report.json"), "{}", joined("vitest"));
-    assert!(joined("mocha").contains("--reporter-option output=/tmp/.kern-report.json"), "{}", joined("mocha"));
+    assert!(joined("mocha").contains("--reporter-options output=/tmp/.kern-report.json"), "the plural is the one every mocha knows; AudienseCo/monorail's mocha refused the singular: {}", joined("mocha"));
     let node = kern::suite::test_command(&kern::suite::detect(Some(br#"{"scripts":{"test":"node --test"}}"#)).unwrap()).join(" ");
     assert!(node.contains("--test-reporter=tap --test-reporter-destination=/tmp/.kern-report.json"), "{node}");
     assert_eq!(kern::suite::test_command(&tests("jest"))[..kern::proof::command(&tests("jest")).len()], kern::proof::command(&tests("jest")), "jest writes the file through Kern's own results processor");
