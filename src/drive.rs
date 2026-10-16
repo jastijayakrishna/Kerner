@@ -1032,7 +1032,7 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds, "scripts": crate::sandbox::throwaway() }))))?;
     let volume = crate::sandbox::Volume::create()?;
     let mut ledger = std::fs::OpenOptions::new().create(true).append(true).open(out.join("volumes.txt"))?;
     std::io::Write::write_all(&mut ledger, format!("{}\n", volume.0).as_bytes())?;

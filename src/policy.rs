@@ -350,7 +350,7 @@ pub fn pinned(p: &Pin) -> R<PathBuf> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Control { pub role: String, pub docker: Pin, pub endpoint: String, pub git: Pin, pub runtime: Pin, pub runtime_version: String, pub host_policy: Pin }
+pub struct Control { pub role: String, pub docker: Pin, pub endpoint: String, pub git: Pin, pub runtime: Pin, pub runtime_version: String, pub host_policy: Pin, pub runtime_name: String }
 static CONTROL: OnceLock<Control> = OnceLock::new();
 static GIT: OnceLock<Pin> = OnceLock::new();
 pub const ENDPOINT: &str = if cfg!(windows) { "npipe:////./pipe/docker_engine" } else { "unix:///var/run/docker.sock" };
@@ -365,11 +365,20 @@ pub fn validate_control(v: &Value) -> R<Control> {
     let (git, host_policy) = (pin(&v["git"], "Git pin")?, pin(&v["host_policy"], "host policy pin")?);
     for p in [&docker, &git, &host_policy] { pinned(p)?; }
     let r = &v["runtime"];
-    exact(r, &["file", "sha256", "version", "arguments"], "runtime pin")?;
+    let named = r.get("name").is_some();
+    exact(r, if named { &["file", "sha256", "version", "arguments", "name"] } else { &["file", "sha256", "version", "arguments"] }, "runtime pin")?;
     let (file, sha, version) = (text(r, "file")?, text(r, "sha256")?, text(r, "version")?);
     ensure!(file.starts_with('/') && is_hex64(sha) && !version.is_empty() && version.len() < 1024, "Pinned Linux runtime required");
     ensure!(r["arguments"].as_array().is_some_and(Vec::is_empty), "Only reviewed default runsc arguments are permitted");
-    Ok(Control { role: text(v, "role")?.into(), docker, endpoint: ENDPOINT.into(), git, runtime: Pin { file: file.into(), sha256: sha.into() }, runtime_version: version.into(), host_policy })
+    let name = if named { text(r, "name")? } else { "runsc" };
+    ensure!(matches!(name, "runsc" | "runc"), "The runtime is gVisor (runsc), or runc on a throwaway machine");
+    if name == "runc" {
+        let policy: Value = serde_json::from_slice(&std::fs::read(&host_policy.file)?).map_err(|_| Denied("The host policy must be JSON".into()))?;
+        ensure!(policy["machine"] == "throwaway",
+            "runc is allowed only on a throwaway machine that holds no keys and is deleted after the check: the host policy must say \"machine\": \"throwaway\"");
+    }
+    Ok(Control { role: text(v, "role")?.into(), docker, endpoint: ENDPOINT.into(), git, runtime: Pin { file: file.into(), sha256: sha.into() }, runtime_version: version.into(), host_policy,
+        runtime_name: name.into() })
 }
 pub fn configure(v: &Value) -> R<()> {
     let c = validate_control(v)?;

@@ -1065,3 +1065,63 @@ fn the_package_manager_kern_downloads_runs_outside_the_project_so_its_package_js
     assert!(!home.starts_with("/workspace"), "apify/camoufox-js#254, storybook#36653: under /workspace, the project's \"type\": \"module\" made Node load yarn 4's yarn.js as ESM and every install failed with Dynamic require of \"util\" is not supported");
     assert!(home.starts_with("/home/kern/"), "the setup sandbox's home is its writable scratch space");
 }
+
+#[test]
+fn on_a_throwaway_machine_packages_install_the_way_ci_installs_them_with_their_scripts() {
+    let t = Temp::new();
+    write(&t.0, "package.json", r#"{"name":"app"}"#);
+    write(&t.0, "package-lock.json", "{}");
+    let sealed = kern::sandbox::install_plan_for(&t.0, false).1;
+    assert!(sealed.iter().all(|(argv, _)| argv.iter().any(|a| a == "--ignore-scripts")), "under gVisor no package script runs: {sealed:?}");
+    let ci = kern::sandbox::install_plan_for(&t.0, true).1;
+    assert!(ci.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--ignore-scripts")), "canvas, prisma and mongodb-memory-server finish installing only through their scripts: {ci:?}");
+    let u = Temp::new();
+    write(&u.0, "package.json", r#"{"name":"app","packageManager":"yarn@4.9.2"}"#);
+    write(&u.0, ".yarnrc.yml", "nodeLinker: node-modules\n");
+    write(&u.0, "yarn.lock", "__metadata:\n  version: 8\n");
+    assert!(kern::sandbox::install_plan_for(&u.0, true).1.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--mode=skip-build")));
+    let v = Temp::new();
+    write(&v.0, "package.json", r#"{"name":"app"}"#);
+    write(&v.0, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    assert!(kern::sandbox::install_plan_for(&v.0, true).1.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--ignore-scripts" || a == "--ignore-pnpmfile")));
+}
+
+#[test]
+fn runc_is_accepted_only_on_a_machine_its_policy_calls_throwaway() {
+    let t = Temp::new();
+    let tool = t.0.join("tool");
+    std::fs::write(&tool, "pinned-tool-fixture").unwrap();
+    let pin = |p: &Path| json!({ "file": p, "sha256": kern::util::sha256(std::fs::read(p).unwrap()) });
+    let policy = |text: &str| { let p = t.0.join(format!("policy-{}.json", kern::util::sha256(text.as_bytes()))); std::fs::write(&p, text).unwrap(); pin(&p) };
+    let control = |runtime: Value, host: Value| json!({ "version": 1, "role": "verifier", "docker": { "file": tool, "sha256": pin(&tool)["sha256"], "endpoint": policy::ENDPOINT },
+        "git": pin(&tool), "host_policy": host, "runtime": runtime });
+    let runc = json!({ "file": "/usr/bin/runc", "sha256": "a".repeat(64), "version": "runc version 1.2.5", "arguments": [], "name": "runc" });
+    let kept = policy(r#"{"host":"github-actions","deployment":"single-vm"}"#);
+    let refused = policy::validate_control(&control(runc.clone(), kept)).unwrap_err();
+    assert!(refused.0.contains("throwaway machine"), "a machine that is kept between checks needs gVisor: {}", refused.0);
+    let throwaway = policy(r#"{"host":"github-actions","deployment":"single-vm","machine":"throwaway"}"#);
+    assert_eq!(policy::validate_control(&control(runc.clone(), throwaway.clone())).unwrap().runtime_name, "runc");
+    let mut other = runc.clone();
+    other["name"] = json!("kata");
+    assert!(policy::validate_control(&control(other, throwaway.clone())).is_err());
+    let plain = json!({ "file": "/usr/local/bin/runsc", "sha256": "a".repeat(64), "version": "fixture", "arguments": [] });
+    assert_eq!(policy::validate_control(&control(plain, throwaway)).unwrap().runtime_name, "runsc", "gVisor stays the default");
+    let limits = kern::policy::Limits { files_changed: 1, lines_changed: 1, file_bytes: 1, total_bytes: 1 << 20, timeout_seconds: 60, memory_mb: 512, pids: 64 };
+    let spec = kern::sandbox::Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__drive_test".into()], network: "none", volumes: vec![],
+        root: false, home_mb: 0, scratch: false, workspace: Some(("kern-deps-x", false)) };
+    let args = kern::sandbox::container_args_for(&spec, "kern-x", "runc").unwrap().join(" ");
+    for want in ["--runtime=runc", "--network=none", "--read-only", "--user=1000:1000", "--cap-drop=ALL", "no-new-privileges"] { assert!(args.contains(want), "{want}: {args}"); }
+    assert!(kern::sandbox::container_args_for(&spec, "kern-x", "kata").is_err());
+}
+
+#[test]
+fn the_receipt_says_how_the_code_ran() {
+    let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
+        "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
+    let off = json!({ "status": "OFF", "why": "no AI key" });
+    let mut r = receipt::build(&drive_json(), &clean_rules(), &tests, &off);
+    assert_eq!(r["sandbox"], "gvisor");
+    assert!(receipt::markdown(&r, None).contains("ran the code only in a sealed sandbox with the network off"));
+    r["sandbox"] = json!("throwaway");
+    assert!(receipt::markdown(&r, None).contains("ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran"));
+}

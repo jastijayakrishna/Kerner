@@ -219,7 +219,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) })))
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
             .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).collect();
-    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "base": d["base"], "head": d["head"], "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": blocked, "look": look, "tests": tests,
+    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"], "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": blocked, "look": look, "tests": tests,
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": report["coverage"]["percent"], "lines": lines, "described": described, "not_mentioned": surprises },
         "rules": rules, "not_checked": not_checked })
 }
@@ -365,7 +365,11 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         md += "\n";
     }
     let short = |k: &str| r[k].as_str().filter(|h| h.len() >= 7).map(|h| h[..7].to_string()).unwrap_or_default();
-    let sandbox = if tests_ran || behaviour_ran { ", and ran the code only in a sealed sandbox with the network off" } else { "" };
+    let sandbox = match (tests_ran || behaviour_ran, r["sandbox"].as_str()) {
+        (false, _) => "",
+        (true, Some("throwaway")) => ", and ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran",
+        (true, _) => ", and ran the code only in a sealed sandbox with the network off",
+    };
     md += &format!("<sub>Kern {} checked `{}` against `{}`{sandbox}.</sub>\n", r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
     if md.len() > 60_000 {
         let mut cut = 60_000;

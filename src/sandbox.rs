@@ -118,25 +118,30 @@ pub fn behavior_counts(stdout: &[u8]) -> std::collections::BTreeMap<String, u64>
 fn docker_json(args: &[&str]) -> R<Value> { Ok(serde_json::from_slice(&docker(args, Duration::from_secs(60), 16 * 1048576)?)?) }
 
 pub struct Doctor { pub ready: bool, pub builder: Option<(String, Value)>, pub report: Value }
+pub fn runtime_name() -> &'static str { crate::policy::control().map_or("runsc", |c| c.runtime_name.as_str()) }
+pub fn throwaway() -> bool { runtime_name() == "runc" }
 pub fn doctor() -> Doctor {
+    let required = runtime_name();
     let attempt = || -> R<Doctor> {
         let info = docker_json(&["info", "--format", "{{json .}}"])?;
         let limits = ["MemoryLimit", "SwapLimit", "PidsLimit", "CpuCfsQuota"].iter().all(|k| info[*k] == true);
         let runtimes: Vec<String> = info["Runtimes"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-        let ready = info["OSType"] == "linux" && runtimes.iter().any(|r| r == "runsc") && limits;
+        let ready = info["OSType"] == "linux" && runtimes.iter().any(|r| r == required) && limits;
         let builder = if ready { Some(builder_identity(&info, &docker_json(&["version", "--format", "{{json .}}"])?)?) } else { None };
-        let report = json!({ "ready": ready, "builder": builder.as_ref().map(|b| json!({ "sha256": b.0, "identity": b.1 })), "os": info["OSType"], "runtimes": runtimes, "resource_limits": limits, "required": "runsc",
-            "explanation": "Operator must pin genuine gVisor (runsc), its daemon mapping, toolchain and host policy, and enable memory/swap/PID/CPU limits. There is no fallback runtime." });
+        let report = json!({ "ready": ready, "builder": builder.as_ref().map(|b| json!({ "sha256": b.0, "identity": b.1 })), "os": info["OSType"], "runtimes": runtimes, "resource_limits": limits, "required": required,
+            "explanation": "Operator must pin genuine gVisor (runsc), or runc on a throwaway machine that holds no keys, with its daemon mapping, toolchain and host policy, and enable memory/swap/PID/CPU limits." });
         Ok(Doctor { ready, builder, report })
     };
-    attempt().unwrap_or_else(|e| Doctor { ready: false, builder: None, report: json!({ "ready": false, "required": "runsc", "explanation": e.0 }) })
+    attempt().unwrap_or_else(|e| Doctor { ready: false, builder: None, report: json!({ "ready": false, "required": required, "explanation": e.0 }) })
 }
 fn builder_identity(info: &Value, versions: &Value) -> R<(String, Value)> {
     ensure!(cfg!(target_os = "linux"), "Production builder identity requires a native Linux controller");
     let c = control()?;
     let runtime = pinned(&c.runtime)?;
-    let mapping = &info["Runtimes"]["runsc"];
-    ensure!(mapping["path"].as_str() == Some(runtime.to_string_lossy().as_ref()) && mapping["runtimeArgs"].as_array().is_none_or(Vec::is_empty), "Daemon runtime mapping does not match the pinned runtime");
+    let mapping = &info["Runtimes"][c.runtime_name.as_str()];
+    let mapped = mapping["path"].as_str().unwrap_or("");
+    let same = mapped == runtime.to_string_lossy() || (!mapped.contains('/') && runtime.file_name().is_some_and(|n| n.to_string_lossy() == mapped));
+    ensure!(same && mapping["runtimeArgs"].as_array().is_none_or(Vec::is_empty), "Daemon runtime mapping does not match the pinned runtime");
     let version = String::from_utf8_lossy(&run(&runtime, &["--version".into()], Run::default())?).trim().to_string();
     ensure!(version == c.runtime_version, "Runtime version changed");
     let git = pinned(&c.git)?;
@@ -249,6 +254,13 @@ pub fn first_error(text: &str) -> Option<&str> {
     lines.iter().copied().find(|l| thrown(l)).or_else(|| lines.iter().copied().find(|l| marked(l)))
 }
 const STALE: &str = "installed from package.json (the lockfile is out of date)";
+pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
+    let (manager, mut attempts) = install_plan(dir);
+    if scripts {
+        for (argv, _) in attempts.iter_mut() { argv.retain(|a| !["--ignore-scripts", "--ignore-pnpmfile", "--mode=skip-build"].contains(&a.as_str())); }
+    }
+    (manager, attempts)
+}
 pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
     let node = |args: &[&str]| -> Vec<String> { ["/usr/local/bin/node"].iter().chain(args).map(|s| s.to_string()).collect() };
     let npm = |args: &[&str]| -> Vec<String> {
@@ -325,7 +337,9 @@ fn mount(source: &Path, target: &str) -> R<[String; 2]> {
 fn cpus(spec: &Spec) -> usize {
     if spec.entry.first().is_some_and(|e| e == "__drive_setup" || e == "__drive_test") { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4) } else { 1 }
 }
-pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
+pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> { container_args_for(spec, name, runtime_name()) }
+pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<String>> {
+    ensure!(matches!(runtime, "runsc" | "runc"), "Unknown container runtime");
     let (drive, drive_setup) = (spec.entry.first().is_some_and(|e| e == "__drive"), spec.entry.first().is_some_and(|e| e == "__drive_setup"));
     let drive_test = spec.entry.first().is_some_and(|e| e == "__drive_test");
     let drive_seal = spec.entry.first().is_some_and(|e| e == "__drive_seal");
@@ -351,7 +365,7 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let cpus = cpus(spec);
     let files = if drive || drive_setup || drive_test { "nofile=65536:65536" } else { "nofile=1024:1024" };
     let mut a: Vec<String> = [
-        "create", "--name", name, "--pull=never", "--runtime=runsc", &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
+        "create", "--name", name, "--pull=never", &format!("--runtime={runtime}"), &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
         "--ulimit", files, "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
     ].iter().map(|s| s.to_string()).collect();
@@ -400,7 +414,7 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         let i = &docker_json(&["inspect", &name])?[0];
         let h = &i["HostConfig"];
         let memory = spec.limits.memory_mb * 1048576;
-        ensure!(h["Runtime"] == "runsc" && h["NetworkMode"] == spec.network && h["ReadonlyRootfs"] == true && i["Config"]["User"] == if spec.root { "0:0" } else { "1000:1000" }, "Container configuration does not match the required boundary");
+        ensure!(h["Runtime"] == runtime_name() && h["NetworkMode"] == spec.network && h["ReadonlyRootfs"] == true && i["Config"]["User"] == if spec.root { "0:0" } else { "1000:1000" }, "Container configuration does not match the required boundary");
         ensure!(h["Memory"] == memory && h["MemorySwap"] == memory && h["PidsLimit"] == spec.limits.pids && h["NanoCpus"] == cpus(spec) as u64 * 1_000_000_000, "Container resource limits not applied");
         ensure!(h["Privileged"] == false && h["CapDrop"].as_array().is_some_and(|c| c.iter().any(|x| x == "ALL")) && h["SecurityOpt"].as_array().is_some_and(|s| s.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("no-new-privileges")))), "Container privilege constraints not applied");
         let added: Vec<String> = h["CapAdd"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|c| c.trim_start_matches("CAP_").to_string()).collect();
@@ -752,7 +766,8 @@ mod inside {
     }
     pub fn drive_setup() -> R<()> {
         let c = config("drive-setup.json")?;
-        exact(&c, &["version", "dirs", "timeout_seconds"], "drive setup")?;
+        exact(&c, &["version", "dirs", "timeout_seconds", "scripts"], "drive setup")?;
+        let scripts = c["scripts"].as_bool().ok_or_else(|| Denied("Invalid drive setup".into()))?;
         ensure!(c["version"] == 1, "Unsupported drive setup");
         let dirs = strings(&c, "dirs", 64)?;
         for d in dirs.iter().filter(|d| *d != ".") { file_path(d)?; }
@@ -766,7 +781,7 @@ mod inside {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
             if d != "." && dir.join("node_modules").exists() { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
-            let (manager, attempts) = super::install_plan(&dir);
+            let (manager, attempts) = super::install_plan_for(&dir, scripts);
             let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
             if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
             let originals = if manager == "bun" { bun_rewrite(&dir)? } else { Vec::new() };
