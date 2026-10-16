@@ -34,6 +34,15 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     crate::drive::prepare(repo, base, head, out, pr)?;
     let d = read_json(out.join("drive.json"))?;
     let rules = crate::rules::rules(repo, base, head)?;
+    let now = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).unwrap_or(0);
+    let times: std::cell::RefCell<std::collections::BTreeMap<String, Option<Value>>> = Default::default();
+    let published = |name: &str, version: &str| -> Option<u64> {
+        let mut cache = times.borrow_mut();
+        if !cache.contains_key(name) && cache.len() >= 30 { return None; }
+        let t = cache.entry(name.to_string()).or_insert_with(|| crate::deps::registry_times(name));
+        t.as_ref().and_then(|t| t[version].as_str()).and_then(crate::deps::rfc3339)
+    };
+    let rules = crate::deps::aged(rules, now, &published);
     let run = runnable(repo, head, &rules);
     let checked = now_ms();
     let behaviour = match ai {

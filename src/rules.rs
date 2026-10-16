@@ -373,7 +373,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let (a, b) = (json_of(&old, &p).unwrap_or_else(|| json!({})), json_of(&new, &p));
         if base_name(&p) == "package.json" && let Some(b) = &b {
             let moved = crate::deps::moves(&a, b);
-            if !moved.is_empty() { d["packages"] = json!(moved); }
+            if !moved.is_empty() { d["packages"] = json!(moved); d["moves"] = json!(crate::deps::changed_versions(&a, b)); }
             let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| !METADATA.contains(&f.as_str())).collect();
             if !fields.is_empty() { d["fields"] = json!(fields); }
             if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }

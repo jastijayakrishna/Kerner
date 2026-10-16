@@ -159,7 +159,15 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", path_of(x)))); }
     }
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
-    if !deps.is_empty() {
+    let all_moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
+    for m in all_moves.iter().filter(|m| m["age"] == "fresh") {
+        let days = m["days"].as_u64().unwrap_or(0);
+        look.push(item("fresh-release", format!("{} came out {} before this change; brand-new releases are where hijacked packages show up, so check it or wait until it is {} days old",
+            code(&format!("{}@{}", m["name"].as_str().unwrap_or(""), m["version"].as_str().unwrap_or("")), 120),
+            if days == 0 { "less than a day".to_string() } else if days == 1 { "1 day".to_string() } else { format!("{days} days") }, crate::deps::FRESH_DAYS)));
+    }
+    let routine = !all_moves.is_empty() && all_moves.iter().all(|m| m["age"] == "routine") && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()));
+    if !deps.is_empty() && !routine {
         let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
         let fields: std::collections::BTreeSet<String> = deps.iter().flat_map(|d| strings(&d["fields"])).collect();
         let only_fields = moved.is_empty() && !fields.is_empty() && deps.iter().all(|d| d["path"].as_str().is_some_and(|p| p.rsplit('/').next() == Some("package.json")));

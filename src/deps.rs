@@ -40,6 +40,71 @@ fn tarball_of(url: &str, name: &str, version: &str) -> bool {
     plain && valid_name(name) && [name.to_string(), name.replacen('/', "%2f", 1), name.replacen('/', "%2F", 1)].iter()
         .any(|n| { let own = format!("{n}/-/{base}-{version}.tgz"); path == own || path.ends_with(&format!("/{own}")) })
 }
+pub const FRESH_DAYS: u64 = 7;
+pub fn changed_versions(old: &Value, new: &Value) -> Vec<Value> {
+    let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
+    let mut out = BTreeMap::new();
+    for s in SECTIONS {
+        let (x, y) = (old[s].as_object().cloned().unwrap_or_default(), new[s].as_object().cloned().unwrap_or_default());
+        for name in x.keys().chain(y.keys()) {
+            let (a, b) = (x.get(name).map(spec), y.get(name).map(spec));
+            if a != b { out.insert(name.clone(), serde_json::json!({ "name": name, "from": a, "to": b })); }
+        }
+    }
+    out.into_values().collect()
+}
+pub fn floor(spec: &str) -> Option<(u64, u64, u64)> {
+    let s = spec.trim();
+    if s.contains(':') || s.contains('/') { return None; }
+    let first = s.split("||").next()?.split_whitespace().next()?;
+    let v = first.trim_start_matches(['^', '~', '>', '=', 'v']);
+    let mut parts = v.split('.');
+    let number = |p: Option<&str>| -> Option<u64> { match p { None => Some(0), Some(x) if ["x", "X", "*"].contains(&x) => Some(0), Some(x) => x.split(['-', '+']).next()?.parse().ok() } };
+    let major = parts.next().filter(|m| !m.is_empty() && *m != "*" && *m != "x")?.parse().ok()?;
+    Some((major, number(parts.next())?, number(parts.next())?))
+}
+pub fn rfc3339(s: &str) -> Option<u64> {
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let clock: Vec<i64> = time.trim_end_matches('Z').split(['.', '+']).next()?.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let (hh, mm, ss) = (*clock.first()?, *clock.get(1)?, clock.get(2).copied().unwrap_or(0));
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    u64::try_from(days * 86_400 + hh * 3_600 + mm * 60 + ss).ok()
+}
+pub fn age(from: Option<&str>, to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
+    let (Some(f), Some(t)) = (from, to) else { return serde_json::json!({ "age": if from.is_none() { "new" } else { "removed" } }) };
+    let (Some(a), Some(b)) = (floor(f), floor(t)) else { return serde_json::json!({ "age": "unknown" }) };
+    if a.0 != b.0 || (a.0 == 0 && a.1 != b.1) { return serde_json::json!({ "age": "major" }); }
+    let version = format!("{}.{}.{}", b.0, b.1, b.2);
+    match published(&version) {
+        None => serde_json::json!({ "age": "unknown", "version": version }),
+        Some(at) if now.saturating_sub(at) < FRESH_DAYS * 86_400 => serde_json::json!({ "age": "fresh", "version": version, "days": now.saturating_sub(at) / 86_400 }),
+        Some(_) => serde_json::json!({ "age": "routine", "version": version }),
+    }
+}
+pub fn aged(mut rules: Value, now: u64, published: &dyn Fn(&str, &str) -> Option<u64>) -> Value {
+    for d in rules["dependencies"].as_array_mut().into_iter().flatten() {
+        for m in d["moves"].as_array_mut().into_iter().flatten() {
+            let name = m["name"].as_str().unwrap_or("").to_string();
+            let verdict = age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now);
+            for (k, v) in verdict.as_object().into_iter().flatten() { m[k] = v.clone(); }
+        }
+    }
+    rules
+}
+pub fn registry_times(name: &str) -> Option<Value> {
+    if !valid_name(name) { return None; }
+    let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(2).http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(20))).build().into();
+    let mut response = agent.get(&format!("https://registry.npmjs.org/{}", name.replace('/', "%2F"))).header("Accept", "application/json").call().ok()?;
+    if response.status() != 200 { return None; }
+    let body = response.body_mut().with_config().limit(64 << 20).read_to_vec().ok()?;
+    serde_json::from_slice::<Value>(&body).ok().map(|v| v["time"].clone())
+}
 pub fn moves(old: &Value, new: &Value) -> Vec<String> {
     let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
     let mut out = BTreeSet::new();

@@ -872,3 +872,39 @@ fn failures_on_sides_set_up_differently_or_without_proof_need_a_look_never_a_blo
     assert!(kinds.contains(&"test-uneven") && kinds.contains(&"test-unproven"), "{kinds:?}");
     assert_eq!(r["decision"], "look", "{r}");
 }
+
+#[test]
+fn a_dependency_update_is_routine_only_when_its_release_has_been_out_a_week_within_the_same_major() {
+    use kern::deps::{age, floor, rfc3339};
+    assert_eq!(floor("^1.6.0"), Some((1, 6, 0)));
+    assert_eq!(floor("~0.4"), Some((0, 4, 0)));
+    assert_eq!(floor(">=2 <3"), Some((2, 0, 0)));
+    assert_eq!(floor("1.2.3-beta.1"), Some((1, 2, 3)));
+    for odd in ["workspace:*", "npm:other@1.0.0", "github:a/b", "latest", "*", "file:../x"] { assert_eq!(floor(odd), None, "{odd}"); }
+    assert_eq!(rfc3339("1970-01-01T00:00:00.000Z"), Some(0));
+    assert_eq!(rfc3339("2000-03-01T00:00:00Z"), Some(951_868_800));
+    let now = rfc3339("2026-10-16T12:00:00.000Z").unwrap();
+    let old = |_: &str| rfc3339("2026-09-01T00:00:00.000Z");
+    let new = |_: &str| rfc3339("2026-10-14T09:00:00.000Z");
+    assert_eq!(age(Some("^1.6.0"), Some("^1.9.0"), &old, now)["age"], "routine");
+    assert_eq!(age(Some("^1.6.0"), Some("^1.9.1"), &new, now), json!({ "age": "fresh", "version": "1.9.1", "days": 2 }),
+        "chalk and debug were hijacked with patch releases that lived a few hours");
+    assert_eq!(age(Some("^1.6.0"), Some("^2.0.0"), &old, now)["age"], "major");
+    assert_eq!(age(Some("^0.3.0"), Some("^0.4.0"), &old, now)["age"], "major", "a 0.x minor bump may break");
+    assert_eq!(age(None, Some("^1.0.0"), &old, now)["age"], "new");
+    assert_eq!(age(Some("^1.0.0"), Some("^1.1.0"), &|_| None, now)["age"], "unknown", "a release the registry does not know of keeps its look");
+}
+
+#[test]
+fn routine_updates_need_no_look_and_a_fresh_release_does() {
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = |moves: Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
+        "dependencies": [{ "path": "package.json", "operation": "modify", "packages": ["x"], "moves": moves }, { "path": "package-lock.json", "operation": "modify" }] });
+    let tests = json!({ "status": "NOT_RUN", "why": "no runner" });
+    let off = json!({ "status": "OFF", "why": "no AI key" });
+    let routine = receipt::build(&d, &rules(json!([{ "name": "vitest", "from": "^3.2.0", "to": "^3.2.4", "age": "routine", "version": "3.2.4" }])), &tests, &off);
+    assert!(!routine["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "71 of 600 pull requests had a dependencies look: {routine}");
+    let fresh = receipt::build(&d, &rules(json!([{ "name": "chalk", "from": "^5.6.0", "to": "^5.6.1", "age": "fresh", "version": "5.6.1", "days": 0 }])), &tests, &off);
+    let kinds: Vec<&str> = fresh["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
+    assert!(kinds.contains(&"fresh-release") && kinds.contains(&"dependencies"), "{kinds:?}");
+}
