@@ -301,6 +301,23 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let w = crate::weaken::compare(&before, after, &elsewhere);
         if !w.is_empty() { weakened.push(json!({ "path": p, "removed": w.removed, "missing": w.missing, "emptied": w.emptied, "loosened": w.loosened })); }
     }
+    let engines = |p: &str| -> Option<(String, crate::nodeapi::Version)> {
+        let parts: Vec<&str> = p.split('/').collect();
+        (0..parts.len()).rev().map(|n| parts[..n].join("/")).find_map(|d| {
+            let manifest = if d.is_empty() { "package.json".to_string() } else { format!("{d}/package.json") };
+            json_of(&new, &manifest).and_then(|v| v["engines"]["node"].as_str().map(str::to_string))
+        }).and_then(|range| crate::nodeapi::lowest(&range).map(|low| (range, low)))
+    };
+    let mut node_versions = Vec::new();
+    for (p, _) in changes.iter().filter(|(p, op)| *op != "delete" && is_code(p)) {
+        let Some(after) = text(&new, p).and_then(|t| crate::nodeapi::uses(p, &t)) else { continue };
+        let before = text(&old, p).and_then(|t| crate::nodeapi::uses(p, &t)).unwrap_or_default();
+        let fresh: Vec<&String> = after.difference(&before).collect();
+        if fresh.is_empty() { continue; }
+        let Some((range, low)) = engines(p) else { continue };
+        let features: Vec<Value> = fresh.iter().filter_map(|k| crate::nodeapi::needs(k, low).map(|since| json!({ "name": k.split_once(':').map_or(k.as_str(), |(_, f)| f), "since": since }))).collect();
+        if !features.is_empty() { node_versions.push(json!({ "path": p, "supports": range, "features": features })); }
+    }
     for (p, op) in changes.iter().filter(|(p, op)| base_name(p) == "package.json" && *op != "delete") {
         if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
             && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
@@ -333,5 +350,5 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     dependencies.retain(|d| d.get("harmless").is_none());
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
-        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "not_checked": not_checked }))
+        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "not_checked": not_checked }))
 }

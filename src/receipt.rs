@@ -92,6 +92,12 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
     for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    for x in rules["node_versions"].as_array().into_iter().flatten() {
+        let features: Vec<String> = x["features"].as_array().into_iter().flatten().take(SHOWN)
+            .map(|f| format!("{} (Node {})", code(f["name"].as_str().unwrap_or(""), 80), plain(f["since"].as_str().unwrap_or("")))).collect();
+        look.push(item("node-version", format!("{} now uses {}, but its package says it runs on Node {} (engines.node), where that is missing or needs a flag",
+            code(x["path"].as_str().unwrap_or(""), 160), features.join(", "), code(x["supports"].as_str().unwrap_or(""), 80))));
+    }
     let gone: std::collections::BTreeSet<String> = strings(&tests["gone"]).into_iter().collect();
     for x in rules["weakened"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");

@@ -245,3 +245,26 @@ test('is a number', () => expect(total([1])).toBeDefined());\n")], &[]);
     for k in ["tests-removed", "tests-emptied", "tests-loosened"] { assert!(kinds.contains(&k), "{k}: {kinds:?}"); }
     assert_eq!(built["decision"], "look");
 }
+
+#[test]
+fn code_that_starts_using_a_node_feature_newer_than_its_package_supports_needs_a_look() {
+    let worker = "packages/wrangler/e2e/worker/index.ts";
+    let (t, base) = repo(&[("package.json", r#"{"name":"root","private":true}"#), ("packages/wrangler/package.json", r#"{"name":"wrangler","engines":{"node":">=20.0.0"}}"#),
+        (worker, "export const a = 1;\n")]);
+    let sqlite = "export const a = 1;\nexport async function testSqlite() { const { DatabaseSync } = await import('node:sqlite'); return new DatabaseSync(':memory:'); }\n";
+    let head = commit(&t, &[(worker, sqlite)], &[]);
+    let r = rules(&t, &base, &head);
+    let found = r["node_versions"].as_array().unwrap();
+    assert_eq!(found.len(), 1, "{r}");
+    assert_eq!((found[0]["path"].as_str(), found[0]["supports"].as_str()), (Some(worker), Some(">=20.0.0")));
+    let names: Vec<&str> = found[0]["features"].as_array().unwrap().iter().filter_map(|f| f["name"].as_str()).collect();
+    assert!(names.contains(&"node:sqlite") && found[0]["features"].as_array().unwrap().iter().all(|f| f["since"] == "22.13.0"),
+        "workers-sdk#11805 broke workerd's CI on Node 20 by importing node:sqlite in a package that supports Node 20: {r}");
+    let d = json!({ "base": base, "head": head, "skipped": [], "unmeasured": [] });
+    let built = receipt::build(&d, &r, &json!({ "status": "NOT_RUN", "why": "e2e tests are not run" }), &json!({ "status": "OFF", "why": "no AI key" }));
+    assert!(built["look"].as_array().unwrap().iter().any(|x| x["kind"] == "node-version"), "{built}");
+    let again = commit(&t, &[(worker, &sqlite.replace("a = 1", "a = 2"))], &[]);
+    assert_eq!(rules(&t, &head, &again)["node_versions"], json!([]), "a feature the code already used is not new");
+    let raised = commit(&t, &[("packages/wrangler/package.json", r#"{"name":"wrangler","engines":{"node":">=22.13.0"}}"#)], &[]);
+    assert_eq!(rules(&t, &base, &raised)["node_versions"], json!([]), "a package that says it needs Node 22.13 may use it");
+}
