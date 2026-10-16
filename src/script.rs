@@ -56,6 +56,27 @@ pub fn files(i: &Invocation) -> Vec<String> {
     out.into_iter().filter(|v| !v.is_empty() && !v.starts_with('-')).collect()
 }
 
+pub const ENV_FILES: &str = ".kern-env-files";
+fn env_files(words: &[Word], mut i: usize, file_flags: &[&str], valued: &[&str], env: &mut BTreeMap<String, String>) -> usize {
+    let mut files = Vec::new();
+    while i < words.len() && words[i].text.starts_with('-') {
+        let w = &words[i].text;
+        if w == "--" { i += 1; break; }
+        let (flag, inline) = match w.split_once('=') { Some((f, v)) if f.starts_with("--") || f.len() == 2 => (f, Some(v.to_string())), _ => (w.as_str(), None) };
+        let takes = file_flags.contains(&flag) || valued.contains(&flag);
+        let value = if takes { inline.or_else(|| words.get(i + 1).map(|n| n.text.clone())) } else { None };
+        if takes && inline_missing(w) { i += 1; }
+        if let Some(v) = value {
+            if file_flags.contains(&flag) { files.push(v); }
+            else if flag == "-v" && let Some((k, x)) = v.split_once('=') && env_name(k) && x.len() <= 4096 { env.insert(k.to_string(), x.to_string()); }
+        }
+        i += 1;
+    }
+    if files.is_empty() { files.push(".env".to_string()); }
+    env.insert(ENV_FILES.to_string(), files.join("\n"));
+    i
+}
+fn inline_missing(w: &str) -> bool { !w.contains('=') }
 pub fn env_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 64 && name.bytes().enumerate().all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
         && !RESERVED.contains(&name) && !name.starts_with("KERN_") && !name.starts_with("LD_") && !name.starts_with("DYLD_")
@@ -123,7 +144,8 @@ impl Reader<'_> {
             i = match w.text.as_str() {
                 "cross-env" | "time" => i + 1,
                 "env" => skip_options(words, i + 1, &["-u", "--unset", "-C", "--chdir"]),
-                "dotenv" => skip_options(words, i + 1, &["-e", "-c", "-v", "-p"]),
+                "dotenv" => env_files(words, i + 1, &["-e"], &["-c", "-v", "-p"], &mut env),
+                "env-cmd" => env_files(words, i + 1, &["-f", "--file"], &["-e", "--environments", "-r", "--rc-file"], &mut env),
                 "npx" | "bunx" => skip_options(words, i + 1, &["-p", "--package", "-c", "--call"]),
                 "c8" | "nyc" => skip_options(words, i + 1, &["-r", "--reporter", "--include", "--exclude", "-n", "-x", "-i", "--require", "-e", "--extension", "-o", "--temp-directory", "--report-dir", "--reports-dir", "--src"]),
                 "npm" | "pnpm" | "yarn" | "bun" if exec => if words.get(i + 2).is_some_and(|n| n.text == "--") { i + 3 } else { i + 2 },

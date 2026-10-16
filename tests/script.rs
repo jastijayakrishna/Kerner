@@ -37,7 +37,7 @@ fn wrappers_and_environment_are_read_the_way_a_shell_would() {
         (Runner::Jest, words(&[&bin("jest"), "--workerIdleMemoryLimit=1000MB"]), env(&[("NODE_NO_WARNINGS", "1"), ("NODE_OPTIONS", "--experimental-vm-modules")])));
     assert_eq!(run(json!({ "test": "npx vitest run" })), (Runner::Vitest, words(&[&bin("vitest"), "run"]), vec![]));
     assert_eq!(run(json!({ "test": "pnpm exec jest" })), (Runner::Jest, words(&[&bin("jest")]), vec![]));
-    assert_eq!(run(json!({ "test": "dotenv -e .env.test -- jest" })), (Runner::Jest, words(&[&bin("jest")]), vec![]));
+    assert_eq!(run(json!({ "test": "dotenv -e .env.test -- jest" })), (Runner::Jest, words(&[&bin("jest")]), env(&[(kern::script::ENV_FILES, ".env.test")])));
     assert_eq!(run(json!({ "test": "c8 --reporter=lcov vitest run" })), (Runner::Vitest, words(&[&bin("vitest"), "run"]), vec![]));
     assert_eq!(run(json!({ "test": "nyc mocha" })), (Runner::Mocha, words(&[&bin("mocha")]), vec![]));
     assert_eq!(run(json!({ "test": "node --expose-gc --max-old-space-size=4096 --experimental-vm-modules node_modules/jest-cli/bin/jest --logHeapUsage" })),
@@ -121,4 +121,13 @@ fn the_named_steps_a_test_script_runs_before_its_runner_are_kept_in_order() {
         ["pretest", "lint", "preunit"]);
     assert_eq!(before(json!({ "test": "tsc && rimraf out && jest" })), Vec::<String>::new(), "only the project's own named scripts are kept");
     assert_eq!(before(json!({ "test": "jest" })), Vec::<String>::new());
+}
+
+#[test]
+fn the_env_files_a_test_script_loads_are_kept_for_kern_to_read() {
+    assert_eq!(run(json!({ "test": "env-cmd -f .env.test jest" })), (Runner::Jest, words(&[&bin("jest")]), env(&[(kern::script::ENV_FILES, ".env.test")])),
+        "FormSG loads its test settings with env-cmd, and Kern ran jest without them");
+    assert_eq!(run(json!({ "test": "env-cmd jest" })), (Runner::Jest, words(&[&bin("jest")]), env(&[(kern::script::ENV_FILES, ".env")])), "env-cmd reads .env by default");
+    assert_eq!(run(json!({ "test": "dotenv -e .env.ci -e .env.local -v NODE_ENV=test -- vitest run" })),
+        (Runner::Vitest, words(&[&bin("vitest"), "run"]), env(&[(kern::script::ENV_FILES, ".env.ci\n.env.local"), ("NODE_ENV", "test")])));
 }

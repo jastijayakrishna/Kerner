@@ -820,6 +820,18 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
     Ok(log)
 }
+pub fn dotenv(text: &str) -> Vec<(String, String)> {
+    text.lines().filter_map(|l| {
+        let l = l.trim();
+        if l.is_empty() || l.starts_with('#') { return None; }
+        let (k, v) = l.strip_prefix("export ").unwrap_or(l).split_once('=')?;
+        let k = k.trim();
+        let v = v.trim();
+        let v = if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2) || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2) { &v[1..v.len() - 1] }
+            else { v.split(" #").next().unwrap_or(v).trim() };
+        (crate::script::env_name(k) && v.len() <= 4096 && !v.contains('\0')).then(|| (k.to_string(), v.to_string()))
+    }).collect()
+}
 pub fn partly_missing(r: &Report) -> Option<String> {
     let markers = ["Cannot find module", "Cannot find package", "Failed to resolve import", "Failed to resolve entry for package", "Failed to load url", "Could not resolve"];
     let text: Vec<&String> = r.why.values().filter(|w| markers.iter().any(|m| w.contains(m))).collect();
@@ -897,6 +909,20 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     };
     if suites.is_empty() {
         return Ok(json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json, at the root or in a package this change touches (Kern runs vitest, jest, mocha and node --test)" }));
+    }
+    let load = |commit: &str, dir: &str, env: &mut Env| {
+        let Some(files) = env.remove(crate::script::ENV_FILES) else { return };
+        for f in files.lines().filter(|f| crate::util::file_path(f).is_ok()) {
+            let path = if dir.is_empty() { f.to_string() } else { format!("{dir}/{f}") };
+            let Some(text) = crate::git::git(repo, &["show", &format!("{commit}:{path}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string()) else { continue };
+            for (k, v) in dotenv(&text) { if env.len() < 32 { env.entry(k).or_insert(v); } }
+        }
+    };
+    let mut suites = suites;
+    for suite in suites.iter_mut() {
+        let dir = suite.dir.clone();
+        load(head, &dir, &mut suite.new.1);
+        if let Some((_, env)) = suite.old.as_mut() { load(base, &dir, env); }
     }
     let mut seconds = serde_json::Map::new();
     let mut timed = |name: String, from: u64| { seconds.insert(name, json!((now_ms() - from) / 1000)); };

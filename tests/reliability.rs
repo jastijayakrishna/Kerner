@@ -945,3 +945,10 @@ fn test_files_that_miss_only_an_unbuilt_package_are_repaired_even_when_others_pa
     assert!(suite::own_build("Cannot find module '../../dist/assembly/index.js' from 'test/a.test.ts'"), "the package's own build output");
     assert!(!suite::own_build("Cannot find module './helpers' from 'test/a.test.ts'"));
 }
+
+#[test]
+fn an_env_file_is_read_the_way_dotenv_reads_it() {
+    let text = "# test settings\nexport DATABASE_URL=\"postgres://localhost/test\"\nAPI_KEY='abc def'\nEMPTY=\nPORT=4000 # local\nnot a line\n1BAD=x\n";
+    assert_eq!(suite::dotenv(text), [("DATABASE_URL".to_string(), "postgres://localhost/test".to_string()), ("API_KEY".to_string(), "abc def".to_string()),
+        ("EMPTY".to_string(), String::new()), ("PORT".to_string(), "4000".to_string())]);
+}
