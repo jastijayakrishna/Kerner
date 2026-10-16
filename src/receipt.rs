@@ -17,6 +17,18 @@ fn code(s: &str, n: usize) -> String {
 }
 fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() }
 fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
+fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> {
+    let mut files: Vec<(String, Vec<String>)> = Vec::new();
+    for k in keys {
+        let f = k.split_once(" > ").map_or(k.as_str(), |(f, _)| f).to_string();
+        match files.iter_mut().find(|(x, _)| *x == f) { Some((_, v)) => v.push(k), None => files.push((f, vec![k])) }
+    }
+    files.into_iter().flat_map(|(f, ks)| {
+        if ks.len() < 3 { return ks.iter().map(|k| item(kind, format!("{one}: {}", code(k, 200)))).collect::<Vec<_>>(); }
+        let titles: Vec<String> = ks.iter().take(3).map(|k| code(k.split_once(" > ").map_or(k.as_str(), |(_, t)| t), 120)).collect();
+        vec![item(kind, format!("{} {many} in {}: {}{}", ks.len(), code(&f, 160), titles.join(", "), if ks.len() > 3 { ", …" } else { "" }))]
+    }).collect()
+}
 
 fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
     if !report.is_object() { return (Vec::new(), Vec::new()); }
@@ -41,7 +53,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     };
     let passing_lost = tests_deleted && tests["gone"].as_array().is_some_and(|g| !g.is_empty());
     let added = |p: &str| !passing_lost && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
-    for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
+    blocked.extend(per_file("test-broke", strings(&tests["broke"]), "A test that passed before now fails", "tests that passed before now fail"));
     for x in tests["run_broke"].as_array().into_iter().flatten() {
         let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
         blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or("")))));
@@ -67,7 +79,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let caps: Vec<String> = strings(&p["added"]).iter().map(|c| code(c, 80)).collect();
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
-    for t in strings(&tests["rewritten"]) { look.push(item("test-rewritten", format!("The change edits this test, and its old version fails on the new code: {}", code(&t, 200)))); }
+    look.extend(per_file("test-rewritten", strings(&tests["rewritten"]), "The change edits this test, and its old version fails on the new code", "tests whose old versions fail on the new code (the change edits them)"));
     for x in tests["edited_unchecked"].as_array().into_iter().flatten() {
         look.push(item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test file on the new code, so it cannot tell whether the change rewrote what the test expects ({})",
             code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or("")))));
@@ -81,18 +93,19 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["code"] == "js" || x["path"].as_str().is_some_and(crate::capability::is_code)) {
         look.push(item("not-checked-code", format!("{}: Kern could not read this changed code, so its rules were not applied ({})", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or("")))));
     }
-    for t in strings(&tests["new_failing"]) { look.push(item("new-test-fails", format!("A test this change adds fails on the new code: {}", code(&t, 200)))); }
+    look.extend(per_file("new-test-fails", strings(&tests["new_failing"]), "A test this change adds fails on the new code", "tests this change adds fail on the new code"));
     let wrote = strings(&tests["wrote_code"]);
     if !wrote.is_empty() {
         let shown: Vec<String> = wrote.iter().take(SHOWN).map(|p| code(p, 160)).collect();
         let more = if wrote.len() > SHOWN { format!(" and {} more", wrote.len() - SHOWN) } else { String::new() };
         look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
     }
-    for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
+    look.extend(per_file("test-gone", strings(&tests["gone"]), "A test that ran before no longer runs", "tests that ran before no longer run"));
     for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or("")))); }
-    for t in strings(&tests["together"]) { look.push(item("test-together", format!("This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests: {}", code(&t, 200)))); }
-    for t in strings(&tests["unconfirmed"]) { look.push(item("test-unconfirmed", format!("This failed once, and Kern could not run it again to confirm it: {}", code(&t, 200)))); }
-    for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
+    look.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests",
+        "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests"));
+    look.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));
+    look.extend(per_file("test-skipped", strings(&tests["newly_skipped"]), "A test that passed before is now skipped", "tests that passed before are now skipped"));
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
     for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run and how their results are read"), ("protected", "protected", "is a CI, secret or configuration file")] {
         for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", path_of(x)))); }

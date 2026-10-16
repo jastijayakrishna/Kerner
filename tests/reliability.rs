@@ -594,3 +594,14 @@ fn a_new_test_that_fails_the_way_old_tests_already_fail_here_is_set_aside() {
     let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [] }), &c, &off()), None);
     assert!(md.contains("1 new fail here the same way tests already failing on the old code do"), "{md}");
 }
+
+#[test]
+fn many_items_in_one_test_file_are_one_line() {
+    let names: Vec<String> = (1..=5).map(|i| format!("test/price.test.js > formats case {i}")).collect();
+    let mut tests = suite::compare(&report(&[("test/a.test.js > adds", 1, 0, 0)], &[]), &report(&[("test/a.test.js > adds", 1, 0, 0)], &[]), None);
+    tests["new_failing"] = json!(names.iter().chain(["test/other.test.js > one".to_string()].iter()).collect::<Vec<_>>());
+    let r = receipt::build(&drive_json(), &json!({ "changed": [] }), &tests, &off());
+    let what: Vec<&str> = r["look"].as_array().unwrap().iter().filter(|x| x["kind"] == "new-test-fails").map(|x| x["what"].as_str().unwrap()).collect();
+    assert_eq!(what.len(), 2, "five failing tests in one file are one item, the one in another file its own: {what:#?}");
+    assert!(what[0].starts_with("5 tests this change adds fail on the new code in `test/price.test.js`") && what[0].ends_with(", …"), "{what:#?}");
+}
