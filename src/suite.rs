@@ -744,7 +744,7 @@ pub fn workspace(repo: &Path, commit: &str) -> Workspace {
     });
     out
 }
-pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: Option<&str>) -> Vec<(String, String)> {
+pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: Option<&str>, (dir, before): (&str, &[String])) -> Vec<(String, String)> {
     fn visit(name: &str, packages: &Workspace, seen: &mut BTreeSet<String>, order: &mut Vec<(String, String)>) {
         if !seen.insert(name.to_string()) || order.len() >= 20 { return; }
         let Some((dir, v)) = packages.get(name) else { return };
@@ -756,6 +756,7 @@ pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: O
     let (mut seen, mut order) = (BTreeSet::new(), Vec::new());
     for m in missing { visit(m, packages, &mut seen, &mut order); }
     if let Some(dir) = pretest { order.push((dir.to_string(), "pretest".into())); }
+    for step in before { if !order.contains(&(dir.to_string(), step.clone())) { order.push((dir.to_string(), step.clone())); } }
     order
 }
 const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.PREPARE_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
@@ -886,13 +887,16 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 if let Some(why) = cannot_load(Some(&run)) {
                     let missing = missing_packages(&why);
                     let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
-                    let pretest = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
-                    let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref());
+                    let compiled = why.contains("No test files found");
+                    let package = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok());
+                    let pretest = package.as_ref().filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
+                    let before = match package.as_ref().map(crate::script::found) { Some(crate::script::Found::Run(i)) if generated || compiled => i.before, _ => Vec::new() };
+                    let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref(), (&suite.dir, &before));
                     if !steps.is_empty() {
                         let at = now_ms();
                         let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
                         let on_old = prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until);
-                        let on_new = prepare(out, op, &volume("new"), &repair_steps(&workspace(repo, head), &missing, pretest.as_deref()), &format!("new{label}"), until);
+                        let on_new = prepare(out, op, &volume("new"), &repair_steps(&workspace(repo, head), &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
                         match (on_old, on_new) {
                             (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
                             (Ok(_), Err(e)) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),

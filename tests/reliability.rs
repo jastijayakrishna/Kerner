@@ -633,7 +633,7 @@ fn the_packages_a_test_needs_are_built_after_the_ones_they_need() {
     ws.insert("@acme/ui".into(), ("packages/ui".into(), pkg("@acme/ui", &["@acme/core"], true)));
     ws.insert("@acme/core".into(), ("packages/core".into(), pkg("@acme/core", &[], true)));
     ws.insert("@acme/types".into(), ("packages/types".into(), pkg("@acme/types", &[], false)));
-    let steps = suite::repair_steps(&ws, &["@acme/ui".to_string(), "@acme/types".to_string()].into_iter().collect(), Some(""));
+    let steps = suite::repair_steps(&ws, &["@acme/ui".to_string(), "@acme/types".to_string()].into_iter().collect(), Some(""), ("", &[]));
     assert_eq!(steps, [("packages/core".to_string(), "build".to_string()), ("packages/ui".to_string(), "build".to_string()), (String::new(), "pretest".to_string())],
         "ui needs core built first; app is not needed; types has nothing to build; the root's pretest runs last, as npm test would run it");
 }
@@ -800,4 +800,13 @@ fn a_vitest_that_does_not_know_one_of_kerns_options_runs_again_without_only_that
     assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--sequence.shuffle`"), Some(command[..5].to_vec()));
     assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--bail`"), Some(s(&["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache", "--sequence.shuffle=false"])));
     assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--color`"), None, "only Kern's own options are dropped");
+}
+
+#[test]
+fn a_build_step_the_test_script_names_is_run_before_tests_that_find_no_files() {
+    let ws: suite::Workspace = std::collections::BTreeMap::new();
+    let missing = std::collections::BTreeSet::new();
+    assert_eq!(suite::repair_steps(&ws, &missing, None, ("packages/mcp", &["build".to_string()])), [("packages/mcp".to_string(), "build".to_string())]);
+    assert_eq!(suite::repair_steps(&ws, &missing, Some("packages/mcp"), ("packages/mcp", &["pretest".to_string(), "build".to_string()])),
+        [("packages/mcp".to_string(), "pretest".to_string()), ("packages/mcp".to_string(), "build".to_string())], "pretest runs once");
 }

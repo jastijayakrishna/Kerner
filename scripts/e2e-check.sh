@@ -376,6 +376,26 @@ cd "$W"
 check mirror "$mirror_base" mirrorrepo
 jq -e '.decision != "blocked" and (.tests.runner | test("vitest in packages/b"))' mirror/receipt.json > /dev/null || { jq '{decision, tests}' mirror/receipt.json; fail "mirror: a build run for packages/a on the old side only made packages/b look broken on the new side"; }
 
+say "Tests that exist only after the test script's own build step are built first, on both sides"
+git init -q compiledrepo && cd compiledrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"compiled","version":"1.0.0","private":true,"type":"module","scripts":{"build":"node build.mjs","test":"npm run build && mocha"},"devDependencies":{"mocha":"10.7.3"}}' > package.json
+printf '%s\n' '{"spec":"out/test/*.test.js"}' > .mocharc.json
+printf '%s\n' 'import { mkdirSync, cpSync } from "node:fs";' 'mkdirSync(new URL("./out/", import.meta.url), { recursive: true });' \
+  'cpSync(new URL("./src/", import.meta.url), new URL("./out/src/", import.meta.url), { recursive: true });' \
+  'cpSync(new URL("./test/", import.meta.url), new URL("./out/test/", import.meta.url), { recursive: true });' > build.mjs
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import assert from "node:assert";' 'import { total } from "../src/total.js";' '' 'it("total", () => assert.equal(total([{ price: 2, qty: 3 }]), 6));' > test/total.test.js
+printf 'out/\n' > .gitignore
+git add -A && git commit -qm base && compiled_base=$(git rev-parse HEAD)
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/compiled.head"
+cd "$W"
+check compiled "$compiled_base" compiledrepo
+decision compiled blocked
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("after Kern ran \\. build"))' compiled/receipt.json > /dev/null || { jq .tests compiled/receipt.json; fail "compiled: the test script's build step was not run before its tests"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

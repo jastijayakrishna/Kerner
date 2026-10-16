@@ -110,3 +110,15 @@ fn only_the_package_managers_own_options_decide_where_the_tests_run() {
         assert_eq!(found(&json!({ "scripts": { "test": script } })), Found::Packages, "{script}");
     }
 }
+
+#[test]
+fn the_named_steps_a_test_script_runs_before_its_runner_are_kept_in_order() {
+    let before = |scripts: serde_json::Value| match found(&json!({ "scripts": scripts })) { Found::Run(i) => i.before, other => panic!("expected a runner, got {other:?}") };
+    assert_eq!(before(json!({ "test": "npm run build && mocha", "build": "tsc" })), ["build"], "browserless-mcp builds into build/ and then runs mocha there");
+    assert_eq!(before(json!({ "test:unit": "mocha out/test", "pretest:unit": "npm run compile-tests", "compile-tests": "tsc -p . --outDir out" })), ["pretest:unit"],
+        "jules-extension's npm runs pretest:unit before test:unit");
+    assert_eq!(before(json!({ "test": "npm run lint && npm run unit", "pretest": "node gen.mjs", "lint": "eslint .", "unit": "vitest run", "preunit": "node seed.mjs" })),
+        ["pretest", "lint", "preunit"]);
+    assert_eq!(before(json!({ "test": "tsc && rimraf out && jest" })), Vec::<String>::new(), "only the project's own named scripts are kept");
+    assert_eq!(before(json!({ "test": "jest" })), Vec::<String>::new());
+}

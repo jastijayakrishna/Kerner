@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invocation { pub runner: Runner, pub command: Vec<String>, pub env: BTreeMap<String, String> }
+pub struct Invocation { pub runner: Runner, pub command: Vec<String>, pub env: BTreeMap<String, String>, pub before: Vec<String> }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found { Run(Invocation), Packages, Nothing }
@@ -86,7 +86,26 @@ impl Reader<'_> {
         if !self.spend(depth) { return Found::Nothing; }
         let mut commands = split(text);
         if let Some(last) = commands.last_mut() { last.extend(extra.iter().cloned()); }
-        either(commands.iter().map(|c| self.command(c, depth)))
+        let mut before: Vec<String> = Some(format!("pre{name}")).filter(|p| self.scripts[p].is_string()).into_iter().collect();
+        let mut packages = false;
+        for c in &commands {
+            match self.command(c, depth) {
+                Found::Run(mut i) => { before.append(&mut i.before); i.before = before; return Found::Run(i); }
+                Found::Packages => packages = true,
+                Found::Nothing => before.extend(self.named(c)),
+            }
+        }
+        if packages { Found::Packages } else { Found::Nothing }
+    }
+
+    fn named(&self, words: &[Word]) -> Option<String> {
+        let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        let name = match texts.as_slice() {
+            ["npm", "run" | "run-script", n, ..] | ["pnpm" | "yarn" | "bun", "run", n, ..] => *n,
+            ["pnpm" | "yarn", n, ..] if !n.starts_with('-') => *n,
+            _ => return None,
+        };
+        (self.scripts[name].is_string() && words.iter().all(|w| !w.expands)).then(|| name.to_string())
     }
 
     fn command(&self, words: &[Word], depth: u32) -> Found {
@@ -330,5 +349,5 @@ fn invocation(runner: Runner, program: Option<&str>, args: &[Word], env: BTreeMa
     if runner == Runner::Vitest { command.push("run".into()); }
     command.extend(kept.into_iter().map(|w| w.text));
     if command.len() > 56 || command.iter().any(|a| a.len() > 8192 || a.contains('\0')) || env.values().any(|v| v.contains('\0')) { return Found::Nothing; }
-    Found::Run(Invocation { runner, command, env })
+    Found::Run(Invocation { runner, command, env, before: Vec::new() })
 }
