@@ -888,6 +888,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the old code: {why}") }));
             continue;
         }
+        if let Some(why) = install_failure(&s, "new", &suite.dir) {
+            let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
+            run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the new code, where {why} (it worked on the old code)") }));
+            continue;
+        }
     let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));

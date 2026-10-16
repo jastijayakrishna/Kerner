@@ -360,7 +360,7 @@ say "A build Kern runs for one package's tests is run on both sides, so a later 
 git init -q mirrorrepo && cd mirrorrepo
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p packages/lib/src packages/ghost packages/a/test packages/a/src packages/b/test packages/b/src
-printf '%s\n' '{"name":"mirror","private":true,"type":"module","workspaces":["packages/*"],"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' '{"name":"mirror","private":true,"type":"module","workspaces":["packages/*"],"scripts":{"test":"npm run test --workspaces"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
 printf '%s\n' '{"name":"@m/lib","version":"1.0.0","type":"module","main":"dist/index.js","scripts":{"build":"node build.mjs"}}' > packages/lib/package.json
 printf '%s\n' "import { mkdirSync, copyFileSync } from 'node:fs';" "mkdirSync(new URL('./dist/', import.meta.url), { recursive: true });" "copyFileSync(new URL('./src/index.js', import.meta.url), new URL('./dist/index.js', import.meta.url));" > packages/lib/build.mjs
 printf '%s\n' "export const add = (a, b) => a + b;" > packages/lib/src/index.js
@@ -412,6 +412,14 @@ cd "$W"
 check nx "$nx_base" nxrepo
 decision nx blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("jest in libs/calc"))' nx/receipt.json > /dev/null || { jq .tests nx/receipt.json; fail "nx: the project's own jest config was not run"; }
+
+say "When only the new code's install fails, the receipt quotes the install and needs a look instead of blaming the tests"
+git -C calc checkout -q -b installfail "$base"
+sed -i 's/"devDependencies":{"vitest":"3.2.4"}/"devDependencies":{"vitest":"3.2.4","@kern-e2e\/does-not-exist":"1.0.0"}/' calc/package.json
+git -C calc commit -qam "Add a package that does not exist" && git -C calc rev-parse HEAD > installfail.head && git -C calc checkout -q "$base"
+check installfail "$base"
+decision installfail look
+jq -e '(.tests.run_unconfirmed | length == 1) and (.tests.run_unconfirmed[0].why | test("installing its dependencies with npm failed"))' installfail/receipt.json > /dev/null || { jq .tests installfail/receipt.json; fail "installfail: a failed install on the new code was not named, or it blocked"; }
 
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
