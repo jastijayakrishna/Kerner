@@ -820,3 +820,12 @@ fn a_package_without_a_test_script_runs_the_runner_its_own_config_names() {
     assert_eq!(vitest.command, ["/workspace/node_modules/.bin/vitest", "run"]);
     assert!(only(&["vite.config.ts", "project.json"]).is_none(), "a vite config alone is an app, not tests");
 }
+
+#[test]
+fn a_test_script_kern_cannot_follow_is_named_when_kern_runs_a_runner_directly() {
+    assert_eq!(suite::guessed(&json!({ "scripts": { "test": "gulp   travis" }, "devDependencies": { "mocha": "10.0.0" } })).as_deref(), Some("gulp travis"),
+        "testcafe-hammerhead runs gulp; Kern ran mocha on its own and the receipt only said mocha found no test files");
+    assert_eq!(suite::guessed(&json!({ "scripts": { "test": "vitest run" } })), None);
+    assert_eq!(suite::guessed(&json!({ "scripts": { "test": "turbo run test" } })), None, "a script that hands the tests to each package is followed, not guessed");
+    assert_eq!(suite::guessed(&json!({ "devDependencies": { "mocha": "10.0.0" } })), None, "no script, nothing to explain");
+}

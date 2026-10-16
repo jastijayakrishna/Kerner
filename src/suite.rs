@@ -609,6 +609,10 @@ pub fn stopped_why(ending: &str, limit: u64) -> Option<String> {
 pub fn whole(why: &str) -> String {
     why.replacen("the tests were", "the whole suite was", 1).replacen("the tests did", "the whole suite did", 1).replacen("no test file finished", "no test file of the whole suite finished", 1)
 }
+pub fn guessed(package: &Value) -> Option<String> {
+    let script = package["scripts"]["test"].as_str()?;
+    (crate::script::found(package) == crate::script::Found::Nothing).then(|| script.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect())
+}
 pub fn stopped_early(ending: &[u8], errors: &[u8], output: &[u8]) -> bool {
     let (errors, output) = (String::from_utf8_lossy(errors), String::from_utf8_lossy(output));
     let empty = [&errors, &output].iter().any(|t| t.contains("No tests found") || t.contains("No test files found"));
@@ -1061,9 +1065,21 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         kept += c["kept"].as_u64().unwrap_or(0);
         let only = if narrowed.is_some() { format!(", only the tests related to the change: {whole_why}") } else { String::new() };
         let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };
+        let only = match manifest(head, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed) {
+            Some(script) => format!("{only}, run directly: the project's test script, `{script}`, is not one Kern can follow"),
+            None => only,
+        };
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
     }
     wrote_code.retain(|f| !old_created.contains(f));
+    for n in not_run.iter_mut() {
+        let dir = n["dir"].as_str().unwrap_or("").to_string();
+        let Some(suite) = suites.iter().find(|s| s.dir == dir) else { continue };
+        if let Some(script) = manifest(head, &dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed) {
+            let why = format!("{} (the project's test script, `{script}`, is not one Kern can follow, so Kern ran {} directly)", n["why"].as_str().unwrap_or(""), suite.new.0.runner.name());
+            n["why"] = json!(why);
+        }
+    }
     let extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds });
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
