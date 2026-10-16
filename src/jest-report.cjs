@@ -6,7 +6,7 @@ module.exports = (results) => {
       name: file.testFilePath,
       status: file.testExecError || file.failureMessage ? 'failed' : 'passed',
       message: (file.testExecError && file.testExecError.message) || file.failureMessage || '',
-      assertionResults: (file.testResults || []).map((t) => ({ ancestorTitles: t.ancestorTitles, title: t.title, status: t.status })),
+      assertionResults: (file.testResults || []).map((t) => ({ ancestorTitles: t.ancestorTitles, title: t.title, status: t.status, failureMessages: (t.failureMessages || []).slice(0, 1).map((m) => String(m).slice(0, 2000)) })),
     })),
   };
   if (process.env.KERN_REPORT) {

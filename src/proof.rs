@@ -566,9 +566,13 @@ fn mocha(v: &Value) -> Option<Report> {
     for k in passes { r.add(k, Status::Passed); }
     for k in pending { r.add(k, Status::Skipped); }
     for (k, t) in failures.into_iter().zip(v.get("failures")?.as_array()?) {
-        if known.contains(&k) { r.add(k, Status::Failed); continue; }
-        let k = hook(&k);
         let message = t.get("err").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("");
+        if known.contains(&k) {
+            if !message.is_empty() { r.why.entry(k.clone()).or_insert_with(|| first_lines(message)); }
+            r.add(k, Status::Failed);
+            continue;
+        }
+        let k = hook(&k);
         if !message.is_empty() { r.why.entry(k.clone()).or_insert_with(|| first_lines(message)); }
         if !r.problems.contains(&k) { r.problems.push(k); }
     }
@@ -588,7 +592,9 @@ fn jest(v: &Value) -> Option<Report> {
             path.push(a.get("title")?.as_str()?);
             let status = match a.get("status")?.as_str()? { "passed" => Status::Passed, "pending" | "skipped" | "todo" | "disabled" => Status::Skipped, _ => Status::Failed };
             failed |= status == Status::Failed;
-            r.add(format!("{name} > {}", path.join(" > ")), status);
+            let key = format!("{name} > {}", path.join(" > "));
+            if status == Status::Failed && let Some(m) = a.get("failureMessages").and_then(Value::as_array).and_then(|m| m.first()).and_then(Value::as_str) { r.why.entry(key.clone()).or_insert_with(|| first_lines(m)); }
+            r.add(key, status);
         }
         if file.get("status").and_then(Value::as_str) == Some("failed") && !failed {
             let message = file.get("message").or_else(|| file.get("failureMessage")).and_then(Value::as_str).unwrap_or("");

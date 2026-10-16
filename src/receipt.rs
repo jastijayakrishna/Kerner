@@ -192,6 +192,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let flaky = tests["flaky"].as_array().map_or(0, Vec::len);
         if added > 0 { line += &format!(" · {} new", added); }
         if flaky > 0 { line += &format!(" · {} failed once and passed when run again (flaky)", flaky); }
+        let same = tests["same_failure"].as_array().map_or(0, Vec::len);
+        if same > 0 { line += &format!(" · {same} new fail here the same way tests already failing on the old code do (set aside)"); }
         let aside = tests["environmental"].as_array().map_or(0, Vec::len);
         if aside > 0 { line += &format!(" · {aside} also fail on the old code when their files run alone (set aside)"); }
         if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }

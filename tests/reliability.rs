@@ -575,3 +575,22 @@ fn changed_data_that_only_tests_kern_does_not_run_use_needs_no_look() {
     assert_eq!(keep.data, ["test/fixtures/load.js"],
         "e2e/ holds only end-to-end tests Kern does not run, so a changed file there cannot hide a break in the tests it runs; test/fixtures/ sits beside the tests that ran, and no old test names it, so it needs a look");
 }
+
+#[test]
+fn a_new_test_that_fails_the_way_old_tests_already_fail_here_is_set_aside() {
+    let knex = "Error: Knex: run\n$ npm install sqlite3 --save\nCannot find module 'bindings'\nRequire stack:\n- /workspace/node_modules/.pnpm/sqlite3@5.1.7/lib/binding.js";
+    let report = |rows: &[(&str, &str, Option<&str>)]| -> Value {
+        let results: Vec<Value> = rows.iter().map(|(file, title, error)| json!({ "name": format!("/workspace/{file}"), "status": if error.is_some() { "failed" } else { "passed" },
+            "assertionResults": [{ "ancestorTitles": [], "title": title, "status": if error.is_some() { "failed" } else { "passed" }, "failureMessages": error.map(|e| vec![e.to_string()]).unwrap_or_default() }] })).collect();
+        json!({ "numTotalTests": rows.len(), "testResults": results })
+    };
+    let read = |v: Value| kern::proof::read_report(policy::Runner::Vitest, v.to_string().as_bytes()).unwrap();
+    let before = read(report(&[("test/old-db.test.js", "reads a post", Some(knex)), ("test/math.test.js", "adds", None)]));
+    let after = read(report(&[("test/old-db.test.js", "reads a post", Some(knex)), ("test/math.test.js", "adds", None),
+        ("test/price.test.js", "formats a price", Some(&knex.replace("5.1.7", "5.1.8"))), ("test/total.test.js", "totals", Some("AssertionError: expected 6 to be 5"))]));
+    let c = suite::compare(&before, &after, Some(&after));
+    assert_eq!(c["same_failure"], json!(["test/price.test.js > formats a price"]), "a new test that fails the way old tests already fail here (sqlite's native part is missing) is the sandbox, not the change: {c}");
+    assert_eq!(c["new_failing"], json!(["test/total.test.js > totals"]), "a new test that fails some other way still needs a look: {c}");
+    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [] }), &c, &off()), None);
+    assert!(md.contains("1 new fail here the same way tests already failing on the old code do"), "{md}");
+}

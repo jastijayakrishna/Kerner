@@ -530,13 +530,16 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let keys: BTreeSet<&String> = before.tests.keys().chain(after.tests.keys()).collect();
     let before_broken: BTreeSet<&str> = before.problems.iter().map(|p| file_of(p)).collect();
     let (mut kept, mut broke, mut flaky, mut gone, mut newly_skipped, mut added, mut already_failing) = (0u64, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut new_failing = Vec::new();
+    let (mut new_failing, mut same_failure) = (Vec::new(), Vec::new());
+    let signature = |w: &str| -> String { masked(&w.replace("/workspace/", "")).chars().take(160).collect() };
+    let old_errors: BTreeSet<String> = before.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k).chain(&before.problems).filter_map(|k| before.why.get(k)).map(|w| signature(w)).collect();
+    let known_error = |k: &str| raw_after.why.get(k).is_some_and(|w| old_errors.contains(&signature(w)));
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
         if b.passed == 0 && b.failed == 0 {
             if b.total() == 0 && before_broken.contains(file_of(k)) { already_failing.push(k.clone()); continue; }
             if b.total() == 0 || a.ran() > 0 { added.push(k.clone()); }
-            if a.failed > 0 { new_failing.push(k.clone()); }
+            if a.failed > 0 { if known_error(k) { same_failure.push(k.clone()); } else { new_failing.push(k.clone()); } }
             continue;
         }
         if b.failed > 0 { already_failing.push(k.clone()); }
@@ -566,7 +569,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
         }
     }
     flaky.extend(unsteady);
-    new_failing.extend(fresh);
+    for p in fresh { if known_error(&p) { same_failure.push(p); } else { new_failing.push(p); } }
     already_failing.extend(before.problems.iter().cloned());
     if total(before) == 0 && total(raw_after) == 0 && before.problems.is_empty() && raw_after.problems.is_empty() {
         return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
@@ -583,7 +586,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let problem_why: serde_json::Map<String, Value> = new_problems.iter().filter_map(|p| again.unwrap_or(after).why.get(p).or_else(|| after.why.get(p)).map(|w| (p.clone(), json!(w)))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(raw_after), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
         "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems, "problem_why": problem_why,
-        "environmental": environmental })
+        "environmental": environmental, "same_failure": same_failure })
 }
 
 pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> String {
@@ -733,7 +736,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     if !out.join("setup.json").exists() { crate::drive::setup(out, op, until)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
-    const LISTS: [&str; 12] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten"];
+    const LISTS: [&str; 13] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten", "same_failure"];
     let mut merged = serde_json::Map::new();
     for l in LISTS { merged.insert(l.into(), json!([])); }
     merged.insert("problem_why".into(), json!({}));
