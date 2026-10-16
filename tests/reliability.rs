@@ -1023,3 +1023,29 @@ fn reading_a_setting_from_the_environment_is_not_a_power_but_reading_a_secret_is
     let secret = commit(&r, &[("src/a.js", "export const a = process.env.GITHUB_TOKEN;\n")]);
     assert!(!kern::rules::rules(&r, &settings, &secret).unwrap()["powers"].as_array().unwrap().is_empty(), "apify/camoufox-js#254 reads GITHUB_TOKEN");
 }
+
+#[test]
+fn a_lockfile_only_change_is_routine_when_every_version_it_moves_to_has_been_out_a_week() {
+    use kern::deps::{aged, lock_moves};
+    let old = json!({ "lockfileVersion": 3, "packages": { "": { "name": "app" }, "node_modules/a": { "version": "1.0.0" }, "node_modules/b": { "version": "2.0.0" },
+        "node_modules/gone": { "version": "0.1.0" }, "packages/lib": { "name": "@app/lib", "version": "1.0.0" }, "node_modules/@app/lib": { "resolved": "packages/lib", "link": true } } });
+    let new = json!({ "lockfileVersion": 3, "packages": { "": { "name": "app" }, "node_modules/a": { "version": "1.0.1" }, "node_modules/b": { "version": "2.0.0" },
+        "node_modules/a/node_modules/c": { "version": "3.1.0" }, "packages/lib": { "name": "@app/lib", "version": "1.1.0" }, "node_modules/@app/lib": { "resolved": "packages/lib", "link": true } } });
+    let moves = lock_moves(&old, &new);
+    let shown: Vec<String> = moves.iter().map(|m| format!("{} {} {}", m["name"].as_str().unwrap(), m["from"].as_str().unwrap_or("-"), m["to"].as_str().unwrap_or("-"))).collect();
+    assert_eq!(shown, ["a 1.0.0 1.0.1", "c - 3.1.0", "gone 0.1.0 -"], "the workspace's own package and links are not dependencies: {shown:?}");
+    let rules = |m: Vec<serde_json::Value>| json!({ "dependencies": [{ "path": "package-lock.json", "packages": [], "fields": [], "moves": m }] });
+    let now = kern::deps::rfc3339("2026-10-16T00:00:00Z").unwrap();
+    let old_release = |_: &str, _: &str| kern::deps::rfc3339("2026-09-01T00:00:00Z");
+    let r = aged(rules(moves.clone()), now, &old_release, &|_| false);
+    assert!(r["dependencies"][0]["moves"].as_array().unwrap().iter().all(|m| m["age"] == "routine" || m["age"] == "removed"), "{r}");
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let full = |deps: serde_json::Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [], "dependencies": deps["dependencies"] });
+    let off = json!({ "status": "OFF", "why": "no AI key" });
+    let tests = json!({ "status": "NOTHING_TO_RUN", "why": "x" });
+    let calm = kern::receipt::build(&d, &full(r), &tests, &off);
+    assert_eq!(calm["decision"], "clear", "Azure/AppConfiguration-JavaScriptProvider#330 only refreshed package-lock.json: {calm}");
+    let fresh = |name: &str, _: &str| if name == "c" { kern::deps::rfc3339("2026-10-15T12:00:00Z") } else { kern::deps::rfc3339("2026-09-01T00:00:00Z") };
+    let hot = kern::receipt::build(&d, &full(aged(rules(moves), now, &fresh, &|_| false)), &tests, &off);
+    assert!(hot["look"].as_array().unwrap().iter().any(|x| x["kind"] == "fresh-release" && x["what"].as_str().unwrap().contains("c@3.1.0")), "a brand-new release deep in the tree is named: {hot}");
+}

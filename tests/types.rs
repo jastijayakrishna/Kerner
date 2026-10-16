@@ -94,3 +94,13 @@ fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a
     let same = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &clean, true, None)])), &off);
     assert!(receipt::markdown(&same, None).contains("no new TypeScript errors in `tsconfig.json` (tsc on the old and the new code, TypeScript 5.6.3)"));
 }
+
+#[test]
+fn the_type_check_asks_the_sandbox_only_for_what_a_test_run_may_have() {
+    let spec = kern::types::spec("packages/app/tsconfig.json", 420);
+    let command = kern::util::argv(&spec["command"]).expect("the sandbox accepts the command");
+    assert_eq!(command.last().map(String::as_str), Some("/workspace/packages/app/tsconfig.json"));
+    assert!(spec["env"].as_object().unwrap().keys().all(|k| kern::script::env_name(k)), "the sandbox refuses variables it reserves, such as KERN_*: {spec}");
+    assert_eq!(kern::sandbox::test_dir(spec["cwd"].as_str().unwrap()).unwrap(), "/workspace/packages/app");
+    assert_eq!(kern::sandbox::test_dir(kern::types::spec("tsconfig.json", 420)["cwd"].as_str().unwrap()).unwrap(), "/workspace");
+}

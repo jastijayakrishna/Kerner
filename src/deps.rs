@@ -96,16 +96,44 @@ pub fn github_owner(repository: &Value) -> Option<String> {
     let owner = rest.split('/').next()?.trim();
     (!owner.is_empty()).then(|| owner.to_ascii_lowercase())
 }
+pub fn lock_age(to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
+    let Some(version) = to else { return serde_json::json!({ "age": "removed" }) };
+    match published(version) {
+        None => serde_json::json!({ "age": "unknown", "version": version }),
+        Some(at) if now.saturating_sub(at) < FRESH_DAYS * 86_400 => serde_json::json!({ "age": "fresh", "version": version, "days": now.saturating_sub(at) / 86_400 }),
+        Some(_) => serde_json::json!({ "age": "routine", "version": version }),
+    }
+}
 pub fn aged(mut rules: Value, now: u64, published: &dyn Fn(&str, &str) -> Option<u64>, own: &dyn Fn(&str) -> bool) -> Value {
-    for d in rules["dependencies"].as_array_mut().into_iter().flatten() {
-        for m in d["moves"].as_array_mut().into_iter().flatten() {
-            let name = m["name"].as_str().unwrap_or("").to_string();
-            let mut verdict = age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now);
-            if verdict["age"] == "fresh" && own(&name) { verdict["age"] = "routine".into(); verdict["own"] = true.into(); }
-            for (k, v) in verdict.as_object().into_iter().flatten() { m[k] = v.clone(); }
+    for pass in [false, true] {
+        for d in rules["dependencies"].as_array_mut().into_iter().flatten() {
+            for m in d["moves"].as_array_mut().into_iter().flatten().filter(|m| (m["lock"] == true) == pass) {
+                let name = m["name"].as_str().unwrap_or("").to_string();
+                let mut verdict = if pass { lock_age(m["to"].as_str(), &|v| published(&name, v), now) } else { age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now) };
+                if verdict["age"] == "fresh" && own(&name) { verdict["age"] = "routine".into(); verdict["own"] = true.into(); }
+                for (k, v) in verdict.as_object().into_iter().flatten() { m[k] = v.clone(); }
+            }
         }
     }
     rules
+}
+pub fn lock_moves(old: &Value, new: &Value) -> Vec<Value> {
+    let deps = |lock: &Value| -> BTreeMap<String, Value> {
+        let packaged = lock["packages"].as_object().is_some_and(|p| !p.is_empty());
+        entries(lock).into_iter().filter(|(k, e)| e["link"] != true && (!packaged || k.contains("node_modules/")) && e["version"].is_string()).collect()
+    };
+    let name_of = |key: &str, e: &Value| e["name"].as_str().map_or_else(|| package_of(key).to_string(), str::to_string);
+    let (before, after) = (deps(old), deps(new));
+    let mut out = BTreeMap::new();
+    for (key, e) in &after {
+        let (version, was) = (e["version"].as_str().unwrap_or(""), before.get(key).and_then(|o| o["version"].as_str()));
+        if was == Some(version) { continue; }
+        out.insert((name_of(key, e), version.to_string()), serde_json::json!({ "name": name_of(key, e), "from": was, "to": version, "lock": true }));
+    }
+    for (key, e) in before.iter().filter(|(k, _)| !after.contains_key(*k)) {
+        out.entry((name_of(key, e), String::new())).or_insert_with(|| serde_json::json!({ "name": name_of(key, e), "from": e["version"], "to": null, "lock": true }));
+    }
+    out.into_values().collect()
 }
 pub fn registry_meta(name: &str) -> Option<Value> {
     if !valid_name(name) { return None; }

@@ -20,7 +20,10 @@ fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what 
 fn routine_deps(rules: &Value) -> bool {
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
     let moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
-    !moves.is_empty() && moves.iter().all(|m| m["age"] == "routine" || m["age"] == "removed") && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
+    let (locked, direct): (Vec<&Value>, Vec<&Value>) = moves.into_iter().partition(|m| m["lock"] == true);
+    let settled = |m: &&Value| m["age"] == "routine" || m["age"] == "removed";
+    let decided = if direct.is_empty() { &locked } else { &direct };
+    !decided.is_empty() && decided.iter().all(settled) && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
 }
 fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> {
     let mut files: Vec<(String, Vec<String>)> = Vec::new();

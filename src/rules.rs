@@ -398,12 +398,26 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         }
         if npm_lockfile(&p) && d["operation"] != "delete" {
             match b {
-                Some(b) => lockfile.extend(crate::deps::lock_surprises(&a, &b).into_iter().map(|why| json!({ "path": p, "why": why }))),
+                Some(b) => {
+                    lockfile.extend(crate::deps::lock_surprises(&a, &b).into_iter().map(|why| json!({ "path": p, "why": why })));
+                    let moves = crate::deps::lock_moves(&a, &b);
+                    if !moves.is_empty() && moves.len() <= 200 {
+                        d["packages"] = json!(moves.iter().map(|m| match (m["from"].as_str(), m["to"].as_str()) {
+                            (Some(f), Some(t)) => format!("{} {f} → {t}", m["name"].as_str().unwrap_or("")),
+                            (None, Some(t)) => format!("{} {t} (new)", m["name"].as_str().unwrap_or("")),
+                            _ => format!("{} (removed)", m["name"].as_str().unwrap_or("")),
+                        }).collect::<Vec<_>>());
+                        d["moves"] = json!(moves);
+                    }
+                }
                 None => not_checked.push(json!({ "path": p, "why": "Kern could not read this lockfile (not JSON, or larger than 64 MiB)" })),
             }
         }
     }
     dependencies.retain(|d| d.get("harmless").is_none());
+    if dependencies.iter().any(|d| base_name(d["path"].as_str().unwrap_or("")) == "package.json" && d["packages"].as_array().is_some_and(|p| !p.is_empty())) {
+        for d in dependencies.iter_mut().filter(|d| npm_lockfile(d["path"].as_str().unwrap_or(""))) { if let Some(o) = d.as_object_mut() { o.remove("packages"); } }
+    }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))
