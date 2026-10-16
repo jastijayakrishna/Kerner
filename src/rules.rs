@@ -318,6 +318,31 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let features: Vec<Value> = fresh.iter().filter_map(|k| crate::nodeapi::needs(k, low).map(|since| json!({ "name": k.split_once(':').map_or(k.as_str(), |(_, f)| f), "since": since }))).collect();
         if !features.is_empty() { node_versions.push(json!({ "path": p, "supports": range, "features": features })); }
     }
+    let shown = |commit: &str, p: &str| -> Option<String> { crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().and_then(|b| String::from_utf8(b).ok()) };
+    let mut public_api = Vec::new();
+    let mut packages_touched = BTreeSet::new();
+    for (p, _) in changes.iter().filter(|(p, _)| is_code(p)) {
+        let parts: Vec<&str> = p.split('/').collect();
+        if let Some(d) = (0..parts.len()).rev().map(|n| parts[..n].join("/")).find(|d| manifests.contains(&if d.is_empty() { "package.json".to_string() } else { format!("{d}/package.json") })) {
+            packages_touched.insert(d);
+        }
+    }
+    for dir in packages_touched.iter().take(10) {
+        let manifest = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
+        let (Some(before), Some(_)) = (json_of(&old, &manifest), json_of(&new, &manifest)) else { continue };
+        let Some(name) = before["name"].as_str().filter(|_| before["private"] != json!(true)) else { continue };
+        let joined = |e: &str| if dir.is_empty() { e.to_string() } else { format!("{dir}/{e}") };
+        let read_old = |f: &str| shown(base, f);
+        let read_new = |f: &str| shown(head, f);
+        let mut seen = BTreeSet::new();
+        for entry in crate::surface::entries(&before).iter().map(|e| joined(e)).filter(|e| is_code(e)) {
+            let Some(was) = crate::surface::surface(&read_old, &entry) else { continue };
+            if !seen.insert(was.clone()) { continue; }
+            let Some(now) = crate::surface::surface(&read_new, &entry) else { continue };
+            let removed: Vec<&String> = was.difference(&now).collect();
+            if !removed.is_empty() { public_api.push(json!({ "package": name, "entry": entry, "removed": removed })); }
+        }
+    }
     for (p, op) in changes.iter().filter(|(p, op)| base_name(p) == "package.json" && *op != "delete") {
         if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
             && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
@@ -350,5 +375,5 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     dependencies.retain(|d| d.get("harmless").is_none());
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
-        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "not_checked": not_checked }))
+        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "not_checked": not_checked }))
 }

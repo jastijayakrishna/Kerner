@@ -92,6 +92,13 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
     for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    for x in rules["public_api"].as_array().into_iter().flatten() {
+        let names = strings(&x["removed"]);
+        let shown: Vec<String> = names.iter().take(SHOWN).map(|n| code(n, 80)).collect();
+        let more = if names.len() > SHOWN { format!(" and {} more", names.len() - SHOWN) } else { String::new() };
+        look.push(item("public-api", format!("{} no longer exports {}{more} ({}), so code that imports {} breaks",
+            code(x["package"].as_str().unwrap_or(""), 120), shown.join(", "), code(x["entry"].as_str().unwrap_or(""), 160), if names.len() == 1 { "it" } else { "them" })));
+    }
     for x in rules["node_versions"].as_array().into_iter().flatten() {
         let features: Vec<String> = x["features"].as_array().into_iter().flatten().take(SHOWN)
             .map(|f| format!("{} (Node {})", code(f["name"].as_str().unwrap_or(""), 80), plain(f["since"].as_str().unwrap_or("")))).collect();

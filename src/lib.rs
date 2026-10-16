@@ -28,3 +28,4 @@ pub mod check;
 pub mod twin;
 pub mod weaken;
 pub mod nodeapi;
+pub mod surface;

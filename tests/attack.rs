@@ -268,3 +268,19 @@ fn code_that_starts_using_a_node_feature_newer_than_its_package_supports_needs_a
     let raised = commit(&t, &[("packages/wrangler/package.json", r#"{"name":"wrangler","engines":{"node":">=22.13.0"}}"#)], &[]);
     assert_eq!(rules(&t, &base, &raised)["node_versions"], json!([]), "a package that says it needs Node 22.13 may use it");
 }
+
+#[test]
+fn a_published_package_that_stops_exporting_a_name_needs_a_look_and_a_private_app_does_not() {
+    let (t, base) = repo(&[("package.json", r#"{"name":"root","private":true}"#),
+        ("packages/provider/package.json", r#"{"name":"@magic-sdk/provider","version":"1.0.0","main":"dist/cjs/index.js","types":"dist/types/index.d.ts"}"#),
+        ("packages/provider/src/index.ts", "export * from './modules/base-extension';\nexport { SDKBase } from './core/sdk';\n"),
+        ("packages/provider/src/modules/base-extension.ts", "export class Extension {}\nexport class InternalExtension {}\n"),
+        ("packages/provider/src/core/sdk.ts", "export class SDKBase {}\n"),
+        ("apps/site/package.json", r#"{"name":"site","private":true,"main":"index.js"}"#), ("apps/site/index.js", "export const page = 1;\n")]);
+    let head = commit(&t, &[("packages/provider/src/modules/base-extension.ts", "export class MagicExtension {}\n"), ("apps/site/index.js", "export const other = 1;\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert_eq!(r["public_api"], json!([{ "package": "@magic-sdk/provider", "entry": "packages/provider/src/index.ts", "removed": ["Extension", "InternalExtension"] }]),
+        "magic-js#881 removed Extension from @magic-sdk/provider and was reverted: {r}");
+    let added = commit(&t, &[("packages/provider/src/modules/base-extension.ts", "export class MagicExtension {}\nexport class Plugin {}\n")], &[]);
+    assert_eq!(rules(&t, &head, &added)["public_api"], json!([]), "adding exports breaks nobody");
+}
