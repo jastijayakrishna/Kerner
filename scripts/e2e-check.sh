@@ -530,6 +530,26 @@ cd "$W"
 check berry "$berry_base" berryrepo
 jq -e '.tests.status == "RAN" and .tests.kept == 1' berry/receipt.json > /dev/null || { jq .tests berry/receipt.json; jq . berry/setup.json 2>/dev/null | head -40; fail "berry: a yarn 4 project with type module did not install"; }
 
+say "A project whose .nvmrc asks for Node 20 is installed and tested on Node 20"
+git init -q nvmrepo && cd nvmrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"nvm","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '20\n' > .nvmrc
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' \
+  'test("runs on the Node the project asks for", () => expect(process.versions.node.split(".")[0]).toBe("20"));' \
+  'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/total.test.js
+git add -A && git commit -qm base && nvm_base=$(git rev-parse HEAD)
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/nvm.head"
+cd "$W"
+check nvm "$nvm_base" nvmrepo
+decision nvm clear
+jq -e '.tests.status == "RAN" and .tests.kept == 2 and .tests.node.old.major == 20 and .tests.node.new.major == 20' nvm/receipt.json > /dev/null \
+  || { jq '.tests | {status, kept, already_failing, node}' nvm/receipt.json; fail "nvm: the project's .nvmrc asked for Node 20 and its tests did not run on Node 20"; }
+grep -q 'Node: 20 on both sides, as the project asks' nvm/receipt.md || { cat nvm/receipt.md; fail "nvm: the receipt does not say which Node ran"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

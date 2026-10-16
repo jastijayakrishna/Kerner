@@ -319,6 +319,17 @@ pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
     }
     changed.then(|| serde_json::to_string_pretty(&pkg).unwrap_or_default())
 }
+pub fn image_major(image: &str) -> Option<u64> {
+    let info = docker_json(&["image", "inspect", image]).ok()?;
+    info[0]["Config"]["Env"].as_array()?.iter().filter_map(Value::as_str).find_map(|e| e.strip_prefix("NODE_VERSION="))?.split('.').next()?.trim_start_matches('v').parse().ok()
+}
+pub fn pull_node(major: u64) -> R<String> {
+    ensure!(crate::nodeapi::NODE_MAJORS.contains(&major), "Kern runs Node {}", crate::nodeapi::NODE_MAJORS.map(|m| m.to_string()).join(", "));
+    let tag = format!("node:{major}-bookworm-slim");
+    docker(&["pull", "-q", &tag], Duration::from_secs(600), 1 << 20)?;
+    let id = docker_json(&["image", "inspect", &tag])?[0]["Id"].as_str().map(str::to_string).ok_or_else(|| Denied(format!("Docker has no {tag}")))?;
+    validate_image(&id)
+}
 pub fn remove_volume(name: &str) { let _ = docker(&["volume", "rm", "--force", name], Duration::from_secs(120), 4096); }
 
 #[derive(Clone)]

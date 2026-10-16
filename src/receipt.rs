@@ -320,6 +320,17 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     } else {
         md += &format!("- ⏭️ Tests: Not run — {}\n", plain(tests["why"].as_str().unwrap_or("Kern found no tests it can run")));
     }
+    let (old_node, new_node) = (&tests["node"]["old"], &tests["node"]["new"]);
+    if let (Some(a), Some(b)) = (old_node["major"].as_u64(), new_node["major"].as_u64()) {
+        let from = new_node["from"].as_str().or(old_node["from"].as_str()).map(|f| format!(" ({})", plain(f))).unwrap_or_default();
+        if let Some(w) = new_node["wanted"].as_u64().or(old_node["wanted"].as_u64()) {
+            md += &format!("- ⚠️ Node: the project asks for Node {w}{from}, but Kern ran Node {b}: {}\n", plain(new_node["why"].as_str().or(old_node["why"].as_str()).unwrap_or("")));
+        } else if a != b {
+            md += &format!("- ⚠️ Node: the change moves the project from Node {a} to Node {b}{from}, and each side ran on its own\n");
+        } else if !from.is_empty() {
+            md += &format!("- ✅ Node: {b} on both sides, as the project asks{from}\n");
+        }
+    }
     for p in tests["types"]["projects"].as_array().into_iter().flatten() {
         let config = code(p["config"].as_str().unwrap_or(""), 160);
         let version = p["version"].as_str().filter(|v| !v.is_empty()).map(|v| format!(", TypeScript {v}")).unwrap_or_default();

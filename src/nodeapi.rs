@@ -54,6 +54,95 @@ fn bound(text: &str) -> Option<Version> {
     Some(match (op, parts) { (">", 1) => (v.0 + 1, 0, 0), (">", 2) => (v.0, v.1 + 1, 0), (">", _) => (v.0, v.1, v.2 + 1), _ => v })
 }
 
+fn parts(text: &str) -> (Option<Version>, usize) {
+    let rest = text.trim().trim_start_matches(['v', '=']);
+    let n = rest.split('.').take_while(|p| !p.is_empty() && !["x", "X", "*"].contains(p)).count();
+    (version(rest), n)
+}
+fn next(v: Version, n: usize) -> Version { match n { 1 => (v.0 + 1, 0, 0), 2 => (v.0, v.1 + 1, 0), _ => (v.0, v.1, v.2 + 1) } }
+fn comparator(c: &str, v: Version) -> Option<bool> {
+    if ["*", "x", "X", ""].contains(&c) { return Some(true); }
+    let (op, rest) = [">=", "<=", ">", "<", "=", "^", "~"].iter().find_map(|o| c.strip_prefix(o).map(|r| (*o, r))).unwrap_or(("", c));
+    if ["*", "x", "X", ""].contains(&rest.trim()) { return Some(op != "<" && op != ">"); }
+    let (b, n) = parts(rest);
+    let b = b?;
+    if n == 0 { return None; }
+    Some(match op {
+        "" | "=" => if n == 3 { v == b } else { v >= b && v < next(b, n) },
+        ">=" => v >= b,
+        ">" => if n == 3 { v > b } else { v >= next(b, n) },
+        "<" => v < b,
+        "<=" => if n == 3 { v <= b } else { v < next(b, n) },
+        "~" => v >= b && v < if n == 1 { (b.0 + 1, 0, 0) } else { (b.0, b.1 + 1, 0) },
+        _ => v >= b && v < if b.0 > 0 || n == 1 { (b.0 + 1, 0, 0) } else if b.1 > 0 || n == 2 { (0, b.1 + 1, 0) } else { (0, 0, b.2 + 1) },
+    })
+}
+pub fn satisfies(range: &str, v: Version) -> Option<bool> {
+    let mut any = false;
+    for alt in range.split("||") {
+        let alt = alt.trim();
+        any |= match alt.split_once(" - ") {
+            Some((a, b)) => {
+                let (lo, (hi, n)) = (parts(a).0?, parts(b));
+                v >= lo && if n == 3 { v <= hi? } else { v < next(hi?, n.max(1)) }
+            }
+            None => {
+                let mut ok = true;
+                let mut words = alt.split_whitespace().peekable();
+                while let Some(w) = words.next() {
+                    let c = if [">=", "<=", ">", "<", "=", "^", "~"].contains(&w) { format!("{w}{}", words.next()?) } else { w.to_string() };
+                    ok &= comparator(&c, v)?;
+                }
+                ok
+            }
+        };
+    }
+    Some(any)
+}
+pub const NODE_MAJORS: [u64; 5] = [18, 20, 22, 24, 26];
+fn spec_major(spec: &str) -> Option<u64> {
+    let s = spec.trim().trim_matches(['"', '\'']).trim_start_matches('v').to_ascii_lowercase();
+    let named = |n: &str| -> Option<u64> {
+        Some(match n { "argon" => 4, "boron" => 6, "carbon" => 8, "dubnium" => 10, "erbium" => 12, "fermium" => 14, "gallium" => 16, "hydrogen" => 18, "iron" => 20, "jod" => 22, "krypton" => 24, _ => return None })
+    };
+    match s.as_str() {
+        "node" | "latest" | "current" | "stable" => Some(26),
+        "lts" | "lts/*" | "lts/latest" => Some(24),
+        x if x.starts_with("lts/") => named(&x[4..]),
+        x => x.split(['.', ' ', '-']).next()?.parse().ok(),
+    }
+}
+pub fn supported_major(m: u64) -> u64 { NODE_MAJORS.iter().copied().find(|s| *s >= m).unwrap_or(NODE_MAJORS[NODE_MAJORS.len() - 1]) }
+pub fn wanted_major(read: &dyn Fn(&str) -> Option<String>, workflows: &[String]) -> Option<(u64, String)> {
+    let first = |t: &str| t.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string);
+    for f in [".nvmrc", ".node-version"] {
+        if let Some(line) = read(f).as_deref().and_then(first) && let Some(m) = spec_major(&line) { return Some((supported_major(m), format!("{f} says {line}"))); }
+    }
+    if let Some(t) = read(".tool-versions") {
+        for l in t.lines().map(str::trim) {
+            let mut w = l.split_whitespace();
+            if matches!(w.next(), Some("nodejs" | "node")) && let Some(v) = w.next() && let Some(m) = spec_major(v) { return Some((supported_major(m), format!(".tool-versions says {v}"))); }
+        }
+    }
+    let package = read("package.json").and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    if let Some(v) = package.as_ref().and_then(|p| p["volta"]["node"].as_str()) && let Some(m) = spec_major(v) { return Some((supported_major(m), format!("package.json's volta.node is {v}"))); }
+    if let Some(range) = package.as_ref().and_then(|p| p["engines"]["node"].as_str()) {
+        let fits = |m: u64| satisfies(range, (m, 999, 999)) == Some(true);
+        if fits(22) { return Some((22, format!("package.json's engines.node is {range}"))); }
+        if let Some(m) = NODE_MAJORS.iter().copied().find(|m| fits(*m)) { return Some((m, format!("package.json's engines.node is {range}"))); }
+    }
+    let mut ci: Vec<u64> = Vec::new();
+    for w in workflows {
+        for l in w.lines().map(str::trim) {
+            let Some(value) = l.strip_prefix("node-version:").or_else(|| l.strip_prefix("node_version:")).map(str::trim) else { continue };
+            if value.contains("${{") { continue; }
+            ci.extend(value.trim_matches(['[', ']']).split(',').filter_map(spec_major));
+        }
+    }
+    if ci.is_empty() { return None; }
+    let m = if ci.contains(&22) { 22 } else { *ci.iter().max()? };
+    Some((supported_major(m), format!("the CI workflow sets up Node {m}")))
+}
 pub fn lowest(range: &str) -> Option<Version> {
     let mut low: Option<Version> = None;
     for alt in range.split("||") {

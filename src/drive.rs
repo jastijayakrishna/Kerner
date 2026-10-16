@@ -1016,6 +1016,22 @@ fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     Ok(files.iter().map(|i| i.path.clone()).collect())
 }
 
+pub fn node_image(op: &crate::policy::Operator, wanted: Option<(u64, String)>) -> (String, Value) {
+    static DEFAULT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let default = *DEFAULT.get_or_init(|| crate::sandbox::image_major(&op.image));
+    match wanted {
+        Some((m, from)) if default.is_some_and(|d| d != m) => match crate::sandbox::pull_node(m) {
+            Ok(id) => (id, json!({ "major": m, "from": from })),
+            Err(e) => (op.image.clone(), json!({ "major": default, "wanted": m, "from": from, "why": e.0 })),
+        },
+        Some((m, from)) => (op.image.clone(), json!({ "major": default.unwrap_or(m), "from": from })),
+        None => (op.image.clone(), json!({ "major": default })),
+    }
+}
+pub fn side_image(out: &Path, volume: &str, op: &crate::policy::Operator) -> String {
+    let s = read_own(out.join("setup.json")).unwrap_or(Value::Null);
+    ["old", "new"].iter().find(|side| s[**side]["volume"] == volume).and_then(|side| s[*side]["image"].as_str()).filter(|i| crate::policy::image(i)).unwrap_or(&op.image).to_string()
+}
 fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str, label: &str, until: u64) -> R<(crate::sandbox::Volume, Value)> {
     let seconds = within(until, 1500);
     ensure!(seconds >= 120, "Kern's time for this check ran out before it could set up the {side} code");
@@ -1029,6 +1045,8 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     if tree.exists() { std::fs::remove_dir_all(&tree)?; }
     let paths = materialize(repo, commit, &tree)?;
     let read = |p: &str| std::fs::read_to_string(tree.join(p)).ok();
+    let workflows: Vec<String> = paths.iter().filter(|p| p.starts_with(".github/workflows/") && (p.ends_with(".yml") || p.ends_with(".yaml"))).filter_map(|p| read(p)).collect();
+    let (image, node) = node_image(op, crate::nodeapi::wanted_major(&read, &workflows));
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
@@ -1037,13 +1055,13 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let mut ledger = std::fs::OpenOptions::new().create(true).append(true).open(out.join("volumes.txt"))?;
     std::io::Write::write_all(&mut ledger, format!("{}\n", volume.0).as_bytes())?;
     let limits = Limits { timeout_seconds: seconds + 300, ..setup_limits() };
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &tree, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_setup".into()],
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &tree, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_setup".into()],
         network: "bridge", volumes: vec![], root: true, home_mb: 2048, scratch: false, workspace: Some((&volume.0, false)) })?;
     ensure!(run.exit_code == 0, "Setting up the {side} code failed in the sandbox (exit code {})", run.exit_code);
     let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
     let _ = std::fs::remove_dir_all(&tree);
     let _ = std::fs::remove_dir_all(&control);
-    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json") });
+    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json"), "image": image, "node": node });
     Ok((volume, entry))
 }
 
@@ -1147,7 +1165,8 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path, until: u64) 
         create_new(control.join("driver.mjs"), &driver_bytes, 0o444)?;
         create_new(control.join("tsconfig.json"), tsconfig(s[side]["tsconfig"] == true).as_bytes(), 0o444)?;
         let volume = s[side]["volume"].as_str().unwrap_or("");
-        let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive".into()],
+        let image = side_image(out, volume, op);
+        let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive".into()],
             network: "none", volumes: vec![(&tools_volume, "/kern-tools/node_modules", true)], root: false, home_mb: 0, scratch: false, workspace: Some((volume, true)) });
         let _ = std::fs::remove_dir_all(&control);
         let run = match run {

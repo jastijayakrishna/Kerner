@@ -721,7 +721,8 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
+    let image = crate::drive::side_image(out, volume, op);
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
         network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
     let _ = std::fs::remove_dir_all(&control);
     let run = match run {
@@ -828,7 +829,8 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    let spec = |entry: &str, root: bool, control: &Path| crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control, writable: &[], limits: &limits,
+    let image = crate::drive::side_image(out, volume, op);
+    let spec = |entry: &str, root: bool, control: &Path| crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control, writable: &[], limits: &limits,
         entry: vec![entry.into()], network: "none", volumes: vec![], root, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
     let run = spec("__drive_test", false, &control);
     let _ = std::fs::remove_dir_all(&control);
@@ -867,7 +869,8 @@ fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &E
     let input = out.join("tests-input");
     let _ = std::fs::create_dir_all(&input);
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
+    let image = crate::drive::side_image(out, volume, op);
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
         network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
     let _ = std::fs::remove_dir_all(&control);
     let Ok(run) = run else { return Vec::new() };
@@ -1248,7 +1251,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             n["why"] = json!(why);
         }
     }
-    let extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds });
+    let extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds,
+        "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));
