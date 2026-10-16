@@ -89,25 +89,31 @@ What Kern checks on every pull request:
    test, with its old data, on the new code (jest, vitest and mocha): a test whose old version now fails needs a look, because the
    change rewrote what it expected. So does an edited test file whose old version Kern cannot run there (node's test runner, for
    one), and an edited data file, helper or mock that no old test names.
-2. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
+2. **Whether the tests check the change at all.** When the tests pass, Kern plants a few small faults in the lines the change touched
+   (`>` turned into `>=`, a condition turned around, a call left out), one at a time, and runs the tests related to each file (jest and
+   vitest). The fault is put in as the file is read, so nothing on disk is edited. A fault that makes a test fail that passed without it
+   is caught. The receipt says how many were caught and names the lines where none was, and when no test notices any of them the change
+   needs a look: the tests pass, but nothing in them checks this change. A fault that only puts back the old line, logging calls, and a
+   run in which the fault never reached the code are not counted.
+3. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
-3. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
+4. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
    the tests that newly reads environment variables, needs a look. Ordinary imports, such as a UI library or a project's own modules,
    are not powers.
-4. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
+5. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
    templates aside), test runner settings (the test script in `package.json` included), and the files that instruct coding agents
    (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
-5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
+6. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
    that has been on npm for a week needs no look; a release less than a week old is named, because that is where hijacked packages
    show up. A new package, a major update and a lockfile entry that downloads a package from somewhere other than its own registry
    tarball need a look.
-6. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
+7. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
    run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
    the package says it supports (`engines.node`, checked against Node's own documentation); and HTML that adds inline styles or scripts
    that a Content-Security-Policy in the same change forbids.
-7. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
+8. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
    it on the old and the new code and lists what behaves differently, with what the pull request does not mention first.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,

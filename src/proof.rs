@@ -881,6 +881,16 @@ fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, befor
     Ok(record)
 }
 
+pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool, bool), output: &[u8], errors: &[u8]) -> &'static str {
+    if !finished { return "unknown"; }
+    let none = |b: &[u8]| { let t = String::from_utf8_lossy(b); t.contains("No tests found") || t.contains("No test files found") };
+    let r = match read_report(runner, output) { Ok(r) => r, Err(_) if none(output) || none(errors) => return "untested", Err(_) => return "unknown" };
+    if r.tests.values().all(|c| c.ran() == 0) && r.problems.is_empty() { return "untested"; }
+    if !served { return "unknown"; }
+    let known: BTreeSet<&String> = failing(before).into_iter().collect();
+    let failed = failing(&r);
+    if failed.iter().any(|k| !known.contains(k)) { "caught" } else if failed.is_empty() && r.sum().passed > 0 { "missed" } else { "unknown" }
+}
 pub fn caught(runner: Runner, known: &BTreeSet<String>, stdout: &[u8], passed: bool) -> bool {
     if known.is_empty() { return !passed; }
     match read_report(runner, stdout) {
@@ -920,6 +930,7 @@ pub struct Mutant { pub id: usize, pub path: String, pub line: usize, pub start:
     pub tests: Vec<String> }
 impl Mutant {
     pub fn describe(&self) -> String { format!("{}:{} {}", self.path, self.line, self.what) }
+    pub fn what(&self) -> &str { &self.what }
 }
 #[derive(Clone, Debug)]
 pub struct Plan { pub targets: Vec<String>, pub mutants: Vec<Mutant>, pub command: Vec<String>, pub tests_paths: Vec<String>, pub old_files: Vec<String>, pub runner: Runner, pub known: Vec<String> }
@@ -1069,6 +1080,17 @@ fn operator_at(source: &str, from: usize, to: usize, op: &str) -> Option<usize> 
     }
     None
 }
+fn logging(callee: &Expression) -> bool {
+    let quiet = |name: &str| matches!(name.to_ascii_lowercase().as_str(), "console" | "logger" | "log");
+    match callee {
+        Expression::StaticMemberExpression(m) => {
+            let owner = match &m.object { Expression::Identifier(o) => quiet(&o.name), Expression::StaticMemberExpression(inner) => quiet(&inner.property.name), _ => false };
+            owner || matches!(m.property.name.as_str(), "debug" | "trace")
+        }
+        Expression::Identifier(f) => f.name == "debug",
+        _ => false,
+    }
+}
 struct Plant<'s> { source: &'s str, p: Planter }
 impl Plant<'_> {
     fn binary(&mut self, left: oxc_span::Span, right: oxc_span::Span, op: &str) {
@@ -1083,13 +1105,13 @@ impl Plant<'_> {
 impl<'a> Visit<'a> for Plant<'_> {
     fn visit_ts_type(&mut self, _: &TSType<'a>) {}
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        let logging = matches!(&it.callee, Expression::StaticMemberExpression(m) if matches!(&m.object, Expression::Identifier(o) if o.name == "console"));
+        let logging = logging(&it.callee);
         self.p.arid += u32::from(logging);
         walk::walk_call_expression(self, it);
         self.p.arid -= u32::from(logging);
     }
     fn visit_expression_statement(&mut self, it: &ExpressionStatement<'a>) {
-        if let Expression::CallExpression(call) = &it.expression && !matches!(&call.callee, Expression::StaticMemberExpression(m) if matches!(&m.object, Expression::Identifier(o) if o.name == "console")) {
+        if let Expression::CallExpression(call) = &it.expression && !logging(&call.callee) {
             let (start, end) = (call.span.start as usize, call.span.end as usize);
             if let Some(text) = self.source.get(start..end) { self.p.add(start, end, text, "void 0", "removes a call".into(), 7); }
         }
@@ -1130,11 +1152,17 @@ impl<'a> Visit<'a> for Plant<'_> {
         self.p.add(it.span.start as usize, it.span.end as usize, o, r, format!("changes {o} to {r}"), 5);
     }
 }
-fn plant(path: &str, source: &str) -> Vec<Mutant> {
+pub fn plant_lines(path: &str, source: &str, lines: &BTreeSet<usize>, old: &BTreeSet<String>) -> Vec<Mutant> {
+    planted(path, source, &|line, mutated| lines.contains(&line) && !old.contains(mutated.trim()))
+}
+fn plant(path: &str, source: &str) -> Vec<Mutant> { planted(path, source, &|_, _| true) }
+fn planted(path: &str, source: &str, keep: &dyn Fn(usize, &str) -> bool) -> Vec<Mutant> {
     let found = parsed(path, source, |program, src| { let mut v = Plant { source: src, p: Planter::default() }; v.visit_program(program); v.p.found }).unwrap_or_default();
     let mut best: BTreeMap<usize, (usize, usize, String, String, String, u8)> = BTreeMap::new();
     for f in found {
         let line = source[..f.0].matches('\n').count() + 1;
+        let (from, to) = (source[..f.0].rfind('\n').map_or(0, |i| i + 1), source[f.1..].find('\n').map_or(source.len(), |i| f.1 + i));
+        if !keep(line, &format!("{}{}{}", &source[from..f.0], f.3, &source[f.1..to])) { continue; }
         if best.get(&line).is_none_or(|b| (f.5, f.0) < (b.5, b.0)) { best.insert(line, f); }
     }
     best.into_iter().map(|(line, (start, end, original, replacement, what, _))| Mutant { id: 0, path: path.to_string(), line, start, end, original, replacement, what, tests: Vec::new() }).collect()

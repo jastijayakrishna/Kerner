@@ -694,7 +694,7 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
     crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files,
-        "early": limit >= test_seconds() }))))?;
+        "early": limit >= test_seconds(), "faults": [] }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
@@ -801,7 +801,7 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     if control.exists() { std::fs::remove_dir_all(&control)?; }
     let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
     crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {},
-        "early": false }))))?;
+        "early": false, "faults": [] }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
@@ -819,6 +819,37 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     let _ = std::fs::remove_dir_all(&control);
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
     Ok(log)
+}
+pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::proof::Mutant> {
+    let mut per_file: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| {
+        let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+        let (removed, added) = crate::compare::changed_lines(&a, &b).unwrap_or_default();
+        let lines: BTreeSet<usize> = added.into_iter().map(|i| i + 1).collect();
+        let gone: BTreeSet<String> = removed.into_iter().filter_map(|i| a.get(i)).map(|l| l.trim().to_string()).collect();
+        crate::proof::plant_lines(path, new, &lines, &gone).into_iter().collect()
+    }).collect();
+    let mut out = Vec::new();
+    while out.len() < limit && per_file.iter().any(|f| !f.is_empty()) {
+        for f in per_file.iter_mut() { if out.len() < limit && let Some(m) = f.pop_front() { out.push(m); } }
+    }
+    out
+}
+fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, until: u64) -> Vec<Value> {
+    let seconds = within(until, 900);
+    if seconds < 120 || faults.is_empty() { return Vec::new(); }
+    let control = out.join("tests-faults");
+    if control.exists() && std::fs::remove_dir_all(&control).is_err() { return Vec::new(); }
+    let spec = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults });
+    if crate::sandbox::control_dir(&control, Some(("drive-test.json", &spec))).is_err() { return Vec::new(); }
+    let input = out.join("tests-input");
+    let _ = std::fs::create_dir_all(&input);
+    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
+        network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
+    let _ = std::fs::remove_dir_all(&control);
+    let Ok(run) = run else { return Vec::new() };
+    let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return Vec::new() };
+    serde_json::from_slice::<Vec<Value>>(&parts["output"]).unwrap_or_default()
 }
 pub fn dotenv(text: &str) -> Vec<(String, String)> {
     text.lines().filter_map(|l| {
@@ -935,6 +966,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let mut merged = serde_json::Map::new();
     for l in LISTS { merged.insert(l.into(), json!([])); }
     merged.insert("uneven_why".into(), json!([]));
+    merged.insert("faults".into(), json!([]));
     merged.insert("problem_why".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
@@ -1151,6 +1183,31 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
         kept += c["kept"].as_u64().unwrap_or(0);
+        if matches!(suite.new.0.runner, Runner::Jest | Runner::Vitest) && c["status"] == "RAN" && within(until, 900) >= 300 && std::env::var("KERN_FAULTS").as_deref() != Ok("0") {
+            let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
+            let files: Vec<(String, String, String)> = changes.iter()
+                .filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && !p.split('/').any(|s| s == "node_modules"))
+                .take(20).filter_map(|(p, _)| Some((p.clone(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
+            let planted = faults(&files, 6);
+            let mut kept_faults = Vec::new();
+            let specs: Vec<Value> = planted.iter().filter_map(|m| {
+                let t = related(&suite.new.0, &[m.path.clone()].into_iter().collect(), &suite.dir)?;
+                let command: Vec<String> = test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
+                kept_faults.push(m);
+                Some(json!({ "path": m.path, "start": m.start, "end": m.end, "original": m.original, "replacement": m.replacement, "command": command }))
+            }).collect();
+            let at = now_ms();
+            let results = run_faults(out, op, &volume("new"), (&suite.new.0, &suite.new.1), &suite.dir, specs, until);
+            if !results.is_empty() { timed(format!("faults{label}"), at); }
+            let _ = std::fs::write(out.join(format!("faults{label}.json")), serde_json::to_vec(&results).unwrap_or_default());
+            if let Some(a) = merged["faults"].as_array_mut() {
+                a.extend(kept_faults.iter().zip(&results).map(|(m, r)| {
+                    let text = |k: &str| r[k].as_str().unwrap_or("").as_bytes().to_vec();
+                    let outcome = proof::fault_verdict(runner, &new, (r["finished"] == true, r["served"] == true), &text("output"), &text("errors"));
+                    json!({ "path": m.path, "line": m.line, "what": m.what(), "outcome": outcome })
+                }));
+            }
+        }
         let only = if narrowed.is_some() { format!(", only the tests related to the change: {whole_why}") } else { String::new() };
         let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };
         let only = match manifest(head, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed) {

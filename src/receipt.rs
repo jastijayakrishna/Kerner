@@ -150,6 +150,12 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it does not block on them")));
     look.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it does not block on it",
         "test files fail on the new code, and Kern has no record of them passing on the old code, so it does not block on them"));
+    let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown").collect();
+    if planted.len() >= 2 && planted.iter().all(|f| f["outcome"] != "caught") {
+        let example = planted.first().map(|f| format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or(""))).unwrap_or_default();
+        look.push(item("untested-change", format!("No test noticed any of the {} small faults Kern planted in the changed lines (such as {}), so the tests do not check this change",
+            planted.len(), code(&example, 200))));
+    }
     look.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests",
         "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests"));
     look.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));
@@ -268,6 +274,14 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }
         md += &line;
         md += "\n";
+        let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown").collect();
+        if !planted.is_empty() {
+            let caught = planted.iter().filter(|f| f["outcome"] == "caught").count();
+            let missed: Vec<String> = planted.iter().filter(|f| f["outcome"] != "caught").take(SHOWN)
+                .map(|f| code(&format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or("")), 200)).collect();
+            md += &format!("- {} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
+                if missed.is_empty() { String::new() } else { format!("; not caught: {}", missed.join(", ")) });
+        }
         for n in tests["not_run"].as_array().into_iter().flatten() {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
         }

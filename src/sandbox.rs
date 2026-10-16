@@ -9,6 +9,7 @@ pub const MONITOR: &str = include_str!("monitor.cjs");
 pub const JEST_REPORT: &str = include_str!("jest-report.cjs");
 pub const JEST_PROGRESS: &str = include_str!("jest-progress.cjs");
 pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
+pub const FAULT: &str = include_str!("fault.cjs");
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
@@ -424,6 +425,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     create_new(dir.join("jest-report.cjs"), JEST_REPORT.as_bytes(), 0o444)?;
     create_new(dir.join("jest-progress.cjs"), JEST_PROGRESS.as_bytes(), 0o444)?;
     create_new(dir.join("vitest-progress.mjs"), VITEST_PROGRESS.as_bytes(), 0o444)?;
+    create_new(dir.join("fault.cjs"), FAULT.as_bytes(), 0o444)?;
     create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
@@ -438,6 +440,14 @@ mod inside {
     const ENV: [(&str, &str); 3] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8")];
     const TEST_ENV: [(&str, &str); 4] = [ENV[0], ENV[1], ENV[2], ("CI", "true")];
     fn config(name: &str) -> R<Value> { read_json(Path::new("/kern").join(name)) }
+    fn ended(mut child: std::process::Child, timeout: Duration) -> R<bool> {
+        let started = std::time::Instant::now();
+        loop {
+            if child.try_wait()?.is_some() { return Ok(true); }
+            if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); return Ok(false); }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     fn wait(mut child: std::process::Child, timeout: Duration) -> R<bool> {
         let started = std::time::Instant::now();
         loop {
@@ -875,7 +885,7 @@ mod inside {
     }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early", "faults"], "test run")?;
         let early = c["early"].as_bool().ok_or_else(|| Denied("Invalid test run".into()))?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
@@ -903,6 +913,38 @@ mod inside {
             ensure!(!p.split('/').any(|c| c == "node_modules") && std::fs::symlink_metadata(&target).is_err(), "A test run file may not replace a project file: {p}");
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
             create_new(&target, text.as_bytes(), 0o644)?;
+        }
+        let faults = c["faults"].as_array().cloned().unwrap_or_default();
+        ensure!(faults.len() <= 12, "Too many planted faults");
+        if !faults.is_empty() {
+            let started = std::time::Instant::now();
+            let mut results = Vec::new();
+            for f in &faults {
+                let path = text(f, "path")?;
+                file_path(path)?;
+                let (start, end) = (f["start"].as_u64().unwrap_or(0) as usize, f["end"].as_u64().unwrap_or(0) as usize);
+                let (original, replacement) = (text(f, "original")?, text(f, "replacement")?);
+                let mut run = argv(&f["command"])?;
+                run[0] = super::runner_in(cwd, &run[0], |p| Path::new(p).exists());
+                let target = Path::new("/workspace").join(path);
+                let body = std::fs::read_to_string(&target).unwrap_or_default();
+                if started.elapsed() > timeout || body.get(start..end) != Some(original) { results.push(json!({ "finished": false })); continue; }
+                std::fs::write("/tmp/.kern-fault-src", format!("{}{}{}", &body[..start], replacement, &body[end..]))?;
+                for f in ["/tmp/.kern-report.json", "/tmp/.kern-fault-served"] { let _ = std::fs::remove_file(f); }
+                let child = Command::new(&run[0]).args(&run[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+                    .env("NODE_OPTIONS", format!("--require=/kern/fault.cjs{options}")).env("KERN_REPORT", "/tmp/.kern-report.json")
+                    .env("KERN_FAULT_FILE", &target).env("KERN_FAULT_SOURCE", "/tmp/.kern-fault-src").env("KERN_FAULT_SERVED", "/tmp/.kern-fault-served")
+                    .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-fault-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-fault-err")?)).spawn()?;
+                let finished = ended(child, timeout.saturating_sub(started.elapsed()).min(Duration::from_secs(180)))?;
+                quiesce()?;
+                let report = some_of("/tmp/.kern-report.json", 4 << 20, false);
+                let output = if report.iter().any(|b| !b.is_ascii_whitespace()) { report } else { some_of("/tmp/.kern-fault-out", 4 << 20, true) };
+                results.push(json!({ "finished": finished, "served": Path::new("/tmp/.kern-fault-served").exists(), "output": String::from_utf8_lossy(&output),
+                    "errors": String::from_utf8_lossy(&some_of("/tmp/.kern-fault-err", 16 << 10, true)) }));
+            }
+            for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"faults".to_vec())] { part(name, &body)?; }
+            std::io::Write::flush(&mut std::io::stdout())?;
+            return Ok(());
         }
         if command.iter().any(|a| a == super::PROGRESS_ARGS[2]) {
             let probe: Vec<String> = command.iter().filter(|a| !super::PROGRESS_ARGS.contains(&a.as_str())).cloned().chain(std::iter::once("--showConfig".to_string())).collect();

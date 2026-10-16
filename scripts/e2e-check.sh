@@ -442,6 +442,46 @@ decision partial blocked
 jq -e '.tests.status == "RAN" and .tests.before.passed == 2 and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build"))' partial/receipt.json > /dev/null \
   || { jq .tests partial/receipt.json; fail "partial: a test file that missed an unbuilt package, while another passed, was set aside instead of built for"; }
 
+say "Kern plants small faults in the changed lines: one a test notices is caught, and a change no test checks needs a look, with vitest and with jest"
+for runner in vitest jest; do
+  git init -q "faults-$runner-repo" && cd "faults-$runner-repo"
+  git config user.email e2e@example.invalid && git config user.name e2e
+  mkdir -p src test
+  if [ "$runner" = vitest ]; then
+    printf '%s\n' '{"name":"faults","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+    def() { printf 'export const %s = %s;\n' "$1" "$2"; }
+    printf '%s\n' 'import { test, expect } from "vitest";' 'import { discount } from "../src/price.js";' '' > test/price.test.js
+  else
+    printf '%s\n' '{"name":"faults","version":"1.0.0","private":true,"scripts":{"test":"jest"},"devDependencies":{"jest":"29.7.0"}}' > package.json
+    def() { printf 'exports.%s = %s;\n' "$1" "$2"; }
+    printf '%s\n' 'const { discount } = require("../src/price.js");' '' > test/price.test.js
+  fi
+  printf '%s\n' 'test("discount from 100", () => expect(discount(100)).toBe(90));' 'test("no discount below 100", () => expect(discount(99)).toBe(99));' >> test/price.test.js
+  { def discount '(amount) => (amount >= 100 ? amount * 0.9 : amount)'; def free '(total) => total >= 50'; } > src/price.js
+  def shipping '(weight) => (weight > 10 ? 15 : 5)' > src/ship.js
+  git add -A && git commit -qm base && faults_base=$(git rev-parse HEAD)
+  git checkout -q -b some
+  { def discount '(amount) => (amount < 100 ? amount : amount * 0.9)'; def free '(total) => total > 60'; } > src/price.js
+  git commit -qam "Same discount, written the other way round, and free shipping from 60" && git rev-parse HEAD > "$W/faults-some-$runner.head"
+  git checkout -q -b none "$faults_base"
+  { def discount '(amount) => (amount >= 100 ? amount * 0.9 : amount)'; def free '(total) => total > 60'; } > src/price.js
+  def shipping '(weight) => (weight > 20 ? 15 : 5)' > src/ship.js
+  git commit -qam "Free shipping from 60, and heavy parcels from 20" && git rev-parse HEAD > "$W/faults-none-$runner.head"
+  git checkout -q "$faults_base"
+  cd "$W"
+  check "faults-some-$runner" "$faults_base" "faults-$runner-repo"
+  decision "faults-some-$runner" clear
+  jq -e '.tests.status == "RAN" and ([.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort == ["src/price.js:1 caught", "src/price.js:2 missed"])' "faults-some-$runner/receipt.json" > /dev/null \
+    || { jq .tests "faults-some-$runner/receipt.json"; fail "faults-some-$runner: the fault a test notices was not caught, or the one no test checks was not missed"; }
+  grep -q 'the tests caught 1 of 2 small faults' "faults-some-$runner/receipt.md" && grep -q 'src/price.js:2' "faults-some-$runner/receipt.md" \
+    || { cat "faults-some-$runner/receipt.md"; fail "faults-some-$runner: the receipt does not say which planted fault no test noticed"; }
+  check "faults-none-$runner" "$faults_base" "faults-$runner-repo"
+  decision "faults-none-$runner" look
+  jq -e '[.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort == ["src/price.js:2 missed", "src/ship.js:1 untested"]' "faults-none-$runner/receipt.json" > /dev/null \
+    || { jq .tests "faults-none-$runner/receipt.json"; fail "faults-none-$runner: a change no test checks was not found"; }
+  [ "$(kinds "faults-none-$runner" untested-change look)" = 1 ] || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: a change no test checks does not need a look"; }
+done
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
