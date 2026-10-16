@@ -163,7 +163,7 @@ pub fn spec(config: &str, seconds: u64) -> Value {
         "files": {}, "early": false, "faults": [] })
 }
 fn check_side(out: &Path, op: &Operator, volume: &str, config: &str, until: u64, label: &str) -> Value {
-    let seconds = within(until, 420);
+    let seconds = within(until, 240);
     if seconds < 90 { return json!({ "status": "unknown", "why": "Kern's time ran out" }); }
     let control = out.join(format!("types-{label}"));
     if control.exists() && std::fs::remove_dir_all(&control).is_err() { return json!({ "status": "unknown", "why": "Kern could not prepare the run" }); }

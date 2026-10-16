@@ -860,7 +860,7 @@ pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::pr
     out
 }
 fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, until: u64) -> Vec<Value> {
-    let seconds = within(until, 900);
+    let seconds = within(until, 300);
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
     let control = out.join("tests-faults");
     if control.exists() && std::fs::remove_dir_all(&control).is_err() { return Vec::new(); }

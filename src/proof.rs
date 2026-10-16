@@ -894,7 +894,7 @@ pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool,
     if !served { return "unknown"; }
     let known: BTreeSet<&String> = failing(before).into_iter().collect();
     let failed = failing(&r);
-    if failed.iter().any(|k| !known.contains(k)) { "caught" } else if failed.is_empty() && r.sum().passed > 0 { "missed" } else { "unknown" }
+    if failed.iter().any(|k| !known.contains(k)) { "caught" } else if r.sum().passed > 0 { "missed" } else { "unknown" }
 }
 pub fn caught(runner: Runner, known: &BTreeSet<String>, stdout: &[u8], passed: bool) -> bool {
     if known.is_empty() { return !passed; }

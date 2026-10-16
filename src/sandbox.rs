@@ -968,7 +968,7 @@ mod inside {
                     .env("NODE_OPTIONS", format!("--require=/kern/fault.cjs{options}")).env("KERN_REPORT", "/tmp/.kern-report.json")
                     .env("KERN_FAULT_FILE", &target).env("KERN_FAULT_SOURCE", "/tmp/.kern-fault-src").env("KERN_FAULT_SERVED", "/tmp/.kern-fault-served")
                     .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-fault-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-fault-err")?)).spawn()?;
-                let finished = ended(child, timeout.saturating_sub(started.elapsed()).min(Duration::from_secs(180)))?;
+                let finished = ended(child, timeout.saturating_sub(started.elapsed()).min(Duration::from_secs(120)))?;
                 quiesce()?;
                 let report = some_of("/tmp/.kern-report.json", 4 << 20, false);
                 let output = if report.iter().any(|b| !b.is_ascii_whitespace()) { report } else { some_of("/tmp/.kern-fault-out", 4 << 20, true) };

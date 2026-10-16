@@ -51,8 +51,10 @@ fn a_fault_counts_as_caught_only_when_a_test_that_passed_without_it_fails() {
     assert_eq!(fault_verdict(Jest, &clean, served, &report(&[("rounds", "passed"), ("discounts", "failed")], false), b""), "caught");
     assert_eq!(fault_verdict(Jest, &clean, served, &report(&[("rounds", "passed"), ("discounts", "passed")], false), b""), "missed");
     assert_eq!(fault_verdict(Jest, &clean, served, &report(&[("rounds", "passed")], true), b""), "caught", "a fault that stops a test file loading is caught too");
-    assert_eq!(fault_verdict(Jest, &already, served, &report(&[("rounds", "passed"), ("discounts", "failed")], false), b""), "unknown",
-        "a test that already failed without the fault proves nothing");
+    assert_eq!(fault_verdict(Jest, &already, served, &report(&[("rounds", "passed"), ("discounts", "failed")], false), b""), "missed",
+        "a test that already failed without the fault proves nothing, and the test that still works did not notice it (formbricks had 237 tests failing already)");
+    assert_eq!(fault_verdict(Jest, &already, served, &report(&[("rounds", "failed"), ("discounts", "failed")], false), b""), "caught", "a working test failed");
+    assert_eq!(fault_verdict(Jest, &already, served, &report(&[("discounts", "failed")], false), b""), "unknown", "only broken tests ran, so nothing can be said");
     assert_eq!(fault_verdict(Jest, &clean, (true, false), &report(&[("rounds", "passed"), ("discounts", "failed")], false), b""), "unknown",
         "when the changed file was never loaded with the fault in it, a failure is not the fault's doing");
     assert_eq!(fault_verdict(Jest, &clean, (true, false), &report(&[("rounds", "passed"), ("discounts", "passed")], false), b""), "unknown");
