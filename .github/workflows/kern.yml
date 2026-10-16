@@ -243,7 +243,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Clean
-        if: always()
+        if: always() && runner.environment != 'github-hosted'
         env:
           KERN_BIN: ${{ steps.install.outputs.bin }}
         run: |
