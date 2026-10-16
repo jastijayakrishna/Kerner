@@ -992,3 +992,34 @@ fn removing_a_dependency_needs_no_look_and_the_receipt_still_names_it() {
     let added = kern::receipt::build(&d, &rules(json!([{ "name": "react-native-purchases", "to": "9.5.4", "age": "new" }]), json!(["react-native-purchases 9.5.4 (new)"])), &tests, &off);
     assert!(added["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "a new package still needs a look");
 }
+
+#[test]
+fn reading_a_setting_from_the_environment_is_not_a_power_but_reading_a_secret_is() {
+    use kern::capability::{env_names, secret_name};
+    let names = |src: &str| env_names("src/a.ts", src).map(|n| n.into_iter().collect::<Vec<_>>());
+    assert_eq!(names("export const prod = process.env.NODE_ENV === 'production';"), Some(vec!["NODE_ENV".to_string()]));
+    assert_eq!(names("const { PORT, HOST } = process.env; export const at = `${HOST}:${PORT}`;"), Some(vec!["HOST".to_string(), "PORT".to_string()]));
+    assert_eq!(names("export const v = process.env['APTOS_CLI_VERSION'];"), Some(vec!["APTOS_CLI_VERSION".to_string()]));
+    assert_eq!(names("import { spawn } from 'node:child_process'; spawn('x', [], { env: process.env });"), None, "the whole environment handed on is a bulk read");
+    assert_eq!(names("export const all = JSON.stringify(process.env);"), None);
+    assert_eq!(names("export const get = (name: string) => process.env[name];"), None, "a name Kern cannot see may be any secret");
+    assert_eq!(names("const { A, ...rest } = process.env; export { rest };"), None);
+    assert_eq!(names("const { env } = process; export const s = env.SECRET;"), None, "no read Kern can name");
+    assert_eq!(names("const g = globalThis; export const s = g.process.env.SECRET;"), Some(vec!["SECRET".to_string()]));
+    assert_eq!(names("export const dev = typeof process !== 'undefined' && process.env!.NODE_ENV !== 'production';"), Some(vec!["NODE_ENV".to_string()]));
+    assert_eq!(names("export const cwd = process.cwd();"), Some(vec![]), "no environment read at all");
+    assert_eq!(names("const p = process; export const s = p.env.NPM_TOKEN;"), None, "process handed to a name Kern does not follow");
+    for secret in ["GITHUB_TOKEN", "VELLUM_API_KEY", "DATABASE_URL", "STRIPE_SECRET_KEY", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY", "dbPassword", "SENTRY_DSN", "SLACK_WEBHOOK_URL", "REDIS_URL", "githubToken", "SK_LIVE"] {
+        assert!(secret_name(secret), "{secret}");
+    }
+    for setting in ["NODE_ENV", "CI", "DEBUG", "FORCE_COLOR", "NO_COLOR", "APTOS_CLI_VERSION", "AWELL_ENVIRONMENT", "TAAPI_PLAN", "WEB_UI_BASE_URL", "EVE_PUBLIC_ROUTE_PREFIX", "PORT", "PWD", "NEXT_PUBLIC_SITE_URL"] {
+        assert!(!secret_name(setting), "{setting}");
+    }
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("src/a.js", "export const a = 1;\n")]);
+    let settings = commit(&r, &[("src/a.js", "export const a = process.env.NODE_ENV === 'test' ? 0 : 1;\n")]);
+    let found = kern::rules::rules(&r, &base, &settings).unwrap();
+    assert!(found["powers"].as_array().unwrap().is_empty(), "FWU-DE/ais-chat#1413 reads NODE_ENV in a theme toggle: {}", found["powers"]);
+    let secret = commit(&r, &[("src/a.js", "export const a = process.env.GITHUB_TOKEN;\n")]);
+    assert!(!kern::rules::rules(&r, &settings, &secret).unwrap()["powers"].as_array().unwrap().is_empty(), "apify/camoufox-js#254 reads GITHUB_TOKEN");
+}

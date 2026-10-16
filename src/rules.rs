@@ -252,14 +252,19 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let test_files = crate::suite::test_paths(&paths);
     let is_test = |p: &str| test_files.iter().any(|t| if t.ends_with('/') { p.starts_with(t.as_str()) } else { p == t });
     let checks: Vec<(String, &str, String)> = inspected.iter().map(|(p, op)| (p.clone(), *op, p.clone())).chain(twins).collect();
+    let source = |files: &Files, p: &str| files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string);
     for (p, op, real) in &checks {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
         let test = is_test(real);
+        let readable = |s: &String| is_code(p) && crate::capability::footprint(p, s).is_ok();
+        let after = source(&new, p).filter(readable).map(|s| crate::capability::env_names(p, &s));
+        let settings_only = after.as_ref().is_some_and(|a| a.as_ref().is_some_and(|names| !names.is_empty() && names.iter().all(|n| !crate::capability::secret_name(n))));
         match crate::capability::check(&old, &new, &one, &none) {
             Ok(_) => {}
             Err(e) => match widened(&e.0) {
                 Some(list) => powers.extend(list.into_iter().filter_map(|mut x| {
-                    let added: Vec<Value> = x["added"].as_array().into_iter().flatten().filter(|c| c.as_str().is_some_and(|c| risky(c) && !(test && c == "process:env"))).cloned().collect();
+                    let added: Vec<Value> = x["added"].as_array().into_iter().flatten()
+                        .filter(|c| c.as_str().is_some_and(|c| risky(c) && !(c == "process:env" && (test || settings_only)))).cloned().collect();
                     if added.is_empty() { return None; }
                     x["added"] = json!(added);
                     x["path"] = json!(real);
@@ -267,6 +272,19 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                 })),
                 None => not_checked.push(if p == real { json!({ "path": real, "why": e.0 }) } else { json!({ "path": real, "why": e.0, "code": "js" }) }),
             },
+        }
+        if test || *op == "delete" { continue; }
+        let before = match source(&old, p) { Some(s) if readable(&s) => crate::capability::env_names(p, &s), Some(_) => None, None => Some(BTreeSet::new()) };
+        let fresh: Vec<String> = match (before, after) {
+            (Some(_), Some(None)) => vec!["env:*".to_string()],
+            (Some(b), Some(Some(a))) => a.iter().filter(|n| crate::capability::secret_name(n) && !b.contains(*n)).map(|n| format!("env:{n}")).collect(),
+            _ => Vec::new(),
+        };
+        if fresh.is_empty() { continue; }
+        match powers.iter_mut().find(|x| x["path"] == real.as_str()) {
+            Some(x) if x["added"].as_array().is_some_and(|a| a.iter().any(|c| c == "process:env")) => {}
+            Some(x) => { if let Some(a) = x["added"].as_array_mut() { a.extend(fresh.into_iter().map(Value::from)); } }
+            None => powers.push(json!({ "path": real, "added": fresh })),
         }
     }
     let package = new.get("package.json").and_then(|e| e.bytes.clone());

@@ -283,6 +283,96 @@ fn parse(name: &str, source: &str, st: SourceType) -> Option<BTreeSet<String>> {
     v.visit_program(&parsed.program);
     Some(v.caps)
 }
+#[derive(Default)]
+struct EnvReads { names: BTreeSet<String>, seen: usize, read: usize, bulk: bool, process: usize, members: usize }
+fn bare<'b, 'a>(e: &'b Expression<'a>) -> &'b Expression<'a> {
+    match e {
+        Expression::ParenthesizedExpression(x) => bare(&x.expression),
+        Expression::TSNonNullExpression(x) => bare(&x.expression),
+        Expression::TSAsExpression(x) => bare(&x.expression),
+        Expression::TSSatisfiesExpression(x) => bare(&x.expression),
+        _ => e,
+    }
+}
+fn env_object(e: &Expression) -> bool {
+    match bare(e) {
+        Expression::StaticMemberExpression(m) if m.property.name == "env" => match bare(&m.object) {
+            Expression::Identifier(o) => o.name == "process",
+            Expression::StaticMemberExpression(p) => p.property.name == "process",
+            _ => false,
+        },
+        _ => false,
+    }
+}
+impl<'a> Visit<'a> for EnvReads {
+    fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
+        if env_object(&it.object) { self.names.insert(it.property.name.to_string()); self.read += 1; }
+        if matches!(bare(&it.object), Expression::Identifier(o) if o.name == "process") { self.members += 1; }
+        walk::walk_static_member_expression(self, it);
+    }
+    fn visit_computed_member_expression(&mut self, it: &ComputedMemberExpression<'a>) {
+        if matches!(bare(&it.object), Expression::Identifier(o) if o.name == "process") { self.bulk = true; }
+        if env_object(&it.object) {
+            match bare(&it.expression) {
+                Expression::StringLiteral(s) => { self.names.insert(s.value.to_string()); self.read += 1; }
+                _ => self.bulk = true,
+            }
+        }
+        walk::walk_computed_member_expression(self, it);
+    }
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let Some(init) = &it.init && env_object(init) {
+            match &it.id {
+                BindingPattern::ObjectPattern(o) if o.rest.is_none() => {
+                    for p in &o.properties {
+                        match p.key.static_name() { Some(n) if !p.computed => { self.names.insert(n.to_string()); } _ => self.bulk = true }
+                    }
+                    self.read += 1;
+                }
+                _ => self.bulk = true,
+            }
+        }
+        walk::walk_variable_declarator(self, it);
+    }
+    fn visit_expression(&mut self, it: &Expression<'a>) {
+        if matches!(it, Expression::StaticMemberExpression(_)) && env_object(it) { self.seen += 1; }
+        if matches!(it, Expression::Identifier(o) if o.name == "process") { self.process += 1; }
+        walk::walk_expression(self, it);
+    }
+    fn visit_unary_expression(&mut self, it: &UnaryExpression<'a>) {
+        if it.operator.is_typeof() && matches!(bare(&it.argument), Expression::Identifier(_)) { return; }
+        walk::walk_unary_expression(self, it);
+    }
+}
+pub fn secret_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if upper == "PWD" || upper == "OLDPWD" { return false; }
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() { if !word.is_empty() { words.push(std::mem::take(&mut word)); } prev_lower = false; continue; }
+        if c.is_ascii_uppercase() && prev_lower && !word.is_empty() { words.push(std::mem::take(&mut word)); }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        word.push(c.to_ascii_uppercase());
+    }
+    if !word.is_empty() { words.push(word); }
+    const WORDS: [&str; 44] = ["KEY", "KEYS", "APIKEY", "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWORDS", "PASSWD", "PASS", "PASSPHRASE", "PWD", "CREDENTIAL",
+        "CREDENTIALS", "CREDS", "CRED", "AUTH", "OAUTH", "PRIVATE", "SESSION", "COOKIE", "SIGNING", "SIGNATURE", "CERT", "CERTIFICATE", "DSN", "SALT", "SK", "JWT", "OTP",
+        "BEARER", "WEBHOOK", "DATABASE", "DB", "MONGO", "MONGODB", "POSTGRES", "PG", "MYSQL", "REDIS", "AMQP", "SMTP", "CONNECTION"];
+    words.iter().any(|w| WORDS.contains(&w.as_str())) || ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "CREDENTIAL", "PRIVATEKEY"].iter().any(|s| upper.replace('_', "").contains(s))
+}
+pub fn env_names(name: &str, source: &str) -> Option<BTreeSet<String>> {
+    for st in source_types(name)? {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, st).parse();
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() { continue; }
+        let mut v = EnvReads::default();
+        v.visit_program(&parsed.program);
+        return (!v.bulk && v.read >= v.seen && v.process <= v.members).then_some(v.names);
+    }
+    None
+}
 pub fn source_types(name: &str) -> Option<Vec<SourceType>> {
     let st = SourceType::from_path(name).ok()?;
     Some(match extension(name) {
