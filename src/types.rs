@@ -246,7 +246,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> Value {
                 at = parent(&at).to_string();
             }
         };
-        let even = crate::suite::uneven(&s, dir).or_else(|| crate::suite::unlocked(&s, dir))
+        let even = crate::suite::setup_differs(&s, dir).or_else(|| crate::suite::unlocked(&s, dir))
             .or_else(|| (!locked(&head_files) || !locked(&base_files)).then(|| "the project has no lockfile, so each side's dependencies were resolved on their own".to_string()));
         checked.push(judge(config, &old, &new, enforced(&scripts), even));
     }

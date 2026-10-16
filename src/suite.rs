@@ -245,7 +245,68 @@ pub fn related(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
 }
 
 pub fn verdict(old: &Report, new: &Report, alone: Option<&Report>, whole: Option<&Report>, old_alone: Option<&Report>, unconfirmed: bool) -> Value {
-    steady(if unconfirmed { judged(old, new, None, None) } else { confirmed(old, new, alone, whole, old_alone) })
+    let c = steady(if unconfirmed { judged(old, new, None, None) } else { confirmed(old, new, alone, whole, old_alone) });
+    if unconfirmed { prove(c, old, new, [None, None], None) } else { prove(c, old, new, [alone, whole], old_alone) }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Observed { Passed, Failed, Skipped, Missing }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Evidence { pub old: Observed, pub old_again: Option<Observed>, pub new: Observed, pub new_again: [Option<Observed>; 2], pub shaky: bool, pub sandbox: bool }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unproven { OldFailsToo, Sandbox, Unsteady, Unconfirmed }
+impl Unproven {
+    pub fn list(self) -> &'static str { match self { Unproven::OldFailsToo => "environmental", Unproven::Sandbox => "sandbox", Unproven::Unsteady => "unsteady", Unproven::Unconfirmed => "unconfirmed" } }
+}
+pub fn blockable(e: Evidence) -> Result<(), Unproven> {
+    if e.old_again == Some(Observed::Failed) { return Err(Unproven::OldFailsToo); }
+    if e.old != Observed::Passed { return Err(Unproven::Unconfirmed); }
+    if e.sandbox { return Err(Unproven::Sandbox); }
+    let reruns: Vec<Observed> = e.new_again.iter().flatten().copied().filter(|o| *o != Observed::Missing).collect();
+    if e.new != Observed::Failed || e.shaky || reruns.iter().any(|o| *o != Observed::Failed) { return Err(Unproven::Unsteady); }
+    if reruns.is_empty() || e.old_again != Some(Observed::Passed) { return Err(Unproven::Unconfirmed); }
+    Ok(())
+}
+const SANDBOX_ERRORS: [&str; 28] = ["getaddrinfo", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "fetch failed",
+    "git: not found", "command not found", "Cannot find module 'bindings'", "Could not locate the bindings file", "invalid ELF header", "compiled against a different Node.js version",
+    "NODE_MODULE_VERSION", "ERR_DLOPEN_FAILED", "cannot open shared object file", "SIGSEGV", "SIGKILL", "SIGABRT", "SIGBUS", "terminated by another process", "Worker exited unexpectedly",
+    "JavaScript heap out of memory", "Reached heap limit", "ERR_WORKER_OUT_OF_MEMORY", "Allocation failed"];
+pub fn sandbox_error(why: &str) -> bool { SANDBOX_ERRORS.iter().any(|e| why.contains(e)) || (why.contains("spawn ") && why.contains("ENOENT")) }
+fn outcome(b: proof::Count, c: proof::Count) -> Observed {
+    if c.total() == 0 { return Observed::Missing; }
+    match seen(b, c) { Seen::Same => Observed::Passed, Seen::Failed => Observed::Failed, Seen::Skipped => Observed::Skipped, Seen::Gone => Observed::Missing }
+}
+fn test_evidence(k: &str, old: &Report, new: &Report, again: &[Option<Report>; 2], old_again: Option<&Report>) -> Evidence {
+    let b = count(old, k);
+    let at = |r: &Report| outcome(b, count(r, k));
+    Evidence { old: if b.passed > 0 && b.failed == 0 { Observed::Passed } else { Observed::Missing }, old_again: old_again.map(at), new: at(new),
+        new_again: [again[0].as_ref().map(at), again[1].as_ref().map(at)], shaky: false, sandbox: false }
+}
+fn problem_evidence(p: &str, old: &Report, new: &Report, again: [Option<&Report>; 2], old_again: Option<&Report>) -> Evidence {
+    let ran_clean = |r: &Report| r.tests.iter().any(|(k, n)| file_of(k) == file_of(p) && n.passed > 0);
+    let has = |r: &Report| matched(&[p.to_string()], &r.problems).first().copied().unwrap_or(false);
+    let at = |r: &Report| if has(r) { Observed::Failed } else if ran_clean(r) { Observed::Passed } else { Observed::Missing };
+    Evidence { old: if !has(old) && ran_clean(old) { Observed::Passed } else { Observed::Missing }, old_again: old_again.map(at), new: at(new), new_again: again.map(|g| g.map(at)), shaky: false, sandbox: false }
+}
+fn prove(mut c: Value, old: &Report, new: &Report, again: [Option<&Report>; 2], old_again: Option<&Report>) -> Value {
+    if c["status"] != "RAN" { return c; }
+    let (settled_new, settled_again, settled_old_again) = (settled(old, new), again.map(|g| g.map(|r| settled(old, r))), old_again.map(|r| settled(old, r)));
+    let shaky: BTreeSet<String> = listed(&c, "flaky").iter().chain(&listed(&c, "unsteady")).map(|k| file_of(k).to_string()).collect();
+    let signature = |w: &str| -> String { masked(&w.replace("/workspace/", "")).chars().take(160).collect() };
+    let old_errors: BTreeSet<String> = old.tests.iter().filter(|(_, n)| n.failed > 0).map(|(k, _)| k).chain(&old.problems).filter_map(|k| old.why.get(k)).map(|w| signature(w)).collect();
+    let why = |k: &str| new.why.get(k).or_else(|| new.why.iter().find(|(n, _)| masked(n) == masked(k)).map(|(_, w)| w));
+    let sandboxed = |k: &str| why(k).is_some_and(|w| sandbox_error(w) || old_errors.contains(&signature(w)));
+    for l in ["broke", "new_problems"] {
+        let mut held = Vec::new();
+        for k in listed(&c, l) {
+            let e = if l == "broke" { test_evidence(&k, old, &settled_new, &settled_again, settled_old_again.as_ref()) } else { problem_evidence(&k, old, new, again, old_again) };
+            match blockable(Evidence { shaky: shaky.contains(file_of(&k)), sandbox: sandboxed(&k), ..e }) {
+                Ok(()) => held.push(k),
+                Err(u) => match c[u.list()].as_array_mut() { Some(a) => a.push(json!(k)), None => c[u.list()] = json!([k]) },
+            }
+        }
+        c[l] = json!(held);
+    }
+    c
 }
 fn listed(v: &Value, k: &str) -> Vec<String> { v[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() }
 pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole: Option<&Report>, alone_old: Option<&Report>) -> Value {
@@ -273,8 +334,8 @@ pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole:
     c["unsteady"] = json!(unsteady);
     c
 }
-pub const LISTS: [&str; 16] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
-    "same_failure", "uneven", "unproven", "unsteady"];
+pub const LISTS: [&str; 17] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
+    "same_failure", "uneven", "unproven", "unsteady", "sandbox"];
 pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
 pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String, unconfirmed: bool, uneven: bool) {
     for l in LISTS {
@@ -686,13 +747,22 @@ pub fn unlocked(setup: &Value, dir: &str) -> Option<String> {
         result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}", result.chars().take(120).collect::<String>()))
     })
 }
-pub fn uneven(setup: &Value, dir: &str) -> Option<String> {
+pub fn setup_differs(setup: &Value, dir: &str) -> Option<String> {
     let (old, new) = (install_record(setup, "old", dir)?, install_record(setup, "new", dir)?);
-    let kind = |r: &Value| r["result"].as_str().unwrap_or("").split(['(', ':']).next().unwrap_or("").trim().to_string();
     let said = |r: &Value| r["result"].as_str().unwrap_or("").chars().take(120).collect::<String>();
-    if kind(old) != kind(new) { return Some(format!("the old code's dependencies were {} and the new code's were {}", said(old), said(new))); }
+    if old["result"] != new["result"] { return Some(format!("the old code's dependencies were {} and the new code's were {}", said(old), said(new))); }
     let parts = |r: &Value| -> BTreeSet<String> { r["parts"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() };
-    (parts(old) != parts(new)).then(|| "Kern fetched a different set of Linux parts for the dependencies on each side".to_string())
+    if parts(old) != parts(new) { return Some("Kern fetched a different set of Linux parts for the dependencies on each side".to_string()); }
+    let (o, n) = (&setup["old"], &setup["new"]);
+    if o["scripts"] != n["scripts"] { return Some("Kern ran the packages' install scripts on one side only, because the other ran out of memory and was installed again without them".to_string()); }
+    let fell_back = |s: &Value| s["node"]["why"].is_string();
+    if (fell_back(o) || fell_back(n)) && o["node"]["major"] != n["node"]["major"] {
+        return Some(format!("Kern could not get the Node version one side asks for, so the old code ran on Node {} and the new code on Node {}", o["node"]["major"], n["node"]["major"]));
+    }
+    if o["node"]["major"] == n["node"]["major"] && o["image"].is_string() && n["image"].is_string() && o["image"] != n["image"] && o["browser"] == n["browser"] {
+        return Some("the two sides ran different builds of the same Node image".to_string());
+    }
+    (o["browser"]["error"].is_string() != n["browser"]["error"].is_string()).then(|| "Kern could set up the browser the tests need on one side only".to_string())
 }
 pub fn uneven_steps(old: &str, new: &str) -> Option<String> {
     let codes = |log: &str| -> std::collections::BTreeMap<String, String> {
@@ -738,7 +808,12 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     s
 }
 
-pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Late }
+#[derive(Debug)]
+pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Cut(String), Late }
+impl Side {
+    fn ending(&self) -> &str { match self { Side::Nothing(w) | Side::Slow(w) | Side::Cut(w) => w, Side::Ran(..) => "it gave results", Side::Late => LATE } }
+}
+pub fn broke_run(first: &Side, again: &Side, uneven: bool) -> bool { matches!((first, again), (Side::Nothing(_), Side::Nothing(_))) && !uneven }
 
 fn run_side(out: &Path, op: &Operator, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     run_with(out, op, (volume, &std::collections::BTreeMap::new(), test_seconds()), side, dir, label, until)
@@ -764,18 +839,18 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     let run = match run {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
-        Err(e) if e.0.contains("exceeded limits") => return Ok(Side::Nothing(format!("the run was stopped: {}", e.0))),
+        Err(e) if e.0.contains("exceeded limits") => return Ok(Side::Cut(format!("the run was stopped: {}", e.0))),
         Err(e) => return Err(e),
     };
     let parts = match crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) {
         Ok(p) => p,
-        Err(e) => return Ok(Side::Nothing(crate::sandbox::refusal(&run.errors).map_or(e.0, |r| format!("Kern could not run the tests in the sandbox: {r}")))),
+        Err(e) => return Ok(Side::Cut(crate::sandbox::refusal(&run.errors).map_or(e.0, |r| format!("Kern could not run the tests in the sandbox: {r}")))),
     };
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
     if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", limit / 60)) }); }
     if let Some(why) = stopped_why(&String::from_utf8_lossy(&parts["ending"]), limit) { return Ok(if cut { Side::Late } else { Side::Slow(why) }); }
-    if parts["ending"] == b"exit -1" { return Ok(Side::Nothing("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
+    if parts["ending"] == b"exit -1" { return Ok(Side::Cut("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
         Ok(r) if r.tests.is_empty() && r.problems.is_empty() && stopped_early(&parts["ending"], &parts["errors"], &parts["output"]) =>
@@ -958,7 +1033,7 @@ fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, ol
     let first = match first {
         Ok(Side::Ran(r, _)) => unkept(&r, &keep.back),
         Ok(Side::Late) => return (Err(LATE.into()), None, true),
-        Ok(Side::Nothing(why) | Side::Slow(why)) => return (Err(why), None, false),
+        Ok(Side::Nothing(why) | Side::Slow(why) | Side::Cut(why)) => return (Err(why), None, false),
         Err(e) => return (Err(e.0), None, false),
     };
     let candidates = rewritten(old, &first, None);
@@ -1056,15 +1131,15 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds, mut whole_why) = (None, 0u64, String::new());
-        let mut uneven_why = uneven(&s, &suite.dir);
-        let (mut built, mut tried) = (Vec::new(), String::new());
+        let mut uneven_why = setup_differs(&s, &suite.dir);
+        let (mut built, mut tried, mut old_tests) = (Vec::new(), String::new(), None);
         let old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
                 let (mut tests, mut phase, mut repairable, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), true, true, Vec::new());
                 let run = loop {
                 let at = now_ms();
-                let run = run_side(out, op, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Nothing(e.0));
+                let run = run_side(out, op, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
                 timed(phase.clone(), at);
                 old_seconds = (now_ms() - at) / 1000;
                 if !pending.is_empty() {
@@ -1106,6 +1181,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     (tests, phase, narrowed) = (o, format!("old-related{label}"), Some(n));
                     continue;
                 }
+                old_tests = Some(tests.clone());
                 break run;
                 };
                 Some(run)
@@ -1113,7 +1189,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         };
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-            Some(Side::Nothing(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
+            Some(Side::Nothing(why) | Side::Cut(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
             Some(Side::Slow(why)) => {
                 let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{more}") }));
@@ -1142,15 +1218,15 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let new = match first {
             Side::Ran(r, created) => { wrote_code.extend(created); r }
             Side::Late => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-            Side::Nothing(why) | Side::Slow(why) if !matches!(old_run, Some(Side::Ran(..))) => {
+            Side::Nothing(why) | Side::Slow(why) | Side::Cut(why) if !matches!(old_run, Some(Side::Ran(..))) => {
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") }));
                 continue;
             }
-            Side::Slow(why) if budget >= test_seconds() => {
+            Side::Slow(why) | Side::Cut(why) if budget >= test_seconds() => {
                 run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} finished on the old code but not on the new code: {why}") }));
                 continue;
             }
-            Side::Nothing(_) | Side::Slow(_) => {
+            first => {
                 let at = now_ms();
                 let again = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
                 timed(format!("new-again{label}"), at);
@@ -1159,11 +1235,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     Ok(Side::Ran(r, created)) => { wrote_code.extend(created); r }
                     Ok(Side::Late) => { late = true; run_unconfirmed.push(cut("Kern's time ran out before it could run them again")); continue; }
                     Err(e) => { run_unconfirmed.push(cut(&format!("running them again failed: {}", e.0))); continue; }
-                    Ok(Side::Nothing(again) | Side::Slow(again)) => {
-                        match &uneven_why {
-                            Some(u) => run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} give no results on the new code ({again}), but the two sides were not set up the same way: {u}") })),
-                            None => run_broke.push(json!({ "dir": suite.dir, "why": again })),
-                        }
+                    Ok(again) if broke_run(&first, &again, uneven_why.is_some()) => { run_broke.push(json!({ "dir": suite.dir, "why": again.ending() })); continue; }
+                    Ok(again) => {
+                        let why = match &uneven_why { Some(u) => format!("the two sides were not set up the same way: {u}"), None => format!("a run hit one of Kern's own limits, so it proves nothing about the change ({})", first.ending()) };
+                        run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} give no results on the new code ({}), but {why}", again.ending()) }));
                         continue;
                     }
                 }
@@ -1177,14 +1252,17 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let present = |r: &Report, f: &String| r.problems.iter().any(|p| file_of(p) == f.as_str()) || r.tests.keys().any(|k| file_of(k) == f.as_str());
         let new_files: BTreeSet<String> = suspect.iter().filter(|f| present(&new, f)).cloned().collect();
         let old_files: BTreeSet<String> = suspect.iter().filter(|f| present(&old, f)).cloned().collect();
+        let old_rerun = |alone: bool| -> Option<(&str, &str, Tests, &Env)> {
+            let ((plain, env), first) = (suite.old.as_ref()?, old_tests.as_ref()?);
+            if old_files.is_empty() { return None; }
+            Some(match kept_focus(plain, &old_files, &suite.dir).filter(|_| alone) { Some(t) => ("old-alone", "old", t, env), None => ("old-again", "old", first.clone(), env) })
+        };
         let plan: Vec<(&str, &str, Tests, &Env)> = if new_files.is_empty() {
             Vec::new()
-        } else if let Some(new_alone) = focused(&suite.new.0, &new_files, &suite.dir) {
-            let mut v = vec![("new-alone", "new", new_alone, &suite.new.1)];
-            if let Some((t, e)) = &suite.old && let Some(old_alone) = focused(t, &old_files, &suite.dir) { v.push(("old-alone", "old", old_alone, e)); }
-            v
+        } else if let Some(new_alone) = kept_focus(&suite.new.0, &new_files, &suite.dir) {
+            [Some(("new-alone", "new", new_alone, &suite.new.1)), old_rerun(true)].into_iter().flatten().collect()
         } else {
-            vec![("new-again", "new", whole_new.0.clone(), whole_new.1)]
+            [Some(("new-again", "new", whole_new.0.clone(), whole_new.1)), old_rerun(false)].into_iter().flatten().collect()
         };
         let (mut alone_new, mut whole, mut second_old, mut unconfirmed) = (None, None, None, false);
         for (name, side, tests, env) in &plan {
@@ -1197,7 +1275,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Ok(Side::Ran(r, created)) => { old_created.extend(created); second_old = Some(r); }
                 Ok(Side::Late) => { late = true; unconfirmed = true; break; }
                 Err(_) => { unconfirmed = true; break; }
-                Ok(Side::Nothing(_) | Side::Slow(_)) => {}
+                Ok(Side::Nothing(_) | Side::Slow(_) | Side::Cut(_)) => {}
             }
         }
         if !unconfirmed && plan.first().is_some_and(|p| p.0 == "new-alone") && alone_new.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
@@ -1208,7 +1286,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Ok(Side::Ran(r, created)) => { wrote_code.extend(created); whole = Some(r); }
                 Ok(Side::Late) => { late = true; unconfirmed = true; }
                 Err(_) => unconfirmed = true,
-                Ok(Side::Nothing(_) | Side::Slow(_)) => {}
+                Ok(Side::Nothing(_) | Side::Slow(_) | Side::Cut(_)) => {}
             }
         }
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }

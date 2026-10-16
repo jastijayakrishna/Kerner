@@ -867,10 +867,10 @@ fn a_test_file_that_fails_on_the_new_code_with_no_record_of_passing_on_the_old_c
 fn sides_set_up_differently_are_named() {
     let setup = |old: &str, new: &str, parts: Value| json!({ "old": { "installs": [{ "dir": ".", "manager": "npm", "result": old, "parts": [] }] },
         "new": { "installs": [{ "dir": ".", "manager": "npm", "result": new, "parts": parts }] } });
-    assert_eq!(suite::uneven(&setup("installed", "installed", json!([])), ""), None);
-    assert!(suite::uneven(&setup("installed", "installed from package.json (the lockfile is out of date)", json!([])), "").unwrap().contains("lockfile"),
+    assert_eq!(suite::setup_differs(&setup("installed", "installed", json!([])), ""), None);
+    assert!(suite::setup_differs(&setup("installed", "installed from package.json (the lockfile is out of date)", json!([])), "").unwrap().contains("lockfile"),
         "dependencies installed two different ways can differ in version");
-    assert!(suite::uneven(&setup("installed", "installed", json!(["@rollup/rollup-linux-x64-gnu@4.20.0"])), "packages/web").is_some());
+    assert!(suite::setup_differs(&setup("installed", "installed", json!(["@rollup/rollup-linux-x64-gnu@4.20.0"])), "packages/web").is_some());
     let steps = |exit: &str| format!("building\nkern-step packages/lib build exit {exit}\n");
     assert_eq!(suite::uneven_steps(&steps("0"), &steps("0")), None);
     assert!(suite::uneven_steps(&steps("0"), &steps("1")).unwrap().contains("packages/lib build"), "a build that worked on one side only");
@@ -1163,6 +1163,40 @@ fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_com
     assert!(!t.0.join("seal.json").exists(), "a seal the run job wrote is never posted");
 }
 
+#[test]
+fn review_a2_every_way_kern_can_set_up_the_two_sides_differently_by_accident_is_named() {
+    let n = |major: u64| json!({ "major": major, "from": format!(".nvmrc says {major}") });
+    let side = |result: &str, scripts: bool, node: Value, browser: Value| json!({ "installs": [{ "dir": ".", "manager": "npm", "result": result, "parts": [] }], "scripts": scripts, "node": node, "browser": browser });
+    let setup = |old: Value, new: Value| json!({ "version": 1, "old": old, "new": new });
+    let even = setup(side("installed", true, n(22), Value::Null), side("installed", true, n(22), Value::Null));
+    assert_eq!(suite::setup_differs(&even, ""), None);
+    let scripts = setup(side("installed", true, n(22), Value::Null), side("installed", false, n(22), Value::Null));
+    assert!(suite::setup_differs(&scripts, "").is_some_and(|w| w.contains("install scripts")), "one side ran out of memory and was installed again without its install scripts");
+    let fell = json!({ "major": 22, "wanted": 20, "from": ".nvmrc says 20", "why": "docker failed (1): toomanyrequests" });
+    let node = setup(side("installed", true, n(20), Value::Null), side("installed", true, fell, Value::Null));
+    assert!(suite::setup_differs(&node, "").is_some_and(|w| w.contains("Node")), "the new side could not pull Node 20 and ran on the default Node 22");
+    assert_eq!(suite::setup_differs(&setup(side("installed", true, n(20), Value::Null), side("installed", true, n(22), Value::Null)), ""), None, "the PR moved .nvmrc from 20 to 22: that is the change being tested");
+    let browser = setup(side("installed", true, n(22), json!({ "why": "the project uses playwright", "playwright": ["1.49.1"] })), side("installed", true, n(22), json!({ "why": "the project uses playwright", "playwright": ["1.49.1"], "error": "docker failed: timed out" })));
+    assert!(suite::setup_differs(&browser, "").is_some_and(|w| w.contains("browser")));
+    let lock = setup(side("installed without its packages' install scripts, because they failed", true, n(22), Value::Null), side("installed from package.json (the lockfile is out of date)", true, n(22), Value::Null));
+    assert!(suite::setup_differs(&lock, "").is_some(), "review A2(d): the old side installed from its lockfile and the new side without one");
+    let relaxed = setup(side("installed from package.json (the lockfile is out of date)", true, n(22), Value::Null), side("installed from package.json (the lockfile is out of date and npm's peer dependency checks were relaxed)", true, n(22), Value::Null));
+    assert!(suite::setup_differs(&relaxed, "").is_some(), "review A2(e): both start with 'installed from package.json' but the new side ignored the lockfile");
+    let mut drift = even.clone();
+    drift["old"]["image"] = json!(format!("sha256:{}", "a".repeat(64)));
+    drift["new"]["image"] = json!(format!("sha256:{}", "b".repeat(64)));
+    assert!(suite::setup_differs(&drift, "").is_some_and(|w| w.contains("image")), "review B: the same node:22 tag pulled twice gave two different builds");
+}
+
+#[test]
+fn review_a2b_a_node_image_that_cannot_be_pulled_comes_from_the_copy_on_disk() {
+    let local = || Ok(format!("sha256:{}", "c".repeat(64)));
+    assert_eq!(kern::sandbox::pulled_or_kept(Err(Denied("docker failed (1): toomanyrequests: You have reached your pull rate limit".into())), local).unwrap(), format!("sha256:{}", "c".repeat(64)),
+        "Docker Hub refused the pull, but the image is already on this machine, so both sides still run the Node they ask for");
+    assert!(kern::sandbox::pulled_or_kept(Err(Denied("docker failed (1): toomanyrequests".into())), || Err(Denied("No such image".into()))).is_err(), "no pull and no copy: say so, never guess");
+    assert_eq!(kern::sandbox::pulled_or_kept(Ok(()), local).unwrap(), format!("sha256:{}", "c".repeat(64)));
+}
+
 fn listed(c: &Value, key: &str) -> Vec<String> { c[key].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() }
 
 #[test]
@@ -1201,7 +1235,7 @@ fn a_hook_that_fails_in_a_file_that_was_flaky_in_the_same_check_cannot_prove_a_b
 
 #[test]
 fn a_receipt_never_shows_a_tests_check_mark_next_to_failures_it_could_not_prove() {
-    for kind in ["unsteady", "uneven", "unproven"] {
+    for kind in ["unsteady", "uneven", "unproven", "sandbox"] {
         let mut t = clean_tests();
         t[kind] = json!(["src/total.test.ts > adds"]);
         let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());

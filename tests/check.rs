@@ -130,10 +130,10 @@ fn every_runner_writes_its_report_to_a_file_kern_names() {
 #[test]
 fn tests_that_run_on_the_old_code_but_give_nothing_on_the_new_code_block() {
     let mut t = clean_tests();
-    t["run_broke"] = json!([{ "dir": "", "why": "the tests did not finish in 15 minutes" }]);
+    t["run_broke"] = json!([{ "dir": "", "why": "the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load" }]);
     let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
     assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-run-broke".to_string()]), "{r}");
-    let broke = json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [{ "dir": "packages/kit", "why": "exit 137" }] });
+    let broke = json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [{ "dir": "packages/kit", "why": "the output contains no vitest report (exit 1); its first error: SyntaxError: Unexpected token '<'" }] });
     let r = receipt::build(&drive_json(), &clean_rules(), &broke, &off());
     let md = receipt::markdown(&r, None);
     assert!(r["decision"] == "blocked" && md.contains("packages/kit") && md.contains("❌ Tests"), "{md}");
@@ -445,6 +445,30 @@ fn moving_a_skip_to_another_test_is_a_trick_and_a_query_s_skip_is_not() {
     assert!(moved.iter().any(|w| w.contains("test.skip('adds')")), "the skip moved from one test to another: {moved:?}");
     let query = tricks_for(&t, &mid, "import { test } from 'vitest';\ntest.skip('needs the network', () => {});\ntest('adds', async () => { await Model.find().skip(10).limit(5); });\n");
     assert!(query.is_empty(), "a database query's skip is not a test trick: {query:?}");
+}
+
+#[test]
+fn review_2_a1_a_skip_or_inversion_blocks_only_on_a_test_that_existed() {
+    let (t, base) = project();
+    let head = "import { total } from '../src/total.js';\nimport { test, it, expect } from 'vitest';\ntest('adds', () => expect(total([1, 2])).toBe(3));\n";
+    for (name, body) in [
+        ("a placeholder for later", "it.todo('refunds');\n"),
+        ("a conditional skip, read like the skip option", "it.skipIf(process.platform === 'win32')('symlinks', () => {});\n"),
+        ("a conditional run", "it.runIf(process.env.CI)('slow path', () => {});\n"),
+        ("a new test written as skipped", "it.skip('new case', () => {});\n"),
+        ("a known bug written as an expected failure", "test.fails('rounds half up', () => expect(total([0.5])).toBe(1));\n"),
+    ] {
+        let found = tricks_for(&t, &base, &format!("{head}{body}"));
+        assert!(found.is_empty(), "{name} hides no test that existed: {found:?}");
+    }
+    for (name, body) in [
+        ("skipping the test that existed", "import { test } from 'vitest';\ntest.skip('adds', () => {});\n"),
+        ("inverting the test that existed", "import { test } from 'vitest';\ntest.fails('adds', () => {});\n"),
+        ("a skipIf that always skips it", "import { it } from 'vitest';\nit.skipIf(true)('adds', () => {});\n"),
+        ("the todo option on it, which runs it but hides its failure", "import { test } from 'node:test';\ntest('adds', { todo: true }, () => {});\n"),
+    ] {
+        assert!(!tricks_for(&t, &base, &format!("import {{ total }} from '../src/total.js';\n{body}")).is_empty(), "{name} hides a test that existed");
+    }
 }
 
 #[test]

@@ -88,6 +88,19 @@ fn chain_selector(e: &Expression) -> Option<(String, String)> {
 fn test_shaped(args: &[Argument]) -> bool {
     args.first().and_then(Argument::as_expression).and_then(literal).is_some() && matches!(args.get(1), Some(Argument::ArrowFunctionExpression(_) | Argument::FunctionExpression(_)))
 }
+const CONDITIONAL: [&str; 2] = ["skipIf", "runIf"];
+fn always_skips(prop: &str, args: &[Argument]) -> bool {
+    let Some(condition) = args.first().and_then(Argument::as_expression) else { return false };
+    let falsy = match unwrap(condition) {
+        Expression::BooleanLiteral(b) => !b.value,
+        Expression::NumericLiteral(n) => n.value == 0.0,
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(id) => id.name == "undefined",
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => literal(condition).is_some_and(|s| s.is_empty()),
+        _ => false,
+    };
+    if prop == "runIf" { falsy } else { truthy(condition) }
+}
 fn truthy(e: &Expression) -> bool {
     match unwrap(e) {
         Expression::BooleanLiteral(b) => b.value,
@@ -132,7 +145,7 @@ impl Scan<'_> {
                 (Some(prop), Some(suite)) if SELECTORS.contains(&prop.as_str()) => Some((suite, prop)),
                 _ => self.selector(&m.object),
             },
-            Expression::CallExpression(c) => self.selector(&c.callee),
+            Expression::CallExpression(c) => self.selector(&c.callee).filter(|(_, prop)| !CONDITIONAL.contains(&prop.as_str()) || always_skips(prop, &c.arguments)),
             _ => None,
         }
     }
@@ -220,7 +233,7 @@ impl Scan<'_> {
     }
     fn member(&mut self, object: &Expression, prop: &str) {
         if self.test {
-            if SELECTORS.contains(&prop) && let Some(suite) = self.suite(object) { self.found.push(format!("{suite}.{prop}")); }
+            if SELECTORS.contains(&prop) && !CONDITIONAL.contains(&prop) && let Some(suite) = self.suite(object) { self.found.push(format!("{suite}.{prop}")); }
             return;
         }
         self.caller(object, prop);
@@ -310,6 +323,8 @@ impl<'a> Visit<'a> for Scan<'_> {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if self.test {
             let title = it.arguments.first().and_then(Argument::as_expression).and_then(literal);
+            if let Expression::StaticMemberExpression(m) = unwrap(&it.callee) && CONDITIONAL.contains(&m.property.name.as_str()) && always_skips(m.property.name.as_str(), &it.arguments)
+                && let Some(suite) = self.suite(&m.object) { self.found.push(format!("{suite}.{}", m.property.name)); }
             let renamed = match unwrap(&it.callee) { Expression::Identifier(id) if RENAMED.contains(&id.name.as_str()) => Some(id.name.to_string()), _ => None };
             if let Some(name) = &renamed {
                 self.found.push(name.clone());
@@ -338,7 +353,10 @@ impl<'a> Visit<'a> for Scan<'_> {
                         "skip" | "todo" => truthy(&p.value),
                         k => SELECTORS.contains(&k) && !matches!(unwrap(&p.value), Expression::BooleanLiteral(b) if !b.value),
                     };
-                    if marked { self.found.push(format!("the {key} option")); }
+                    if marked {
+                        self.found.push(format!("the {key} option"));
+                        if let Some(t) = &title { self.found.push(format!("the {key} option in '{t}'")); }
+                    }
                 }
             }
         } else if let Expression::StaticMemberExpression(m) = unwrap(&it.callee)
@@ -389,6 +407,11 @@ fn markers(path: &str, source: &str, test: bool) -> R<BTreeMap<String, usize>> {
     deny!("Changed code cannot be parsed for the test proof: {path}. Fix its syntax")
 }
 fn titled(m: &str) -> bool { marker_title(m).is_some() }
+fn group(m: &str) -> bool { ["describe", "context", "suite", "xdescribe", "fdescribe", "xcontext"].contains(&m.split(['.', '[', '(', ' ']).next().unwrap_or("")) }
+fn title_stem(t: &str) -> String {
+    let words: Vec<&str> = t.split_whitespace().filter(|w| !(w.len() >= 2 && w.starts_with('%')) && !w.starts_with('$')).collect();
+    words.join(" ")
+}
 fn marker_title(m: &str) -> Option<&str> {
     if let Some((_, t)) = m.split_once("('") { return t.strip_suffix("')"); }
     m.split_once(" in '").and_then(|(_, t)| t.strip_suffix('\''))
@@ -399,7 +422,9 @@ fn marker_kind(m: &str) -> String {
     if m.ends_with("[a computed name]") { return "a computed name".to_string(); }
     let word = m.trim_start_matches("the test context's ").trim_start_matches("this.").trim_start_matches("the ").trim_end_matches("()").trim_end_matches(" option");
     match word.rsplit('.').next().unwrap_or(word) {
-        "xit" | "xtest" | "xdescribe" | "xcontext" | "xspecify" | "todo" => "skip".to_string(),
+        "todo" if m.ends_with(" option") || m.contains("context") || m.starts_with("this.") => "skip".to_string(),
+        "todo" => "todo".to_string(),
+        "xit" | "xtest" | "xdescribe" | "xcontext" | "xspecify" => "skip".to_string(),
         "fit" | "fdescribe" | "ftest" => "only".to_string(),
         "failing" => "fails".to_string(),
         w => w.to_string(),
@@ -433,8 +458,8 @@ pub fn literals(path: &str, source: &str) -> Vec<(usize, usize, String)> {
     Vec::new()
 }
 pub fn test_markers(path: &str, source: &str) -> BTreeMap<String, usize> { markers(path, source, true).unwrap_or_default() }
-pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -> R<Value> { screen_with(base, candidate, changed, tests, &BTreeMap::new()) }
-pub fn screen_with(base: &Files, candidate: &Files, changed: &Value, tests: &Tests, pool: &BTreeMap<String, usize>) -> R<Value> {
+pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -> R<Value> { screen_with(base, candidate, changed, tests, &BTreeMap::new(), false) }
+pub fn screen_with(base: &Files, candidate: &Files, changed: &Value, tests: &Tests, pool: &BTreeMap<String, usize>, existing_only: bool) -> R<Value> {
     let (mut new_tests, mut changed_tests, mut deleted_tests, mut regression) = (Vec::new(), Vec::new(), Vec::new(), false);
     for f in changed["files"].as_array().into_iter().flatten() {
         let (path, op) = (f["path"].as_str().unwrap_or(""), f["operation"].as_str().unwrap_or(""));
@@ -454,17 +479,24 @@ pub fn screen_with(base: &Files, candidate: &Files, changed: &Value, tests: &Tes
         let mut before = text_of(base, path).and_then(|s| markers(path, s, inside).ok()).unwrap_or_default();
         if inside { for (m, n) in pool { *before.entry(m.clone()).or_insert(0) += n; } }
         if inside {
-            let kinds = |m: &BTreeMap<String, usize>| -> BTreeMap<String, usize> {
+            let old_text = text_of(base, path).unwrap_or("");
+            let quoted = |t: &str| !t.is_empty() && ['\'', '"', '`'].iter().any(|q| old_text.contains(&format!("{q}{t}{q}")));
+            let existed = |t: &str| quoted(t) || quoted(&title_stem(t));
+            let kind_of = |m: &str| { let k = marker_kind(m); if k == "todo" { "skip".to_string() } else { k } };
+            let strict = |m: &str| !existing_only || marker_kind(m) == "only" || group(m);
+            let counted = |m: &str| !existing_only || marker_kind(m) != "todo";
+            let tally = |m: &BTreeMap<String, usize>, keep: &dyn Fn(&str) -> bool| -> BTreeMap<String, usize> {
                 let mut out = BTreeMap::new();
-                for (name, n) in m.iter().filter(|(k, _)| !titled(k)) { *out.entry(marker_kind(name)).or_insert(0) += n; }
+                for (name, n) in m.iter().filter(|(k, _)| keep(k)) { *out.entry(kind_of(name)).or_insert(0) += n; }
                 out
             };
-            let (now, then) = (kinds(&found), kinds(&before));
-            let more = |m: &str| { let kind = marker_kind(m); now.get(&kind).copied().unwrap_or(0) > then.get(&kind).copied().unwrap_or(0) };
-            let pairs: BTreeSet<(String, &str)> = before.keys().filter_map(|k| marker_title(k).map(|t| (marker_kind(k), t))).collect();
-            let old_text = text_of(base, path).unwrap_or("");
-            let moved = |m: &str| marker_title(m).is_some_and(|t| !pairs.contains(&(marker_kind(m), t)) && ['\'', '"', '`'].iter().any(|q| old_text.contains(&format!("{q}{t}{q}"))));
-            let grown: Vec<&String> = found.iter().filter(|(k, n)| before.get(*k).copied().unwrap_or(0) < **n && (more(k.as_str()) || moved(k.as_str()))).map(|(k, _)| k).collect();
+            let (now, then) = (tally(&found, &|k| !titled(k)), tally(&before, &|k| !titled(k)));
+            let fresh = tally(&found, &|k| !strict(k) && (marker_kind(k) == "todo" || marker_title(k).is_some_and(|t| !existed(t))));
+            let more = |m: &str| { let kind = kind_of(m); now.get(&kind).copied().unwrap_or(0) > then.get(&kind).copied().unwrap_or(0) + if strict(m) { 0 } else { fresh.get(&kind).copied().unwrap_or(0) } };
+            let pairs: BTreeSet<(String, &str)> = before.keys().filter_map(|k| marker_title(k).map(|t| (kind_of(k), t))).collect();
+            let moved = |m: &str| marker_title(m).is_some_and(|t| !pairs.contains(&(kind_of(m), t)) && existed(t));
+            let lands = |m: &str| if strict(m) { more(m) || moved(m) } else if titled(m) { moved(m) } else { more(m) };
+            let grown: Vec<&String> = found.iter().filter(|(k, n)| counted(k) && before.get(*k).copied().unwrap_or(0) < **n && lands(k)).map(|(k, _)| k).collect();
             if let Some(m) = grown.iter().find(|k| k.contains("('")).or(grown.first()) {
                 deny!("A test file skips, focuses or inverts tests: {path} uses {m}. Every test must run and check what it says, so remove it")
             }

@@ -413,9 +413,12 @@ pub fn image_major(image: &str) -> Option<u64> {
 pub fn pull_node(major: u64) -> R<String> {
     ensure!(crate::nodeapi::NODE_MAJORS.contains(&major), "Kern runs Node {}", crate::nodeapi::NODE_MAJORS.map(|m| m.to_string()).join(", "));
     let tag = format!("node:{major}-bookworm-slim");
-    docker(&["pull", "-q", &tag], Duration::from_secs(600), 1 << 20)?;
-    let id = docker_json(&["image", "inspect", &tag])?[0]["Id"].as_str().map(str::to_string).ok_or_else(|| Denied(format!("Docker has no {tag}")))?;
+    let pulled = docker(&["pull", "-q", &tag], Duration::from_secs(600), 1 << 20).map(|_| ());
+    let id = pulled_or_kept(pulled, || docker_json(&["image", "inspect", &tag])?[0]["Id"].as_str().map(str::to_string).ok_or_else(|| Denied(format!("Docker has no {tag}"))))?;
     validate_image(&id)
+}
+pub fn pulled_or_kept(pulled: R<()>, on_disk: impl FnOnce() -> R<String>) -> R<String> {
+    match (pulled, on_disk()) { (_, Ok(id)) => Ok(id), (Err(e), Err(_)) | (Ok(()), Err(e)) => Err(e) }
 }
 pub fn build_browser(base: &str, dockerfile: &dyn Fn(&str, &[String]) -> String, versions: &[String]) -> R<String> {
     ensure!(versions.len() <= 8 && versions.iter().all(|v| plain_version(v)), "Unexpected Playwright version");

@@ -143,6 +143,23 @@ fn a_check_that_ran_the_old_versions_of_edited_tests_keeps_its_stored_gone_list(
 }
 
 #[test]
+fn a_stored_setup_whose_sides_differ_is_judged_with_todays_setup_comparison() {
+    let t = Temp::new("setup");
+    let dir = t.0.join("receipt-acme__shop__9");
+    stored(&dir, "vitest", json!({}), &[
+        ("old", vitest(&[(ADDS, "discounts", "passed")])),
+        ("new", vitest(&[(ADDS, "discounts", "failed")])),
+        ("new-alone", vitest(&[(ADDS, "discounts", "failed")])),
+        ("old-alone", vitest(&[(ADDS, "discounts", "passed")])),
+    ]);
+    let side = |scripts: bool| json!({ "installs": [{ "dir": ".", "manager": "npm", "result": "installed", "parts": [] }], "scripts": scripts, "node": { "major": 22 } });
+    std::fs::write(dir.join("setup.json"), json!({ "version": 1, "old": side(true), "new": side(false) }).to_string()).unwrap();
+    let r = kern::replay::rejudge(&dir).unwrap();
+    assert_eq!((r["receipt"]["tests"]["broke"].clone(), r["receipt"]["tests"]["uneven"].clone()), (json!([]), json!([format!("{ADDS} > discounts")])),
+        "the new side lost its install scripts to a memory retry, so its failure cannot block: {r}");
+}
+
+#[test]
 fn a_result_whose_runs_were_not_kept_keeps_its_stored_verdict() {
     let t = Temp::new("bare");
     let dir = t.0.join("receipt-acme__shop__4");

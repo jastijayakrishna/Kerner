@@ -5,12 +5,13 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-const ROLES: [&str; 11] = ["old-built-related", "new-related", "old-related", "new-alone", "new-again", "old-alone", "new-kept", "old-kept", "old-built", "new", "old"];
+const ROLES: [&str; 12] = ["old-built-related", "new-related", "old-related", "new-alone", "new-again", "old-alone", "old-again", "new-kept", "old-kept", "old-built", "new", "old"];
 const OLD: [&str; 4] = ["old-built-related", "old-related", "old-built", "old"];
 const REPORT_BYTES_MAX: u64 = 64 << 20;
 const ENTRIES_COUNT_MAX: usize = 10_000;
 const SUITES_COUNT_MAX: usize = 16;
 
+struct Judged { verdict: Value, runner: Runner, suite_dir: String, unconfirmed: bool, uneven: bool }
 fn role(stem: &str) -> Option<(&'static str, &str)> {
     ROLES.iter().find_map(|r| stem.strip_prefix(r).filter(|rest| rest.is_empty() || rest.starts_with('-')).map(|rest| (*r, rest)))
 }
@@ -28,7 +29,7 @@ fn report(path: &Path, runner: Runner) -> Option<Report> {
 }
 fn suite(dir: &Path, label: &str, runner: Runner, unconfirmed: bool) -> Option<Value> {
     let run = |r: &str| report(&dir.join(format!("tests-{r}{label}.out")), runner);
-    let (alone, mut whole, old_alone) = (run("new-alone"), run("new-again"), run("old-alone"));
+    let (alone, mut whole, old_alone) = (run("new-alone"), run("new-again"), run("old-alone").or_else(|| run("old-again")));
     let old = OLD.iter().find(|r| dir.join(format!("tests-{r}{label}.out")).is_file()).and_then(|r| run(r))?;
     let new = run("new-related").or_else(|| run("new")).or_else(|| if alone.is_none() { whole.take() } else { None })?;
     let c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed);
@@ -44,18 +45,20 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         let Some(stem) = name.strip_prefix("tests-").and_then(|n| n.strip_suffix(".out")) else { continue };
         if let Some((r, label)) = role(stem) && (r == "new" || r == "new-related") { labels.insert(label.to_string()); }
     }
-    let uneven = tests["uneven_why"].as_array().is_some_and(|a| !a.is_empty());
+    let stored_uneven = tests["uneven_why"].as_array().is_some_and(|a| !a.is_empty());
+    let setup = read_json(dir.join("setup.json")).ok();
     let judgeable = tests["status"] == "RAN" && !labels.is_empty() && labels.len() <= SUITES_COUNT_MAX;
-    let judged: Option<Vec<(Value, Runner, String, bool)>> = judgeable.then(|| labels.iter().map(|label| {
+    let judged: Option<Vec<Judged>> = judgeable.then(|| labels.iter().map(|label| {
         let (runner, suite_dir) = suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-'))?.clone();
         let unconfirmed = tests["unconfirmed"].as_array().into_iter().flatten().filter_map(Value::as_str)
             .any(|k| suite_dir.is_empty() || k.starts_with(&format!("{suite_dir}/")) || k.starts_with(&format!("{suite_dir}: ")));
-        suite(dir, label, runner, unconfirmed).map(|c| (c, runner, suite_dir, unconfirmed))
+        let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, &suite_dir).is_some());
+        suite(dir, label, runner, unconfirmed).map(|verdict| Judged { verdict, runner, suite_dir, unconfirmed, uneven })
     }).collect()).flatten();
     if let Some(judged) = &judged {
         let mut merged: serde_json::Map<String, Value> = crate::suite::LISTS.iter().map(|l| (l.to_string(), json!([]))).collect();
         merged.insert("problem_why".into(), json!({}));
-        for (c, runner, suite_dir, unconfirmed) in judged { crate::suite::fold(&mut merged, c, &|k| crate::suite::in_suite(*runner, suite_dir, k), *unconfirmed, uneven); }
+        for j in judged { crate::suite::fold(&mut merged, &j.verdict, &|k| crate::suite::in_suite(j.runner, &j.suite_dir, k), j.unconfirmed, j.uneven); }
         let kept_runs = labels.iter().any(|label| dir.join(format!("tests-new-kept{label}.out")).is_file());
         for l in crate::suite::LISTS.iter().filter(|l| **l != "rewritten" && !(kept_runs && **l == "gone")) { tests[*l] = merged[*l].clone(); }
         tests["problem_why"] = merged["problem_why"].clone();

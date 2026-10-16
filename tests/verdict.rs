@@ -1,0 +1,134 @@
+use kern::proof::{Count, Report};
+use kern::suite::{self, Evidence, Observed, Unproven};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str], why: &[(&str, &str)]) -> Report {
+    let mut t = BTreeMap::new();
+    for (k, passed, failed, skipped) in tests { t.insert(k.to_string(), Count { passed: *passed, failed: *failed, skipped: *skipped }); }
+    Report { tests: t, problems: problems.iter().map(|p| p.to_string()).collect(), why: why.iter().map(|(k, w)| (k.to_string(), w.to_string())).collect() }
+}
+fn listed(c: &Value, key: &str) -> Vec<String> { c[key].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() }
+
+#[test]
+fn every_combination_of_run_outcomes_blocks_only_with_full_proof() {
+    use Observed::*;
+    let all = [Passed, Failed, Skipped, Missing];
+    let maybe: Vec<Option<Observed>> = std::iter::once(None).chain(all.iter().copied().map(Some)).collect();
+    let (mut combinations, mut blocked) = (0u32, 0u32);
+    for old in all { for old_again in &maybe { for new in all { for a in &maybe { for b in &maybe { for shaky in [false, true] { for sandbox in [false, true] {
+        let e = Evidence { old, old_again: *old_again, new, new_again: [*a, *b], shaky, sandbox };
+        let reruns: Vec<Observed> = [*a, *b].into_iter().flatten().filter(|o| *o != Missing).collect();
+        let full = old == Passed && *old_again == Some(Passed) && new == Failed && !reruns.is_empty() && reruns.iter().all(|o| *o == Failed) && !shaky && !sandbox;
+        combinations += 1;
+        assert_eq!(suite::blockable(e).is_ok(), full, "a block needs the test to pass in every old run including an old rerun, to fail in every new run that included it with at least one rerun, in a steady file, with no sandbox error: {e:?}");
+        if *old_again == Some(Failed) { assert_eq!(suite::blockable(e), Err(Unproven::OldFailsToo), "{e:?}"); }
+        else if sandbox && old == Passed { assert_eq!(suite::blockable(e), Err(Unproven::Sandbox), "{e:?}"); }
+        else if old == Passed && new == Failed && (shaky || reruns.iter().any(|o| *o != Failed)) { assert_eq!(suite::blockable(e), Err(Unproven::Unsteady), "{e:?}"); }
+        if full { blocked += 1; }
+    }}}}}}}
+    assert_eq!((combinations, blocked), (8000, 5), "of 8000 combinations only 5 block: both reruns failed, or one failed and the other did not run or did not include the test");
+}
+
+#[test]
+fn ghost_28552_a_test_skipped_when_its_file_ran_alone_never_blocks_and_a_missing_native_module_is_the_sandbox() {
+    let gift = "ghost/core/test/unit/server/web/gift-preview/image.test.js > Gift Preview Image > generateGiftPreviewImage > returns different results for different accent colors";
+    let bindings = "Error: Knex: run\n$ npm install sqlite3 --save\nCannot find module 'bindings'\nRequire stack:\n- /workspace/node_modules/.pnpm/sqlite3@5.1.7/node_modules/sqlite3/lib/sqlite3-binding.js";
+    let (old, old_alone) = (report(&[(gift, 1, 0, 0)], &[], &[]), report(&[(gift, 1, 0, 0)], &[], &[]));
+    let alone = report(&[(gift, 0, 0, 1)], &[], &[]);
+    let plain = report(&[(gift, 0, 1, 0)], &[], &[(gift, "expected 'a' to not equal 'a'")]);
+    let c = suite::verdict(&old, &plain, Some(&alone), Some(&plain), Some(&old_alone), false);
+    assert_eq!((listed(&c, "broke"), listed(&c, "unsteady")), (vec![], vec![gift.to_string()]), "the run of its file alone skipped the test instead of failing it, so it did not fail in every new run: {c}");
+    let native = report(&[(gift, 0, 1, 0)], &[], &[(gift, bindings)]);
+    let c = suite::verdict(&old, &native, Some(&alone), Some(&native), Some(&old_alone), false);
+    assert_eq!((listed(&c, "broke"), listed(&c, "sandbox")), (vec![], vec![gift.to_string()]), "sqlite3's native part was missing from the install, which is the sandbox, not the change: {c}");
+}
+
+#[test]
+fn finance_tracker_36_a_test_file_whose_jest_worker_crashed_never_blocks() {
+    let file = "apps/api/src/expenses/expenses.service.spec.ts";
+    let test = "apps/api/src/expenses/expenses.service.spec.ts > ExpensesService > creates an expense";
+    let crash = "A jest worker process (pid=49) was terminated by another process: signal=SIGSEGV, exitCode=null. Operating system logs may contain more information on why this occurred.";
+    let (old, old_alone) = (report(&[(test, 1, 0, 0)], &[], &[]), report(&[(test, 1, 0, 0)], &[], &[]));
+    let crashed = report(&[], &[file], &[(file, crash)]);
+    let c = suite::verdict(&old, &crashed, Some(&crashed), None, Some(&old_alone), false);
+    assert!(listed(&c, "new_problems").is_empty() && listed(&c, "broke").is_empty(), "a crashed process is the machine, not proof the change broke the file: {c}");
+    assert_eq!(listed(&c, "sandbox"), [file], "{c}");
+}
+
+#[test]
+fn a_failure_with_the_error_old_tests_already_fail_with_here_is_the_sandbox() {
+    let (seed, cart) = ("test/db.test.js > seeds", "test/cart.test.js > adds");
+    let refused = "Error: connect ECONNREFUSED 127.0.0.1:5432";
+    let old = report(&[(seed, 0, 1, 0), (cart, 1, 0, 0)], &[], &[(seed, refused)]);
+    let new = report(&[(seed, 0, 1, 0), (cart, 0, 1, 0)], &[], &[(seed, refused), (cart, refused)]);
+    let old_alone = report(&[(cart, 1, 0, 0)], &[], &[]);
+    let c = suite::verdict(&old, &new, Some(&new), None, Some(&old_alone), false);
+    assert_eq!((listed(&c, "broke"), listed(&c, "sandbox")), (vec![], vec![cart.to_string()]), "the cart test now reaches the database the sandbox does not have, exactly as the seed test already did on the old code: {c}");
+}
+
+#[test]
+fn a_test_broken_in_every_run_with_an_old_rerun_that_passes_still_blocks() {
+    let total = "test/total.test.js > discount from 100";
+    let (old, old_alone) = (report(&[(total, 1, 0, 0)], &[], &[]), report(&[(total, 1, 0, 0)], &[], &[]));
+    let new = report(&[(total, 0, 1, 0)], &[], &[(total, "AssertionError: expected 100 to be 90")]);
+    let c = suite::verdict(&old, &new, Some(&new), Some(&new), Some(&old_alone), false);
+    assert_eq!(listed(&c, "broke"), [total], "the e2e calc break: failed in all three new runs, passed in both old runs: {c}");
+}
+
+#[test]
+fn a_break_with_no_old_rerun_is_unconfirmed_never_blocked() {
+    let total = "test/total.test.js > discount from 100";
+    let old = report(&[(total, 1, 0, 0)], &[], &[]);
+    let new = report(&[(total, 0, 1, 0)], &[], &[(total, "AssertionError: expected 100 to be 90")]);
+    let c = suite::verdict(&old, &new, None, Some(&new), None, false);
+    assert_eq!((listed(&c, "broke"), listed(&c, "unconfirmed")), (vec![], vec![total.to_string()]), "mocha and vitest with file arguments got only a second new run; without an old rerun nothing can block (CLAUDE.md): {c}");
+}
+
+#[test]
+fn a_new_run_cut_short_by_kerns_own_limits_never_proves_the_tests_broke() {
+    use suite::Side::{Cut, Nothing, Slow};
+    let runner = || Nothing("the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load".to_string());
+    assert!(suite::broke_run(&runner(), &runner(), false), "the runner itself gave no results twice where the old code's tests ran: the e2e 'broke' case blocks");
+    assert!(!suite::broke_run(&runner(), &runner(), true), "the sides were set up differently");
+    for (first, again) in [(Slow("the tests did not finish in 15 minutes".into()), Slow("the tests did not finish in 15 minutes".into())),
+        (Cut("the run was stopped: Sandbox exceeded limits: it ran out of memory (it allows 4096 MiB)".into()), Cut("the run was stopped: Sandbox exceeded limits: it ran out of memory (it allows 4096 MiB)".into())),
+        (Cut("the test runner was stopped by a signal, so Kern does not trust its report".into()), runner()), (runner(), Slow("no test file finished in 7 minutes".into()))] {
+        assert!(!suite::broke_run(&first, &again, false), "review A1: Kern's own time, memory or signal limit is not proof the change broke the tests: {first:?} then {again:?}");
+    }
+}
+
+#[test]
+fn random_runs_never_block_a_test_the_raw_runs_do_not_prove_broken() {
+    let names = ["a.test.js > one", "a.test.js > two", "b.test.js > three", "b.test.js > four", "c.test.js > five"];
+    let errors = ["expected 1 to be 2", "connect ECONNREFUSED 127.0.0.1:5432", "Cannot find module 'bindings'", "TypeError: x is not a function"];
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |n: u64| { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state % n };
+    let (mut checked, mut blocks) = (0u32, 0u32);
+    for _ in 0..20_000 {
+        let mut run = |kept: bool| -> Option<Report> {
+            if !kept && next(4) == 0 { return None; }
+            let (mut tests, mut why) = (Vec::new(), Vec::new());
+            for n in names {
+                match next(10) { 0 => {}, 1 => tests.push((n, 0, 0, 1)), 2..=4 => { tests.push((n, 0, 1, 0)); why.push((n, errors[next(4) as usize])); }, _ => tests.push((n, 1, 0, 0)) }
+            }
+            Some(report(&tests, &[], &why))
+        };
+        let (old, new) = (run(true).unwrap(), run(true).unwrap());
+        let (alone, whole, old_alone) = (run(false), run(false), run(false));
+        let c = suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), false);
+        checked += 1;
+        for k in listed(&c, "broke") {
+            blocks += 1;
+            let at = |r: &Report| r.tests.get(&k).copied().unwrap_or_default();
+            assert!(at(&old).passed > 0 && at(&old).failed == 0, "{k} blocked without passing on the old code: {c}");
+            assert!(old_alone.as_ref().is_some_and(|o| at(o).passed > 0 && at(o).failed == 0 && at(o).skipped == 0), "{k} blocked without passing in an old rerun: {c}");
+            assert!(at(&new).failed > 0, "{k} blocked without failing on the new code: {c}");
+            let reruns: Vec<Count> = [alone.as_ref(), whole.as_ref()].into_iter().flatten().map(at).filter(|x| x.passed + x.failed + x.skipped > 0).collect();
+            assert!(!reruns.is_empty() && reruns.iter().all(|x| x.failed > 0 && x.passed == 0 && x.skipped == 0), "{k} blocked without failing in every new rerun that ran it: {c}");
+            assert!(new.why.get(&k).is_none_or(|w| !w.contains("ECONNREFUSED") && !w.contains("bindings")), "{k} blocked on a sandbox error: {c}");
+        }
+    }
+    assert_eq!(checked, 20_000);
+    assert!(blocks > 0, "the random runs include real breaks, and those still block");
+}
