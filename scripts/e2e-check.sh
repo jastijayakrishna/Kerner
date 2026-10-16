@@ -309,6 +309,36 @@ cd "$W"
 check crash "$crash_base" crashrepo
 jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("SHOP_DATABASE_URL must be set"))' crash/receipt.json > /dev/null || { jq .tests crash/receipt.json; fail "crash: the runner's own error was not quoted"; }
 
+say "A suite on course to take far longer than its limit is stopped early and checked with the tests related to the change, with vitest and with jest"
+for runner in vitest jest; do
+  git init -q "early-$runner" && cd "early-$runner"
+  git config user.email e2e@example.invalid && git config user.name e2e
+  mkdir -p src test
+  if [ "$runner" = vitest ]; then
+    printf '%s\n' '{"name":"early","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+    printf '%s\n' 'export default { test: { fileParallelism: false } };' > vitest.config.js
+    printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+    printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/total.test.js
+    slow='import { test } from "vitest";'
+  else
+    printf '%s\n' '{"name":"early","version":"1.0.0","private":true,"scripts":{"test":"jest --maxWorkers=1"},"devDependencies":{"jest":"29.7.0"}}' > package.json
+    printf '%s\n' 'module.exports = { total: (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0) };' > src/total.js
+    printf '%s\n' 'const { total } = require("../src/total.js");' '' 'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/total.test.js
+    slow=''
+  fi
+  for i in $(seq 1 24); do printf '%s\n' "$slow" 'test("waits", async () => { await new Promise((r) => setTimeout(r, 8000)); }, 20000);' > "test/slow-$i.test.js"; done
+  git add -A && git commit -qm base && early_base=$(git rev-parse HEAD)
+  sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
+  git commit -qam "Shorter names" && git rev-parse HEAD > "$W/early-$runner.head"
+  cd "$W"
+  export KERN_TEST_MINUTES=1
+  check "early-$runner" "$early_base" "early-$runner"
+  unset KERN_TEST_MINUTES
+  decision "early-$runner" clear
+  jq -e '.tests.status == "RAN" and (.tests.runner | test("related to the change: the whole suite was on course to take about"))' "early-$runner/receipt.json" > /dev/null \
+    || { jq .tests "early-$runner/receipt.json"; fail "early-$runner: the run was not stopped early, so its progress was not read"; }
+done
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

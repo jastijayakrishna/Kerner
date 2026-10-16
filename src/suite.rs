@@ -15,10 +15,10 @@ pub const REPORT: &str = "/tmp/.kern-report.json";
 pub fn test_command(tests: &Tests) -> Vec<String> {
     let mut c = proof::command(tests);
     match tests.runner {
-        Runner::Vitest => c.push(format!("--outputFile={REPORT}")),
+        Runner::Vitest => c.extend([format!("--outputFile={REPORT}"), crate::sandbox::PROGRESS_ARGS[0].to_string()]),
         Runner::Mocha => c.extend(["--reporter-option".to_string(), format!("output={REPORT}")]),
         Runner::Node => { if let Some(at) = c.iter().position(|a| a == "--test-reporter=tap") { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
-        Runner::Jest => {}
+        Runner::Jest => c.extend(crate::sandbox::PROGRESS_ARGS[1..].iter().map(|a| a.to_string())),
     }
     c
 }
@@ -589,6 +589,19 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
         "environmental": environmental, "same_failure": same_failure })
 }
 
+fn lasting(s: u64) -> String { if s < 120 { format!("{s} seconds") } else { format!("{} minutes", s / 60) } }
+pub fn stopped_why(ending: &str, limit: u64) -> Option<String> {
+    let words: Vec<u64> = ending.split(' ').skip(1).filter_map(|w| w.parse().ok()).collect();
+    match (ending.split(' ').next(), words.as_slice()) {
+        (Some("projected"), [projected, after]) => Some(format!("the tests were on course to take about {} (the limit is {} minutes), so Kern stopped the run after {}",
+            lasting(*projected), limit / 60, lasting(*after))),
+        (Some("stalled"), [after]) => Some(format!("no test file finished in {} (the limit is {} minutes), so Kern stopped the run", lasting(*after), limit / 60)),
+        _ => None,
+    }
+}
+pub fn whole(why: &str) -> String {
+    why.replacen("the tests were", "the whole suite was", 1).replacen("the tests did", "the whole suite did", 1).replacen("no test file finished", "no test file of the whole suite finished", 1)
+}
 pub fn stopped_early(ending: &[u8], errors: &[u8], output: &[u8]) -> bool {
     let (errors, output) = (String::from_utf8_lossy(errors), String::from_utf8_lossy(output));
     let empty = [&errors, &output].iter().any(|t| t.contains("No tests found") || t.contains("No test files found"));
@@ -619,10 +632,11 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
         out
     };
     let source = if errors.iter().any(|b| !b.is_ascii_whitespace()) { text(errors) } else { text(output) };
-    let last: Vec<&str> = source.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let from = last.iter().rposition(|l| !l.starts_with("at ")).unwrap_or(0).saturating_sub(1);
+    let last: Vec<&str> = source.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains('\u{23af}')).collect();
+    let frame = |l: &str| l.starts_with("at ") || l.starts_with('\u{276f}');
+    let from = last.iter().rposition(|l| !frame(l)).unwrap_or(0).saturating_sub(1);
     let tail = last[from..].iter().take(3).copied().collect::<Vec<_>>().join(" / ");
-    let first = last.iter().find(|l| { let x = l.to_ascii_lowercase(); !l.starts_with("at ") && (x.contains("error") || x.contains("cannot find") || x.contains("failed to")) })
+    let first = last.iter().find(|l| { let x = l.to_ascii_lowercase(); !frame(l) && (x.contains("error") || x.contains("cannot find") || x.contains("failed to")) })
         .map(|l| l.chars().take(240).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
     let mut s = format!("{why} ({})", String::from_utf8_lossy(ending).trim());
     if let Some(f) = first { s += &format!("; its first error: {f}"); }
@@ -645,7 +659,8 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     let cut = seconds < limit;
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files,
+        "early": limit >= test_seconds() }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
@@ -665,6 +680,7 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
     if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", limit / 60)) }); }
+    if let Some(why) = stopped_why(&String::from_utf8_lossy(&parts["ending"]), limit) { return Ok(if cut { Side::Late } else { Side::Slow(why) }); }
     if parts["ending"] == b"exit -1" { return Ok(Side::Nothing("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
@@ -749,7 +765,8 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     let control = out.join(format!("prepare-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
     let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {} }))))?;
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {},
+        "early": false }))))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
@@ -857,7 +874,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
-        let (mut narrowed, mut old_seconds) = (None, 0u64);
+        let (mut narrowed, mut old_seconds, mut whole_why) = (None, 0u64, String::new());
         let (mut built, mut tried) = (Vec::new(), String::new());
         let old_run = match &suite.old {
             None => None,
@@ -894,7 +911,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                         timed(format!("old-built{label}"), at);
                     }
                 }
-                if matches!(run, Side::Slow(_)) && tried.is_empty() && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
+                if let Side::Slow(why) = &run && tried.is_empty() && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
+                    whole_why = whole(why);
                     let at = now_ms();
                     run = run_side(out, op, &volume("old"), (&o, env), &suite.dir, &format!("old-related{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
                     timed(format!("old-related{label}"), at);
@@ -1029,7 +1047,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
         kept += c["kept"].as_u64().unwrap_or(0);
-        let only = if narrowed.is_some() { format!(", only the tests related to the change: the whole suite takes over {} minutes", test_seconds() / 60) } else { String::new() };
+        let only = if narrowed.is_some() { format!(", only the tests related to the change: {whole_why}") } else { String::new() };
         let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
     }

@@ -7,6 +7,8 @@ use std::time::Duration;
 
 pub const MONITOR: &str = include_str!("monitor.cjs");
 pub const JEST_REPORT: &str = include_str!("jest-report.cjs");
+pub const JEST_PROGRESS: &str = include_str!("jest-progress.cjs");
+pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
@@ -190,8 +192,28 @@ pub fn yarnrc_without_code(text: &str) -> String {
     out
 }
 pub fn locked_mode(mode: u32, dir: bool) -> u32 { if dir { 0o1777 } else { (mode & 0o755) | 0o444 } }
+pub const PROGRESS_ARGS: [&str; 3] = ["--reporter=/kern/vitest-progress.mjs", "--reporters=default", "--reporters=/kern/jest-progress.cjs"];
 pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> {
-    (errors.contains("Unknown option `--cache`") && command.iter().any(|a| a == "--no-cache")).then(|| command.iter().filter(|a| *a != "--no-cache").cloned().collect())
+    let drop: &[&str] = if errors.contains("Unknown option `--cache`") { &["--no-cache"] }
+        else if errors.contains("/kern/vitest-progress.mjs") || errors.contains("/kern/jest-progress.cjs") { &PROGRESS_ARGS }
+        else { &[] };
+    let shorter: Vec<String> = command.iter().filter(|a| !drop.contains(&a.as_str())).cloned().collect();
+    (shorter.len() < command.len()).then_some(shorter)
+}
+pub fn early_stop(started_ms: u64, now_ms: u64, timeout: u64, progress: &str) -> Option<String> {
+    let (mut total, mut seen, mut times) = (0u64, std::collections::BTreeSet::new(), Vec::new());
+    for line in progress.lines() {
+        if let Some(n) = line.strip_prefix("total ") { total = total.max(n.trim().parse().unwrap_or(0)); continue; }
+        let Some((at, path)) = line.strip_prefix("done ").and_then(|r| r.split_once(' ')) else { continue };
+        if let Ok(at) = at.parse::<u64>() && seen.insert(path) { times.push(at.saturating_sub(started_ms) / 1000); }
+    }
+    let (elapsed, done) = (now_ms.saturating_sub(started_ms) / 1000, times.len() as u64);
+    if total < 10 || done >= total || elapsed < (timeout / 10).max(10) { return None; }
+    if done == 0 { return (total >= 20 && 2 * elapsed >= timeout).then(|| format!("stalled {elapsed}")); }
+    let span = elapsed.saturating_sub(times.iter().copied().min().unwrap_or(0));
+    if done < 3 || span < 10 { return None; }
+    let projected = elapsed + (total - done) * span / (done - 1);
+    (projected > 2 * timeout).then(|| format!("projected {projected} {elapsed}"))
 }
 pub fn first_error(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|l| {
@@ -372,6 +394,8 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o555))?;
     create_new(dir.join("monitor.cjs"), MONITOR.as_bytes(), 0o444)?;
     create_new(dir.join("jest-report.cjs"), JEST_REPORT.as_bytes(), 0o444)?;
+    create_new(dir.join("jest-progress.cjs"), JEST_PROGRESS.as_bytes(), 0o444)?;
+    create_new(dir.join("vitest-progress.mjs"), VITEST_PROGRESS.as_bytes(), 0o444)?;
     create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
@@ -823,7 +847,8 @@ mod inside {
     }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early"], "test run")?;
+        let early = c["early"].as_bool().ok_or_else(|| Denied("Invalid test run".into()))?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
         ensure!(vars.len() <= 32, "Invalid test run environment");
@@ -852,18 +877,28 @@ mod inside {
             create_new(&target, text.as_bytes(), 0o644)?;
         }
         let started = std::time::Instant::now();
+        let epoch = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let mut ending;
         loop {
+            let _ = std::fs::remove_file("/tmp/.kern-progress");
+            let (begun, mut look) = (epoch(), Duration::from_secs(5));
             let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
                 .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
+                .env("KERN_PROGRESS", "/tmp/.kern-progress")
                 .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
             ending = loop {
                 if let Some(s) = child.try_wait()? { break format!("exit {}", s.code().unwrap_or(-1)); }
                 if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); break "timeout".to_string(); }
+                if early && started.elapsed() >= look {
+                    look = started.elapsed() + Duration::from_secs(5);
+                    let progress = String::from_utf8_lossy(&some_of("/tmp/.kern-progress", 8 << 20, false)).to_string();
+                    if let Some(stop) = super::early_stop(begun, epoch(), timeout.as_secs(), &progress) { let _ = child.kill(); let _ = child.wait(); break stop; }
+                }
                 std::thread::sleep(Duration::from_millis(100));
             };
             let errors = String::from_utf8_lossy(&some_of("/tmp/.kern-test-err", 64 << 10, true)).to_string();
-            match super::retried_command(&command, &errors).filter(|_| ending != "timeout") {
+            let reported = std::fs::metadata("/tmp/.kern-report.json").is_ok_and(|m| m.len() > 0);
+            match super::retried_command(&command, &errors).filter(|_| ending.starts_with("exit") && !reported) {
                 Some(shorter) => {
                     command = shorter;
                     quiesce()?;

@@ -742,3 +742,52 @@ fn a_runner_that_stops_before_any_test_is_told_apart_from_one_that_finds_none() 
     assert!(!suite::stopped_early(b"exit 1", b"", b"No test files found, exiting with code 1"));
     assert!(!suite::stopped_early(b"exit 0", b"", b"{}"), "MetaMask's github-tools has no jest tests and passes with none");
 }
+
+#[test]
+fn a_suite_on_course_to_take_far_longer_than_its_limit_is_stopped_early_and_one_that_will_finish_is_not() {
+    use kern::sandbox::early_stop;
+    let start = 1_000_000u64;
+    let lines = |total: u64, done: &[(u64, String)]| -> String {
+        std::iter::once(format!("total {total}")).chain(done.iter().map(|(ms, p)| format!("done {} {p}", start + ms))).collect::<Vec<_>>().join("\n")
+    };
+    let metamask: Vec<(u64, String)> = (0..40).map(|i| (60_000 + i * 3_000, format!("/workspace/ui/t{i}.test.ts"))).collect();
+    assert_eq!(early_stop(start, start + 180_000, 900, &lines(2000, &metamask)).as_deref(), Some("projected 6210 180"),
+        "metamask-extension ran 15 minutes, then its related tests 15 more, and gave nothing");
+    let quick_after_slow_start: Vec<(u64, String)> = (0..120).map(|i| (300_000 + i * 100, format!("/workspace/t{i}.test.ts"))).collect();
+    assert_eq!(early_stop(start, start + 312_000, 900, &lines(3000, &quick_after_slow_start)), None, "five minutes of start-up, then ten files a second: done in about ten minutes");
+    assert_eq!(early_stop(start, start + 450_000, 900, &lines(500, &[])).as_deref(), Some("stalled 450"), "loreai printed only warnings for 30 minutes");
+    assert_eq!(early_stop(start, start + 449_000, 900, &lines(500, &[])), None);
+    let few: Vec<(u64, String)> = [100_000, 110_000, 120_000].iter().enumerate().map(|(i, ms)| (*ms, format!("/w/{i}.test.js"))).collect();
+    assert_eq!(early_stop(start, start + 600_000, 900, &lines(5, &few)), None, "a handful of files is left to the time limit");
+    let steady: Vec<(u64, String)> = (1..=10).map(|i| (i * 10_000, format!("/w/{i}.test.js"))).collect();
+    assert_eq!(early_stop(start, start + 100_000, 900, &lines(100, &steady)), None, "on course for about 17 minutes: within twice the limit, so it runs on");
+    let twice: Vec<(u64, String)> = (0..40).map(|i| (60_000 + (i % 3) * 3_000, "/w/same.test.js".to_string())).collect();
+    assert_eq!(early_stop(start, start + 180_000, 900, &lines(2000, &twice)), None, "a file reported twice counts once");
+}
+
+#[test]
+fn a_runner_that_cannot_load_kerns_progress_reporter_is_run_again_without_it() {
+    let s = |l: &[&str]| -> Vec<String> { l.iter().map(|x| x.to_string()).collect() };
+    let vitest = s(&["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--outputFile=/tmp/.kern-report.json", "--reporter=/kern/vitest-progress.mjs"]);
+    assert_eq!(kern::sandbox::retried_command(&vitest, "Error: Failed to load custom Reporter from /kern/vitest-progress.mjs"), Some(vitest[..4].to_vec()));
+    let jest = s(&["/workspace/node_modules/.bin/jest", "--ci", "--testResultsProcessor=/kern/jest-report.cjs", "--reporters=default", "--reporters=/kern/jest-progress.cjs"]);
+    assert_eq!(kern::sandbox::retried_command(&jest, "Could not resolve a module for a custom reporter: /kern/jest-progress.cjs"), Some(jest[..3].to_vec()));
+}
+
+#[test]
+fn a_run_stopped_early_says_how_long_it_was_on_course_to_take() {
+    assert_eq!(suite::stopped_why("projected 6210 180", 900).as_deref(),
+        Some("the tests were on course to take about 103 minutes (the limit is 15 minutes), so Kern stopped the run after 3 minutes"));
+    assert_eq!(suite::stopped_why("stalled 450", 900).as_deref(), Some("no test file finished in 7 minutes (the limit is 15 minutes), so Kern stopped the run"));
+    assert_eq!(suite::stopped_why("exit 1", 900), None);
+    assert_eq!(suite::whole("the tests were on course to take about 103 minutes"), "the whole suite was on course to take about 103 minutes");
+    assert_eq!(suite::whole("the tests did not finish in 15 minutes"), "the whole suite did not finish in 15 minutes");
+}
+
+#[test]
+fn vitests_banners_and_stack_lines_are_not_quoted_as_the_error() {
+    let err = "\u{23af}\u{23af}\u{23af}\u{23af} Unhandled Error \u{23af}\u{23af}\u{23af}\u{23af}\nError: SHOP_DATABASE_URL must be set to a test database\n \u{276f} default test/setup.js:1:62\n \u{276f} start node_modules/vitest/dist/chunks/cac.Cb-PYCCB.js:1412:15\n \u{276f} CAC.run node_modules/vitest/dist/chunks/cac.Cb-PYCCB.js:1391:2\n\u{23af}\u{23af}\u{23af}\u{23af}\u{23af}\u{23af}\n";
+    let why = suite::no_results("the runner stopped before running any test", b"exit 1", err.as_bytes(), b"{}");
+    assert!(why.contains("SHOP_DATABASE_URL must be set to a test database"), "the e2e crash case quoted vitest's banner instead: {why}");
+    assert!(!why.contains("Unhandled Error \u{23af}") && !why.contains("CAC.run"), "{why}");
+}
