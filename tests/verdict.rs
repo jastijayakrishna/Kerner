@@ -140,3 +140,16 @@ fn random_runs_never_block_a_test_the_raw_runs_do_not_prove_broken() {
     assert_eq!(checked, 20_000);
     assert!(blocks > 0, "the random runs include real breaks, and those still block");
 }
+
+#[test]
+fn vuetifyjs_0_840_a_runner_that_dies_because_the_sandbox_is_full_never_blocks() {
+    let errors = b"node:events:505\n    throw er; // Unhandled 'error' event\n    ^\n\nError: ENOSPC: no space left on device, write\n    at writeSync (node:fs:1237:3)\n    at SyncWriteStream._write (node:internal/fs/sync_write_stream:27:5)\n\nNode.js v26.12.0\n";
+    let full = suite::without_results("the output contains no vitest report", b"exit 1", errors, b"");
+    assert!(matches!(&full, suite::Side::Cut(w) if w.contains("ENOSPC: no space left on device")), "the disk the sandbox gave the run filled up, which is Kern's limit, and the receipt names it: {full:?}");
+    assert!(!suite::broke_run(&full, &full, false), "twice out of space proves nothing about the change");
+    for limit in ["Error: EMFILE: too many open files, open '/workspace/a.json'", "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory", "Error: spawn ENOMEM"] {
+        assert!(matches!(suite::without_results("no report", b"exit 1", limit.as_bytes(), b""), suite::Side::Cut(_)), "{limit}");
+    }
+    let broken = suite::without_results("the output contains no vitest report", b"exit 1", b"failed to load config from /workspace/vitest.config.ts\nSyntaxError: Unexpected token '}'\n", b"");
+    assert!(matches!(broken, suite::Side::Nothing(_)), "a config the change broke gives nothing for a reason in the project: {broken:?}");
+}

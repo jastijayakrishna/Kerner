@@ -53,7 +53,8 @@ fn test_grant(path: &str) -> Option<String> {
     let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
     if let Some(i) = lower[..lower.len().saturating_sub(1)].iter().position(|d| FOLDERS.contains(&d.as_str())) { return Some(format!("{}/", parts[..=i].join("/"))); }
     let name = lower.last()?;
-    NAMES.iter().any(|m| name.contains(m)).then(|| path.to_string())
+    let plain = name.split_once('.').is_some_and(|(stem, ext)| ["test", "spec"].contains(&stem) && !ext.contains('.') && crate::capability::is_code(name));
+    (plain || NAMES.iter().any(|m| name.contains(m))).then(|| path.to_string())
 }
 
 pub fn is_test_path(path: &str) -> bool { test_grant(path).is_some() }
@@ -266,10 +267,11 @@ pub fn blockable(e: Evidence) -> Result<(), Unproven> {
     if reruns.is_empty() || e.old_again != Some(Observed::Passed) { return Err(Unproven::Unconfirmed); }
     Ok(())
 }
-const SANDBOX_ERRORS: [&str; 28] = ["getaddrinfo", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "fetch failed",
+const SANDBOX_ERRORS: [&str; 35] = ["getaddrinfo", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "fetch failed",
     "git: not found", "command not found", "Cannot find module 'bindings'", "Could not locate the bindings file", "invalid ELF header", "compiled against a different Node.js version",
     "NODE_MODULE_VERSION", "ERR_DLOPEN_FAILED", "cannot open shared object file", "SIGSEGV", "SIGKILL", "SIGABRT", "SIGBUS", "terminated by another process", "Worker exited unexpectedly",
-    "JavaScript heap out of memory", "Reached heap limit", "ERR_WORKER_OUT_OF_MEMORY", "Allocation failed"];
+    "JavaScript heap out of memory", "Reached heap limit", "ERR_WORKER_OUT_OF_MEMORY", "Allocation failed", "ENOSPC", "no space left on device", "ENOMEM", "Cannot allocate memory",
+    "EMFILE", "ENFILE", "too many open files"];
 pub fn sandbox_error(why: &str) -> bool { SANDBOX_ERRORS.iter().any(|e| why.contains(e)) || (why.contains("spawn ") && why.contains("ENOENT")) }
 fn outcome(b: proof::Count, c: proof::Count) -> Observed {
     if c.total() == 0 { return Observed::Missing; }
@@ -334,8 +336,8 @@ pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole:
     c["unsteady"] = json!(unsteady);
     c
 }
-pub const LISTS: [&str; 17] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
-    "same_failure", "uneven", "unproven", "unsteady", "sandbox"];
+pub const LISTS: [&str; 18] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
+    "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable"];
 pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
 pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String, unconfirmed: bool, uneven: bool) {
     for l in LISTS {
@@ -499,9 +501,10 @@ pub fn kept_plan(repo: &Path, (base, head): (&str, &str), changes: &[(String, &'
     }
     if owners.is_empty() && data.is_empty() { return k; }
     let base_items = crate::drive::listing(repo, base).unwrap_or_default();
+    let head_items = crate::drive::listing(repo, head).unwrap_or_default();
     let tree: BTreeSet<String> = base_items.iter().map(|i| i.path.clone()).collect();
     let mut present = tree.clone();
-    present.extend(crate::drive::listing(repo, head).unwrap_or_default().into_iter().map(|i| i.path));
+    present.extend(head_items.iter().map(|i| i.path.clone()));
     let mut free = |p: &str| -> Option<String> {
         let n = (0..10).filter_map(|n| kept_name(p, n)).find(|n| !present.contains(n) && !present.contains(&snapshot_of(n)))?;
         present.insert(n.clone());
@@ -522,6 +525,14 @@ pub fn kept_plan(repo: &Path, (base, head): (&str, &str), changes: &[(String, &'
     let mut texts = std::collections::BTreeMap::new();
     let items: Vec<&crate::drive::Item> = base_items.iter().filter(|i| wanted.contains(&i.path) && i.size <= KEPT_BYTES as u64).collect();
     let _ = crate::drive::blobs(repo, &items, |item, bytes| { if let Ok(t) = std::str::from_utf8(bytes) { texts.insert(item.path.clone(), t.to_string()); } Ok(()) });
+    let snaps: BTreeSet<&str> = changes.iter().map(|(p, _)| p.as_str()).filter(|p| p.ends_with(".snap")).collect();
+    let edited: Vec<&crate::drive::Item> = head_items.iter().filter(|i| owners.contains(&i.path) && i.size <= KEPT_BYTES as u64 && !snaps.contains(snapshot_of(&i.path).as_str())).collect();
+    let mut grown = BTreeSet::new();
+    let _ = crate::drive::blobs(repo, &edited, |item, bytes| {
+        if let (Ok(now), Some(was)) = (std::str::from_utf8(bytes), texts.get(&item.path)) && crate::weaken::only_adds_tests(&item.path, was, now) { grown.insert(item.path.clone()); }
+        Ok(())
+    });
+    owners.retain(|f| !grown.contains(f));
     let mut moves = moved.clone();
     moves.extend(data_kept.clone());
     let escaped = |s: &str| serde_json::to_string(s).map_or(KEPT_BYTES + 1, |j| j.len());
@@ -655,16 +666,17 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let keys: BTreeSet<&String> = before.tests.keys().chain(after.tests.keys()).collect();
     let before_broken: BTreeSet<&str> = before.problems.iter().map(|p| file_of(p)).collect();
     let (mut kept, mut broke, mut flaky, mut gone, mut newly_skipped, mut added, mut already_failing) = (0u64, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let (mut new_failing, mut same_failure) = (Vec::new(), Vec::new());
+    let (mut new_failing, mut same_failure, mut unrunnable) = (Vec::new(), Vec::new(), Vec::new());
     let signature = |w: &str| -> String { masked(&w.replace("/workspace/", "")).chars().take(160).collect() };
     let old_errors: BTreeSet<String> = before.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k).chain(&before.problems).filter_map(|k| before.why.get(k)).map(|w| signature(w)).collect();
     let known_error = |k: &str| raw_after.why.get(k).is_some_and(|w| old_errors.contains(&signature(w)));
+    let lacking = |k: &str| raw_after.why.get(k).is_some_and(|w| sandbox_error(w));
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
         if b.passed == 0 && b.failed == 0 {
             if b.total() == 0 && before_broken.contains(file_of(k)) { already_failing.push(k.clone()); continue; }
             if b.total() == 0 || a.ran() > 0 { added.push(k.clone()); }
-            if a.failed > 0 { if known_error(k) { same_failure.push(k.clone()); } else { new_failing.push(k.clone()); } }
+            if a.failed > 0 { if known_error(k) { same_failure.push(k.clone()); } else if lacking(k) { unrunnable.push(k.clone()); } else { new_failing.push(k.clone()); } }
             continue;
         }
         if b.failed > 0 { already_failing.push(k.clone()); }
@@ -694,7 +706,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
         }
     }
     flaky.extend(unsteady);
-    for p in fresh { if known_error(&p) { same_failure.push(p); } else { new_failing.push(p); } }
+    for p in fresh { if known_error(&p) { same_failure.push(p); } else if lacking(&p) { unrunnable.push(p); } else { new_failing.push(p); } }
     already_failing.extend(before.problems.iter().cloned());
     if total(before) == 0 && total(raw_after) == 0 && before.problems.is_empty() && raw_after.problems.is_empty() {
         return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
@@ -708,10 +720,10 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
         new_failing.extend(fresh_problems(before, raw_after).into_iter().filter(|p| !new_failing.contains(p)).collect::<Vec<_>>());
         return json!({ "status": "NOT_RUN", "why": why, "new_failing": new_failing });
     }
-    let problem_why: serde_json::Map<String, Value> = new_problems.iter().filter_map(|p| again.unwrap_or(after).why.get(p).or_else(|| after.why.get(p)).map(|w| (p.clone(), json!(w)))).collect();
+    let problem_why: serde_json::Map<String, Value> = new_problems.iter().chain(&unproven).filter_map(|p| again.unwrap_or(after).why.get(p).or_else(|| after.why.get(p)).map(|w| (p.clone(), json!(w)))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(raw_after), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
         "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems, "problem_why": problem_why,
-        "environmental": environmental, "same_failure": same_failure, "unproven": unproven })
+        "environmental": environmental, "same_failure": same_failure, "unproven": unproven, "unrunnable": unrunnable })
 }
 
 fn lasting(s: u64) -> String { if s < 120 { format!("{s} seconds") } else { format!("{} minutes", s / 60) } }
@@ -799,7 +811,8 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     let frame = |l: &str| l.starts_with("at ") || l.starts_with('\u{276f}');
     let from = last.iter().rposition(|l| !frame(l)).unwrap_or(0).saturating_sub(1);
     let tail = last[from..].iter().take(3).copied().collect::<Vec<_>>().join(" / ");
-    let first = last.iter().find(|l| { let x = l.to_ascii_lowercase(); !frame(l) && (x.contains("error") || x.contains("cannot find") || x.contains("failed to")) })
+    let first = last.iter().find(|l| !frame(l) && sandbox_error(l))
+        .or_else(|| last.iter().find(|l| { let x = l.to_ascii_lowercase(); !frame(l) && (x.contains("error") || x.contains("cannot find") || x.contains("failed to")) }))
         .map(|l| l.chars().take(240).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
     let mut s = format!("{why} ({})", String::from_utf8_lossy(ending).trim());
     if let Some(f) = first { s += &format!("; its first error: {f}"); }
@@ -812,6 +825,10 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
 pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Cut(String), Late }
 impl Side {
     fn ending(&self) -> &str { match self { Side::Nothing(w) | Side::Slow(w) | Side::Cut(w) => w, Side::Ran(..) => "it gave results", Side::Late => LATE } }
+}
+pub fn without_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Side {
+    let said = no_results(why, ending, errors, output);
+    if sandbox_error(&String::from_utf8_lossy(errors)) || sandbox_error(&String::from_utf8_lossy(output)) { Side::Cut(said) } else { Side::Nothing(said) }
 }
 pub fn unreadable(refusal: Option<String>, error: String) -> Side { refusal.map_or(Side::Cut(error), |r| Side::Nothing(format!("Kern could not run the tests in the sandbox: {r}"))) }
 pub fn broke_run(first: &Side, again: &Side, uneven: bool) -> bool { matches!((first, again), (Side::Nothing(_), Side::Nothing(_))) && !uneven }
@@ -855,9 +872,9 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
         Ok(r) if r.tests.is_empty() && r.problems.is_empty() && stopped_early(&parts["ending"], &parts["errors"], &parts["output"]) =>
-            Side::Nothing(no_results("the runner stopped before running any test", &parts["ending"], &parts["errors"], &parts["output"])),
+            without_results("the runner stopped before running any test", &parts["ending"], &parts["errors"], &parts["output"]),
         Ok(r) => Side::Ran(r, created),
-        Err(why) => Side::Nothing(no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])),
+        Err(why) => without_results(&why, &parts["ending"], &parts["errors"], &parts["output"]),
     })
 }
 

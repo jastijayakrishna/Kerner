@@ -223,9 +223,16 @@ impl Scan<'_> {
             _ => false,
         };
         let error = matches!(unwrap(object), Expression::Identifier(id) if id.name == "Error" && self.global(id));
+        let arguments = |e: &Expression| matches!(unwrap(e), Expression::Identifier(id) if id.name == "arguments");
+        let function = |e: &Expression| match unwrap(e) {
+            Expression::Identifier(id) => id.name == "arguments" || id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()).is_some_and(|s| self.scoping.symbol_flags(s).is_function()),
+            Expression::StaticMemberExpression(m) => m.property.name == "callee" && arguments(&m.object),
+            _ => false,
+        };
         let found = match prop {
             "stack" if made(object) => Some("new Error().stack".to_string()),
-            "caller" | "callee" => Some(format!(".{prop}")),
+            "callee" if arguments(object) => Some(".callee".to_string()),
+            "caller" if function(object) => Some(".caller".to_string()),
             "prepareStackTrace" | "captureStackTrace" if error => Some(format!("Error.{prop}")),
             _ => None,
         };
@@ -321,6 +328,9 @@ impl<'a> Visit<'a> for Scan<'_> {
         walk::walk_unary_expression(self, it);
     }
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        let own_stack = matches!(unwrap(&it.callee), Expression::StaticMemberExpression(m) if m.property.name == "captureStackTrace" && matches!(unwrap(&m.object), Expression::Identifier(e) if e.name == "Error" && self.global(e)))
+            && matches!(it.arguments.first(), Some(Argument::ThisExpression(_)));
+        if !self.test && own_stack { return it.arguments.iter().for_each(|a| self.visit_argument(a)); }
         if self.test {
             let title = it.arguments.first().and_then(Argument::as_expression).and_then(literal);
             if let Expression::StaticMemberExpression(m) = unwrap(&it.callee) && CONDITIONAL.contains(&m.property.name.as_str()) && always_skips(m.property.name.as_str(), &it.arguments)
@@ -434,6 +444,12 @@ fn text_of<'f>(files: &'f Files, path: &str) -> Option<&'f str> { files.get(path
 fn runner_config(name: &str) -> bool {
     RUNNER_CONFIG.iter().any(|c| name.starts_with(c))
         || (["vitest.", "jest.", "vite.", "playwright.", "karma.", "mocha."].iter().any(|p| name.starts_with(p)) && [".config.", ".setup.", ".workspace.", ".conf."].iter().any(|m| name.contains(m)))
+}
+const READ_BY: [(&str, &[Runner]); 9] = [("vitest.", &[Runner::Vitest]), ("vite.", &[Runner::Vitest]), ("jest.", &[Runner::Jest]), ("jest-setup", &[Runner::Jest]), ("setuptests", &[Runner::Jest]),
+    (".mocharc", &[Runner::Mocha]), ("mocha.", &[Runner::Mocha]), (".babelrc", &[Runner::Jest, Runner::Mocha]), ("babel.config", &[Runner::Jest, Runner::Mocha])];
+pub fn read_by(name: &str, runner: Runner) -> bool {
+    let name = name.to_ascii_lowercase();
+    runner_config(&name) && READ_BY.iter().find(|(p, _)| name.starts_with(p)).is_some_and(|(_, readers)| readers.contains(&runner))
 }
 fn helper(path: &str) -> bool { path.split('/').map(str::to_ascii_lowercase).any(|d| HELPERS.contains(&d.as_str())) }
 

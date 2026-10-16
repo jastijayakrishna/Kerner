@@ -8,6 +8,8 @@ pub const MARK: &str = "<!-- kern-receipt -->";
 pub const SEAL_MARK: &str = "<!-- kern-seal ";
 fn author() -> String { crate::github::env("KERN_COMMENT_AUTHOR").unwrap_or_else(|| "github-actions[bot]".into()) }
 const SHOWN: usize = 15;
+const RECEIPT_BYTES_MAX: usize = 60_000;
+const DETAILS_FRAME_BYTES: usize = 200;
 
 fn code(s: &str, n: usize) -> String {
     let flat: String = s.chars().map(|c| match c { '`' => '\'', '<' => '‹', c if c.is_control() => ' ', c => c }).collect();
@@ -17,6 +19,8 @@ fn code(s: &str, n: usize) -> String {
 }
 fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() }
 fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
+fn tidy(key: &str) -> String { key.split(" > ").map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" > ") }
+fn file_of(key: &str) -> &str { key.split_once(" > ").map_or(key, |(f, _)| f) }
 fn routine_deps(rules: &Value) -> bool {
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
     let moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
@@ -25,7 +29,7 @@ fn routine_deps(rules: &Value) -> bool {
         Some("package-lock.json" | "npm-shrinkwrap.json") => d["moves"].is_array(),
         _ => false,
     };
-    let settled = |m: &&Value| m["age"] == "routine" || m["age"] == "removed";
+    let settled = |m: &&Value| ["routine", "removed", "internal"].iter().any(|a| m["age"] == *a);
     !moves.is_empty() && deps.iter().all(read) && moves.iter().all(settled) && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
 }
 fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> {
@@ -69,16 +73,28 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
         blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or("")))));
     }
+    let mut cannot_run: Vec<Value> = Vec::new();
+    let lacking = |t: &str| tests["problem_why"][t].as_str().is_some_and(crate::suite::sandbox_error);
+    let mut new_file = |t: &str, new_tests: &mut Vec<Value>| {
+        let why = tests["problem_why"][t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
+        if lacking(t) { cannot_run.push(json!({ "what": format!("{}: a test file this change adds needs something Kern's sandbox does not have{why}", code(t, 200)) })); }
+        else { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(t, 200)))); }
+    };
     for t in strings(&tests["new_problems"]) {
-        let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
-        if added(t.split(" > ").next().unwrap_or(&t)) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200)))); }
-        else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200)))); }
+        if added(file_of(&t)) { new_file(&t, &mut new_tests); }
+        else {
+            let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
+            blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200))));
+        }
     }
-    let (unproven_added, unproven): (Vec<String>, Vec<String>) = strings(&tests["unproven"]).into_iter().partition(|t| added(t.split(" > ").next().unwrap_or(t)));
-    for t in unproven_added {
-        let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
-        new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200))));
+    let (unproven_added, unproven): (Vec<String>, Vec<String>) = strings(&tests["unproven"]).into_iter().partition(|t| added(file_of(t)));
+    for t in unproven_added { new_file(&t, &mut new_tests); }
+    let mut needs: Vec<(String, usize)> = Vec::new();
+    for t in strings(&tests["unrunnable"]) {
+        match needs.iter_mut().find(|(f, _)| f == file_of(&t)) { Some((_, n)) => *n += 1, None => needs.push((file_of(&t).to_string(), 1)) }
     }
+    cannot_run.extend(needs.iter().map(|(f, n)| json!({ "what": format!("{}: {} this change adds need{} something Kern's sandbox does not have (the network, a program or a native module), so Kern could not run {}",
+        code(f, 160), plural(*n, "test", "tests"), if *n == 1 { "s" } else { "" }, if *n == 1 { "it" } else { "them" }) })));
     for x in rules["tricks"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");
         let reach = x["why"].as_str().is_some_and(|w| w.starts_with("Code outside the tests"));
@@ -104,7 +120,13 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
-    for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    let gone_all = strings(&tests["gone"]);
+    let deleted: std::collections::BTreeSet<&str> = rules["deleted_tests"].as_array().into_iter().flatten().filter_map(|x| x["path"].as_str()).collect();
+    for p in &deleted {
+        let n = gone_all.iter().filter(|g| file_of(g) == *p).count();
+        let lost = if n == 0 { String::new() } else { format!(" ({} that ran before no longer run{})", plural(n, "test", "tests"), if n == 1 { "s" } else { "" }) };
+        look.push(item("test-deleted", format!("{}: a test file this change deletes{lost}", code(p, 160))));
+    }
     for x in rules["inline_csp"].as_array().into_iter().flatten() {
         let what = match x["kind"].as_str().unwrap_or("") { "style" => "an inline <style>", "style-attr" => "inline style attributes", "script" => "an inline <script>", _ => "inline event handlers (such as onclick)" };
         look.push(item("inline-blocked", format!("{} adds {what}, but {} sends a Content-Security-Policy ({}) that does not allow it, so browsers will refuse it",
@@ -123,7 +145,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         look.push(item("node-version", format!("{} now uses {}, but its package says it runs on Node {} (engines.node), where that is missing or needs a flag",
             code(x["path"].as_str().unwrap_or(""), 160), features.join(", "), code(x["supports"].as_str().unwrap_or(""), 80))));
     }
-    let gone: std::collections::BTreeSet<String> = strings(&tests["gone"]).into_iter().collect();
+    let gone: std::collections::BTreeSet<String> = gone_all.iter().map(|g| tidy(g)).collect();
     for x in rules["weakened"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");
         let listed = |key: &str| -> String {
@@ -132,7 +154,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
             format!("{}{}", shown.join(", "), if names.len() > SHOWN { format!(" and {} more", names.len() - SHOWN) } else { String::new() })
         };
         let removed = x["removed"].as_u64().unwrap_or(0);
-        let covered = strings(&x["missing"]).iter().all(|m| gone.contains(&format!("{path} > {m}")));
+        let covered = strings(&x["missing"]).iter().all(|m| gone.contains(&tidy(&format!("{path} > {m}"))));
         if removed > 0 && !covered {
             look.push(item("tests-removed", format!("{}: the change removes {removed} test{} from this existing test file, so {} no longer check{} anything: {}",
                 code(path, 160), if removed == 1 { "" } else { "s" }, if removed == 1 { "it" } else { "they" }, if removed == 1 { "s" } else { "" }, listed("missing"))));
@@ -155,7 +177,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let more = if wrote.len() > SHOWN { format!(" and {} more", wrote.len() - SHOWN) } else { String::new() };
         look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
     }
-    look.extend(per_file("test-gone", strings(&tests["gone"]), "A test that ran before no longer runs", "tests that ran before no longer run"));
+    look.extend(per_file("test-gone", gone_all.iter().filter(|g| !deleted.contains(file_of(g))).cloned().collect(), "A test that ran before no longer runs", "tests that ran before no longer run"));
     for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or("")))); }
     let reasons = strings(&tests["uneven_why"]);
     let because = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.iter().map(|r| plain(r)).collect::<Vec<_>>().join("; ")) };
@@ -233,7 +255,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) }))
         .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) })))
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
-            .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).collect();
+            .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).chain(cannot_run).collect();
     json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"], "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": blocked, "look": look, "tests": tests,
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": percent, "lines": lines, "described": described, "not_mentioned": surprises, "sorted": sorted },
         "rules": rules, "not_checked": not_checked, "drive": { "skipped": d["skipped"], "unmeasured": d["unmeasured"] } })
@@ -386,7 +408,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     }
     if routine_deps(&r["rules"]) {
         let moved: Vec<String> = r["rules"]["dependencies"].as_array().into_iter().flatten().flat_map(|d| strings(&d["packages"])).collect();
-        md += &format!("- ✅ Dependencies: {}{} (removed, or updated within the same major version to releases out for at least {} days)\n",
+        md += &format!("- ✅ Dependencies: {}{} (each removed, from this repository, or updated within the same major version to a release out for at least {} days)\n",
             moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "), if moved.len() > SHOWN { format!(" and {} more", moved.len() - SHOWN) } else { String::new() }, crate::deps::FRESH_DAYS);
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
@@ -407,10 +429,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         _ => md += &format!("- ⏭️ Changed lines: Not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the run did not finish"))),
     }
     md += "\n";
-    if let Some(c) = drive_comment.filter(|c| !c.trim().is_empty()) {
-        let body = c.lines().skip_while(|l| l.starts_with("### ") || l.trim().is_empty()).collect::<Vec<_>>().join("\n");
-        md += &format!("<details><summary>What this change does when it runs, line by line</summary>\n\n{body}\n\n</details>\n\n");
-    }
     let not_checked = r["not_checked"].as_array().cloned().unwrap_or_default();
     if !not_checked.is_empty() {
         md += "**Not checked**\n\n";
@@ -423,9 +441,21 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         (true, Some("throwaway")) => ", and ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran",
         (true, _) => ", and ran the code only in a sealed sandbox with the network off",
     };
-    md += &format!("<sub>Kern {} checked `{}` against `{}`{sandbox}.</sub>\n", r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
-    if md.len() > 60_000 {
-        let mut cut = 60_000;
+    let footer = format!("<sub>Kern {} checked `{}` against `{}`{sandbox}.</sub>\n", r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
+    if let Some(c) = drive_comment.filter(|c| !c.trim().is_empty()) {
+        let mut body = c.lines().skip_while(|l| l.starts_with("### ") || l.trim().is_empty()).collect::<Vec<_>>().join("\n");
+        let room = RECEIPT_BYTES_MAX.saturating_sub(md.len() + footer.len() + DETAILS_FRAME_BYTES);
+        if body.len() > room {
+            let mut cut = room;
+            while !body.is_char_boundary(cut) { cut -= 1; }
+            body.truncate(body[..cut].rfind('\n').unwrap_or(cut));
+            body += "\n\n… (cut short to fit the comment)";
+        }
+        md += &format!("<details><summary>What this change does when it runs, line by line</summary>\n\n{body}\n\n</details>\n\n");
+    }
+    md += &footer;
+    if md.len() > RECEIPT_BYTES_MAX {
+        let mut cut = RECEIPT_BYTES_MAX;
         while !md.is_char_boundary(cut) { cut -= 1; }
         md.truncate(md[..cut].rfind('\n').unwrap_or(cut));
         md += "\n… (cut short; the full receipt is in the job's receipt.json)\n";

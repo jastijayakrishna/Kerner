@@ -34,9 +34,7 @@ pub fn clock(repo: &Path, head: &str) -> u64 {
     let commit = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).filter(|c| *c > 0);
     commit.map_or(wall, |c| c.min(wall))
 }
-pub fn own_packages(repo: &Path, base: &str, head: &str) -> BTreeSet<String> {
-    [base, head].iter().flat_map(|c| crate::suite::workspace(repo, c).into_keys()).collect()
-}
+pub fn own_packages(repo: &Path, head: &str) -> BTreeSet<String> { crate::suite::workspace(repo, head).into_keys().collect() }
 const SELF_TEST_PACKAGE: &str = r#"{"name":"kern-self-test","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node --test"}}"#;
 const SELF_TEST_CODE: &str = "export const add = (a, b) => a + b;\nexport const hello = (name) => `hello ${name}`;\n";
 const SELF_TEST_TESTS: &str = "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add, hello } from '../math.js';\n\ntest('adds', () => assert.equal(add(2, 3), 5));\ntest('says hello', () => assert.equal(hello('kern'), 'hello kern'));\n";
@@ -83,7 +81,7 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
         cache.entry(name.to_string()).or_insert_with(|| crate::deps::registry_meta(name)).clone()
     };
     let published = |name: &str, version: &str| -> Option<u64> { meta(name).and_then(|m| m["time"][version].as_str().and_then(crate::deps::rfc3339)) };
-    let ours = own_packages(repo, base, head);
+    let ours = own_packages(repo, head);
     let rules = crate::deps::aged(rules, now, &published, &|name: &str| ours.contains(name));
     let run = runnable(repo, head, &rules);
     let machine = if run { self_test() } else { Ok("not needed: nothing to run".to_string()) };

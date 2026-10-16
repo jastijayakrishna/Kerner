@@ -132,6 +132,48 @@ pub fn cases(path: &str, source: &str) -> Option<BTreeMap<String, Case>> {
     })
 }
 
+struct Blocks { path: Vec<String>, found: Vec<(String, usize, usize)> }
+impl<'a> Visit<'a> for Blocks {
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if let (Some(name), Some(t)) = (root(&it.callee), title(&it.arguments)) && (GROUPS.contains(&name.as_str()) || CASES.contains(&name.as_str())) {
+            let key = self.path.iter().chain(std::iter::once(&t)).cloned().collect::<Vec<_>>().join(" > ");
+            self.found.push((key, it.span.start as usize, it.span.end as usize));
+            if GROUPS.contains(&name.as_str()) {
+                self.path.push(t);
+                walk::walk_call_expression(self, it);
+                self.path.pop();
+            }
+            return;
+        }
+        walk::walk_call_expression(self, it);
+    }
+}
+fn blocks(path: &str, source: &str) -> Option<Vec<(String, usize, usize)>> {
+    crate::capability::source_types(path)?.into_iter().find_map(|st| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, st).parse();
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() { return None; }
+        let mut b = Blocks { path: Vec::new(), found: Vec::new() };
+        b.visit_program(&parsed.program);
+        Some(b.found)
+    })
+}
+pub fn only_adds_tests(path: &str, old: &str, new: &str) -> bool {
+    let (Some(before), Some(after)) = (blocks(path, old), blocks(path, new)) else { return false };
+    let known: BTreeSet<&str> = before.iter().map(|(k, _, _)| k.as_str()).collect();
+    let mut cut: Vec<(usize, usize)> = Vec::new();
+    for (key, start, end) in &after {
+        if known.contains(key.as_str()) || cut.last().is_some_and(|(_, e)| start < e) { continue; }
+        cut.push((*start, *end));
+    }
+    let mut rest = String::with_capacity(new.len());
+    let mut at = 0;
+    for (start, end) in &cut { rest.push_str(&new[at..*start]); at = *end; }
+    rest.push_str(&new[at..]);
+    let squeeze = |t: &str| t.chars().filter(|c| !c.is_whitespace() && *c != ';').collect::<String>();
+    !cut.is_empty() && squeeze(&rest) == squeeze(old)
+}
+
 pub fn leaf(key: &str) -> &str { key.rsplit(" > ").next().unwrap_or(key) }
 
 pub fn compare(old: &BTreeMap<String, Case>, new: &BTreeMap<String, Case>, elsewhere: &BTreeSet<String>) -> Weakened {

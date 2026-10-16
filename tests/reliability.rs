@@ -403,7 +403,7 @@ fn a_package_json_change_says_what_changed_in_it() {
     assert!(items.len() == 1 && items[0].contains("scripts.postinstall") && !items[0].contains("dependencies change"), "a new install hook is named as what it is: {items:?}");
     let bump = r#"{"name":"shop","main":"src/index.js","scripts":{"test":"vitest run","build":"tsc"},"devDependencies":{"vitest":"3.2.4"}}"#;
     let items = look(base, bump);
-    assert!(items.len() == 1 && items[0].contains("vitest 3.2.0") && items[0].contains("main"), "{items:?}");
+    assert!(items.len() == 1 && items[0].contains("vitest 3.2.0") && !items[0].contains("main"), "main neither runs on install nor decides what gets installed: {items:?}");
 }
 
 #[test]
@@ -982,16 +982,16 @@ fn an_env_file_is_read_the_way_dotenv_reads_it() {
 #[test]
 fn review_2_a10_a_fresh_release_is_its_own_only_when_this_repository_contains_the_package() {
     let t = Temp::new();
-    let (r, base) = repo(&t, &[("package.json", r#"{"name":"rl-cli","private":true,"workspaces":["packages/*"]}"#), ("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.0.0"}"#)]);
+    let (r, _) = repo(&t, &[("package.json", r#"{"name":"rl-cli","private":true,"workspaces":["packages/*"]}"#), ("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.0.0"}"#)]);
     let head = commit(&r, &[("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.1.0"}"#)]);
-    let own = check::own_packages(&r, &base, &head);
+    let own = check::own_packages(&r, &head);
     assert!(own.contains("@runloop/sdk") && own.contains("rl-cli"), "{own:?}");
     assert!(!own.contains("@runloop/api-client"), "a package published from another repository, even of the same organization, is not this change's own: a stolen token publishes there with the organization's repository field (Shai-Hulud)");
     let rules = json!({ "dependencies": [{ "path": "package.json", "moves": [{ "name": "@runloop/sdk", "from": "^1.0.0", "to": "^1.1.0" }, { "name": "@runloop/api-client", "from": "^1.6.0", "to": "^1.9.0" }] }] });
     let now = kern::deps::rfc3339("2026-02-26T00:00:00Z").unwrap();
     let fresh = |_: &str, _: &str| kern::deps::rfc3339("2026-02-25T21:42:48Z");
     let out = kern::deps::aged(rules, now, &fresh, &|name: &str| own.contains(name));
-    assert_eq!(out["dependencies"][0]["moves"][0]["age"], "routine", "a changesets release bumping a package of this same repository");
+    assert_eq!(out["dependencies"][0]["moves"][0]["age"], "internal", "a changesets release bumping a package of this same repository");
     assert_eq!(out["dependencies"][0]["moves"][1]["age"], "fresh");
 }
 

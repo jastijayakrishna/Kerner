@@ -95,7 +95,9 @@ What Kern checks on every pull request:
    edits, or moves and edits, an existing test file, its snapshot, or a data file or helper the test names, Kern also runs the old
    test, with its old data, on the new code (jest, vitest and mocha): a test whose old version now fails needs a look, because the
    change rewrote what it expected. So does an edited test file whose old version Kern cannot run there (node's test runner, for
-   one), and an edited data file, helper or mock that no old test names.
+   one), and an edited data file, helper or mock that no old test names. A test file the change only adds tests to needs no such run:
+   its old tests are still in it, unchanged, and ran on the new code. A new test that fails only for want of something the sandbox does
+   not have (the network, a program or a native module) is listed as not checked.
 2. **Whether the tests check the change at all.** When the tests pass, Kern plants a few small faults in the lines the change touched
    (`>` turned into `>=`, a condition turned around, a call left out), one at a time, and runs the tests related to each file (jest and
    vitest). The fault is put in as the file is read, so nothing on disk is edited. A fault that makes a test fail that passed without it
@@ -110,15 +112,21 @@ What Kern checks on every pull request:
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
 5. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
-   the tests that newly reads environment variables, needs a look. Ordinary imports, such as a UI library or a project's own modules,
-   are not powers.
-6. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
-   templates aside), test runner settings (the test script in `package.json` included), and the files that instruct coding agents
-   (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
+   the tests that newly reads secret environment variables (a name whose last word is a credential, such as `API_KEY` or `DB_PASSWORD`;
+   never one a framework builds into the page, such as `NEXT_PUBLIC_` or `VITE_`), needs a look. A power counts only when the code uses
+   it: swapping `fetch` for a mock in a test, reading a class's name or checking that a value is a function is not one. Ordinary
+   imports, such as a UI library, a project's own modules or a build tool's `virtual:` module, are not powers.
+6. **Files that steer everything else.** Files that run code or grant access: CI and container files, `CODEOWNERS`, renovate's config,
+   `.npmrc` and the like, and `.env` files that hold a secret or a setting that runs code (pictures, `FUNDING.yml`, notes such as
+   Markdown files and `.env.example` templates, and `.env` files of plain settings aside). The settings of the test runner Kern runs
+   (the test script in `package.json` included; a babel or vite config that runner never reads is not one), and the files that
+   instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look too.
 7. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
    that has been on npm for a week needs no look; a release less than a week old is named, because that is where hijacked packages
-   show up. A new package, a major update and a lockfile entry that downloads a package from somewhere other than its own registry
-   tarball need a look.
+   show up. A package of this repository (`workspace:`, `file:` or a workspace's name) is the project's own, and a package moved to
+   another section keeps its version. A new package, a major update, a `package.json` change that runs code on install or decides what
+   gets installed (install scripts, `overrides`, `packageManager` and the like), and a lockfile entry that downloads a package from
+   somewhere other than its own registry tarball need a look.
 8. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
    run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
@@ -225,7 +233,7 @@ Next steps:
 - Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
   could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run and need a look, never passed or failed.
-  Kern's own limits (time, memory, a killed process, a broken report) never block.
+  Kern's own limits (time, memory, disk space, open files, a killed process, a broken report) never block.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).
 

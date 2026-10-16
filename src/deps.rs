@@ -41,18 +41,33 @@ fn tarball_of(url: &str, name: &str, version: &str) -> bool {
         .any(|n| { let own = format!("{n}/-/{base}-{version}.tgz"); path == own || path.ends_with(&format!("/{own}")) })
 }
 pub const FRESH_DAYS: u64 = 7;
-pub fn changed_versions(old: &Value, new: &Value) -> Vec<Value> {
+type Specs = BTreeMap<(String, &'static str), String>;
+fn specs(manifest: &Value) -> Specs {
     let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
+    SECTIONS.iter().flat_map(|s| manifest[*s].as_object().into_iter().flatten().map(move |(n, v)| ((n.clone(), *s), spec(v)))).collect()
+}
+fn in_any(specs: &Specs, name: &str) -> Option<String> { SECTIONS.iter().find_map(|s| specs.get(&(name.to_string(), *s)).cloned()) }
+pub fn changed_versions(old: &Value, new: &Value) -> Vec<Value> {
+    let (before, after) = (specs(old), specs(new));
     let mut out = BTreeMap::new();
-    for s in SECTIONS {
-        let (x, y) = (old[s].as_object().cloned().unwrap_or_default(), new[s].as_object().cloned().unwrap_or_default());
-        for name in x.keys().chain(y.keys()) {
-            let (a, b) = (x.get(name).map(spec), y.get(name).map(spec));
-            if a != b { out.insert((name.clone(), s), serde_json::json!({ "name": name, "from": a, "to": b })); }
-        }
+    for ((name, s), to) in &after {
+        let from = before.get(&(name.clone(), *s)).cloned().or_else(|| in_any(&before, name));
+        if from.as_deref() != Some(to.as_str()) { out.insert((name.clone(), *s), json!({ "name": name, "from": from, "to": to })); }
+    }
+    for ((name, s), from) in &before {
+        if !after.contains_key(&(name.clone(), *s)) && in_any(&after, name).is_none() { out.insert((name.clone(), *s), json!({ "name": name, "from": from, "to": null })); }
     }
     out.into_values().collect()
 }
+pub fn shown(m: &Value) -> String {
+    let name = m["name"].as_str().unwrap_or("");
+    match (m["from"].as_str(), m["to"].as_str()) {
+        (Some(f), Some(t)) => format!("{name} {f} → {t}"),
+        (None, Some(t)) => format!("{name} {t} (new)"),
+        _ => format!("{name} (removed)"),
+    }
+}
+fn local(spec: &str) -> bool { ["workspace:", "link:", "file:", "portal:"].iter().any(|p| spec.starts_with(p)) }
 pub fn top(spec: &str) -> Option<(u64, u64, u64)> {
     let floors: Vec<Option<(u64, u64, u64)>> = spec.split("||").map(floor).collect();
     if floors.iter().any(Option::is_none) { return None; }
@@ -105,8 +120,9 @@ pub fn aged(mut rules: Value, now: u64, published: &dyn Fn(&str, &str) -> Option
         for d in rules["dependencies"].as_array_mut().into_iter().flatten() {
             for m in d["moves"].as_array_mut().into_iter().flatten().filter(|m| (m["lock"] == true) == pass) {
                 let name = m["name"].as_str().unwrap_or("").to_string();
-                let mut verdict = if pass { lock_age(m["to"].as_str(), &|v| published(&name, v), now) } else { age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now) };
-                if verdict["age"] == "fresh" && own(&name) { verdict["age"] = "routine".into(); verdict["own"] = true.into(); }
+                let verdict = if pass { lock_age(m["to"].as_str(), &|v| published(&name, v), now) }
+                    else if own(&name) || m["to"].as_str().is_some_and(local) { json!({ "age": "internal" }) }
+                    else { age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now) };
                 for (k, v) in verdict.as_object().into_iter().flatten() { m[k] = v.clone(); }
             }
         }
@@ -139,22 +155,7 @@ pub fn registry_meta(name: &str) -> Option<Value> {
     let body = response.body_mut().with_config().limit(64 << 20).read_to_vec().ok()?;
     serde_json::from_slice::<Value>(&body).ok().map(|v| serde_json::json!({ "time": v["time"], "repository": v["repository"] }))
 }
-pub fn moves(old: &Value, new: &Value) -> Vec<String> {
-    let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
-    let mut out = BTreeSet::new();
-    for s in SECTIONS {
-        let (x, y) = (old[s].as_object().cloned().unwrap_or_default(), new[s].as_object().cloned().unwrap_or_default());
-        for name in x.keys().chain(y.keys()) {
-            match (x.get(name), y.get(name)) {
-                (Some(a), Some(b)) if a != b => { out.insert(format!("{name} {} → {}", spec(a), spec(b))); }
-                (None, Some(b)) => { out.insert(format!("{name} {} (new)", spec(b))); }
-                (Some(_), None) => { out.insert(format!("{name} (removed)")); }
-                _ => {}
-            }
-        }
-    }
-    out.into_iter().collect()
-}
+pub fn moves(old: &Value, new: &Value) -> Vec<String> { changed_versions(old, new).iter().map(shown).collect::<BTreeSet<_>>().into_iter().collect() }
 const REGISTRIES: [&str; 2] = ["registry.npmjs.org", "registry.yarnpkg.com"];
 fn host(url: &str) -> Option<String> {
     url.split_once("://").and_then(|(_, rest)| rest.split(['/', '?', '#']).next()).filter(|h| !h.is_empty()).map(str::to_ascii_lowercase)

@@ -1,0 +1,344 @@
+use kern::receipt;
+use kern::util::*;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Temp {
+        let p = std::env::temp_dir().join(format!("kern-noise-{}", uuid4().unwrap()));
+        std::fs::create_dir_all(&p).unwrap();
+        Temp(p)
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git").args(args).current_dir(dir).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+fn write(dir: &Path, path: &str, text: &str) {
+    let p = dir.join(path);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, text).unwrap();
+}
+fn repo(t: &Temp, files: &[(&str, &str)]) -> (PathBuf, String) {
+    let r = t.0.join("repo");
+    std::fs::create_dir_all(&r).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["config", "core.autocrlf", "false"]);
+    for (p, text) in files { write(&r, p, text); }
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&r, &["rev-parse", "HEAD"]);
+    (r, base)
+}
+fn commit(r: &Path, files: &[(&str, &str)], deleted: &[&str]) -> String {
+    for (p, text) in files { write(r, p, text); }
+    for p in deleted { git(r, &["rm", "-q", "-r", p]); }
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "change"]);
+    git(r, &["rev-parse", "HEAD"])
+}
+fn rules_for(base: &[(&str, &str)], head: &[(&str, &str)], deleted: &[&str]) -> Value {
+    let t = Temp::new();
+    let (r, b) = repo(&t, base);
+    let h = commit(&r, head, deleted);
+    kern::rules::rules(&r, &b, &h).unwrap()
+}
+fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
+fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 0, "skipped": 0 }, "after": { "passed": 12, "failed": 0, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] }) }
+fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
+fn paths(rules: &Value, key: &str) -> Vec<String> { rules[key].as_array().unwrap().iter().filter_map(|x| x["path"].as_str().map(str::to_string)).collect() }
+
+const VITEST: &str = r#"{"name":"poml","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#;
+
+#[test]
+fn microsoft_poml_52_a_package_json_field_that_neither_runs_nor_steers_installs_is_not_a_dependency_change() {
+    let before = r#"{"name":"poml","type":"commonjs","main":"out/index.js","engines":{"vscode":"^1.90.0"},"contributes":{"commands":[{"command":"poml.preview"}]},
+        "scripts":{"test":"vitest run","lint":"eslint .","typecheck":"tsc"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let after = r#"{"name":"poml","type":"module","main":"dist/index.js","exports":{".":"./dist/index.js"},"types":"dist/index.d.ts","engines":{"vscode":"^1.95.0"},
+        "contributes":{"commands":[{"command":"poml.preview"},{"command":"poml.test"}]},"scripts":{"test":"vitest run","lint":"eslint src","typecheck":"tsc -b"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let rules = rules_for(&[("package.json", before)], &[("package.json", after)], &[]);
+    assert!(paths(&rules, "dependencies").is_empty(), "a VS Code extension's contributes, its entry points and its lint script install nothing and run nothing on install: {}", rules["dependencies"]);
+}
+
+#[test]
+fn a_lifecycle_script_or_an_install_setting_in_package_json_is_a_dependency_change() {
+    let after = r#"{"name":"poml","scripts":{"test":"vitest run","postinstall":"node fetch.js"},"overrides":{"tar":"7.0.0"},"packageManager":"pnpm@10.0.0","trustedDependencies":["esbuild"],
+        "bin":{"poml":"cli.js"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let rules = rules_for(&[("package.json", VITEST)], &[("package.json", after)], &[]);
+    let fields: Vec<String> = rules["dependencies"][0]["fields"].as_array().unwrap_or(&vec![]).iter().map(|f| f.as_str().unwrap().to_string()).collect();
+    assert_eq!(fields, ["bin", "overrides", "packageManager", "scripts.postinstall", "trustedDependencies"], "each runs code on install or decides what gets installed: {}", rules["dependencies"]);
+}
+
+#[test]
+fn near_api_js_1642_a_package_that_moves_between_sections_with_the_same_range_is_not_new() {
+    let old = json!({ "dependencies": { "@noble/hashes": "^1.7.1", "randombytes": "^2.1.0" } });
+    let new = json!({ "peerDependencies": { "@noble/hashes": "^1.7.1" } });
+    let moves = kern::deps::changed_versions(&old, &new);
+    assert_eq!(moves, [json!({ "name": "randombytes", "from": "^2.1.0", "to": null })], "the package is still there with the same range: {moves:?}");
+    assert_eq!(kern::deps::moves(&old, &new), ["randombytes (removed)"]);
+    let new = json!({ "devDependencies": { "@noble/hashes": "^1.8.0" } });
+    let moves = kern::deps::changed_versions(&old, &new);
+    assert!(moves.contains(&json!({ "name": "@noble/hashes", "from": "^1.7.1", "to": "^1.8.0" })), "a move with a new range is an update from the old range, not a new package: {moves:?}");
+    assert_eq!(kern::deps::moves(&old, &new), ["@noble/hashes ^1.7.1 → ^1.8.0", "randombytes (removed)"]);
+}
+
+#[test]
+fn constructive_io_blocks_35_a_package_of_this_repository_is_internal_never_a_new_dependency() {
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"blocks","private":true,"workspaces":["packages/*"]}"#), ("packages/json-renderer/package.json", r#"{"name":"json-renderer","version":"1.0.0"}"#),
+        ("packages/flow/package.json", r#"{"name":"flow","dependencies":{"left-pad":"^1.3.0"}}"#)]);
+    let head = commit(&r, &[("packages/flow/package.json", r#"{"name":"flow","dependencies":{"left-pad":"^1.3.0","json-renderer":"*","local-helper":"file:../helper","linked":"link:../linked","yarn-portal":"portal:../portal","pinned":"workspace:^"}}"#)], &[]);
+    let rules = kern::rules::rules(&r, &base, &head).unwrap();
+    let own = kern::check::own_packages(&r, &head);
+    let now = kern::deps::rfc3339("2026-02-26T00:00:00Z").unwrap();
+    let out = kern::deps::aged(rules, now, &|_: &str, _: &str| None, &|name: &str| own.contains(name));
+    let ages: Vec<String> = out["dependencies"][0]["moves"].as_array().unwrap().iter().map(|m| format!("{} {}", m["name"].as_str().unwrap(), m["age"].as_str().unwrap())).collect();
+    assert_eq!(ages, ["json-renderer internal", "linked internal", "local-helper internal", "pinned internal", "yarn-portal internal"], "{}", out["dependencies"]);
+    let built = receipt::build(&drive_json(), &out, &clean_tests(), &off());
+    assert_eq!(built["decision"], "clear", "the code comes from this repository, where Kern's rules and tests already see it: {built}");
+}
+
+#[test]
+fn a_dependency_on_a_package_the_change_deletes_from_the_repository_comes_from_the_registry() {
+    let t = Temp::new();
+    let (r, _) = repo(&t, &[("package.json", r#"{"name":"app","private":true,"workspaces":["packages/*"],"dependencies":{"@repo/database":"*"}}"#),
+        ("packages/database/package.json", r#"{"name":"@repo/database","version":"1.0.0"}"#)]);
+    let head = commit(&r, &[("package.json", r#"{"name":"app","private":true,"workspaces":["packages/*"],"dependencies":{"@repo/database":"^2.0.0"}}"#)], &["packages/database"]);
+    let own = kern::check::own_packages(&r, &head);
+    assert!(own.contains("app") && !own.contains("@repo/database"), "with the folder gone, npm installs @repo/database from the registry, where anyone can publish that name: {own:?}");
+}
+
+fn caps(path: &str, src: &str) -> Vec<String> { kern::capability::footprint(path, src).unwrap().into_iter().collect() }
+
+#[test]
+fn nanhesam_eveokee_monorepo_2_a_variable_the_framework_builds_into_the_page_is_never_a_secret() {
+    for public in ["EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY", "NEXT_PUBLIC_STRIPE_KEY", "VITE_API_KEY", "REACT_APP_FIREBASE_API_KEY", "PUBLIC_SUPABASE_ANON_KEY", "GATSBY_ALGOLIA_SEARCH_KEY",
+        "NUXT_PUBLIC_API_TOKEN", "VUE_APP_MAPS_KEY", "STORYBOOK_TOKEN"] {
+        assert!(!kern::capability::secret_name(public), "{public} is built into the page every visitor downloads");
+    }
+}
+
+#[test]
+fn review_2_b_a_secret_is_a_name_whose_last_word_is_a_credential() {
+    for setting in ["CACHE_KEY_PREFIX", "SESSION_TTL", "AUTH_ENABLED", "DB_PORT", "DB_HOST", "TOKEN_TTL", "PASSWORD_MIN_LENGTH", "STRIPE_PUBLISHABLE_KEY", "VAPID_PUBLIC_KEY", "SECRET_NAME", "API_URL"] {
+        assert!(!kern::capability::secret_name(setting), "{setting} names a setting about a credential, not the credential");
+    }
+    for secret in ["VERIFIER_API_KEY", "PUSHOVER_TOKEN", "PUSHOVER_USER_KEY", "SK_LIVE", "API_KEY_PROD", "MONGODB_URI", "CONNECTION_STRING", "JWT_SECRET", "SESSION_SECRET", "BASIC_AUTH",
+        "SMTP_PASS", "PGPASSWORD", "OPENAI_APIKEY", "DATABASE_URL", "SENTRY_DSN", "SLACK_WEBHOOK_URL", "dbPassword"] {
+        assert!(kern::capability::secret_name(secret), "{secret}");
+    }
+}
+
+#[test]
+fn salfatigroup_opencheck_6_reading_a_class_name_or_comparing_classes_runs_no_code() {
+    for harmless in ["export const errorName = (error) => error instanceof Error ? error.constructor.name : 'UnknownError';",
+        "export class NotFound extends Error { constructor(m) { super(m); Error.captureStackTrace(this, this.constructor); } }",
+        "export const plain = (v) => v !== null && v.constructor === Object;", "export const same = (a, b) => a instanceof b.constructor;"] {
+        assert!(!caps("src/cli.js", harmless).iter().any(|c| c.starts_with("code:")), "{harmless}: {:?}", caps("src/cli.js", harmless));
+    }
+    for reach in ["[].constructor.constructor('return process')();", "export const f = (() => {}).constructor('return 1');",
+        "const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;\nexport const run = (src) => new AsyncFunction(src)();", "export const make = (o) => o.constructor;",
+        "export const name = (o) => o.constructor.constructor.name;"] {
+        assert!(caps("src/a.js", reach).contains(&"code:constructor".to_string()), "{reach} reaches the Function constructor");
+    }
+}
+
+#[test]
+fn alibaba_hooks_2916_a_test_that_expects_any_function_runs_no_code() {
+    for harmless in ["expect(addListener).toHaveBeenCalledWith(expect.any(Function));", "expect(listener).toBeInstanceOf(Function);"] {
+        assert!(!caps("src/useTheme/__tests__/index.spec.ts", harmless).contains(&"code:Function".to_string()), "workos/workos-node#1694 does the same: {harmless}");
+    }
+    assert!(!caps("src/a.js", "export const callable = (f) => f instanceof Function;").contains(&"code:Function".to_string()));
+    for runs in ["new Function('return import(\"open\")')();", "Reflect.construct(Function, ['return 1'])();", "const F = Function;\nexport const f = F('return 1');",
+        "export const f = Function('a', 'return a');", "const expect = { any: (F) => F('return process')() };\nexpect.any(Function);"] {
+        assert!(caps("src/a.js", runs).contains(&"code:Function".to_string()), "{runs}");
+    }
+}
+
+#[test]
+fn bassa01_google_cloud_mcp_61_a_test_that_swaps_fetch_for_a_mock_calls_no_network() {
+    let swap = "import { vi, beforeEach, afterEach } from 'vitest';\nconst originalFetch = globalThis.fetch;\nconst fetchMock = vi.fn();\nbeforeEach(() => { globalThis.fetch = fetchMock as typeof fetch; });\nafterEach(() => { globalThis.fetch = originalFetch; });\n";
+    for mock in [swap, "global.fetch = vi.fn();", "window.fetch = jest.fn();"] {
+        assert!(!caps("test/unit/services/trace/resources.test.ts", mock).contains(&"global:fetch".to_string()), "replacing fetch with a mock is not calling it: {mock}");
+    }
+    for calls in ["globalThis.fetch('https://x.invalid');", "const f = globalThis.fetch;\nf('https://x.invalid');", "fetch('https://x.invalid');",
+        "const saved = globalThis.fetch;\nexport const send = () => saved('https://x.invalid');\nglobalThis.fetch = saved;"] {
+        assert!(caps("test/a.test.ts", calls).contains(&"global:fetch".to_string()), "{calls}");
+    }
+}
+
+#[test]
+fn review_2_b_a_module_the_build_tool_makes_is_no_power() {
+    let risky = |src: &str| caps("src/main.ts", src).into_iter().filter(|c| kern::rules::risky(c)).collect::<Vec<_>>();
+    assert_eq!(risky("import 'virtual:uno.css';\nimport routes from 'virtual:generated-pages';\nimport { getCollection } from 'astro:content';\nexport default [routes, getCollection];"), Vec::<String>::new());
+    assert_eq!(risky("import { API_SECRET } from 'astro:env/server';\nexport const s = API_SECRET;"), ["process:env"], "astro:env/server hands out secrets");
+    assert!(!risky("import x from 'data:text/javascript,export default 1';\nexport default x;").is_empty(), "a data: URL is code from text");
+    assert!(!risky("import x from 'https://deno.land/x/mod.ts';\nexport default x;").is_empty(), "code fetched from the network");
+}
+
+const JEST: &str = r#"{"name":"cryptoformat","scripts":{"test":"jest"},"devDependencies":{"jest":"29.7.0"}}"#;
+
+#[test]
+fn coingecko_cryptoformat_76_jest_runs_a_file_named_test_js_as_a_test() {
+    for test in ["src/test.js", "lib/spec.ts", "test.tsx"] { assert!(kern::suite::is_test_path(test), "jest's default testMatch runs {test}"); }
+    for code in ["src/latest.js", "src/testing.js", "src/contest.ts", "test.config.js", "src/test.d.ts", "src/test.json"] { assert!(!kern::suite::is_test_path(code), "{code}"); }
+    let before = "const f = require('./index');\ntest('formats', () => expect(f(1)).toBe('1.00'));\n";
+    let rules = rules_for(&[("package.json", JEST), ("src/index.js", "module.exports = (n) => n.toFixed(2);\n"), ("src/test.js", before)],
+        &[("src/test.js", &format!("{before}test('rounds', () => expect(f(1.005)).toBe('1.00'));\n"))], &[]);
+    assert!(rules["tricks"].as_array().unwrap().is_empty(), "a test file that uses the test runner is the test runner's own: {}", rules["tricks"]);
+}
+
+#[test]
+fn review_2_b_code_that_reads_an_ast_nodes_callee_or_builds_its_own_error_does_not_reach_the_test_runner() {
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n")];
+    let rules = rules_for(&base, &[("src/rule.js", "export const callee = (node) => node.callee.name + String(node.callee.caller);\n"),
+        ("src/errors.ts", "export class AppError extends Error {\n  constructor(m: string) {\n    super(m);\n    Error.captureStackTrace(this, AppError);\n  }\n}\n")], &[]);
+    assert!(paths(&rules, "tricks").is_empty(), "ESLint rules read node.callee, and a custom error captures its own stack: {}", rules["tricks"]);
+    let rules = rules_for(&base, &[("src/who.js", "export function who() { return arguments.callee.caller; }\n"),
+        ("src/stack.js", "export const stack = () => { const o = {}; Error.captureStackTrace(o); return o.stack; };\n"),
+        ("src/trace.js", "Error.prepareStackTrace = (_, s) => s;\nexport const at = () => 1;\n"), ("src/made.js", "export const at = () => new Error().stack;\n"),
+        ("src/me.js", "export function me() { return me.caller; }\n")], &[]);
+    assert_eq!(paths(&rules, "tricks"), ["src/made.js", "src/me.js", "src/stack.js", "src/trace.js", "src/who.js"], "each reads who called it, which is how code tells it runs under a test: {}", rules["tricks"]);
+}
+
+#[test]
+fn ethtaipei_website_322_a_config_the_runner_kern_runs_never_reads_changes_no_test() {
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".babelrc", "{}\n"), ("babel.config.js", "module.exports = {};\n"), ("jest.config.js", "module.exports = {};\n"),
+        ("karma.conf.js", "module.exports = () => {};\n"), ("playground/define/package.json", r#"{"name":"define","private":true,"scripts":{"dev":"vite"}}"#),
+        ("playground/define/vite.config.js", "export default {};\n"), ("vitest.config.ts", "export default {};\n"), ("vite.config.ts", "export default {};\n")];
+    let rules = rules_for(&base, &[(".babelrc", "{\"presets\":[\"next/babel\"]}\n"), ("babel.config.js", "module.exports = { presets: [] };\n"), ("jest.config.js", "module.exports = { roots: [] };\n"),
+        ("karma.conf.js", "module.exports = (c) => c.set({});\n"), ("playground/define/vite.config.js", "export default { define: { X: 1 } };\n"), ("vite.config.ts", "export default { base: '/x/' };\n")], &[]);
+    assert!(paths(&rules, "settings").is_empty(), "vitest reads its own vitest.config here, and none of these (vitejs/vite#20998, mui/mui-public#578): {}", rules["settings"]);
+    let rules = rules_for(&base, &[("vitest.config.ts", "export default { test: { include: [] } };\n")], &[]);
+    assert_eq!(paths(&rules, "settings"), ["vitest.config.ts"]);
+}
+
+#[test]
+fn a_config_the_runner_kern_runs_reads_or_one_kern_cannot_place_still_needs_a_look() {
+    let jest = rules_for(&[("package.json", JEST), ("src/a.js", "module.exports = 1;\n"), ("babel.config.js", "module.exports = {};\n")], &[("babel.config.js", "module.exports = { plugins: ['strip-tests'] };\n")], &[]);
+    assert_eq!(paths(&jest, "settings"), ["babel.config.js"], "babel-jest transforms every test with it");
+    let vite = rules_for(&[("package.json", VITEST), ("vite.config.ts", "export default {};\n")], &[("vite.config.ts", "export default { test: { include: ['nothing/**'] } };\n")], &[]);
+    assert_eq!(paths(&vite, "settings"), ["vite.config.ts"], "with no vitest.config beside it, vitest reads vite.config");
+    let merged = rules_for(&[("package.json", VITEST), ("vite.config.ts", "export default {};\n"), ("vitest.config.ts", "import base from './vite.config';\nexport default base;\n")],
+        &[("vite.config.ts", "export default { test: { include: [] } };\n")], &[]);
+    assert_eq!(paths(&merged, "settings"), ["vite.config.ts"], "the vitest config builds on vite.config");
+    let turbo = r#"{"name":"mono","private":true,"workspaces":["packages/*"],"scripts":{"test":"turbo test"}}"#;
+    let mono = rules_for(&[("package.json", turbo), ("babel.config.js", "module.exports = {};\n")], &[("babel.config.js", "module.exports = { plugins: [] };\n")], &[]);
+    assert_eq!(paths(&mono, "settings"), ["babel.config.js"], "each package picks its own runner, so Kern keeps the look");
+}
+
+#[test]
+fn review_2_b_only_files_that_run_code_or_grant_access_need_a_look() {
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".env.development", "PORT=3000\n")];
+    let quiet = rules_for(&base, &[(".github/FUNDING.yml", "github: [me]\n"), (".github/assets/logo.png", "PNG"), (".github/screenshot.svg", "<svg/>"), (".github/release.yml", "changelog: {}\n"),
+        (".env.development", "PORT=3001\nNEXT_PUBLIC_SITE_URL=http://localhost:3001\n# local only\n"), (".env.test", "export DEBUG=true\nLOG_LEVEL=info\n")], &[]);
+    assert!(paths(&quiet, "protected").is_empty(), "sponsor links, pictures, release-note headings and local settings neither run code nor grant access: {}", quiet["protected"]);
+    let loud = rules_for(&base, &[(".github/labeler.yml", "safe-to-test: ['**']\n"), (".github/workflows/ci.yml", "on: push\n"), (".env.development", "PORT=3001\nOPENAI_API_KEY=sk-live-123\n"),
+        (".env.local", "NODE_OPTIONS=--require ./hook.js\n"), (".env.ci", "npm_config_registry=https://evil.example\n"), (".env.prod", "A=\"multi\nline\"\n"), ("renovate.json", "{\"automerge\": true}\n")], &[]);
+    assert_eq!(paths(&loud, "protected"), [".env.ci", ".env.development", ".env.local", ".env.prod", ".github/labeler.yml", ".github/workflows/ci.yml", "renovate.json"],
+        "a label can unlock a safe-to-test workflow, a committed key is a leak, NODE_OPTIONS and npm settings run code, and renovate can merge on its own");
+}
+
+#[test]
+fn launchdarkly_js_sdk_common_146_a_change_that_only_adds_tests_rewrites_nothing() {
+    let path = "src/__tests__/diagnosticEvents-test.js";
+    let before = "describe('diagnostics', () => {\n  it('counts events', () => {\n    expect(count(1)).toBe(1);\n  });\n});\n";
+    let added = "describe('diagnostics', () => {\n  it('counts events', () => {\n    expect(count(1)).toBe(1);\n  });\n\n  it('counts drops', () => {\n    expect(count(0)).toBe(0);\n  });\n});\n\ndescribe('streams', () => {\n  beforeEach(() => reset());\n  it.each([[1], [2]])('opens %i', (n) => expect(open(n)).toBe(true));\n});\n";
+    assert!(kern::weaken::only_adds_tests(path, before, added), "two new tests and a new group with its own hook leave the old test as it was");
+    let edits = [added.replace("toBe(1)", "toBe(2)"), format!("beforeEach(() => vi.mock('./count'));\n{added}"),
+        added.replacen("describe('diagnostics', () => {\n", "describe('diagnostics', () => {\n  beforeEach(() => vi.useFakeTimers());\n", 1), before.replace("counts events", "counts all events"),
+        before.replace("  });\n});\n", "  });\n  it('counts events', () => expect(count(2)).toBe(1));\n});\n")];
+    for edited in edits { assert!(!kern::weaken::only_adds_tests(path, before, &edited), "this changes what an existing test does or checks:\n{edited}"); }
+}
+
+#[test]
+fn remix_run_react_router_15628_an_edited_test_file_that_only_gained_tests_needs_no_run_of_its_old_version() {
+    use kern::proof::{Count, Report};
+    let t = Temp::new();
+    let before = "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest('adds', () => expect(total([1, 2])).toBe(3));\n";
+    let (r, base) = repo(&t, &[("package.json", VITEST), ("src/total.js", "export const total = (xs) => xs.reduce((a, b) => a + b, 0);\n"), ("test/total.test.js", before)]);
+    let old = Report { tests: [("test/total.test.js > adds".to_string(), Count { passed: 1, failed: 0, skipped: 0 })].into_iter().collect(), ..Report::default() };
+    let code = "export const total = (xs) => xs.reduce((a, b) => a + b, 0);\nexport const none = () => 0;\n";
+    let added = commit(&r, &[("src/total.js", code), ("test/total.test.js", &format!("{before}test('adds nothing', () => expect(total([])).toBe(0));\n"))], &[]);
+    let plan = kern::suite::kept_plan(&r, (&base, &added), &kern::rules::changed(&r, &base, &added).unwrap(), &old, "");
+    assert!(plan.run.is_empty() && plan.skipped.is_empty(), "the old test is still in the file, unchanged, and already ran on the new code: {:?} {:?}", plan.run, plan.skipped);
+    let edited = commit(&r, &[("src/total.js", code), ("test/total.test.js", &before.replace("toBe(3)", "toBe(4)"))], &[]);
+    let plan = kern::suite::kept_plan(&r, (&base, &edited), &kern::rules::changed(&r, &base, &edited).unwrap(), &old, "");
+    assert_eq!(plan.run.len(), 1, "an edited expectation still gets its old version run on the new code");
+}
+
+fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
+fn look_kinds(r: &Value) -> Vec<String> { r["look"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect() }
+fn report(tests: &[(&str, u32, u32, u32)]) -> kern::proof::Report {
+    kern::proof::Report { tests: tests.iter().map(|(k, p, f, s)| (k.to_string(), kern::proof::Count { passed: *p, failed: *f, skipped: *s })).collect(), ..Default::default() }
+}
+
+#[test]
+fn facebook_stylex_1888_a_file_kern_cannot_read_is_named_once() {
+    let rules = rules_for(&[("package.json", VITEST), ("src/media.js", "export const a = 1;\n")], &[("src/media.js", "// @flow\nexport function parse(input: string): ?Query { return null; }\n")], &[]);
+    assert_eq!(paths(&rules, "not_checked"), ["src/media.js"], "one file Kern could not read is one line, not one per rule that tried: {}", rules["not_checked"]);
+}
+
+#[test]
+fn agentforscience_flamebird_13_a_test_the_change_removes_is_named_once() {
+    let mut rules = clean_rules();
+    let file = "tests/challenges/api-client.test.ts";
+    rules["weakened"] = json!([{ "path": file, "removed": 2, "missing": ["Challenge API Client — method signatures > client has commentOnChallenge method", "Challenge API Client — method signatures > client has getChallengeComments method"], "emptied": [], "loosened": [] }]);
+    let mut tests = clean_tests();
+    tests["gone"] = json!([format!("{file} >  > Challenge API Client — method signatures > client has commentOnChallenge method"), format!("{file} >  > Challenge API Client — method signatures > client has getChallengeComments method")]);
+    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    assert_eq!(look_kinds(&r), ["test-gone", "test-gone"], "vitest names an unnamed outer group with an empty title; the two removed tests are the two that no longer run: {}", r["look"]);
+}
+
+#[test]
+fn a_deleted_test_file_is_one_look_that_says_how_many_tests_stopped_running() {
+    let mut rules = clean_rules();
+    rules["changed"] = json!([{ "path": "src/total.js", "operation": "modify" }, { "path": "test/old.test.js", "operation": "delete" }]);
+    rules["deleted_tests"] = json!([{ "path": "test/old.test.js" }]);
+    let mut tests = clean_tests();
+    tests["gone"] = json!(["test/old.test.js > a", "test/old.test.js > b", "test/old.test.js > c", "test/other.test.js > d"]);
+    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    assert_eq!(look_kinds(&r), ["test-deleted", "test-gone"], "{}", r["look"]);
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("3 tests that ran before"), "{}", r["look"][0]);
+}
+
+#[test]
+fn agentforscience_flamebird_13_a_new_test_that_needs_the_network_is_not_checked_rather_than_a_look() {
+    let before = report(&[("tests/a.test.ts > old", 1, 0, 0)]);
+    let mut after = report(&[("tests/a.test.ts > old", 1, 0, 0), ("tests/e2e.test.ts > registers", 0, 1, 0), ("tests/unit.test.ts > adds", 0, 1, 0)]);
+    after.why.insert("tests/e2e.test.ts > registers".into(), "TypeError: fetch failed\n  cause: Error: connect ECONNREFUSED 127.0.0.1:3000".into());
+    after.why.insert("tests/unit.test.ts > adds".into(), "AssertionError: expected 3 to be 4".into());
+    let c = kern::suite::compare(&before, &after, None);
+    assert_eq!((&c["unrunnable"], &c["new_failing"]), (&json!(["tests/e2e.test.ts > registers"]), &json!(["tests/unit.test.ts > adds"])), "{c}");
+    let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
+    assert_eq!(look_kinds(&r), ["new-test-fails"], "a new test that fails its own assertion is a look: {}", r["look"]);
+    assert!(r["not_checked"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("tests/e2e.test.ts")), "a new test that needs the network Kern's sandbox does not have is something Kern could not check: {}", r["not_checked"]);
+}
+
+#[test]
+fn review_2_a12_a_long_line_by_line_report_never_pushes_not_checked_off_the_receipt() {
+    let mut rules = clean_rules();
+    rules["not_checked"] = json!([{ "path": "src/legacy.flow.js", "why": "Kern could not read this file" }]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &json!({ "status": "RAN", "report": {} }));
+    let huge = format!("### What changed\n\n{}", "- a line the AI wrote about one changed line of code\n".repeat(3000));
+    let md = receipt::markdown(&r, Some(&huge));
+    assert!(md.contains("**Not checked**") && md.contains("src/legacy.flow.js"), "what Kern did not check is never cut to make room for prose:\n{}", &md[md.len().saturating_sub(800)..]);
+    assert!(md.len() <= 60_200 && md.contains("</details>"), "the long part is cut to fit and still closed: {} bytes", md.len());
+}
+
+#[test]
+fn constructive_io_blocks_35_the_dependencies_line_says_what_made_each_move_routine() {
+    let mut rules = clean_rules();
+    rules["dependencies"] = json!([{ "path": "packages/flow/package.json", "operation": "modify", "packages": ["json-renderer workspace:^ (new)", "left-pad 1.3.0 → 1.3.1"],
+        "moves": [{ "name": "json-renderer", "from": null, "to": "workspace:^", "age": "internal" }, { "name": "left-pad", "from": "1.3.0", "to": "1.3.1", "age": "routine" }] }]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests(), &off()), None);
+    assert!(md.contains("✅ Dependencies") && md.contains("from this repository"), "a package of this repository is neither removed nor a release out for a week:\n{md}");
+}

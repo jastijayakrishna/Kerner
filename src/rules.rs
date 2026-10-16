@@ -70,7 +70,30 @@ fn harmless_note(p: &str) -> bool {
     [".md", ".mdx", ".txt"].iter().any(|e| base.ends_with(e)) || [".env.example", ".env.sample", ".env.template", ".env.dist"].contains(&base.as_str())
         || lower.starts_with(".github/issue_template/")
 }
-const METADATA: [&str; 9] = ["version", "description", "keywords", "homepage", "repository", "bugs", "author", "contributors", "funding"];
+const INSTALL_FIELDS: [&str; 14] = ["bin", "name", "overrides", "resolutions", "pnpm", "workspaces", "packageManager", "publishConfig", "bundleDependencies", "bundledDependencies",
+    "dependenciesMeta", "peerDependenciesMeta", "trustedDependencies", "installConfig"];
+const LIFECYCLE: [&str; 16] = ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish", "prepublishOnly", "publish", "postpublish", "prepack", "postpack",
+    "dependencies", "preuninstall", "uninstall", "postuninstall"];
+fn steers_install(field: &str) -> bool { field.strip_prefix("scripts.").map_or_else(|| INSTALL_FIELDS.contains(&field), |s| LIFECYCLE.contains(&s)) }
+const IMAGES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "avif"];
+const GITHUB_NOTES: [&str; 3] = ["funding.yml", "funding.yaml", "release.yml"];
+const RUNS_CODE_KEYS: [&str; 16] = ["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PATH", "BASH_ENV", "ENV", "PYTHONSTARTUP", "PYTHONPATH",
+    "PERL5OPT", "RUBYOPT", "JAVA_TOOL_OPTIONS", "GIT_SSH_COMMAND", "SHELL", "EDITOR"];
+const TOOL_PREFIXES: [&str; 4] = ["NPM_CONFIG_", "YARN_", "PNPM_", "COREPACK_"];
+fn env_keys(text: &str) -> Option<Vec<String>> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| {
+        let (key, _) = l.strip_prefix("export ").unwrap_or(l).split_once('=')?;
+        let key = key.trim();
+        (!key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)) && !key.starts_with(|c: char| c.is_ascii_digit())).then(|| key.to_ascii_uppercase())
+    }).collect()
+}
+fn quiet(p: &str, text: Option<&str>) -> bool {
+    let lower = p.to_ascii_lowercase();
+    let base = base_name(&lower);
+    if lower.split('/').any(|d| d == ".github") && (GITHUB_NOTES.contains(&base) || base.rsplit_once('.').is_some_and(|(_, e)| IMAGES.contains(&e))) { return true; }
+    let harmless = |k: &String| !crate::capability::secret_name(k) && !RUNS_CODE_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
+    (base == ".env" || base.starts_with(".env.")) && text.and_then(env_keys).is_some_and(|keys| keys.iter().all(harmless))
+}
 fn agent_note(p: &str) -> bool {
     AGENT_NOTES.contains(&base_name(p)) || p.split('/').next().is_some_and(|d| AGENT_FOLDERS.contains(&d)) || [".github/instructions/", ".github/prompts/", ".github/chatmodes/"].iter().any(|d| p.starts_with(d))
 }
@@ -161,6 +184,28 @@ fn fill(repo: &Path, files: &mut Files, items: &[crate::drive::Item], wanted: &B
     })
 }
 
+fn runner_at(dir: &str, old: &Files, new: &Files, head: &BTreeSet<&str>) -> Option<(String, Runner)> {
+    let parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for n in (0..=parts.len()).rev() {
+        let d = parts[..n].join("/");
+        let at = |f: &str| if d.is_empty() { f.to_string() } else { format!("{d}/{f}") };
+        let Some(bytes) = new.get(&at("package.json")).or_else(|| old.get(&at("package.json"))).and_then(|e| e.bytes.as_deref()) else { continue };
+        match crate::suite::plan(Some(bytes)) {
+            crate::suite::Plan::Run(t, _) => return Some((d, t.runner)),
+            crate::suite::Plan::Packages => return None,
+            crate::suite::Plan::Nothing => { if let Some((t, _)) = crate::suite::by_config(|f| head.contains(at(f).as_str())) { return Some((d, t.runner)); } }
+        }
+    }
+    None
+}
+fn runner_reads(p: &str, old: &Files, new: &Files, head: &BTreeSet<&str>) -> bool {
+    let (dir, name) = p.rsplit_once('/').unwrap_or(("", p));
+    let Some((root, runner)) = runner_at(dir, old, new, head) else { return true };
+    if !crate::proof::read_by(name, runner) { return false; }
+    if !name.to_ascii_lowercase().starts_with("vite.") { return true; }
+    let beside: Vec<&&str> = head.iter().filter(|q| q.rsplit_once('/').map_or("", |(d, _)| d) == dir && base_name(q).to_ascii_lowercase().starts_with("vitest.config.")).collect();
+    root == dir && (beside.is_empty() || beside.iter().any(|q| new.get(**q).and_then(|e| e.bytes.as_deref()).is_some_and(|b| String::from_utf8_lossy(b).contains("vite.config"))))
+}
 fn widened(message: &str) -> Option<Vec<Value>> {
     let list = message.strip_prefix("Patch widens module capabilities: ")?;
     let list = list.split(". If this is intended").next().unwrap_or(list);
@@ -302,11 +347,15 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             for (m, n) in crate::proof::test_markers(p, text) { *pool.entry(m).or_insert(0) += n; }
         }
     }
+    let head_paths: BTreeSet<&str> = head_listing.iter().map(|i| i.path.as_str()).collect();
+    let reads = |p: &str| runner_reads(p, &old, &new, &head_paths);
     for (p, op) in &changes {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
         if let Err(e) = crate::proof::screen_with(&old, &new, &one, &tests, &pool, true) {
             let item = json!({ "path": p, "operation": if moved_to.contains(p) { "modify" } else { op }, "why": e.0 });
-            if e.0.starts_with("Test runner configuration cannot change") || (mentioned(&named, p) && e.0.starts_with("Code outside the tests reaches into the test runner")) { settings.push(item); }
+            let config = e.0.starts_with("Test runner configuration cannot change");
+            if config && !mentioned(&named, p) && !reads(p) { continue; }
+            if config || (mentioned(&named, p) && e.0.starts_with("Code outside the tests reaches into the test runner")) { settings.push(item); }
             else if e.0.starts_with("A test file skips, focuses or inverts tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }
             else { not_checked.push(item); }
         }
@@ -395,7 +444,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if base_name(&p) == "package.json" && let Some(b) = &b {
             let moved = crate::deps::moves(&a, b);
             if !moved.is_empty() { d["packages"] = json!(moved); d["moves"] = json!(crate::deps::changed_versions(&a, b)); }
-            let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| !METADATA.contains(&f.as_str())).collect();
+            let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| steers_install(f)).collect();
             if !fields.is_empty() { d["fields"] = json!(fields); }
             if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }
         }
@@ -409,11 +458,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                     }
                     if moves.is_empty() { d["moves"] = json!([]); }
                     if !moves.is_empty() && moves.len() <= LOCK_MOVES_COUNT_MAX {
-                        d["packages"] = json!(moves.iter().map(|m| match (m["from"].as_str(), m["to"].as_str()) {
-                            (Some(f), Some(t)) => format!("{} {f} → {t}", m["name"].as_str().unwrap_or("")),
-                            (None, Some(t)) => format!("{} {t} (new)", m["name"].as_str().unwrap_or("")),
-                            _ => format!("{} (removed)", m["name"].as_str().unwrap_or("")),
-                        }).collect::<Vec<_>>());
+                        d["packages"] = json!(moves.iter().map(crate::deps::shown).collect::<Vec<_>>());
                         d["moves"] = json!(moves);
                     }
                 }
@@ -425,6 +470,10 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     if dependencies.iter().any(|d| base_name(d["path"].as_str().unwrap_or("")) == "package.json" && d["packages"].as_array().is_some_and(|p| !p.is_empty())) {
         for d in dependencies.iter_mut().filter(|d| npm_lockfile(d["path"].as_str().unwrap_or(""))) { if let Some(o) = d.as_object_mut() { o.remove("packages"); } }
     }
+    let mut listed = BTreeSet::new();
+    not_checked.retain(|x| listed.insert(x["path"].as_str().unwrap_or("").to_string()));
+    let text_now = |p: &str| new.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok());
+    let protected: Vec<Value> = protected.into_iter().filter(|x| { let p = x["path"].as_str().unwrap_or(""); !quiet(p, text_now(p)) }).collect();
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))

@@ -62,12 +62,25 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-struct Footprint<'s> { file: &'s str, caps: BTreeSet<String>, scoping: &'s Scoping, strict: bool, global_this: bool, method_next: bool, aliases: BTreeSet<SymbolId> }
+struct Footprint<'s> {
+    file: &'s str, caps: BTreeSet<String>, scoping: &'s Scoping, strict: bool, global_this: bool, method_next: bool, aliases: BTreeSet<SymbolId>,
+    saved: Vec<(SymbolId, String)>, restored: BTreeMap<SymbolId, usize>,
+}
+fn class_of<'b, 'a>(e: &'b Expression<'a>) -> Option<&'b Expression<'a>> {
+    match strip(e) { Expression::StaticMemberExpression(m) if m.property.name == "constructor" => Some(&m.object), _ => None }
+}
 impl Footprint<'_> {
     fn add(&mut self, c: String) { self.caps.insert(c); }
     fn global(&self, id: &IdentifierReference) -> bool { id.reference_id.get().is_none_or(|r| self.scoping.get_reference(r).symbol_id().is_none()) }
-    fn alias(&self, id: &IdentifierReference) -> bool {
-        id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()).is_some_and(|s| self.aliases.contains(&s))
+    fn symbol(&self, id: &IdentifierReference) -> Option<SymbolId> { id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()) }
+    fn alias(&self, id: &IdentifierReference) -> bool { self.symbol(id).is_some_and(|s| self.aliases.contains(&s)) }
+    fn network_member(&self, e: &Expression) -> Option<String> {
+        match strip(e) { Expression::StaticMemberExpression(m) if NETWORK.contains(&m.property.name.as_str()) && self.global_object(&m.object) => Some(format!("global:{}", m.property.name)), _ => None }
+    }
+    fn beside_class<'a>(&mut self, e: &Expression<'a>) { match class_of(e) { Some(inner) => self.visit_expression(inner), None => self.visit_expression(e) } }
+    fn type_matcher(&self, call: &CallExpression) -> bool {
+        crate::suite::is_test_path(self.file) && call.arguments.len() == 1 && matches!(&call.arguments[0], Argument::Identifier(id) if id.name == "Function" && self.global(id))
+            && matches!(strip(&call.callee), Expression::StaticMemberExpression(m) if ["any", "toBeInstanceOf"].contains(&m.property.name.as_str()))
     }
     fn global_object(&self, e: &Expression) -> bool {
         match strip(e) {
@@ -127,7 +140,11 @@ impl Footprint<'_> {
             return;
         }
         if let Some((scheme, _)) = spec.split_once(':') && scheme != "node" && !scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b)) {
-            return self.add(format!("url:{}", scheme.to_ascii_lowercase()));
+            return match scheme.to_ascii_lowercase().as_str() {
+                "virtual" => {}
+                "astro" => { if spec.starts_with("astro:env/server") { self.add("process:env".into()) } }
+                s => self.add(format!("url:{s}")),
+            };
         }
         let bare = spec.strip_prefix("node:").unwrap_or(spec);
         let mut segs = bare.split('/');
@@ -170,12 +187,19 @@ impl<'a> Visit<'a> for Footprint<'_> {
             && let Some(s) = id.reference_id.get().and_then(|r| self.scoping.get_reference(r).symbol_id()) {
             self.aliases.insert(s);
         }
-        self.visit_assignment_target(&it.left);
+        let replaced = it.operator == AssignmentOperator::Assign
+            && matches!(&it.left, AssignmentTarget::StaticMemberExpression(m) if NETWORK.contains(&m.property.name.as_str()) && self.global_object(&m.object));
+        if !replaced { self.visit_assignment_target(&it.left); }
+        else if let Expression::Identifier(id) = strip(&it.right) && let Some(s) = self.symbol(id) { *self.restored.entry(s).or_default() += 1; }
         self.method_next = matches!(it.left, AssignmentTarget::StaticMemberExpression(_) | AssignmentTarget::ComputedMemberExpression(_)) && matches!(it.right, Expression::FunctionExpression(_));
         self.visit_expression(&it.right);
         self.method_next = false;
     }
     fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let (Some(init), BindingPattern::BindingIdentifier(b)) = (&it.init, &it.id) && let Some(cap) = self.network_member(init) && let Some(s) = b.symbol_id.get() {
+            self.saved.push((s, cap));
+            return;
+        }
         if let Some(init) = &it.init && self.global_object(init) {
             match &it.id {
                 BindingPattern::BindingIdentifier(b) => { if let Some(s) = b.symbol_id.get() { self.aliases.insert(s); } }
@@ -206,6 +230,13 @@ impl<'a> Visit<'a> for Footprint<'_> {
         walk::walk_import_expression(self, it);
     }
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if self.type_matcher(it) { return self.visit_expression(&it.callee); }
+        if let Expression::StaticMemberExpression(m) = strip(&it.callee) && m.property.name == "captureStackTrace"
+            && matches!(strip(&m.object), Expression::Identifier(e) if e.name == "Error" && self.global(e)) {
+            self.visit_expression(&it.callee);
+            for arg in &it.arguments { match arg.as_expression() { Some(e) => self.beside_class(e), None => self.visit_argument(arg) } }
+            return;
+        }
         if let Expression::Identifier(id) = &it.callee {
             let name = id.name.as_str();
             if name == "require" && self.global(id) {
@@ -219,8 +250,15 @@ impl<'a> Visit<'a> for Footprint<'_> {
         }
         walk::walk_call_expression(self, it);
     }
+    fn visit_binary_expression(&mut self, it: &BinaryExpression<'a>) {
+        if it.operator.is_equality() { self.beside_class(&it.left); return self.beside_class(&it.right); }
+        if it.operator != BinaryOperator::Instanceof { return walk::walk_binary_expression(self, it); }
+        self.visit_expression(&it.left);
+        match strip(&it.right) { Expression::Identifier(id) if id.name == "Function" && self.global(id) => {}, right => self.beside_class(right) }
+    }
     fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
         let prop = it.property.name.as_str();
+        if prop == "name" && let Some(inner) = class_of(&it.object) { return self.visit_expression(inner); }
         if let Some((_, kind)) = REACH.iter().find(|(p, _)| *p == prop) { self.add(format!("{kind}:{prop}")); }
         let this_global = self.global_this && matches!(strip(&it.object), Expression::ThisExpression(_));
         let aliased = matches!(&it.object, Expression::Identifier(obj) if self.alias(obj));
@@ -279,8 +317,11 @@ fn parse(name: &str, source: &str, st: SourceType) -> Option<BTreeSet<String>> {
     if parsed.fatal_error || !parsed.diagnostics.is_empty() { return None; }
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
     let esm = matches!(extension(name), "mjs" | "mts");
-    let mut v = Footprint { file: name, caps: BTreeSet::new(), scoping: semantic.scoping(), strict: esm, global_this: !esm, method_next: false, aliases: BTreeSet::new() };
+    let mut v = Footprint { file: name, caps: BTreeSet::new(), scoping: semantic.scoping(), strict: esm, global_this: !esm, method_next: false, aliases: BTreeSet::new(), saved: Vec::new(), restored: BTreeMap::new() };
     v.visit_program(&parsed.program);
+    for (s, cap) in std::mem::take(&mut v.saved) {
+        if v.restored.get(&s).copied().unwrap_or(0) < v.scoping.get_resolved_reference_ids(s).len() { v.caps.insert(cap); }
+    }
     Some(v.caps)
 }
 #[derive(Default)]
@@ -344,12 +385,8 @@ impl<'a> Visit<'a> for EnvReads {
         walk::walk_unary_expression(self, it);
     }
 }
-pub fn secret_name(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    if upper == "PWD" || upper == "OLDPWD" { return false; }
-    let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut prev_lower = false;
+fn words(name: &str) -> Vec<String> {
+    let (mut words, mut word, mut prev_lower) = (Vec::new(), String::new(), false);
     for c in name.chars() {
         if !c.is_ascii_alphanumeric() { if !word.is_empty() { words.push(std::mem::take(&mut word)); } prev_lower = false; continue; }
         if c.is_ascii_uppercase() && prev_lower && !word.is_empty() { words.push(std::mem::take(&mut word)); }
@@ -357,10 +394,29 @@ pub fn secret_name(name: &str) -> bool {
         word.push(c.to_ascii_uppercase());
     }
     if !word.is_empty() { words.push(word); }
-    const WORDS: [&str; 44] = ["KEY", "KEYS", "APIKEY", "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWORDS", "PASSWD", "PASS", "PASSPHRASE", "PWD", "CREDENTIAL",
-        "CREDENTIALS", "CREDS", "CRED", "AUTH", "OAUTH", "PRIVATE", "SESSION", "COOKIE", "SIGNING", "SIGNATURE", "CERT", "CERTIFICATE", "DSN", "SALT", "SK", "JWT", "OTP",
-        "BEARER", "WEBHOOK", "DATABASE", "DB", "MONGO", "MONGODB", "POSTGRES", "PG", "MYSQL", "REDIS", "AMQP", "SMTP", "CONNECTION"];
-    words.iter().any(|w| WORDS.contains(&w.as_str())) || ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "CREDENTIAL", "PRIVATEKEY"].iter().any(|s| upper.replace('_', "").contains(s))
+    words
+}
+const PUBLIC_PREFIXES: [&str; 9] = ["NEXT_PUBLIC_", "VITE_", "EXPO_PUBLIC_", "PUBLIC_", "REACT_APP_", "GATSBY_", "NUXT_PUBLIC_", "VUE_APP_", "STORYBOOK_"];
+const CREDENTIALS: [&str; 24] = ["KEY", "KEYS", "APIKEY", "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWORDS", "PASSWD", "PASS", "PASSPHRASE", "PWD", "CREDENTIAL",
+    "CREDENTIALS", "CREDS", "CRED", "AUTH", "DSN", "SALT", "SK", "JWT", "OTP", "BEARER"];
+const JOINED: [&str; 9] = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "PRIVATEKEY", "ACCESSKEY", "SECRETKEY", "PASSPHRASE"];
+const LINKS: [&str; 5] = ["URL", "URI", "STRING", "CONNECTION", "CONN"];
+const SERVICES: [&str; 22] = ["DATABASE", "DB", "MONGO", "MONGODB", "POSTGRES", "POSTGRESQL", "PG", "MYSQL", "MARIADB", "MSSQL", "REDIS", "VALKEY", "AMQP", "RABBITMQ", "SMTP",
+    "KAFKA", "NATS", "ELASTICSEARCH", "OPENSEARCH", "WEBHOOK", "CLICKHOUSE", "CONNECTION"];
+const QUALIFIERS: [&str; 18] = ["LIVE", "TEST", "PROD", "PRODUCTION", "DEV", "DEVELOPMENT", "STAGING", "STAGE", "LOCAL", "PREVIEW", "OLD", "NEW", "PRIMARY", "SECONDARY", "BASE64",
+    "B64", "ENCODED", "RAW"];
+const NAMED_KEYS: [&str; 8] = ["PUBLIC", "PUBLISHABLE", "CACHE", "SORT", "PRIMARY", "PARTITION", "STORAGE", "QUERY"];
+pub fn secret_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if upper == "PWD" || upper == "OLDPWD" || PUBLIC_PREFIXES.iter().any(|p| upper.starts_with(p)) { return false; }
+    let words = words(name);
+    let qualifier = |w: &str| QUALIFIERS.contains(&w) || w.bytes().all(|b| b.is_ascii_digit()) || w.strip_prefix('V').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    let mut end = words.len();
+    while end > 1 && qualifier(&words[end - 1]) { end -= 1; }
+    let Some((last, before)) = words[..end].split_last() else { return false };
+    if last == "KEY" && before.last().is_some_and(|w| NAMED_KEYS.contains(&w.as_str())) { return false; }
+    CREDENTIALS.contains(&last.as_str()) || JOINED.iter().any(|j| last.len() > j.len() && last.ends_with(j))
+        || (LINKS.contains(&last.as_str()) && before.iter().any(|w| SERVICES.contains(&w.as_str())))
 }
 pub fn env_names(name: &str, source: &str) -> Option<BTreeSet<String>> {
     for st in source_types(name)? {

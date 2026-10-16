@@ -283,14 +283,17 @@ fn only_edited_test_files_that_ran_are_put_back_and_only_real_failures_count() {
     let t = Temp::new();
     let snapshot_test = "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest('snaps', () => expect(total([1])).toMatchSnapshot());\n";
     let (r, base) = repo(&t, &[("package.json", PACKAGE), ("src/math.js", MATH), ("src/total.js", TOTAL), ("test/total.test.js", TOTAL_TEST), ("test/gone.test.js", TOTAL_TEST),
-        ("test/snap.test.js", snapshot_test), ("test/__snapshots__/snap.test.js.snap", "exports[`snaps 1`] = `1`;\n"), ("test/never.test.js", TOTAL_TEST)]);
+        ("test/snap.test.js", snapshot_test), ("test/__snapshots__/snap.test.js.snap", "exports[`snaps 1`] = `1`;\n"), ("test/never.test.js", TOTAL_TEST), ("test/grown.test.js", TOTAL_TEST)]);
     std::fs::remove_file(r.join("test/gone.test.js")).unwrap();
-    let head = commit(&r, &[("src/total.js", &TOTAL.replace("sum(items)", "sum([...items])")), ("test/total.test.js", &format!("{TOTAL_TEST}test('adds more', () => expect(total([1, 1])).toBe(2));\n")), ("test/new.test.js", TOTAL_TEST),
-        ("test/__snapshots__/snap.test.js.snap", "exports[`snaps 1`] = `2`;\n"), ("test/never.test.js", &TOTAL_TEST.replace("toBe(5)", "toBe(6)"))]);
-    let old = report(&[("test/total.test.js > adds", 1, 0, 0), ("test/gone.test.js > adds", 1, 0, 0), ("test/snap.test.js > snaps", 1, 0, 0), ("test/never.test.js > adds", 0, 1, 0)], &[]);
+    let edited = format!("{}test('adds more', () => expect(total([1, 1])).toBe(2));\n", TOTAL_TEST.replace("total([2, 3])", "total([3, 2])"));
+    let head = commit(&r, &[("src/total.js", &TOTAL.replace("sum(items)", "sum([...items])")), ("test/total.test.js", &edited), ("test/new.test.js", TOTAL_TEST),
+        ("test/__snapshots__/snap.test.js.snap", "exports[`snaps 1`] = `2`;\n"), ("test/never.test.js", &TOTAL_TEST.replace("toBe(5)", "toBe(6)")),
+        ("test/grown.test.js", &format!("{TOTAL_TEST}test('adds one', () => expect(total([1])).toBe(1));\n"))]);
+    let old = report(&[("test/total.test.js > adds", 1, 0, 0), ("test/gone.test.js > adds", 1, 0, 0), ("test/snap.test.js > snaps", 1, 0, 0), ("test/never.test.js > adds", 0, 1, 0),
+        ("test/grown.test.js > adds", 1, 0, 0)], &[]);
     let plan = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, "");
     assert_eq!(plan.run.iter().collect::<Vec<_>>(), ["test/snap.kern-kept.test.js", "test/total.kern-kept.test.js"],
-        "an edited test file and the owner of an edited snapshot are put back; a deleted, an added and a never-passing test file are not: {:?}", plan.files.keys());
+        "an edited test file and the owner of an edited snapshot are put back; a deleted, an added, a never-passing test file and one that only gained tests are not: {:?}", plan.files.keys());
     assert_eq!(plan.files.get("test/snap.kern-kept.test.js").map(String::as_str), Some(snapshot_test));
     assert_eq!(suite::kept_name("src/__tests__/cart.ts", 0).as_deref(), Some("src/__tests__/cart.kern-kept.ts"));
     assert_eq!(suite::kept_name("test/.hidden", 0), None);
