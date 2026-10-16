@@ -318,6 +318,19 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let features: Vec<Value> = fresh.iter().filter_map(|k| crate::nodeapi::needs(k, low).map(|since| json!({ "name": k.split_once(':').map_or(k.as_str(), |(_, f)| f), "since": since }))).collect();
         if !features.is_empty() { node_versions.push(json!({ "path": p, "supports": range, "features": features })); }
     }
+    let live: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && is_code(p)).map(|(p, _)| p).collect();
+    let policies: Vec<(String, String)> = live.iter().flat_map(|p| text(&new, p).map(|t| crate::csp::policies(p, &t)).unwrap_or_default().into_iter().map(move |x| (p.to_string(), x))).collect();
+    let mut inline_csp = Vec::new();
+    for p in live.iter().filter(|_| !policies.is_empty()) {
+        let Some(after) = text(&new, p).map(|t| crate::csp::inline(p, &t)) else { continue };
+        let before = text(&old, p).map(|t| crate::csp::inline(p, &t)).unwrap_or_default();
+        for (kind, n) in &after {
+            if *n <= before.get(kind).copied().unwrap_or(0) { continue; }
+            if let Some((q, policy)) = policies.iter().find(|(_, x)| crate::csp::blocks(x, kind)) {
+                inline_csp.push(json!({ "path": p, "kind": kind, "policy": policy, "policy_path": q }));
+            }
+        }
+    }
     let shown = |commit: &str, p: &str| -> Option<String> { crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().and_then(|b| String::from_utf8(b).ok()) };
     let mut public_api = Vec::new();
     let mut packages_touched = BTreeSet::new();
@@ -375,5 +388,5 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     dependencies.retain(|d| d.get("harmless").is_none());
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
-        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "not_checked": not_checked }))
+        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))
 }

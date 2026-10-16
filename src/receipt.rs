@@ -92,6 +92,11 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
     for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    for x in rules["inline_csp"].as_array().into_iter().flatten() {
+        let what = match x["kind"].as_str().unwrap_or("") { "style" => "an inline <style>", "style-attr" => "inline style attributes", "script" => "an inline <script>", _ => "inline event handlers (such as onclick)" };
+        look.push(item("inline-blocked", format!("{} adds {what}, but {} sends a Content-Security-Policy ({}) that does not allow it, so browsers will refuse it",
+            code(x["path"].as_str().unwrap_or(""), 160), code(x["policy_path"].as_str().unwrap_or(""), 160), code(x["policy"].as_str().unwrap_or(""), 200))));
+    }
     for x in rules["public_api"].as_array().into_iter().flatten() {
         let names = strings(&x["removed"]);
         let shown: Vec<String> = names.iter().take(SHOWN).map(|n| code(n, 80)).collect();

@@ -284,3 +284,18 @@ fn a_published_package_that_stops_exporting_a_name_needs_a_look_and_a_private_ap
     let added = commit(&t, &[("packages/provider/src/modules/base-extension.ts", "export class MagicExtension {}\nexport class Plugin {}\n")], &[]);
     assert_eq!(rules(&t, &head, &added)["public_api"], json!([]), "adding exports breaks nobody");
 }
+
+#[test]
+fn html_that_adds_inline_code_a_policy_in_the_same_change_forbids_needs_a_look() {
+    let controller = |body: &str, policy: &str| format!("import {{ renderPage }} from './page';\nexport function finish(res) {{\n  res.setHeader('Content-Security-Policy', \"{policy}\");\n  res.send({body});\n}}\n");
+    let novu = "default-src 'self'; script-src 'self' 'unsafe-inline'";
+    let (t, base) = repo(&[("package.json", r#"{"name":"api","private":true}"#), ("src/page.ts", "export const renderPage = () => '<html>ok</html>';\n"),
+        ("src/controller.ts", &controller("'<html>done</html>'", novu))]);
+    let page = "export const renderPage = () => `<html><head><style>body { font: 14px sans-serif }</style></head><body>Connected</body></html>`;\n";
+    let head = commit(&t, &[("src/page.ts", page), ("src/controller.ts", &controller("renderPage()", novu))], &[]);
+    let r = rules(&t, &base, &head);
+    assert_eq!(r["inline_csp"], json!([{ "path": "src/page.ts", "kind": "style", "policy": novu, "policy_path": "src/controller.ts" }]),
+        "novu#11372 sent a styled page under a policy that refuses inline styles, and two AI reviewers missed it: {r}");
+    let allowed = commit(&t, &[("src/controller.ts", &controller("renderPage()", "default-src 'self'; style-src 'self' 'unsafe-inline'"))], &[]);
+    assert_eq!(rules(&t, &base, &allowed)["inline_csp"], json!([]), "a policy that allows inline styles");
+}
