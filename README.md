@@ -75,7 +75,11 @@ What Kern checks on every pull request:
    package, each changed package's own script), in a sealed sandbox (gVisor) with the network off. A test that passed before and fails now
    blocks, but only when it fails again when Kern runs its file alone on the new code, and not when the old code runs that file alone.
    A failure that shows only when the whole suite runs needs a look; one that does not repeat is called flaky. A test that stops running,
-   or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside. When the change
+   or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside, and so is a new
+   test that fails here with the same error as they do (the sandbox lacks something, not the change). The old code's tests run first:
+   when they cannot load because a package of the same repository was never built, Kern runs that package's own build script (and
+   those of the packages it needs) as the test user without a network, makes the result read-only, and does the same on the new code;
+   when they still cannot run, Kern says why at once instead of running the new code too. When the change
    edits, or moves and edits, an existing test file, its snapshot, or a data file or helper the test names, Kern also runs the old
    test, with its old data, on the new code (jest, vitest and mocha): a test whose old version now fails needs a look, because the
    change rewrote what it expected. So does an edited test file whose old version Kern cannot run there (node's test runner, for
