@@ -968,3 +968,13 @@ fn a_fresh_release_from_the_same_github_organization_as_the_change_is_its_own() 
     assert_eq!(out["dependencies"][0]["moves"][0]["age"], "routine", "runloopai/rl-cli moving to its own SDK release is not a stranger's new release");
     assert_eq!(out["dependencies"][0]["moves"][1]["age"], "fresh");
 }
+
+#[test]
+fn a_jest_project_with_reporters_of_its_own_keeps_them() {
+    use kern::sandbox::own_reporters;
+    assert!(own_reporters("{\"configs\":[{}],\"globalConfig\":{\"reporters\":[[\"default\",{}],[\"detox/runners/jest/reporter\",{}]]}}\n"),
+        "wix/Detox's tests need jest-metadata's reporter; replacing the reporters made every test file fail to load");
+    assert!(!own_reporters("{\"configs\":[{}],\"globalConfig\":{\"reporters\":[[\"default\",{}]]}}"));
+    assert!(!own_reporters("{\"configs\":[{}],\"globalConfig\":{}}"));
+    assert!(!own_reporters("not json"));
+}

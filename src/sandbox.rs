@@ -203,6 +203,14 @@ pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> 
         && !(progress && PROGRESS_ARGS.contains(&a.as_str()))).cloned().collect();
     (shorter.len() < command.len()).then_some(shorter)
 }
+pub fn own_reporters(show: &str) -> bool {
+    let Some(start) = show.find('{') else { return false };
+    let Some(Ok(v)) = serde_json::Deserializer::from_str(&show[start..]).into_iter::<Value>().next() else { return false };
+    v["globalConfig"]["reporters"].as_array().is_some_and(|list| list.iter().any(|r| {
+        let name = r.as_str().or_else(|| r[0].as_str()).unwrap_or("");
+        !["default", "summary", "github-actions"].contains(&name)
+    }))
+}
 pub fn early_stop(started_ms: u64, now_ms: u64, timeout: u64, progress: &str) -> Option<String> {
     let (mut total, mut seen, mut times) = (0u64, std::collections::BTreeSet::new(), Vec::new());
     for line in progress.lines() {
@@ -895,6 +903,15 @@ mod inside {
             ensure!(!p.split('/').any(|c| c == "node_modules") && std::fs::symlink_metadata(&target).is_err(), "A test run file may not replace a project file: {p}");
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
             create_new(&target, text.as_bytes(), 0o644)?;
+        }
+        if command.iter().any(|a| a == super::PROGRESS_ARGS[2]) {
+            let probe: Vec<String> = command.iter().filter(|a| !super::PROGRESS_ARGS.contains(&a.as_str())).cloned().chain(std::iter::once("--showConfig".to_string())).collect();
+            let shown = std::fs::File::create("/tmp/.kern-show")?;
+            let child = Command::new(&probe[0]).args(&probe[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+                .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::from(shown)).stderr(Stdio::null()).spawn()?;
+            let _ = wait(child, Duration::from_secs(60));
+            if super::own_reporters(&std::fs::read_to_string("/tmp/.kern-show").unwrap_or_default()) { command.retain(|a| !super::PROGRESS_ARGS.contains(&a.as_str())); }
+            let _ = std::fs::remove_file("/tmp/.kern-show");
         }
         let started = std::time::Instant::now();
         let epoch = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
