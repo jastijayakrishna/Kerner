@@ -256,6 +256,47 @@ pub fn first_error(text: &str) -> Option<&str> {
 const STALE: &str = "installed from package.json (the lockfile is out of date)";
 pub const UNSCRIPTED: &str = "installed without its packages' install scripts, because they failed";
 pub const COREPACK: &str = "corepack@0.36.0";
+pub fn plain_version(v: &str) -> bool {
+    let (core, pre) = v.split_once('-').unwrap_or((v, ""));
+    v.len() <= 64 && core.split('.').count() == 3 && core.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && (!v.contains('-') || (!pre.is_empty() && pre.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')))
+}
+pub fn version_key(v: &str) -> (Vec<u64>, bool, String) {
+    let (core, pre) = v.split_once('-').unwrap_or((v, ""));
+    (core.split('.').map(|p| p.parse().unwrap_or(0)).collect(), pre.is_empty(), pre.to_string())
+}
+pub fn installed_versions(root: &Path, names: &[&str]) -> Vec<String> {
+    fn version(dir: &Path, name: &str) -> Option<String> {
+        let v: Value = serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
+        v["version"].as_str().filter(|s| v["name"] == name && plain_version(s)).map(str::to_string)
+    }
+    fn dirs(dir: &Path, budget: &mut usize) -> Vec<(String, PathBuf)> {
+        if *budget == 0 { return Vec::new(); }
+        *budget -= 1;
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        entries.flatten().filter(|e| e.file_type().is_ok_and(|k| k.is_dir())).map(|e| (e.file_name().to_string_lossy().to_string(), e.path())).collect()
+    }
+    fn modules(dir: &Path, names: &[&str], depth: u32, budget: &mut usize, found: &mut std::collections::BTreeSet<String>) {
+        if depth > 32 { return; }
+        for (name, path) in dirs(dir, budget) {
+            if names.contains(&name.as_str()) { found.extend(version(&path, &name)); }
+            let inner: Vec<PathBuf> = if name.starts_with('@') || name == ".pnpm" { dirs(&path, budget).into_iter().map(|(_, p)| p.join("node_modules")).collect() } else { vec![path.join("node_modules")] };
+            for n in inner.into_iter().filter(|n| n.is_dir()) { modules(&n, names, depth + 1, budget, found); }
+        }
+    }
+    fn tree(dir: &Path, names: &[&str], depth: u32, budget: &mut usize, found: &mut std::collections::BTreeSet<String>) {
+        if depth > 32 { return; }
+        for (name, path) in dirs(dir, budget) {
+            if name == "node_modules" { modules(&path, names, depth + 1, budget, found); }
+            else if ![".git", ".kern-install", ".kern-pnpm-store"].contains(&name.as_str()) { tree(&path, names, depth + 1, budget, found); }
+        }
+    }
+    let (mut budget, mut found) = (50_000usize, std::collections::BTreeSet::new());
+    tree(root, names, 0, &mut budget, &mut found);
+    let mut list: Vec<String> = found.into_iter().collect();
+    list.sort_by_key(|v| version_key(v));
+    list
+}
 pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
     let (manager, attempts) = install_plan(dir);
     if !scripts { return (manager, attempts); }
@@ -334,16 +375,16 @@ pub fn pull_node(major: u64) -> R<String> {
     let id = docker_json(&["image", "inspect", &tag])?[0]["Id"].as_str().map(str::to_string).ok_or_else(|| Denied(format!("Docker has no {tag}")))?;
     validate_image(&id)
 }
-pub fn build_browser(base: &str, dockerfile: &dyn Fn(&str, &str) -> String, playwright: &str) -> R<String> {
-    ensure!(playwright.is_empty() || playwright.split('.').count() == 3 && playwright.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())), "Unexpected Playwright version");
+pub fn build_browser(base: &str, dockerfile: &dyn Fn(&str, &[String]) -> String, versions: &[String]) -> R<String> {
+    ensure!(versions.len() <= 8 && versions.iter().all(|v| plain_version(v)), "Unexpected Playwright version");
     let base = validate_image(base)?;
-    let tag = format!("kern-browser:{}", &sha256(format!("{base} {playwright}").as_bytes())[..16]);
+    let tag = format!("kern-browser:{}", &sha256(format!("{base} {}", versions.join(" ")).as_bytes())[..16]);
     if let Ok(i) = docker_json(&["image", "inspect", &tag]) && let Some(id) = i[0]["Id"].as_str() { return validate_image(id); }
     let short = format!("kern-base:{}", &base.trim_start_matches("sha256:")[..16]);
     docker(&["tag", &base, &short], Duration::from_secs(60), 1 << 20)?;
     let dir = std::env::temp_dir().join(format!("kern-browser-{}", uuid4()?));
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("Dockerfile"), dockerfile(&short, playwright))?;
+    std::fs::write(dir.join("Dockerfile"), dockerfile(&short, versions))?;
     let built = docker(&["build", "--quiet", "--tag", &tag, "--file", &dir.join("Dockerfile").to_string_lossy(), &dir.to_string_lossy()], Duration::from_secs(900), 1 << 20);
     let _ = std::fs::remove_dir_all(&dir);
     built?;
@@ -797,8 +838,9 @@ mod inside {
     }
     pub fn drive_setup() -> R<()> {
         let c = config("drive-setup.json")?;
-        exact(&c, &["version", "dirs", "timeout_seconds", "scripts"], "drive setup")?;
+        exact(&c, &["version", "dirs", "timeout_seconds", "scripts", "browsers"], "drive setup")?;
         let scripts = c["scripts"].as_bool().ok_or_else(|| Denied("Invalid drive setup".into()))?;
+        let browsers = c["browsers"].as_bool().ok_or_else(|| Denied("Invalid drive setup".into()))?;
         ensure!(c["version"] == 1, "Unsupported drive setup");
         let dirs = strings(&c, "dirs", 64)?;
         for d in dirs.iter().filter(|d| *d != ".") { file_path(d)?; }
@@ -863,9 +905,10 @@ mod inside {
             records.push(json!({ "dir": d, "manager": manager, "result": result, "parts": parts }));
         }
         let _ = std::fs::remove_dir_all(scratch);
+        let playwright = if browsers { super::installed_versions(Path::new("/workspace"), &["playwright", "playwright-core"]) } else { Vec::new() };
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         lock_down(Path::new("/workspace"));
-        println!("{}", json!({ "version": 1, "installs": records }));
+        println!("{}", json!({ "version": 1, "installs": records, "browsers": playwright }));
         Ok(())
     }
     fn part(name: &str, bytes: &[u8]) -> R<()> {

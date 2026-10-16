@@ -116,6 +116,23 @@ fn a_package_whose_tests_kern_runs_gets_its_dependencies_installed() {
 }
 
 #[test]
+fn only_the_setup_of_a_project_whose_tests_drive_a_browser_looks_for_the_playwright_it_installed() {
+    let plan_of = |files: &[(&str, &str)]| -> Value {
+        let t = Temp::new();
+        let (r, base) = repo(&t, files);
+        let head = commit(&r, &[("src/page.js", "export const title = (name) => name;\n")]);
+        let out = t.0.join("out");
+        drive::prepare(&r, &base, &head, &out, None).unwrap();
+        assert!(drive::setup(&out, &operator(), u64::MAX).is_err(), "no Docker here, so setup stops after it writes its plan");
+        read_json(out.join("sandbox").join("setup-new").join("drive-setup.json")).or_else(|_| read_json(out.join("sandbox").join("setup-old").join("drive-setup.json"))).unwrap()
+    };
+    let browser = r#"{"name":"shop","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4","playwright-core":"1.49.1"}}"#;
+    assert_eq!(plan_of(&[("package.json", browser), ("src/page.js", "export const title = (shop) => shop;\n")])["browsers"], true,
+        "the test launches Chromium through playwright-core, so the setup reports which playwright versions it installed");
+    assert_eq!(plan_of(&[("package.json", PACKAGE), ("src/page.js", "export const title = (shop) => shop;\n")])["browsers"], false, "no browser dependency, nothing to look for");
+}
+
+#[test]
 fn a_receipt_whose_package_tests_did_not_run_does_not_say_nothing_unexpected() {
     let mut t = clean_tests();
     t["runner"] = json!("vitest in packages/kit");

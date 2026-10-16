@@ -1022,46 +1022,42 @@ fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
 pub const BROWSER_DEPS: [&str; 11] = ["@vitest/browser", "@vitest/browser-playwright", "@vitest/browser-webdriverio", "playwright", "playwright-core", "puppeteer", "puppeteer-core",
     "jest-puppeteer", "jest-playwright-preset", "@web/test-runner-playwright", "@web/test-runner-puppeteer"];
 const PLAYWRIGHT_DEFAULT: &str = "1.49.1";
-pub fn lock_versions(name: &str, text: &str) -> Vec<crate::nodeapi::Version> {
-    let semver = |s: &str| -> Option<crate::nodeapi::Version> {
-        let s = s.trim_start_matches(['"', '\'', ' ', ':', '@', 'v']);
-        let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
-        let parts: Vec<u64> = s[..end].split('.').filter_map(|p| p.parse().ok()).collect();
-        (parts.len() == 3).then(|| (parts[0], parts[1], parts[2]))
-    };
-    let mut found = Vec::new();
-    for (at, _) in text.match_indices(name) {
-        let before = text[..at].chars().next_back();
-        let after = &text[at + name.len()..];
-        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') || after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-') { continue; }
-        if let Some(rest) = after.strip_prefix('@') && let Some(v) = semver(rest.trim_start_matches("npm:")) { found.push(v); continue; }
-        let window: String = after.chars().take(240).collect();
-        if let Some(i) = window.find("version") && let Some(v) = semver(&window[i + 7..]) { found.push(v); }
-    }
-    found
-}
-pub fn browser_need(manifests: &[String], locks: &[String]) -> Option<(String, String)> {
-    let named = manifests.iter().filter_map(|m| serde_json::from_str::<Value>(m).ok()).find_map(|m| {
-        ["dependencies", "devDependencies", "optionalDependencies"].iter().find_map(|s| BROWSER_DEPS.iter().find(|d| m[*s].get(**d).is_some()).map(|d| d.to_string()))
-    })?;
-    let version = locks.iter().flat_map(|l| lock_versions("playwright-core", l).into_iter().chain(lock_versions("playwright", l))).max();
-    Some(match version {
-        Some(v) => (format!("{}.{}.{}", v.0, v.1, v.2), format!("the project uses {named}")),
-        None => (String::new(), format!("the project uses {named}")),
+const MAX_BROWSERS: usize = 4;
+pub fn browser_need(manifests: &[String]) -> Option<String> {
+    manifests.iter().filter_map(|m| serde_json::from_str::<Value>(m).ok()).find_map(|m| {
+        ["dependencies", "devDependencies", "optionalDependencies"].iter().find_map(|s| BROWSER_DEPS.iter().find(|d| m[*s].get(**d).is_some()).map(|d| format!("the project uses {d}")))
     })
 }
-pub fn browser_dockerfile(base: &str, playwright: &str) -> String {
-    let install = if playwright.is_empty() { format!("npx -y playwright@{PLAYWRIGHT_DEFAULT} install-deps chromium") } else { format!("npx -y playwright@{playwright} install --with-deps chromium") };
+pub fn browser_dockerfile(base: &str, versions: &[String]) -> String {
+    let install = if versions.is_empty() { format!("npx -y playwright@{PLAYWRIGHT_DEFAULT} install-deps chromium") }
+        else { versions.iter().map(|v| format!("npx -y playwright@{v} install --with-deps chromium")).collect::<Vec<_>>().join(" && ") };
     format!("FROM {base}\nENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright\nRUN mkdir -p /ms-playwright && {install} && chmod -R a+rX /ms-playwright && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache\n")
 }
-fn browser_image(image: &str, paths: &BTreeSet<String>, read: &dyn Fn(&str) -> Option<String>) -> (String, Value) {
-    let manifests: Vec<String> = paths.iter().filter(|p| p.rsplit('/').next() == Some("package.json") && !p.split('/').any(|s| s == "node_modules")).take(400).filter_map(|p| read(p)).collect();
-    let locks: Vec<String> = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "npm-shrinkwrap.json"].iter().filter_map(|p| read(p)).collect();
-    let Some((version, why)) = browser_need(&manifests, &locks) else { return (image.to_string(), Value::Null) };
-    if !crate::sandbox::throwaway() { return (image.to_string(), json!({ "why": why, "skipped": "browsers run only on a throwaway machine" })); }
-    match crate::sandbox::build_browser(image, &browser_dockerfile, &version) {
-        Ok(id) => (id, json!({ "why": why, "playwright": if version.is_empty() { Value::Null } else { json!(version) } })),
-        Err(e) => (image.to_string(), json!({ "why": why, "error": e.0 })),
+pub fn browser_plan(sides: &[(String, Option<Vec<String>>)]) -> Vec<(String, Vec<String>)> {
+    let mut plan: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (image, versions) in sides { if let Some(v) = versions { plan.entry(image.clone()).or_default().extend(v.iter().cloned()); } }
+    plan.into_iter().map(|(image, set)| {
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort_by_key(|x| crate::sandbox::version_key(x));
+        let newest = v.split_off(v.len().saturating_sub(MAX_BROWSERS));
+        (image, newest)
+    }).collect()
+}
+fn browsers(sides: &mut serde_json::Map<String, Value>) {
+    let Some(why) = ["old", "new"].iter().find_map(|s| sides[*s]["browser"]["why"].as_str().map(str::to_string)) else { return };
+    let installed = |s: &Value| -> Vec<String> { s["browser"]["installed"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|v| crate::sandbox::plain_version(v)).map(str::to_string).collect() };
+    let wanted: Vec<(String, Option<Vec<String>>)> = ["old", "new"].iter().map(|s| (sides[*s]["image"].as_str().unwrap_or("").to_string(), Some(installed(&sides[*s])))).collect();
+    if !crate::sandbox::throwaway() {
+        for s in ["old", "new"] { sides[s]["browser"] = json!({ "why": why, "installed": installed(&sides[s]), "skipped": "browsers run only on a throwaway machine" }); }
+        return;
+    }
+    for (base, versions) in browser_plan(&wanted) {
+        let built = crate::sandbox::build_browser(&base, &browser_dockerfile, &versions);
+        for s in ["old", "new"].into_iter().zip(&wanted).filter(|(_, (image, _))| *image == base).map(|(s, _)| s) {
+            let mut record = json!({ "why": why, "installed": installed(&sides[s]), "playwright": versions });
+            match &built { Ok(id) => sides[s]["image"] = json!(id), Err(e) => record["error"] = json!(e.0) }
+            sides[s]["browser"] = record;
+        }
     }
 }
 pub fn node_image(op: &crate::policy::Operator, wanted: Option<(u64, String)>) -> (String, Value) {
@@ -1096,13 +1092,14 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let workflows: Vec<String> = paths.iter().filter(|p| (p.starts_with(".github/workflows/") || p.starts_with(".github/actions/")) && (p.ends_with(".yml") || p.ends_with(".yaml")))
         .take(100).filter_map(|p| read(p)).collect();
     let (image, node) = node_image(op, crate::nodeapi::wanted_major(&read, &workflows));
-    let (image, browser) = browser_image(&image, &paths, &read);
+    let manifests: Vec<String> = paths.iter().filter(|p| p.rsplit('/').next() == Some("package.json") && !p.split('/').any(|s| s == "node_modules")).take(400).filter_map(|p| read(p)).collect();
+    let need = browser_need(&manifests);
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
     let limits = Limits { timeout_seconds: seconds + 300, ..setup_limits() };
     let attempt = |scripts: bool| -> R<(crate::sandbox::Volume, crate::sandbox::Execution)> {
         if control.exists() { std::fs::remove_dir_all(&control)?; }
-        crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds, "scripts": scripts }))))?;
+        crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds, "scripts": scripts, "browsers": need.is_some() }))))?;
         let volume = crate::sandbox::Volume::create()?;
         let mut ledger = std::fs::OpenOptions::new().create(true).append(true).open(out.join("volumes.txt"))?;
         std::io::Write::write_all(&mut ledger, format!("{}\n", volume.0).as_bytes())?;
@@ -1119,6 +1116,7 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
     let _ = std::fs::remove_dir_all(&tree);
     let _ = std::fs::remove_dir_all(&control);
+    let browser = need.map_or(Value::Null, |why| json!({ "why": why, "installed": record["browsers"] }));
     let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json"), "image": image, "node": node, "browser": browser, "scripts": scripts });
     Ok((volume, entry))
 }
@@ -1146,6 +1144,7 @@ pub fn setup(out: &Path, op: &crate::policy::Operator, until: u64) -> R<Value> {
         sides.insert((*side).into(), entry);
         volumes.push(volume);
     }
+    browsers(&mut sides);
     for v in &mut volumes { v.keep(); }
     let s = json!({ "version": 1, "old": sides["old"], "new": sides["new"], "tools": null });
     write_json(out.join("setup.json"), &s)?;

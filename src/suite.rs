@@ -1257,8 +1257,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             n["why"] = json!(why);
         }
     }
-    let extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds,
+    let mut extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds,
         "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
+    if !s["old"]["browser"].is_null() || !s["new"]["browser"].is_null() { extra["browser"] = json!({ "old": s["old"]["browser"], "new": s["new"]["browser"] }); }
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));

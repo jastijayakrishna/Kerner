@@ -93,6 +93,7 @@ check() {
   started=$(date +%s)
   "$K" --control verifier.json check "$W/${3:-calc}" "$2" "$(cat "$1.head")" "$W/$1" operator.json "$1.md" > "$1.json" 2> "$1.err" || { cat "$1.err"; fail "$1: kern check failed"; }
   echo "$1: $(jq -c '{decision, blocked, look, tests, behaviour}' "$1.json") in $(( $(date +%s) - started )) s"
+  [ "$(jq -r .tests "$1.json")" = RAN ] || echo "$1: tests $(jq -r .tests "$1.json") because $(jq -r '.tests.why // "no reason given"' "$1/receipt.json")"
 }
 decision() { [ "$(jq -r .decision "$1.json")" = "$2" ] || { cat "$1/receipt.md"; fail "$1: expected $2, got $(jq -r .decision "$1.json")"; }; }
 kinds() { jq -r --arg k "$2" '[.'"$3"'[] | select(.kind == $k)] | length' "$1/receipt.json"; }
@@ -568,7 +569,9 @@ cd "$W"
 check browser "$browser_base" browserrepo
 decision browser clear
 jq -e '.tests.status == "RAN" and .tests.kept == 1 and (.tests.already_failing | length == 0)' browser/receipt.json > /dev/null \
-  || { jq '.tests | {status, kept, already_failing, problem_why}' browser/receipt.json; jq '.new.browser, .old.browser' browser/setup.json 2>/dev/null; fail "browser: the test that drives Chromium did not pass on both sides"; }
+  || { jq '.tests | {status, why, kept, already_failing, problem_why, browser}' browser/receipt.json; fail "browser: the test that drives Chromium did not pass on both sides"; }
+jq -e '.tests.browser.old.playwright == ["1.49.1"] and .tests.browser.new.playwright == ["1.49.1"] and .tests.browser.new.installed == ["1.49.1"] and (.tests.browser.new.error == null)' browser/receipt.json > /dev/null \
+  || { jq '.tests.browser' browser/receipt.json; fail "browser: Chromium was not set up for the playwright-core 1.49.1 the install put on disk"; }
 fi
 
 say "Kern check removes its own sandbox volumes"
