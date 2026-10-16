@@ -932,6 +932,15 @@ fn a_project_with_no_lockfile_is_installed_with_the_package_manager_it_declares(
     let v = Temp::new();
     write(&v.0, "package.json", r#"{"name":"plain"}"#);
     assert_eq!(kern::sandbox::install_plan(&v.0).0, "npm");
+    let w = Temp::new();
+    write(&w.0, "package.json", r#"{"name":"berry","packageManager":"yarn@4.9.2"}"#);
+    write(&w.0, ".yarnrc.yml", "nodeLinker: node-modules\n");
+    let (manager, attempts) = kern::sandbox::install_plan(&w.0);
+    assert_eq!(manager, "yarn");
+    assert!(attempts.iter().all(|(argv, _)| argv.iter().any(|a| a == "--no-immutable")), "yarn 4 makes every install immutable when CI is set, so an install that must write the lockfile has to say so: {attempts:?}");
+    write(&w.0, "yarn.lock", "__metadata:\n  version: 8\n");
+    let (_, attempts) = kern::sandbox::install_plan(&w.0);
+    assert!(attempts[0].0.iter().any(|a| a == "--immutable") && attempts[1].0.iter().any(|a| a == "--no-immutable"), "a stale lockfile is rewritten on the second try: {attempts:?}");
 }
 
 #[test]
@@ -1048,4 +1057,11 @@ fn a_lockfile_only_change_is_routine_when_every_version_it_moves_to_has_been_out
     let fresh = |name: &str, _: &str| if name == "c" { kern::deps::rfc3339("2026-10-15T12:00:00Z") } else { kern::deps::rfc3339("2026-09-01T00:00:00Z") };
     let hot = kern::receipt::build(&d, &full(aged(rules(moves), now, &fresh, &|_| false)), &tests, &off);
     assert!(hot["look"].as_array().unwrap().iter().any(|x| x["kind"] == "fresh-release" && x["what"].as_str().unwrap().contains("c@3.1.0")), "a brand-new release deep in the tree is named: {hot}");
+}
+
+#[test]
+fn the_package_manager_kern_downloads_runs_outside_the_project_so_its_package_json_cannot_change_how_it_loads() {
+    let home = kern::sandbox::INSTALL_ENV.iter().find(|(k, _)| *k == "COREPACK_HOME").map(|(_, v)| *v).unwrap();
+    assert!(!home.starts_with("/workspace"), "apify/camoufox-js#254, storybook#36653: under /workspace, the project's \"type\": \"module\" made Node load yarn 4's yarn.js as ESM and every install failed with Dynamic require of \"util\" is not supported");
+    assert!(home.starts_with("/home/kern/"), "the setup sandbox's home is its writable scratch space");
 }

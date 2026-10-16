@@ -510,6 +510,21 @@ decision types-fine clear
 jq -e '.tests.types.projects[0].result == "same" and .tests.types.projects[0].version == "5.6.3"' types-fine/receipt.json > /dev/null \
   || { jq .tests.types types-fine/receipt.json; fail "types-fine: the type check did not run on both sides"; }
 
+say "A yarn 4 project whose package.json says type module installs: the yarn Kern downloads runs outside the project"
+git init -q berryrepo && cd berryrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"berry","version":"1.0.0","private":true,"type":"module","packageManager":"yarn@4.9.2","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' 'nodeLinker: node-modules' > .yarnrc.yml
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/total.test.js
+git add -A && git commit -qm base && berry_base=$(git rev-parse HEAD)
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/berry.head"
+cd "$W"
+check berry "$berry_base" berryrepo
+jq -e '.tests.status == "RAN" and .tests.kept == 1' berry/receipt.json > /dev/null || { jq .tests berry/receipt.json; jq . berry/setup.json 2>/dev/null | head -40; fail "berry: a yarn 4 project with type module did not install"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

@@ -10,6 +10,11 @@ pub const JEST_REPORT: &str = include_str!("jest-report.cjs");
 pub const JEST_PROGRESS: &str = include_str!("jest-progress.cjs");
 pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub const FAULT: &str = include_str!("fault.cjs");
+pub const INSTALL_ENV: [(&str, &str); 17] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
+    ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_HOME", "/home/kern/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
+    ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"), ("npm_config_cache", "/workspace/.kern-install/npm"),
+    ("npm_config_store_dir", "/workspace/.kern-install/pnpm-store"), ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
+    ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")];
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
@@ -255,7 +260,8 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     }
     if dir.join("yarn.lock").is_file() {
         if dir.join(".yarnrc.yml").is_file() {
-            return ("yarn", vec![(node(&[corepack, "yarn", "install", "--immutable", "--mode=skip-build"]), "installed"), (node(&[corepack, "yarn", "install", "--mode=skip-build"]), STALE)]);
+            return ("yarn", vec![(node(&[corepack, "yarn", "install", "--immutable", "--mode=skip-build"]), "installed"),
+                (node(&[corepack, "yarn", "install", "--no-immutable", "--mode=skip-build"]), STALE)]);
         }
         return ("yarn", vec![(node(&[corepack, "yarn", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--ignore-engines"]), "installed"),
             (node(&[corepack, "yarn", "install", "--ignore-scripts", "--non-interactive", "--ignore-engines"]), STALE)]);
@@ -272,7 +278,7 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
         return ("pnpm", vec![(node(&[corepack, "pnpm", "install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed from package.json (the project has no lockfile)")]);
     }
     if declared == "yarn" && dir.join(".yarnrc.yml").is_file() {
-        return ("yarn", vec![(node(&[corepack, "yarn", "install", "--mode=skip-build"]), "installed from package.json (the project has no lockfile)")]);
+        return ("yarn", vec![(node(&[corepack, "yarn", "install", "--no-immutable", "--mode=skip-build"]), "installed from package.json (the project has no lockfile)")]);
     }
     if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
         return ("bun", vec![(loose, "installed from package.json (Kern does not read Bun's lockfile)")]);
@@ -768,12 +774,7 @@ mod inside {
                 if left.is_zero() { result = json!("out of time"); break; }
                 let log_file = std::fs::File::create(log)?;
                 let child = Command::new(&argv[0]).args(&argv[1..]).current_dir(&dir).env_clear()
-                    .envs([("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"), ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"),
-                        ("COREPACK_HOME", "/workspace/.kern-install/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
-                        ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"),
-                        ("npm_config_cache", "/workspace/.kern-install/npm"), ("npm_config_store_dir", "/workspace/.kern-install/pnpm-store"),
-                        ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
-                        ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")])
+                    .envs(super::INSTALL_ENV)
                     .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
                     .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
                 if wait(child, left)? { result = json!(said); break; }
