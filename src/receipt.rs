@@ -166,15 +166,10 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
             code(p["config"].as_str().unwrap_or(""), 160), shown.join(", "), if count > shown.len() { ", …" } else { "" });
         match p["uneven"].as_str() {
             _ if p["enforced"] != true => look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
+            _ if p["generated"] == true => look.push(item("types-new", format!("{what} (some are about modules or exports that a build step may generate, and Kern did not run it, so Kern does not block on them)"))),
             Some(why) => look.push(item("types-new", format!("{what} (Kern does not block on it: {})", plain(why)))),
             None => blocked.push(item("types-broke", what)),
         }
-    }
-    let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown").collect();
-    if planted.len() >= 2 && planted.iter().all(|f| f["outcome"] != "caught") {
-        let example = planted.first().map(|f| format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or(""))).unwrap_or_default();
-        look.push(item("untested-change", format!("No test noticed any of the {} small faults Kern planted in the changed lines (such as {}), so the tests do not check this change",
-            planted.len(), code(&example, 200))));
     }
     look.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests",
         "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests"));

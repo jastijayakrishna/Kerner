@@ -114,6 +114,32 @@ fn spec_major(spec: &str) -> Option<u64> {
 }
 pub fn supported_major(m: u64) -> u64 { NODE_MAJORS.iter().copied().find(|s| *s >= m).unwrap_or(NODE_MAJORS[NODE_MAJORS.len() - 1]) }
 pub fn wanted_major(read: &dyn Fn(&str) -> Option<String>, workflows: &[String]) -> Option<(u64, String)> {
+    let package = read("package.json").and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let range = package.as_ref().and_then(|p| p["engines"]["node"].as_str()).map(str::to_string);
+    let allowed = |m: u64| range.as_deref().is_none_or(|r| satisfies(r, (m, 999, 999)) != Some(false));
+    let chosen = declared(read, workflows, package.as_ref());
+    match (chosen, &range) {
+        (Some((m, from)), _) if allowed(m) => Some((m, from)),
+        (_, Some(r)) => {
+            let m = if allowed(22) { 22 } else { NODE_MAJORS.iter().copied().find(|m| allowed(*m))? };
+            Some((m, format!("package.json's engines.node is {r}")))
+        }
+        (chosen, None) => chosen,
+    }
+}
+fn declared(read: &dyn Fn(&str) -> Option<String>, workflows: &[String], package: Option<&serde_json::Value>) -> Option<(u64, String)> {
+    let mut ci: Vec<u64> = Vec::new();
+    for w in workflows {
+        for l in w.lines().map(str::trim) {
+            let Some(value) = l.strip_prefix("node-version:").or_else(|| l.strip_prefix("node_version:")).map(|v| v.split(" #").next().unwrap_or(v).trim()) else { continue };
+            if value.contains("${{") { continue; }
+            ci.extend(value.trim_matches(['[', ']']).split(',').filter_map(spec_major));
+        }
+    }
+    if !ci.is_empty() {
+        let m = if ci.contains(&22) { 22 } else { *ci.iter().max()? };
+        return Some((supported_major(m), format!("the CI workflow sets up Node {m}")));
+    }
     let first = |t: &str| t.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string);
     for f in [".nvmrc", ".node-version"] {
         if let Some(line) = read(f).as_deref().and_then(first) && let Some(m) = spec_major(&line) { return Some((supported_major(m), format!("{f} says {line}"))); }
@@ -124,24 +150,8 @@ pub fn wanted_major(read: &dyn Fn(&str) -> Option<String>, workflows: &[String])
             if matches!(w.next(), Some("nodejs" | "node")) && let Some(v) = w.next() && let Some(m) = spec_major(v) { return Some((supported_major(m), format!(".tool-versions says {v}"))); }
         }
     }
-    let package = read("package.json").and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    if let Some(v) = package.as_ref().and_then(|p| p["volta"]["node"].as_str()) && let Some(m) = spec_major(v) { return Some((supported_major(m), format!("package.json's volta.node is {v}"))); }
-    if let Some(range) = package.as_ref().and_then(|p| p["engines"]["node"].as_str()) {
-        let fits = |m: u64| satisfies(range, (m, 999, 999)) == Some(true);
-        if fits(22) { return Some((22, format!("package.json's engines.node is {range}"))); }
-        if let Some(m) = NODE_MAJORS.iter().copied().find(|m| fits(*m)) { return Some((m, format!("package.json's engines.node is {range}"))); }
-    }
-    let mut ci: Vec<u64> = Vec::new();
-    for w in workflows {
-        for l in w.lines().map(str::trim) {
-            let Some(value) = l.strip_prefix("node-version:").or_else(|| l.strip_prefix("node_version:")).map(str::trim) else { continue };
-            if value.contains("${{") { continue; }
-            ci.extend(value.trim_matches(['[', ']']).split(',').filter_map(spec_major));
-        }
-    }
-    if ci.is_empty() { return None; }
-    let m = if ci.contains(&22) { 22 } else { *ci.iter().max()? };
-    Some((supported_major(m), format!("the CI workflow sets up Node {m}")))
+    if let Some(v) = package.and_then(|p| p["volta"]["node"].as_str()) && let Some(m) = spec_major(v) { return Some((supported_major(m), format!("package.json's volta.node is {v}"))); }
+    None
 }
 pub fn lowest(range: &str) -> Option<Version> {
     let mut low: Option<Version> = None;

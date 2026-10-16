@@ -72,3 +72,15 @@ fn the_receipt_says_which_node_ran() {
         .contains("asks for Node 26"));
     assert!(!md(tests(json!({ "major": 22 }), json!({ "major": 22 }))).contains("Node:"), "nothing to say when the project names no version");
 }
+
+#[test]
+fn the_node_the_projects_ci_runs_comes_first_and_never_one_its_engines_forbid() {
+    let ci = |text: &str| vec![text.to_string()];
+    let workers = files(&[("package.json", r#"{"volta":{"node":"20.19.3"},"engines":{"node":">=20"}}"#)]);
+    assert_eq!(wanted_major(&workers, &ci("      - uses: actions/setup-node@v4\n        with:\n          node-version: 22 # need this version for `Set` methods\n")).map(|(m, _)| m), Some(22),
+        "cloudflare/workers-sdk pins volta 20 but tests on 22; on 20 its tests gave no results");
+    let strict = files(&[("package.json", r#"{"engines":{"node":">=22"}}"#)]);
+    assert_eq!(wanted_major(&strict, &ci("node-version: 20\n")).map(|(m, _)| m), Some(22), "a version engines.node forbids is never chosen");
+    let old_pin = files(&[(".nvmrc", "18"), ("package.json", r#"{"engines":{"node":">=20"}}"#)]);
+    assert_eq!(wanted_major(&old_pin, &[]).map(|(m, _)| m), Some(22));
+}

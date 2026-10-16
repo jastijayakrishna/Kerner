@@ -104,3 +104,16 @@ fn the_type_check_asks_the_sandbox_only_for_what_a_test_run_may_have() {
     assert_eq!(kern::sandbox::test_dir(spec["cwd"].as_str().unwrap()).unwrap(), "/workspace/packages/app");
     assert_eq!(kern::sandbox::test_dir(kern::types::spec("tsconfig.json", 420)["cwd"].as_str().unwrap()).unwrap(), "/workspace");
 }
+
+#[test]
+fn a_new_error_about_a_module_or_an_export_needs_a_look_because_a_build_step_may_generate_it() {
+    let clean = json!({ "status": "clean", "version": "5.6.3" });
+    let generated = side("kern-types: typescript 5.6.3\napps/web/jest.integration.setup.ts(1,10): error TS2305: Module '\"@repo/database\"' has no exported member 'PrismaClient'.\nkern-types: exit 2 \n", "");
+    let p = judge("apps/web/tsconfig.json", &clean, &generated, true, None);
+    assert_eq!(p["generated"], true);
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let r = receipt::build(&d, &rules, &json!({ "status": "NOT_RUN", "why": "x", "types": { "status": "CHECKED", "projects": [p] } }), &json!({ "status": "OFF", "why": "no AI key" }));
+    assert_eq!(r["decision"], "look", "tuliren/turbo-template#29 imported PrismaClient, which prisma generate makes in the project's CI and Kern never ran: blocking it was wrong: {r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("a build step may generate"));
+}

@@ -12,6 +12,14 @@ fn faults_are_planted_only_in_the_lines_a_change_touches() {
 }
 
 #[test]
+fn faults_are_planted_only_in_product_code() {
+    for p in [".github/pr-webhook-utils.cjs", "scripts/post-evalite-results.ts", "apps/examples/src/flex.tsx", "docs/app.js", "vite.config.ts", "src/button.stories.tsx", "e2e/login.ts"] {
+        assert!(!kern::suite::product_code(p), "{p}");
+    }
+    for p in ["src/auth/provider.ts", "packages/core/src/index.ts", "app/editor/menus/block.tsx", "lib/total.js"] { assert!(kern::suite::product_code(p), "{p}"); }
+}
+
+#[test]
 fn a_fault_that_only_puts_back_the_old_line_is_not_planted() {
     let file = |old: &str, new: &str| vec![("src/a.js".to_string(), old.to_string(), new.to_string())];
     let back = kern::suite::faults(&file("export const f = (a) => a >= 1;\n", "export const f = (a) => a > 1;\n"), 6);
@@ -74,8 +82,8 @@ fn faults_no_test_noticed_are_named_and_a_change_no_test_checks_needs_a_look() {
         "faults": outcomes.iter().enumerate().map(|(i, o)| json!({ "path": "src/price.js", "line": i + 2, "what": "changes > to >=", "outcome": o })).collect::<Vec<_>>() });
     let off = json!({ "status": "OFF", "why": "no AI key" });
     let none = receipt::build(&d, &rules, &tests(&["missed", "untested", "missed"]), &off);
-    assert!(none["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change"), "{none}");
-    assert_eq!(none["decision"], "look");
+    assert_eq!(none["decision"], "clear", "no test checking a change is shown, not a look: 14 of 118 real pull requests changed code no test reaches, many of them CI scripts and examples: {none}");
+    assert!(receipt::markdown(&none, None).contains("the tests caught 0 of 3 small faults"));
     let some = receipt::build(&d, &rules, &tests(&["caught", "missed", "caught"]), &off);
     assert!(!some["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change"));
     let md = receipt::markdown(&some, None);

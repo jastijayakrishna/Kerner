@@ -481,10 +481,10 @@ for runner in vitest jest; do
   grep -q 'the tests caught 1 of 2 small faults' "faults-some-$runner/receipt.md" && grep -q 'src/price.js:2' "faults-some-$runner/receipt.md" \
     || { cat "faults-some-$runner/receipt.md"; fail "faults-some-$runner: the receipt does not say which planted fault no test noticed"; }
   check "faults-none-$runner" "$faults_base" "faults-$runner-repo"
-  decision "faults-none-$runner" look
+  decision "faults-none-$runner" clear
   jq -e '[.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort == ["src/price.js:2 missed", "src/ship.js:1 untested"]' "faults-none-$runner/receipt.json" > /dev/null \
     || { jq .tests "faults-none-$runner/receipt.json"; fail "faults-none-$runner: a change no test checks was not found"; }
-  [ "$(kinds "faults-none-$runner" untested-change look)" = 1 ] || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: a change no test checks does not need a look"; }
+  grep -q 'the tests caught 0 of 2 small faults' "faults-none-$runner/receipt.md" || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: the receipt does not say no test checks the change"; }
 done
 
 say "A change that brings TypeScript errors to a project that type-checked clean is blocked, even when its tests still pass"

@@ -6,6 +6,7 @@ use std::path::Path;
 
 pub const CHECK: &str = "const{spawnSync}=require('child_process'),path=require('path'),os=require('os');const config=process.argv[1],dir=path.dirname(config);let tsc;try{tsc=require.resolve('typescript/bin/tsc',{paths:[dir]})}catch{process.stdout.write('kern-types: no typescript\\n');process.exit(0)}const heap=Math.max(1024,Math.floor(os.totalmem()/1048576*0.7));const run=(a)=>spawnSync(process.execPath,['--max-old-space-size='+heap,tsc,...a],{cwd:dir,encoding:'utf8',maxBuffer:1<<28});let o={};try{o=JSON.parse(run(['--showConfig','-p',config]).stdout).compilerOptions||{}}catch{}const a=['--noEmit','-p',config,'--pretty','false'];if(o.incremental||o.composite)a.push('--tsBuildInfoFile','/tmp/.kern-tsbuildinfo');const r=run(a);let v='';try{v=require(path.join(path.dirname(tsc),'..','package.json')).version}catch{}process.stdout.write('kern-types: typescript '+v+'\\n'+(r.stdout||'')+'\\nkern-types: exit '+r.status+' '+(r.signal||'')+'\\n')";
 const MAX_PROJECTS: usize = 2;
+const RESOLUTION: [&str; 12] = ["TS2307", "TS2305", "TS2724", "TS2614", "TS2694", "TS7016", "TS2792", "TS2306", "TS2688", "TS6053", "TS2503", "TS2709"];
 const LOCKS: [&str; 6] = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +150,7 @@ pub fn judge(config: &str, old: &Value, new: &Value, enforced: bool, even: Optio
             p["added"] = json!(fresh.iter().take(20).map(Diag::json).collect::<Vec<_>>());
             p["count"] = json!(fresh.len());
             p["enforced"] = json!(enforced);
+            if fresh.iter().any(|d| RESOLUTION.contains(&d.code.as_str())) { p["generated"] = json!(true); }
             if let Some(why) = even { p["uneven"] = json!(why); }
         }
         (Some("errors"), _) => { p["result"] = "not-compared".into(); p["why"] = json!(format!("it already had {} TypeScript errors here on the old code", old["errors"].as_u64().unwrap_or(0))); }

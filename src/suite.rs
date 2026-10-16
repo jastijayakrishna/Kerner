@@ -845,6 +845,12 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
     Ok(log)
 }
+const NOT_PRODUCT: [&str; 19] = ["node_modules", ".github", "scripts", "script", "examples", "example", "docs", "doc", "demo", "demos", "benchmark", "benchmarks", "bench",
+    "fixtures", "__fixtures__", "e2e", "playground", "playgrounds", ".storybook"];
+pub fn product_code(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    !path.split('/').any(|s| NOT_PRODUCT.contains(&s)) && !name.contains(".config.") && !name.contains(".stories.") && !name.contains(".story.")
+}
 pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::proof::Mutant> {
     let mut per_file: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| {
         let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
@@ -1212,7 +1218,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         if matches!(suite.new.0.runner, Runner::Jest | Runner::Vitest) && c["status"] == "RAN" && within(until, 900) >= 300 && std::env::var("KERN_FAULTS").as_deref() != Ok("0") {
             let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
             let files: Vec<(String, String, String)> = changes.iter()
-                .filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && !p.split('/').any(|s| s == "node_modules"))
+                .filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p))
                 .take(20).filter_map(|(p, _)| Some((p.clone(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
             let planted = faults(&files, 6);
             let mut kept_faults = Vec::new();

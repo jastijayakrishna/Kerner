@@ -255,6 +255,7 @@ pub fn first_error(text: &str) -> Option<&str> {
 }
 const STALE: &str = "installed from package.json (the lockfile is out of date)";
 pub const UNSCRIPTED: &str = "installed without its packages' install scripts, because they failed";
+pub const COREPACK: &str = "corepack@0.36.0";
 pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
     let (manager, attempts) = install_plan(dir);
     if !scripts { return (manager, attempts); }
@@ -416,7 +417,7 @@ pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<Strin
     for grant in spec.writable {
         a.extend(["--tmpfs".into(), format!("/workspace/{}:rw,nosuid,nodev,size={},uid=1000,gid=1000,mode=0700", grant.trim_end_matches('/'), l.total_bytes)]);
     }
-    if spec.home_mb > 0 { a.extend(["--tmpfs".into(), format!("/home/kern:rw,nosuid,nodev,size={}m,mode=0700", spec.home_mb)]); }
+    if spec.home_mb > 0 { a.extend(["--tmpfs".into(), format!("/home/kern:rw,exec,nosuid,nodev,size={}m,mode=0700", spec.home_mb)]); }
     for (volume, target, readonly) in &spec.volumes {
         a.extend(["--mount".into(), format!("type=volume,source={volume},target={target}{}", if *readonly { ",readonly" } else { "" })]);
         for dir in CACHE_DIRS.iter().filter(|_| *readonly && *target == "/workspace/node_modules") {
@@ -811,7 +812,16 @@ mod inside {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
             if d != "." && dir.join("node_modules").exists() { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
-            let (manager, attempts) = super::install_plan_for(&dir, scripts);
+            let (manager, mut attempts) = super::install_plan_for(&dir, scripts);
+            let bundled = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
+            if attempts.iter().any(|(argv, _)| argv.iter().any(|a| a == bundled)) && !Path::new(bundled).exists() {
+                let own = scratch.join("corepack/node_modules/corepack/dist/corepack.js");
+                if !own.exists() {
+                    let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &scratch.join("corepack").to_string_lossy(),
+                        super::COREPACK, "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier"]).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                }
+                for (argv, _) in attempts.iter_mut() { for a in argv.iter_mut() { if a == bundled { *a = own.to_string_lossy().to_string(); } } }
+            }
             let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
             if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
             let originals = if manager == "bun" { bun_rewrite(&dir)? } else { Vec::new() };

@@ -995,7 +995,10 @@ pub const BROWSER: &str = include_str!("drive-browser.mjs");
 pub const C8: &str = include_str!("drive-c8.mjs");
 pub const RUNNER: &str = include_str!("drive-run.mjs");
 fn run_limits() -> Limits { Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: 300, memory_mb: 2048, pids: 512 } }
-fn setup_limits() -> Limits { Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 1 << 20, timeout_seconds: 1800, memory_mb: 4096, pids: 1024 } }
+fn setup_limits() -> Limits {
+    let memory_mb = if crate::sandbox::throwaway() { total_mb().map_or(4096, |m| (m * 3 / 8).clamp(4096, 8192)) } else { 4096 };
+    Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 1 << 20, timeout_seconds: 1800, memory_mb, pids: 1024 }
+}
 
 pub fn linux_path(p: &str) -> bool {
     !p.is_empty() && p.len() <= 4096 && !p.starts_with('/') && !p.contains('\0') && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c != ".git")
@@ -1090,24 +1093,33 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     if tree.exists() { std::fs::remove_dir_all(&tree)?; }
     let paths = materialize(repo, commit, &tree)?;
     let read = |p: &str| std::fs::read_to_string(tree.join(p)).ok();
-    let workflows: Vec<String> = paths.iter().filter(|p| p.starts_with(".github/workflows/") && (p.ends_with(".yml") || p.ends_with(".yaml"))).filter_map(|p| read(p)).collect();
+    let workflows: Vec<String> = paths.iter().filter(|p| (p.starts_with(".github/workflows/") || p.starts_with(".github/actions/")) && (p.ends_with(".yml") || p.ends_with(".yaml")))
+        .take(100).filter_map(|p| read(p)).collect();
     let (image, node) = node_image(op, crate::nodeapi::wanted_major(&read, &workflows));
     let (image, browser) = browser_image(&image, &paths, &read);
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
-    if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds, "scripts": crate::sandbox::throwaway() }))))?;
-    let volume = crate::sandbox::Volume::create()?;
-    let mut ledger = std::fs::OpenOptions::new().create(true).append(true).open(out.join("volumes.txt"))?;
-    std::io::Write::write_all(&mut ledger, format!("{}\n", volume.0).as_bytes())?;
     let limits = Limits { timeout_seconds: seconds + 300, ..setup_limits() };
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &tree, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_setup".into()],
-        network: "bridge", volumes: vec![], root: true, home_mb: 2048, scratch: false, workspace: Some((&volume.0, false)) })?;
+    let attempt = |scripts: bool| -> R<(crate::sandbox::Volume, crate::sandbox::Execution)> {
+        if control.exists() { std::fs::remove_dir_all(&control)?; }
+        crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds, "scripts": scripts }))))?;
+        let volume = crate::sandbox::Volume::create()?;
+        let mut ledger = std::fs::OpenOptions::new().create(true).append(true).open(out.join("volumes.txt"))?;
+        std::io::Write::write_all(&mut ledger, format!("{}\n", volume.0).as_bytes())?;
+        let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &tree, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_setup".into()],
+            network: "bridge", volumes: vec![], root: true, home_mb: 2048, scratch: false, workspace: Some((&volume.0, false)) })?;
+        Ok((volume, run))
+    };
+    let scripts = crate::sandbox::throwaway();
+    let (volume, run, scripts) = match attempt(scripts) {
+        Err(e) if scripts && (e.0.contains("out of memory") || e.0.contains("exceeded limits")) => { let (v, r) = attempt(false)?; (v, r, false) }
+        other => { let (v, r) = other?; (v, r, scripts) }
+    };
     ensure!(run.exit_code == 0, "Setting up the {side} code failed in the sandbox (exit code {})", run.exit_code);
     let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
     let _ = std::fs::remove_dir_all(&tree);
     let _ = std::fs::remove_dir_all(&control);
-    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json"), "image": image, "node": node, "browser": browser });
+    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json"), "image": image, "node": node, "browser": browser, "scripts": scripts });
     Ok((volume, entry))
 }
 
