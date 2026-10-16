@@ -7,7 +7,9 @@ use std::path::Path;
 
 const FOLDERS: [&str; 11] = ["test", "tests", "__tests__", "spec", "specs", "e2e", "__e2e__", "cypress", "playwright", "__mocks__", "__fixtures__"];
 const NAMES: [&str; 4] = [".test.", ".spec.", ".e2e.", ".cy."];
-const TIMEOUT_SECONDS: u64 = 900;
+pub fn test_seconds() -> u64 {
+    std::env::var("KERN_TEST_MINUTES").ok().and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| (1..=60).contains(m)).unwrap_or(15) * 60
+}
 pub const REPORT: &str = "/tmp/.kern-report.json";
 
 pub fn test_command(tests: &Tests) -> Vec<String> {
@@ -138,8 +140,41 @@ pub fn focused(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
             t.command.extend(files.iter().map(|f| format!("/workspace/{f}")));
         }
         Runner::Vitest => {
-            if tests.command.iter().skip(2).any(|a| !a.starts_with('-')) { return None; }
+            if positionals(tests.command.get(2..).unwrap_or_default()) { return None; }
             for f in files { t.command.push(f.strip_prefix(&prefix)?.to_string()); }
+        }
+        Runner::Mocha | Runner::Node => return None,
+    }
+    Some(t)
+}
+
+fn positionals(args: &[String]) -> bool {
+    let mut value = false;
+    for a in args {
+        if a.starts_with('-') { value = !a.contains('='); continue; }
+        if !value { return true; }
+        value = false;
+    }
+    false
+}
+
+pub fn related(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tests> {
+    if files.is_empty() || files.len() > FOCUS { return None; }
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let mut t = tests.clone();
+    match tests.runner {
+        Runner::Jest => {
+            t.command.push("--findRelatedTests".into());
+            t.command.extend(files.iter().map(|f| format!("/workspace/{f}")));
+        }
+        Runner::Vitest => {
+            let args = tests.command.get(2..).unwrap_or_default();
+            if tests.command.get(1).map(String::as_str) != Some("run") || positionals(args) { return None; }
+            let mut c = vec![tests.command[0].clone(), "related".to_string()];
+            for f in files { c.push(f.strip_prefix(&prefix)?.to_string()); }
+            c.push("--run".into());
+            c.extend(args.iter().cloned());
+            t.command = c;
         }
         Runner::Mocha | Runner::Node => return None,
     }
@@ -267,9 +302,10 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
 pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Late }
 
 fn run_side(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
-    let seconds = within(until, TIMEOUT_SECONDS);
+    let limit = test_seconds();
+    let seconds = within(until, limit);
     if seconds < 60 { return Ok(Side::Late); }
-    let cut = seconds < TIMEOUT_SECONDS;
+    let cut = seconds < limit;
     let control = out.join(format!("tests-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
     crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env }))))?;
@@ -291,7 +327,7 @@ fn run_side(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env
     };
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
-    if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", TIMEOUT_SECONDS / 60)) }); }
+    if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", limit / 60)) }); }
     if parts["ending"] == b"exit -1" { return Ok(Side::Nothing("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
@@ -366,6 +402,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
     let mut late = false;
+    let changes = crate::rules::changed(repo, base, head)?;
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
     let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
@@ -374,19 +411,39 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let new_side = (&suite.new.0, &suite.new.1);
         let first = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new{label}"), until)?;
         timed(format!("new{label}"), at);
+        let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
+        let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
+        let narrowed = match (&first, &suite.old) {
+            (Side::Slow(_), Some((t, e))) => related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)).map(|(n, o)| (n, o, e)),
+            _ => None,
+        };
+        let (first, whole_new) = match &narrowed {
+            Some((n, _, _)) => {
+                let at = now_ms();
+                let r = run_side(out, op, &volume("new"), (n, &suite.new.1), &suite.dir, &format!("new-related{label}"), until)?;
+                timed(format!("new-related{label}"), at);
+                (r, (n, &suite.new.1))
+            }
+            None => (first, new_side),
+        };
         let at = now_ms();
-        let old_run = match &suite.old {
-            None => None,
-            Some((t, env)) if !matches!(first, Side::Late) => {
+        let old_run = match (&suite.old, &narrowed) {
+            (None, _) => None,
+            (Some(_), Some((_, o, e))) if !matches!(first, Side::Late) => {
+                let run = run_side(out, op, &volume("old"), (o, e), &suite.dir, &format!("old-related{label}"), until)?;
+                timed(format!("old-related{label}"), at);
+                Some(run)
+            }
+            (Some((t, env)), None) if !matches!(first, Side::Late) => {
                 let run = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old{label}"), until)?;
                 timed(format!("old{label}"), at);
                 Some(run)
             }
-            Some(_) => Some(Side::Late),
+            (Some(_), _) => Some(Side::Late),
         };
         let old_seconds = (now_ms() - at) / 1000;
         if matches!(first, Side::Late) || matches!(old_run, Some(Side::Late)) { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-        let slow = matches!(first, Side::Slow(_)) && old_seconds * 3 > TIMEOUT_SECONDS;
+        let slow = matches!(first, Side::Slow(_)) && old_seconds * 3 > test_seconds();
         let new = match first {
             Side::Ran(r, created) => { wrote_code.extend(created); r }
             Side::Nothing(why) | Side::Slow(why) => {
@@ -395,7 +452,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     continue;
                 }
                 let at = now_ms();
-                let again = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until);
+                let again = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
                 timed(format!("new-again{label}"), at);
                 let cut = |why: &str| json!({ "dir": suite.dir, "why": format!("the tests{place} gave no results on the new code once, where the old code's tests ran, and {why}") });
                 match again {
@@ -424,7 +481,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             if let Some((t, e)) = &suite.old && let Some(old_alone) = focused(t, &old_files, &suite.dir) { v.push(("old-alone", "old", old_alone, e)); }
             v
         } else {
-            vec![("new-again", "new", suite.new.0.clone(), &suite.new.1)]
+            vec![("new-again", "new", whole_new.0.clone(), whole_new.1)]
         };
         let (mut second, mut second_old, mut unconfirmed) = (None, None, false);
         for (name, side, tests, env) in &plan {
@@ -441,7 +498,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         if !unconfirmed && plan.first().is_some_and(|p| p.0 == "new-alone") && second.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
             let at = now_ms();
-            let r = run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new-again{label}"), until);
+            let r = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
             timed(format!("new-again{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) => { wrote_code.extend(created); second = Some(match second { Some(g) => worse(&g, &r), None => r }); }
@@ -470,7 +527,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
         kept += c["kept"].as_u64().unwrap_or(0);
-        ran.push(if suite.dir.is_empty() { runner.name().to_string() } else { format!("{} in {}", runner.name(), suite.dir) });
+        let only = if narrowed.is_some() { format!(", only the tests related to the change: the whole suite takes over {} minutes", test_seconds() / 60) } else { String::new() };
+        ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
     }
     let extra = json!({ "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds });
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };

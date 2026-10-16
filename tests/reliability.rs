@@ -462,3 +462,18 @@ fn a_receipt_never_says_tests_still_pass_when_no_test_could_load_on_the_old_code
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &c, &off()), None);
     assert!(!md.contains("still pass"), "{md}");
 }
+
+#[test]
+fn a_suite_too_big_for_the_time_limit_runs_only_the_tests_related_to_the_change() {
+    let files: std::collections::BTreeSet<String> = ["packages/web/src/cart.ts".to_string(), "packages/web/src/total.ts".to_string()].into();
+    let tests = |runner: policy::Runner, command: &[&str]| policy::Tests { paths: Vec::new(), kind: policy::Kind::Feature, runner, command: command.iter().map(|s| s.to_string()).collect(), edits: policy::Edits::Checked };
+    let jest = suite::related(&tests(policy::Runner::Jest, &["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js"]), &files, "packages/web").unwrap();
+    assert_eq!(jest.command, ["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js", "--findRelatedTests", "/workspace/packages/web/src/cart.ts", "/workspace/packages/web/src/total.ts"]);
+    let vitest = suite::related(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "--project", "unit"]), &files, "packages/web").unwrap();
+    assert_eq!(vitest.command, ["/workspace/node_modules/.bin/vitest", "related", "src/cart.ts", "src/total.ts", "--run", "--project", "unit"]);
+    assert!(suite::related(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "tests/unit"]), &files, "packages/web").is_none(), "a script that already filters files is not narrowed");
+    assert!(suite::related(&tests(policy::Runner::Mocha, &["/workspace/node_modules/.bin/mocha"]), &files, "").is_none());
+    assert!(suite::related(&tests(policy::Runner::Jest, &["/workspace/node_modules/.bin/jest"]), &std::collections::BTreeSet::new(), "").is_none(), "no changed code, nothing related");
+    let focus = suite::focused(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "--project", "unit"]), &files, "packages/web");
+    assert!(focus.is_some(), "an option's value is not a file filter");
+}

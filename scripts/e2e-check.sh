@@ -204,6 +204,18 @@ check missing "$base"
 decision missing blocked
 grep -q 'not installed' missing/receipt.md && [ "$(kinds missing settings look)" = 1 ] || { cat missing/receipt.md; fail "missing: the receipt does not say the runner is missing, or the script change is not a settings item"; }
 
+say "A suite too big for the time limit is checked with the tests related to the change"
+git -C calc checkout -q -b big "$base"
+printf '%s\n' "import { test } from 'vitest';" '' "test('takes its time', async () => { await new Promise((r) => setTimeout(r, 150000)); }, 200000);" > calc/test/slow.test.js
+git -C calc add -A && git -C calc commit -qm "A slow test" && big_base=$(git -C calc rev-parse HEAD)
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' calc/src/total.js
+git -C calc commit -qam "Shorter names" && git -C calc rev-parse HEAD > big.head && git -C calc checkout -q "$base"
+export KERN_TEST_MINUTES=1
+check big "$big_base"
+unset KERN_TEST_MINUTES
+decision big clear
+jq -e '.tests.status == "RAN" and .tests.kept == 3 and (.tests.runner | test("related to the change"))' big/receipt.json > /dev/null || { jq .tests big/receipt.json; fail "big: the related tests did not run in place of the whole suite"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
