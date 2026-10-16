@@ -501,3 +501,17 @@ fn a_report_whose_test_titles_cut_an_emoji_in_half_is_still_read() {
     assert_eq!(keys.len(), 2, "{keys:?}");
     assert!(keys.iter().any(|k| k.ends_with("\u{1f600}\u{1f600}\u{1f600}\u{fffd} ...")) && keys.iter().any(|k| k.ends_with("keeps \u{1f600} pairs and \\ud83d text")), "{keys:?}");
 }
+
+#[test]
+fn a_change_to_tests_and_docs_alone_puts_nothing_back_and_raises_no_test_data_look() {
+    let t = Temp::new();
+    let test = "import { total } from '../src/total.js';\nimport { items } from './helpers.js';\nimport { test, expect } from 'vitest';\ntest('adds', () => expect(total(items())).toBe(3));\n";
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"shop","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#),
+        ("src/total.js", "export const total = (xs) => xs.reduce((a, b) => a + b, 0);\n"), ("test/helpers.js", "export const items = () => [1, 2];\n"), ("test/total.test.js", test), ("README.md", "# shop\n")]);
+    let head = commit(&r, &[("test/helpers.js", "export const items = () => [1, 2];\nexport const none = () => [];\n"), ("test/total.test.js", &format!("{test}test('adds none', () => expect(total([])).toBe(0));\n")),
+        ("README.md", "# shop\n\nAdds things.\n")]);
+    let old = report(&[("test/total.test.js > adds", 1, 0, 0)], &[]);
+    let keep = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, |_| true);
+    assert!(keep.run.is_empty() && keep.data.is_empty() && keep.skipped.is_empty(),
+        "the change adds a test, a helper and a line to the README; no code changes, so the old tests on the new code are the old tests on the old code, which passed: nothing to put back and nothing to look at: run {:?} data {:?}", keep.run, keep.data);
+}

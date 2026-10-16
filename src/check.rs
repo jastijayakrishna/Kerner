@@ -12,7 +12,7 @@ pub fn minutes() -> u64 { std::env::var("KERN_CHECK_MINUTES").ok().and_then(|m| 
 
 const DOCS: [&str; 13] = ["md", "mdx", "markdown", "txt", "rst", "adoc", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf"];
 const DOC_NAMES: [&str; 7] = ["license", "licence", "changelog", "authors", "contributors", "codeowners", "notice"];
-fn documentation(path: &str) -> bool {
+pub fn documentation(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
     DOCS.contains(&ext) || (DOC_NAMES.contains(&stem) && ext.is_empty())

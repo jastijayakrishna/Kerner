@@ -273,7 +273,7 @@ fn snapshot_owner(path: &str) -> Option<String> {
 pub fn kept_plan(repo: &Path, (base, head): (&str, &str), changes: &[(String, &'static str)], old: &Report, inside: impl Fn(&str) -> bool) -> Kept {
     let mut k = Kept::default();
     let ran: BTreeSet<&str> = old.tests.iter().filter(|(_, c)| c.passed > 0).map(|(k, _)| file_of(k)).collect();
-    if ran.is_empty() || changes.iter().all(|(p, _)| is_test_path(p)) { return k; }
+    if ran.is_empty() || changes.iter().all(|(p, _)| is_test_path(p) || crate::check::documentation(p)) { return k; }
     let moved: std::collections::BTreeMap<String, bool> = crate::rules::renames(repo, base, head).unwrap_or_default().into_iter().map(|(from, _, same)| (from, same)).collect();
     let gone: BTreeSet<&str> = changes.iter().filter(|(p, op)| *op == "delete" && !moved.contains_key(p)).map(|(p, _)| p.as_str()).collect();
     let test_named = |p: &str| { let n = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase(); NAMES.iter().any(|m| n.contains(m)) };
