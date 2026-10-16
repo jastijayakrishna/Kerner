@@ -64,6 +64,12 @@ fn dependency_file(p: &str) -> bool {
     let b = base_name(p).to_ascii_lowercase();
     DEPENDENCY_FILES.contains(&b.as_str()) || (b.starts_with("requirements") && b.ends_with(".txt"))
 }
+fn harmless_note(p: &str) -> bool {
+    let (lower, base) = (p.to_ascii_lowercase(), base_name(p).to_ascii_lowercase());
+    [".md", ".mdx", ".txt"].iter().any(|e| base.ends_with(e)) || [".env.example", ".env.sample", ".env.template", ".env.dist"].contains(&base.as_str())
+        || lower.starts_with(".github/issue_template/")
+}
+const METADATA: [&str; 9] = ["version", "description", "keywords", "homepage", "repository", "bugs", "author", "contributors", "funding"];
 fn agent_note(p: &str) -> bool { AGENT_NOTES.contains(&base_name(p)) || p.split('/').next().is_some_and(|d| AGENT_FOLDERS.contains(&d)) }
 
 pub fn changed(repo: &Path, base: &str, head: &str) -> R<Vec<(String, &'static str)>> {
@@ -165,7 +171,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let changes = changed(repo, base, head)?;
     let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
     let pick = |f: fn(&str) -> bool| -> Vec<Value> { changes.iter().filter(|(p, _)| f(p)).map(|(p, op)| json!({ "path": p, "operation": op })).collect() };
-    let protected = pick(|p| crate::git::protected(p) && !dependency_file(p) && !agent_note(p));
+    let protected = pick(|p| crate::git::protected(p) && !dependency_file(p) && !agent_note(p) && !harmless_note(p));
     let mut dependencies = pick(dependency_file);
     let agent_notes = pick(agent_note);
     let inspected: Vec<&(String, &str)> = changes.iter().filter(|(p, op)| *op != "delete" && (is_code(p) || is_data(p))).collect();
@@ -303,8 +309,9 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if base_name(&p) == "package.json" && let Some(b) = &b {
             let moved = crate::deps::moves(&a, b);
             if !moved.is_empty() { d["packages"] = json!(moved); }
-            let fields = package_fields(&a, b);
+            let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| !METADATA.contains(&f.as_str())).collect();
             if !fields.is_empty() { d["fields"] = json!(fields); }
+            if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }
         }
         if npm_lockfile(&p) && d["operation"] != "delete" {
             match b {
@@ -313,6 +320,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             }
         }
     }
+    dependencies.retain(|d| d.get("harmless").is_none());
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "not_checked": not_checked }))
