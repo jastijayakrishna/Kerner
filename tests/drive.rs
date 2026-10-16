@@ -893,3 +893,13 @@ fn the_comment_says_when_dependencies_could_not_be_installed() {
     let comment = drive::comment(&d, &report);
     assert!(comment.contains("could not be installed") && comment.contains("@acme/private"), "{comment}");
 }
+
+#[test]
+fn a_yarnrc_keeps_only_the_settings_yarn_itself_knows_once_its_plugins_are_gone() {
+    let rc = "plugins:\n  - path: .yarn/plugins/after.cjs\nafterInstall: yarn build\nenableTelemetry: false\nnpmScopes:\n  acme:\n    npmRegistryServer: \"https://npm.acme.test\"\npackageExtensions:\n  \"left-pad@*\":\n    dependencies:\n      lodash: \"*\"\n\"supportedArchitectures\":\n  cpu: [x64]\n";
+    let clean = kern::sandbox::yarnrc_without_code(rc);
+    assert!(!clean.contains("afterInstall"), "OneKey's afterInstall comes from a plugin Kern removes, and yarn refuses a setting it does not know: {clean}");
+    for kept in ["enableTelemetry: false", "npmScopes:", "npm.acme.test", "packageExtensions:", "lodash", "supportedArchitectures", "cpu: [x64]"] {
+        assert!(clean.contains(kept), "{kept}: {clean}");
+    }
+}

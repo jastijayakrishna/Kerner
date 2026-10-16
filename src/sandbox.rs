@@ -165,14 +165,68 @@ impl Drop for Volume {
     fn drop(&mut self) { if !self.1 { remove_volume(&self.0); } }
 }
 pub fn volume_exists(name: &str) -> bool { docker(&["volume", "inspect", name], Duration::from_secs(60), 1 << 20).is_ok() }
+const YARN_SETTINGS: [&str; 92] = ["approvedGitRepositories", "cacheFolder", "cacheMigrationMode", "changesetBaseRefs", "changesetIgnorePatterns", "checksumBehavior",
+    "cloneConcurrency", "compressionLevel", "constraintsPath", "defaultLanguageName", "defaultProtocol", "defaultSemverRangePrefix", "deferredVersionFolder", "enableColors",
+    "enableConstraintsChecks", "enableGlobalCache", "enableHardenedMode", "enableHyperlinks", "enableImmutableCache", "enableImmutableInstalls", "enableInlineBuilds",
+    "enableInlineHunks", "enableMessageNames", "enableMirror", "enableNetwork", "enableOfflineMode", "enableProgressBars", "enableScripts", "enableStrictSsl",
+    "enableTelemetry", "enableTimers", "enableTransparentWorkspaces", "globalFolder", "httpProxy", "httpRetry", "httpTimeout", "httpsCaFilePath", "httpsCertFilePath",
+    "httpsKeyFilePath", "httpsProxy", "ignoreCwd", "immutablePatterns", "initFields", "initScope", "initEditorConfig", "injectEnvironmentFiles", "installStatePath",
+    "lockfileFilename", "logFilters", "networkConcurrency", "networkSettings", "nmHoistingLimits", "nmMode", "nmSelfReferences", "nodeLinker", "npmAlwaysAuth",
+    "npmAuditExcludePackages", "npmAuditIgnoreAdvisories", "npmAuditRegistry", "npmAuthIdent", "npmAuthToken", "npmMinimalAgeGate", "npmPreapprovedPackages",
+    "npmPublishAccess", "npmPublishProvenance", "npmPublishRegistry", "npmRegistries", "npmRegistryServer", "npmScopes", "packageExtensions", "patchFolder", "pnpDataPath",
+    "pnpEnableEsmLoader", "pnpEnableInlining", "pnpFallbackMode", "pnpIgnorePatterns", "pnpMode", "pnpShebang", "pnpUnpluggedFolder", "preferDeferredVersions",
+    "preferInteractive", "preferReuse", "preferTruncatedLines", "progressBarStyle", "supportedArchitectures", "taskPoolConcurrency", "taskPoolMode", "telemetryInterval",
+    "telemetryUserId", "tsEnableAutoTypes", "unsafeHttpWhitelist", "virtualFolder"];
 pub fn yarnrc_without_code(text: &str) -> String {
     let (mut out, mut skipping) = (String::new(), false);
     for line in text.lines() {
         let top = !line.is_empty() && !line.starts_with([' ', '\t', '-', '#']);
-        if top { skipping = ["yarnPath", "plugins"].iter().any(|k| line.strip_prefix(k).is_some_and(|r| r.trim_start().starts_with(':'))); }
+        if top {
+            let key = line.split_once(':').map_or("", |(k, _)| k.trim().trim_matches(['"', '\'']));
+            skipping = !YARN_SETTINGS.contains(&key);
+        }
         if !skipping { out.push_str(line); out.push('\n'); }
     }
     out
+}
+pub fn locked_mode(mode: u32, dir: bool) -> u32 { if dir { 0o1777 } else { (mode & 0o755) | 0o444 } }
+pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> {
+    (errors.contains("Unknown option `--cache`") && command.iter().any(|a| a == "--no-cache")).then(|| command.iter().filter(|a| *a != "--no-cache").cloned().collect())
+}
+pub fn first_error(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| {
+        let x = l.to_ascii_lowercase();
+        ["error", "invalid", "incompatible", "not compatible", "failed"].iter().any(|w| x.contains(w)) && !x.contains("failed with errors")
+    })
+}
+const STALE: &str = "installed from package.json (the lockfile is out of date)";
+pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
+    let node = |args: &[&str]| -> Vec<String> { ["/usr/local/bin/node"].iter().chain(args).map(|s| s.to_string()).collect() };
+    let npm = |args: &[&str]| -> Vec<String> {
+        node(&[&["/usr/local/lib/node_modules/npm/bin/npm-cli.js"], args, &["--engine-strict=false", "--no-audit", "--no-fund", "--no-update-notifier"]].concat())
+    };
+    let corepack = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
+    if dir.join("pnpm-lock.yaml").is_file() {
+        let store = "--store-dir=/workspace/.kern-pnpm-store";
+        return ("pnpm", vec![(node(&[corepack, "pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed"),
+            (node(&[corepack, "pnpm", "install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), STALE)]);
+    }
+    if dir.join("yarn.lock").is_file() {
+        if dir.join(".yarnrc.yml").is_file() {
+            return ("yarn", vec![(node(&[corepack, "yarn", "install", "--immutable", "--mode=skip-build"]), "installed"), (node(&[corepack, "yarn", "install", "--mode=skip-build"]), STALE)]);
+        }
+        return ("yarn", vec![(node(&[corepack, "yarn", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--ignore-engines"]), "installed"),
+            (node(&[corepack, "yarn", "install", "--ignore-scripts", "--non-interactive", "--ignore-engines"]), STALE)]);
+    }
+    let loose = npm(&["install", "--ignore-scripts", "--no-package-lock", "--legacy-peer-deps"]);
+    if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() {
+        return ("npm", vec![(npm(&["ci", "--ignore-scripts"]), "installed"), (npm(&["install", "--ignore-scripts"]), STALE),
+            (loose, "installed from package.json (the lockfile is out of date and npm's peer dependency checks were relaxed)")]);
+    }
+    if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
+        return ("bun", vec![(loose, "installed from package.json (Kern does not read Bun's lockfile)")]);
+    }
+    ("npm", vec![(npm(&["install", "--ignore-scripts", "--no-package-lock"]), "installed"), (loose, "installed from package.json (npm's peer dependency checks were relaxed)")])
 }
 pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
     let mut pkg: Value = serde_json::from_str(text).ok()?;
@@ -569,29 +623,6 @@ mod inside {
         }
         Ok(())
     }
-    fn install_plan(dir: &Path) -> (&'static str, Vec<Vec<String>>) {
-        let node = |args: &[&str]| -> Vec<String> { ["/usr/local/bin/node"].iter().chain(args).map(|s| s.to_string()).collect() };
-        let npm = "/usr/local/lib/node_modules/npm/bin/npm-cli.js";
-        let corepack = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
-        let quiet = ["--no-audit", "--no-fund", "--no-update-notifier"];
-        if dir.join("pnpm-lock.yaml").is_file() {
-            let store = "--store-dir=/workspace/.kern-pnpm-store";
-            return ("pnpm", vec![node(&[corepack, "pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]),
-                node(&[corepack, "pnpm", "install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store])]);
-        }
-        if dir.join("yarn.lock").is_file() {
-            if dir.join(".yarnrc.yml").is_file() { return ("yarn", vec![node(&[corepack, "yarn", "install", "--immutable", "--mode=skip-build"]), node(&[corepack, "yarn", "install", "--mode=skip-build"])]); }
-            return ("yarn", vec![node(&[corepack, "yarn", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive"]), node(&[corepack, "yarn", "install", "--ignore-scripts", "--non-interactive"])]);
-        }
-        let plain: Vec<String> = node(&[npm, "install", "--ignore-scripts", "--no-package-lock"]).into_iter().chain(quiet.iter().map(|s| s.to_string())).collect();
-        if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() {
-            return ("npm", vec![node(&[npm, "ci", "--ignore-scripts"]).into_iter().chain(quiet.iter().map(|s| s.to_string())).collect(), plain]);
-        }
-        if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
-            return ("bun", vec![plain.into_iter().chain(["--legacy-peer-deps".to_string()]).collect()]);
-        }
-        ("npm", vec![plain])
-    }
     fn bun_rewrite(dir: &Path) -> R<Vec<(PathBuf, Vec<u8>)>> {
         let root = std::fs::read_to_string(dir.join("package.json"))?;
         let (mut originals, mut folders) = (Vec::new(), vec![(dir.to_path_buf(), 0)]);
@@ -612,7 +643,7 @@ mod inside {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
         if meta.file_type().is_symlink() { return; }
         let mode = meta.permissions().mode() & 0o7777;
-        let wanted = if meta.is_dir() { 0o1777 } else { (mode & 0o555) | 0o444 };
+        let wanted = super::locked_mode(mode, meta.is_dir());
         if wanted != mode { let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted)); }
         if meta.is_dir() && let Ok(entries) = std::fs::read_dir(path) {
             for e in entries.flatten() { lock_down(&e.path()); }
@@ -664,13 +695,13 @@ mod inside {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
             if d != "." && dir.join("node_modules").exists() { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
-            let (manager, attempts) = install_plan(&dir);
+            let (manager, attempts) = super::install_plan(&dir);
             let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
             if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
             let originals = if manager == "bun" { bun_rewrite(&dir)? } else { Vec::new() };
             let mut result = json!("failed");
             let log = Path::new("/home/kern/install.log");
-            for (i, argv) in attempts.iter().enumerate() {
+            for (argv, said) in &attempts {
                 let left = budget.saturating_sub(started.elapsed());
                 if left.is_zero() { result = json!("out of time"); break; }
                 let log_file = std::fs::File::create(log)?;
@@ -683,13 +714,11 @@ mod inside {
                         ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")])
                     .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
                     .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
-                if wait(child, left)? {
-                    result = json!(if manager == "bun" { "installed from package.json (Kern does not read Bun's lockfile)" }
-                        else if i == 0 { "installed" } else { "installed from package.json (the lockfile is out of date)" });
-                    break;
-                }
+                if wait(child, left)? { result = json!(said); break; }
                 let text = std::fs::read(log).unwrap_or_default();
-                result = json!(format!("failed: {}", String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim()));
+                let tail = String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim().to_string();
+                let first = super::first_error(&String::from_utf8_lossy(&text)).map(|f| f.chars().take(300).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
+                result = json!(format!("failed: {}{tail}", first.map_or(String::new(), |f| format!("{f}\n…\n"))));
             }
             for (path, text) in &originals { std::fs::write(path, text)?; }
             let mut parts = Vec::new();
@@ -822,15 +851,27 @@ mod inside {
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
             create_new(&target, text.as_bytes(), 0o644)?;
         }
-        let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env)
-            .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
-            .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
         let started = std::time::Instant::now();
-        let ending = loop {
-            if let Some(s) = child.try_wait()? { break format!("exit {}", s.code().unwrap_or(-1)); }
-            if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); break "timeout".to_string(); }
-            std::thread::sleep(Duration::from_millis(100));
-        };
+        let mut ending;
+        loop {
+            let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+                .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
+                .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
+            ending = loop {
+                if let Some(s) = child.try_wait()? { break format!("exit {}", s.code().unwrap_or(-1)); }
+                if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); break "timeout".to_string(); }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            let errors = String::from_utf8_lossy(&some_of("/tmp/.kern-test-err", 64 << 10, true)).to_string();
+            match super::retried_command(&command, &errors).filter(|_| ending != "timeout") {
+                Some(shorter) => {
+                    command = shorter;
+                    quiesce()?;
+                    for f in ["/tmp/.kern-report.json", "/tmp/.kern-behavior"] { let _ = std::fs::remove_file(f); }
+                }
+                None => break,
+            }
+        }
         quiesce()?;
         let report = some_of("/tmp/.kern-report.json", 64 << 20, false);
         part("output", &if report.iter().any(|b| !b.is_ascii_whitespace()) { report } else { some_of("/tmp/.kern-test-out", 32 << 20, true) })?;

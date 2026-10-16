@@ -675,3 +675,70 @@ fn a_platform_part_npm_left_out_is_found_and_only_the_one_for_this_machine() {
     assert_eq!(parts, [(format!("@rollup/rollup-linux-{arch}-gnu"), "4.20.0".to_string())],
         "npm's lockfile from a Mac leaves out rollup's Linux part (npm/cli#4828), so vitest cannot start; esbuild's is already there, and musl, macOS and Windows parts are not this machine's");
 }
+
+#[test]
+fn a_locked_file_keeps_its_owners_write_bit_so_a_tests_own_copy_of_it_can_be_edited() {
+    use kern::sandbox::locked_mode;
+    assert_eq!(locked_mode(0o644, false), 0o644, "sentry-wizard and react-router copy fixtures to /tmp and edit the copies; a 0444 original made 0444 copies the test could not write");
+    assert_eq!(locked_mode(0o666, false), 0o644, "nobody but the owner, root, may write a project file");
+    assert_eq!(locked_mode(0o600, false), 0o644);
+    assert_eq!(locked_mode(0o4775, false), 0o755);
+    assert_eq!(locked_mode(0o700, true), 0o1777);
+}
+
+#[test]
+fn installs_retry_with_the_lockfile_then_with_npms_older_peer_rules_and_do_not_stop_at_a_node_version() {
+    let t = Temp::new();
+    write(&t.0, "package.json", "{}");
+    write(&t.0, "package-lock.json", "{}");
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    let args: Vec<String> = attempts.iter().map(|(a, _)| a[2..].join(" ")).collect();
+    assert_eq!(manager, "npm");
+    assert_eq!(args.len(), 3, "{args:?}");
+    assert!(args[0].starts_with("ci --ignore-scripts"), "{args:?}");
+    assert!(args[1].starts_with("install --ignore-scripts") && !args[1].contains("--no-package-lock"), "after npm ci fails, the lockfile is still used: {args:?}");
+    assert!(args[2].contains("--no-package-lock") && args[2].contains("--legacy-peer-deps"), "lobehub and vercel/nft stop at npm's peer dependency conflicts: {args:?}");
+    assert!(args.iter().all(|a| a.contains("--engine-strict=false")), "biofile-finder's .npmrc refuses Node 22 for a project that asks for 20.x: {args:?}");
+    assert!(attempts.iter().all(|(_, said)| said.starts_with("installed")));
+    std::fs::remove_file(t.0.join("package-lock.json")).unwrap();
+    let (_, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts[1].0.iter().any(|a| a == "--legacy-peer-deps"));
+    write(&t.0, "yarn.lock", "");
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!(manager, "yarn");
+    assert!(attempts.iter().all(|(a, _)| a.iter().any(|x| x == "--ignore-engines")), "otlplus and terraware ask yarn for Node 18 and 24 and yarn 1 refuses 22");
+}
+
+#[test]
+fn an_old_vitest_that_does_not_know_no_cache_is_run_again_without_it() {
+    let command: Vec<String> = ["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(kern::sandbox::retried_command(&command, "CACError: Unknown option `--cache`").as_deref(), Some(&command[..3]), "AntAlmanac's vitest 0.34.6");
+    assert_eq!(kern::sandbox::retried_command(&command, "Error: Cannot find module 'x'"), None);
+    assert_eq!(kern::sandbox::retried_command(&command[..3], "CACError: Unknown option `--cache`"), None);
+}
+
+#[test]
+fn a_failed_install_is_named_as_the_reason_the_tests_did_not_run() {
+    let setup = json!({ "old": { "installs": [
+        { "dir": ".", "manager": "npm", "result": "failed: npm error code EBADENGINE\nnpm error engine Unsupported engine\nnpm error notsup Required: {\"node\":\"20.x\"}" },
+        { "dir": "packages/web", "manager": "npm", "result": "installed" },
+        { "dir": "packages/ui", "manager": null, "result": "installed with the workspace" } ] } });
+    assert_eq!(suite::install_failure(&setup, "old", "").as_deref(), Some("installing its dependencies with npm failed: npm error code EBADENGINE"),
+        "12 of 139 receipts said the runner was not installed when the install had failed");
+    assert_eq!(suite::install_failure(&setup, "old", "packages/web"), None);
+    assert_eq!(suite::install_failure(&setup, "old", "packages/ui/src"), None);
+    assert!(suite::install_failure(&setup, "old", "packages/api").is_some(), "a package without its own install uses the root's");
+    let yarn = json!({ "new": { "installs": [{ "dir": ".", "manager": "yarn", "result": "failed: \u{27a4} YN0000: \u{2514} Completed\n\u{27a4} YN0041: \u{2502} scratch-gui@npm:13.7.3: Invalid authentication (as an anonymous user)\n\u{27a4} YN0000: \u{b7} Failed with errors in 2s" }] } });
+    assert!(suite::install_failure(&yarn, "new", "").unwrap().contains("Invalid authentication"));
+}
+
+#[test]
+fn a_runner_that_stops_before_any_test_is_told_apart_from_one_that_finds_none() {
+    assert!(suite::stopped_early(b"exit 1", b"Error: FRONT_DATABASE_URI must be set to a test DB", b"{}"), "dust's global setup threw, and the receipt said the runner found no tests");
+    assert!(suite::stopped_early(b"exit 0", b"Error: nuxt-module-build failed: Error: spawnSync pnpm ENOENT", b"{}"));
+    assert!(suite::stopped_early(b"exit 1", b"", b"{}"));
+    assert!(!suite::stopped_early(b"exit 1", b"No tests found, exiting with code 1", b"{}"), "a package with no tests left is the old finding, not a crash");
+    assert!(!suite::stopped_early(b"exit 1", b"", b"No test files found, exiting with code 1"));
+    assert!(!suite::stopped_early(b"exit 0", b"", b"{}"), "MetaMask's github-tools has no jest tests and passes with none");
+}

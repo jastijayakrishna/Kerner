@@ -273,6 +273,42 @@ unset KERN_TEST_MINUTES
 decision gen blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("pretest")) and (.tests.runner | test("related to the change"))' gen/receipt.json > /dev/null || { jq .tests gen/receipt.json; fail "gen: the pretest script did not run first, or the related tests did not run in place of the whole suite"; }
 
+say "A project that asks for another Node, ends its test script with --, runs an old vitest and edits a copy of its fixture is installed and tested all the same"
+git init -q strictrepo && cd strictrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test/fixtures
+printf '%s\n' '{"name":"strict","version":"1.0.0","private":true,"type":"module","engines":{"node":"18.x"},"scripts":{"test":"vitest run --"},"devDependencies":{"vitest":"0.34.6"}}' > package.json
+printf 'engine-strict=true\n' > .npmrc
+printf '%s\n' 'export const add = (a, b) => a + b;' > src/add.js
+printf '{"count":1}\n' > test/fixtures/state.json
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { cpSync, writeFileSync, readFileSync, mkdtempSync } from "node:fs";' 'import { tmpdir } from "node:os";' 'import { join } from "node:path";' 'import { add } from "../src/add.js";' '' \
+  'test("adds", () => expect(add(2, 3)).toBe(5));' \
+  'test("edits a copy of its fixture", () => {' '  const dir = mkdtempSync(join(tmpdir(), "strict-"));' '  cpSync(new URL("./fixtures/state.json", import.meta.url), join(dir, "state.json"));' \
+  '  writeFileSync(join(dir, "state.json"), "{\"count\":2}");' '  expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).count).toBe(2);' '});' > test/add.test.js
+git add -A && git commit -qm base && strict_base=$(git rev-parse HEAD)
+sed -i 's/a + b/a + b + 1/' src/add.js
+git commit -qam "Add one more" && git rev-parse HEAD > "$W/strict.head"
+cd "$W"
+check strict "$strict_base" strictrepo
+decision strict blocked
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and .tests.before.passed == 2 and (.tests.already_failing | length == 0)' strict/receipt.json > /dev/null || { jq .tests strict/receipt.json; jq . strict/setup.json 2>/dev/null; fail "strict: the project was not installed and tested as it is, or its fixture test could not edit its own copy"; }
+
+say "A runner that stops before running any test is quoted, not reported as finding no tests"
+git init -q crashrepo && cd crashrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"crash","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' 'export default { test: { globalSetup: ["./test/setup.js"] } };' > vitest.config.js
+printf '%s\n' 'export default () => { if (!process.env.SHOP_DATABASE_URL) throw new Error("SHOP_DATABASE_URL must be set to a test database"); };' > test/setup.js
+printf '%s\n' 'export const a = 1;' > src/a.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { a } from "../src/a.js";' '' 'test("a", () => expect(a).toBe(1));' > test/a.test.js
+git add -A && git commit -qm base && crash_base=$(git rev-parse HEAD)
+sed -i 's/a = 1/a = 2/' src/a.js
+git commit -qam "Two" && git rev-parse HEAD > "$W/crash.head"
+cd "$W"
+check crash "$crash_base" crashrepo
+jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("SHOP_DATABASE_URL must be set"))' crash/receipt.json > /dev/null || { jq .tests crash/receipt.json; fail "crash: the runner's own error was not quoted"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

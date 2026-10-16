@@ -589,6 +589,24 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
         "environmental": environmental, "same_failure": same_failure })
 }
 
+pub fn stopped_early(ending: &[u8], errors: &[u8], output: &[u8]) -> bool {
+    let (errors, output) = (String::from_utf8_lossy(errors), String::from_utf8_lossy(output));
+    let empty = [&errors, &output].iter().any(|t| t.contains("No tests found") || t.contains("No test files found"));
+    !empty && (ending != b"exit 0" || crate::sandbox::first_error(&errors).is_some())
+}
+pub fn install_failure(setup: &Value, side: &str, dir: &str) -> Option<String> {
+    let applies = |d: &str| d == "." || d == dir || dir.starts_with(&format!("{d}/"));
+    let record = setup[side]["installs"].as_array()?.iter().filter(|i| i["dir"].as_str().is_some_and(applies))
+        .max_by_key(|i| i["dir"].as_str().map_or(0, |d| if d == "." { 0 } else { d.len() }))?;
+    let result = record["result"].as_str()?;
+    if result.starts_with("installed") { return None; }
+    let with = record["manager"].as_str().map(|m| format!(" with {m}")).unwrap_or_default();
+    let detail = result.strip_prefix("failed:").map(str::trim).unwrap_or("");
+    let line = crate::sandbox::first_error(detail).or_else(|| detail.lines().map(str::trim).rfind(|l| !l.is_empty())).unwrap_or("").chars().take(240).collect::<String>();
+    Some(if result == "out of time" { format!("installing its dependencies{with} ran out of time") }
+        else if line.is_empty() { format!("installing its dependencies{with} failed") }
+        else { format!("installing its dependencies{with} failed: {line}") })
+}
 pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> String {
     let text = |b: &[u8]| -> String {
         let s = String::from_utf8_lossy(b);
@@ -650,6 +668,8 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     if parts["ending"] == b"exit -1" { return Ok(Side::Nothing("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
+        Ok(r) if r.tests.is_empty() && r.problems.is_empty() && stopped_early(&parts["ending"], &parts["errors"], &parts["output"]) =>
+            Side::Nothing(no_results("the runner stopped before running any test", &parts["ending"], &parts["errors"], &parts["output"])),
         Ok(r) => Side::Ran(r, created),
         Err(why) => Side::Nothing(no_results(&why, &parts["ending"], &parts["errors"], &parts["output"])),
     })
@@ -828,6 +848,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let changes = crate::rules::changed(repo, base, head)?;
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+        if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
+            let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
+            not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the old code: {why}") }));
+            continue;
+        }
     let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
