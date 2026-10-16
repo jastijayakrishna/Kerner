@@ -321,6 +321,10 @@ fn invocation(runner: Runner, program: Option<&str>, args: &[Word], env: BTreeMa
         }
         kept.push(w.clone());
     }
+    if let Some(at) = kept.iter().position(|w| w.text == "--") {
+        if kept[at + 1..].iter().any(|w| w.text.starts_with('-')) { return Found::Nothing; }
+        kept.remove(at);
+    }
     let program = program.map(str::to_string).unwrap_or_else(|| format!("/workspace/node_modules/.bin/{}", match runner { Runner::Vitest => "vitest", Runner::Jest => "jest", Runner::Mocha => "mocha", Runner::Node => "node" }));
     let mut command = vec![program];
     if runner == Runner::Vitest { command.push("run".into()); }

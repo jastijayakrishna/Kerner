@@ -79,6 +79,15 @@ fn a_script_kern_cannot_run_is_nothing_and_never_a_guess() {
 }
 
 #[test]
+fn a_bare_double_dash_in_the_script_does_not_turn_kerns_own_options_into_test_names() {
+    assert_eq!(run(json!({ "test": "jest --collectCoverage --" })), (Runner::Jest, words(&[&bin("jest")]), vec![]),
+        "openplc-editor runs jest --collectCoverage --, and jest read Kern's --ci and --testResultsProcessor after the -- as file patterns and found no tests");
+    assert_eq!(run(json!({ "test": "vitest run -- src/" })), (Runner::Vitest, words(&[&bin("vitest"), "run", "src/"]), vec![]));
+    assert_eq!(run(json!({ "test": "mocha --exit -- test/unit" })), (Runner::Mocha, words(&[&bin("mocha"), "--exit", "test/unit"]), vec![]));
+    assert!(matches!(found(&json!({ "scripts": { "test": "jest -- -odd.test.js" } })), Found::Nothing), "a name after -- that starts with a dash cannot be passed without the --");
+}
+
+#[test]
 fn what_would_change_how_kern_reads_the_results_is_left_out() {
     assert_eq!(run(json!({ "test": "jest --ci --coverage --reporters=default --reporters=jest-junit --json --outputFile out.json --watchAll=false -u --bail" })),
         (Runner::Jest, words(&[&bin("jest"), "--ci"]), vec![]));
