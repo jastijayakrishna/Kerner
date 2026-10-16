@@ -326,7 +326,7 @@ for runner in vitest jest; do
     printf '%s\n' 'const { total } = require("../src/total.js");' '' 'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/total.test.js
     slow=''
   fi
-  for i in $(seq 1 24); do printf '%s\n' "$slow" 'test("waits", async () => { await new Promise((r) => setTimeout(r, 8000)); }, 20000);' > "test/slow-$i.test.js"; done
+  for i in $(seq 1 120); do printf '%s\n' "$slow" 'test("waits", async () => { await new Promise((r) => setTimeout(r, 3000)); }, 20000);' > "test/slow-$i.test.js"; done
   git add -A && git commit -qm base && early_base=$(git rev-parse HEAD)
   sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
   git commit -qam "Shorter names" && git rev-parse HEAD > "$W/early-$runner.head"
