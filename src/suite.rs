@@ -721,7 +721,7 @@ pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: O
 }
 const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.KERN_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
 fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
-    let seconds = within(until, 600);
+    let seconds = within(until, 480);
     crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
     let control = out.join(format!("prepare-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
@@ -850,7 +850,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let mut built = Vec::new();
         if let (Some((t, env)), Some(why)) = (&suite.old, cannot_load(old_run.as_ref())) && narrowed.is_none() {
             let missing = missing_packages(&why);
-            let pretest = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).filter(|v| v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
+            let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
+            let pretest = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
             let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref());
             if !steps.is_empty() {
                 let at = now_ms();
