@@ -17,6 +17,25 @@ pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Pat
     env.extend([("PATH".into(), String::new()), ("DOCKER_CONFIG".into(), dir.display().to_string()), ("XDG_CONFIG_HOME".into(), dir.display().to_string())]);
     Ok((binary, full, env))
 }
+pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+    let mut packages = Vec::new();
+    for e in std::fs::read_dir(node_modules).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') { continue; }
+        if name.starts_with('@') { packages.extend(std::fs::read_dir(e.path()).into_iter().flatten().flatten().map(|s| s.path())); } else { packages.push(e.path()); }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for p in packages {
+        let Some(v) = std::fs::read(p.join("package.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        for (dep, spec) in v["optionalDependencies"].as_object().into_iter().flatten() {
+            let d = dep.to_ascii_lowercase();
+            let fits = d.contains("linux") && (d.contains(arch) || (arch == "x64" && d.contains("linux-64"))) && !d.contains("musl");
+            if fits && file_path(dep).is_ok() && !node_modules.join(dep).exists() { out.insert(dep.clone(), spec.as_str().unwrap_or("*").to_string()); }
+        }
+    }
+    out.into_iter().take(20).collect()
+}
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
 pub const TEST_PARTS: [&str; 5] = ["output", "errors", "behavior", "created", "ending"];
@@ -673,7 +692,25 @@ mod inside {
                 result = json!(format!("failed: {}", String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim()));
             }
             for (path, text) in &originals { std::fs::write(path, text)?; }
-            records.push(json!({ "dir": d, "manager": manager, "result": result }));
+            let mut parts = Vec::new();
+            if result.as_str().is_some_and(|r| r.starts_with("installed")) && manager != "pnpm" {
+                let dest = scratch.join("parts");
+                std::fs::create_dir_all(&dest)?;
+                for (name, spec) in super::missing_platform_parts(&dir.join("node_modules")) {
+                    if budget.saturating_sub(started.elapsed()).is_zero() { break; }
+                    let packed = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "pack", &format!("{name}@{spec}"), "--ignore-scripts", "--silent"])
+                        .arg(format!("--pack-destination={}", dest.display())).current_dir(&dir).env_clear()
+                        .envs([("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("npm_config_cache", "/workspace/.kern-install/npm"),
+                            ("npm_config_loglevel", "error"), ("TMPDIR", "/workspace/.kern-install/tmp")]).stdin(Stdio::null()).output()?;
+                    let file = String::from_utf8_lossy(&packed.stdout).lines().last().unwrap_or("").trim().to_string();
+                    if !packed.status.success() || file.is_empty() || file.contains('/') { continue; }
+                    let target = dir.join("node_modules").join(&name);
+                    std::fs::create_dir_all(&target)?;
+                    let unpacked = Command::new("/bin/tar").arg("-xzf").arg(dest.join(&file)).arg("-C").arg(&target).args(["--strip-components=1", "--no-same-owner"]).status()?;
+                    if unpacked.success() { parts.push(format!("{name}@{spec}")); }
+                }
+            }
+            records.push(json!({ "dir": d, "manager": manager, "result": result, "parts": parts }));
         }
         let _ = std::fs::remove_dir_all(scratch);
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }

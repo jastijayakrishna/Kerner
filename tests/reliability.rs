@@ -659,3 +659,19 @@ Error: Failed to load native binding
     let why = suite::no_results("the output contains no vitest report", b"exit 1", err, b"");
     assert!(why.contains("its first error: failed to load config from /workspace/apps/web/vite.config.ts") && why.contains("the last lines it printed"), "{why}");
 }
+
+#[test]
+fn a_platform_part_npm_left_out_is_found_and_only_the_one_for_this_machine() {
+    let t = Temp::new();
+    let nm = t.0.join("node_modules");
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+    std::fs::create_dir_all(nm.join("@rollup/rollup")).unwrap();
+    std::fs::write(nm.join("@rollup/rollup/package.json"), json!({ "name": "@rollup/rollup", "optionalDependencies": {
+        format!("@rollup/rollup-linux-{arch}-gnu"): "4.20.0", format!("@rollup/rollup-linux-{arch}-musl"): "4.20.0", "@rollup/rollup-darwin-arm64": "4.20.0", "@rollup/rollup-win32-x64-msvc": "4.20.0" } }).to_string()).unwrap();
+    std::fs::create_dir_all(nm.join("esbuild")).unwrap();
+    std::fs::write(nm.join("esbuild/package.json"), json!({ "name": "esbuild", "optionalDependencies": { format!("@esbuild/linux-{arch}"): "0.23.0" } }).to_string()).unwrap();
+    std::fs::create_dir_all(nm.join(format!("@esbuild/linux-{arch}"))).unwrap();
+    let parts = kern::sandbox::missing_platform_parts(&nm);
+    assert_eq!(parts, [(format!("@rollup/rollup-linux-{arch}-gnu"), "4.20.0".to_string())],
+        "npm's lockfile from a Mac leaves out rollup's Linux part (npm/cli#4828), so vitest cannot start; esbuild's is already there, and musl, macOS and Windows parts are not this machine's");
+}
