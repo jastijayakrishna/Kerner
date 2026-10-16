@@ -34,9 +34,10 @@ fn every_way_code_reaches_a_node_feature_is_seen() {
         console.log(import.meta.dirname, AbortSignal.any([]), require('fs').globSync('y'), path.matchesGlob('a', 'b'));\nawait import('node:sea');\n";
     let found = uses("src/a.mjs", src).unwrap();
     for k in ["module:node:sqlite", "member:sqlite.DatabaseSync", "member:fs.globSync", "member:fs/promises.glob", "member:util.styleText", "member:util.parseArgs",
-        "member:process.getBuiltinModule", "global:WebSocket", "global:import.meta.dirname", "global:AbortSignal.any", "module:node:sea", "member:path.matchesGlob"] {
+        "member:process.getBuiltinModule", "global:import.meta.dirname", "module:node:sea", "member:path.matchesGlob"] {
         assert!(found.contains(k), "{k}: {found:?}");
     }
+    assert!(!found.contains("global:WebSocket") && !found.contains("global:AbortSignal.any"), "browsers have these too, so a front end using them is not wrong about Node: {found:?}");
     let shadowed = uses("src/b.js", "const WebSocket = require('ws');\nnew WebSocket('x');\nimport test from 'test';\nconst fetch = () => 1;\nfetch();\n").unwrap();
     assert!(shadowed.is_empty(), "a local WebSocket or fetch and the npm package named test are not Node's: {shadowed:?}");
 }

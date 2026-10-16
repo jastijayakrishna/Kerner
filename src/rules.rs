@@ -318,7 +318,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let features: Vec<Value> = fresh.iter().filter_map(|k| crate::nodeapi::needs(k, low).map(|since| json!({ "name": k.split_once(':').map_or(k.as_str(), |(_, f)| f), "since": since }))).collect();
         if !features.is_empty() { node_versions.push(json!({ "path": p, "supports": range, "features": features })); }
     }
-    let live: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && is_code(p)).map(|(p, _)| p).collect();
+    let live: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && is_code(p) && !is_test(p)).map(|(p, _)| p).collect();
     let policies: Vec<(String, String)> = live.iter().flat_map(|p| text(&new, p).map(|t| crate::csp::policies(p, &t)).unwrap_or_default().into_iter().map(move |x| (p.to_string(), x))).collect();
     let mut inline_csp = Vec::new();
     for p in live.iter().filter(|_| !policies.is_empty()) {

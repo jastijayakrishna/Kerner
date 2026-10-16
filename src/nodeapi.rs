@@ -174,6 +174,6 @@ pub fn uses(path: &str, source: &str) -> Option<BTreeSet<String>> {
         let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
         let mut scan = Scan { scoping: semantic.scoping(), found: BTreeSet::new(), aliases: BTreeMap::new() };
         scan.visit_program(&parsed.program);
-        Some(scan.found.into_iter().filter(|k| table().contains_key(k)).collect())
+        Some(scan.found.into_iter().filter(|k| table().contains_key(k) && (!k.starts_with("global:") || k.starts_with("global:import.meta."))).collect())
     })
 }
