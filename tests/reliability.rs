@@ -1074,16 +1074,19 @@ fn on_a_throwaway_machine_packages_install_the_way_ci_installs_them_with_their_s
     let sealed = kern::sandbox::install_plan_for(&t.0, false).1;
     assert!(sealed.iter().all(|(argv, _)| argv.iter().any(|a| a == "--ignore-scripts")), "under gVisor no package script runs: {sealed:?}");
     let ci = kern::sandbox::install_plan_for(&t.0, true).1;
-    assert!(ci.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--ignore-scripts")), "canvas, prisma and mongodb-memory-server finish installing only through their scripts: {ci:?}");
+    let (with, without): (Vec<_>, Vec<_>) = ci.iter().partition(|(_, said)| *said != kern::sandbox::UNSCRIPTED);
+    assert!(!with.is_empty() && with.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--ignore-scripts")), "canvas, prisma and mongodb-memory-server finish installing only through their scripts: {ci:?}");
+    assert_eq!(without.len(), sealed.len(), "when a package's script fails (no compiler in the image, say), the install falls back to what gVisor mode does, so it never gets worse");
+    assert!(without.iter().all(|(argv, _)| argv.iter().any(|a| a == "--ignore-scripts")) && ci.iter().position(|(_, s)| *s == kern::sandbox::UNSCRIPTED) == Some(with.len()), "{ci:?}");
     let u = Temp::new();
     write(&u.0, "package.json", r#"{"name":"app","packageManager":"yarn@4.9.2"}"#);
     write(&u.0, ".yarnrc.yml", "nodeLinker: node-modules\n");
     write(&u.0, "yarn.lock", "__metadata:\n  version: 8\n");
-    assert!(kern::sandbox::install_plan_for(&u.0, true).1.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--mode=skip-build")));
+    assert!(kern::sandbox::install_plan_for(&u.0, true).1.iter().filter(|(_, said)| *said != kern::sandbox::UNSCRIPTED).all(|(argv, _)| !argv.iter().any(|a| a == "--mode=skip-build")));
     let v = Temp::new();
     write(&v.0, "package.json", r#"{"name":"app"}"#);
     write(&v.0, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
-    assert!(kern::sandbox::install_plan_for(&v.0, true).1.iter().all(|(argv, _)| !argv.iter().any(|a| a == "--ignore-scripts" || a == "--ignore-pnpmfile")));
+    assert!(kern::sandbox::install_plan_for(&v.0, true).1.iter().filter(|(_, said)| *said != kern::sandbox::UNSCRIPTED).all(|(argv, _)| !argv.iter().any(|a| a == "--ignore-scripts" || a == "--ignore-pnpmfile")));
 }
 
 #[test]

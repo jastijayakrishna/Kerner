@@ -254,12 +254,15 @@ pub fn first_error(text: &str) -> Option<&str> {
     lines.iter().copied().find(|l| thrown(l)).or_else(|| lines.iter().copied().find(|l| marked(l)))
 }
 const STALE: &str = "installed from package.json (the lockfile is out of date)";
+pub const UNSCRIPTED: &str = "installed without its packages' install scripts, because they failed";
 pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
-    let (manager, mut attempts) = install_plan(dir);
-    if scripts {
-        for (argv, _) in attempts.iter_mut() { argv.retain(|a| !["--ignore-scripts", "--ignore-pnpmfile", "--mode=skip-build"].contains(&a.as_str())); }
-    }
-    (manager, attempts)
+    let (manager, attempts) = install_plan(dir);
+    if !scripts { return (manager, attempts); }
+    let mut scripted: Vec<(Vec<String>, &'static str)> = attempts.iter().map(|(argv, said)| {
+        (argv.iter().filter(|a| !["--ignore-scripts", "--ignore-pnpmfile", "--mode=skip-build"].contains(&a.as_str())).cloned().collect(), *said)
+    }).collect();
+    scripted.extend(attempts.into_iter().map(|(argv, _)| (argv, UNSCRIPTED)));
+    (manager, scripted)
 }
 pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
     let node = |args: &[&str]| -> Vec<String> { ["/usr/local/bin/node"].iter().chain(args).map(|s| s.to_string()).collect() };
