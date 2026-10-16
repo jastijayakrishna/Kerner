@@ -610,10 +610,12 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
 pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Late }
 
 fn run_side(out: &Path, op: &Operator, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
-    run_with(out, op, (volume, &std::collections::BTreeMap::new()), side, dir, label, until)
+    run_with(out, op, (volume, &std::collections::BTreeMap::new(), test_seconds()), side, dir, label, until)
 }
-fn run_with(out: &Path, op: &Operator, (volume, files): (&str, &std::collections::BTreeMap<String, String>), (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
-    let limit = test_seconds();
+fn run_for(out: &Path, op: &Operator, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
+    run_with(out, op, (volume, &std::collections::BTreeMap::new(), limit), side, dir, label, until)
+}
+fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::collections::BTreeMap<String, String>, u64), (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     let seconds = within(until, limit);
     if seconds < 60 { return Ok(Side::Late); }
     let cut = seconds < limit;
@@ -675,7 +677,7 @@ fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, ol
     if keep.run.is_empty() { return (Ok(Report::default()), None, false); }
     let Some(t) = kept_focus(&suite.new.0, &keep.run, &suite.dir) else { return (Err(SINGLE_FILES.into()), None, false) };
     let at = now_ms();
-    let first = run_with(out, op, (volumes.0, &keep.files), (&t, &suite.new.1), &suite.dir, &format!("new-kept{label}"), until);
+    let first = run_with(out, op, (volumes.0, &keep.files, test_seconds()), (&t, &suite.new.1), &suite.dir, &format!("new-kept{label}"), until);
     timed(format!("new-kept{label}"), at);
     let first = match first {
         Ok(Side::Ran(r, _)) => unkept(&r, &keep.back),
@@ -687,7 +689,7 @@ fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, ol
     let files: BTreeSet<String> = keep.back.iter().filter(|(_, o)| candidates.iter().any(|c| file_of(c) == o.as_str())).map(|(k, _)| k.clone()).collect();
     let Some((t, env)) = suite.old.as_ref().filter(|_| !files.is_empty()).and_then(|(t, e)| kept_focus(t, &files, &suite.dir).map(|t| (t, e))) else { return (Ok(first), None, false) };
     let at = now_ms();
-    let second = run_with(out, op, (volumes.1, &keep.old_files), (&t, env), &suite.dir, &format!("old-kept{label}"), until);
+    let second = run_with(out, op, (volumes.1, &keep.old_files, test_seconds()), (&t, env), &suite.dir, &format!("old-kept{label}"), until);
     timed(format!("old-kept{label}"), at);
     let second = match second { Ok(Side::Ran(r, _)) => Some(unkept(&r, &keep.back)), _ => None };
     (Ok(first), second, false)
@@ -744,60 +746,62 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
     let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
+        let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
+        let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
+        let (mut narrowed, mut old_seconds) = (None, 0u64);
+        let old_run = match &suite.old {
+            None => None,
+            Some((t, env)) => {
+                let at = now_ms();
+                let mut run = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
+                timed(format!("old{label}"), at);
+                old_seconds = (now_ms() - at) / 1000;
+                if matches!(run, Side::Slow(_)) && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
+                    let at = now_ms();
+                    run = run_side(out, op, &volume("old"), (&o, env), &suite.dir, &format!("old-related{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
+                    timed(format!("old-related{label}"), at);
+                    old_seconds = (now_ms() - at) / 1000;
+                    narrowed = Some(n);
+                }
+                Some(run)
+            }
+        };
+        match &old_run {
+            Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+            Some(Side::Nothing(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
+            Some(Side::Slow(why)) => {
+                let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
+                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{more}") }));
+                continue;
+            }
+            Some(Side::Ran(r, _)) if r.tests.values().all(|c| c.passed == 0) && (!r.tests.is_empty() || !r.problems.is_empty()) => {
+                not_run.push(json!({ "dir": suite.dir, "why": judged(r, &Report::default(), None, None)["why"] }));
+                continue;
+            }
+            _ => {}
+        }
+        let budget = if suite.old.is_some() { test_seconds().min((4 * old_seconds + 120).max(300)) } else { test_seconds() };
+        let new_tests = narrowed.clone().unwrap_or_else(|| suite.new.0.clone());
+        let whole_new = (&new_tests, &suite.new.1);
+        let name = if narrowed.is_some() { "new-related" } else { "new" };
         let at = now_ms();
-        let new_side = (&suite.new.0, &suite.new.1);
-        let first = match run_side(out, op, &volume("new"), new_side, &suite.dir, &format!("new{label}"), until) {
+        let first = match run_for(out, op, (&volume("new"), budget), whole_new, &suite.dir, &format!("{name}{label}"), until) {
             Ok(s) => s,
             Err(e) => { not_run.push(json!({ "dir": suite.dir, "why": format!("Kern could not run the tests{place}: {}", e.0) })); continue; }
         };
-        timed(format!("new{label}"), at);
-        let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
-        let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
-        let narrowed = match (&first, &suite.old) {
-            (Side::Slow(_), Some((t, e))) => related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)).map(|(n, o)| (n, o, e)),
-            _ => None,
-        };
-        let (first, whole_new) = match &narrowed {
-            Some((n, _, _)) => {
-                let at = now_ms();
-                let r = match run_side(out, op, &volume("new"), (n, &suite.new.1), &suite.dir, &format!("new-related{label}"), until) {
-                    Ok(s) => s,
-                    Err(e) => { not_run.push(json!({ "dir": suite.dir, "why": format!("Kern could not run the tests{place}: {}", e.0) })); continue; }
-                };
-                timed(format!("new-related{label}"), at);
-                (r, (n, &suite.new.1))
-            }
-            None => (first, new_side),
-        };
-        let at = now_ms();
-        let old_run = match (&suite.old, &narrowed) {
-            (None, _) => None,
-            (Some(_), Some((_, o, e))) if !matches!(first, Side::Late) => {
-                let run = run_side(out, op, &volume("old"), (o, e), &suite.dir, &format!("old-related{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                timed(format!("old-related{label}"), at);
-                Some(run)
-            }
-            (Some((t, env)), None) if !matches!(first, Side::Late) => {
-                let run = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                timed(format!("old{label}"), at);
-                Some(run)
-            }
-            (Some(_), _) => Some(Side::Late),
-        };
-        let old_seconds = (now_ms() - at) / 1000;
-        if matches!(first, Side::Late) || matches!(old_run, Some(Side::Late)) { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-        let slow = matches!(first, Side::Slow(_)) && old_seconds * 3 > test_seconds();
+        timed(format!("{name}{label}"), at);
         let new = match first {
             Side::Ran(r, created) => { wrote_code.extend(created); r }
-            Side::Nothing(why) | Side::Slow(why) => {
-                if !matches!(old_run, Some(Side::Ran(..))) {
-                    not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") }));
-                    continue;
-                }
-                if slow {
-                    run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} finished on the old code but not on the new code: {why}") }));
-                    continue;
-                }
+            Side::Late => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+            Side::Nothing(why) | Side::Slow(why) if !matches!(old_run, Some(Side::Ran(..))) => {
+                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") }));
+                continue;
+            }
+            Side::Slow(why) if budget >= test_seconds() => {
+                run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} finished on the old code but not on the new code: {why}") }));
+                continue;
+            }
+            Side::Nothing(_) | Side::Slow(_) => {
                 let at = now_ms();
                 let again = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
                 timed(format!("new-again{label}"), at);
@@ -809,13 +813,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     Ok(Side::Nothing(again) | Side::Slow(again)) => { run_broke.push(json!({ "dir": suite.dir, "why": again })); continue; }
                 }
             }
-            Side::Late => continue,
         };
         let old = match old_run {
-            None => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
             Some(Side::Ran(r, created)) => { old_created.extend(created); r }
-            Some(Side::Nothing(why) | Side::Slow(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
-            Some(Side::Late) => continue,
+            _ => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
         };
         let suspect = suspects(&old, &new);
         let present = |r: &Report, f: &String| r.problems.iter().any(|p| file_of(p) == f.as_str()) || r.tests.keys().any(|k| file_of(k) == f.as_str());
