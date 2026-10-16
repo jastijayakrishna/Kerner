@@ -10,6 +10,8 @@ pub const JEST_REPORT: &str = include_str!("jest-report.cjs");
 pub const JEST_PROGRESS: &str = include_str!("jest-progress.cjs");
 pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub const FAULT: &str = include_str!("fault.cjs");
+pub const NODE_REPORT: &str = include_str!("node-report.mjs");
+pub const NODE_REPORTER: &str = "--test-reporter=/kern/node-report.mjs";
 pub const INSTALL_ENV: [(&str, &str); 17] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_HOME", "/home/kern/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
     ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"), ("npm_config_cache", "/workspace/.kern-install/npm"),
@@ -432,6 +434,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     create_new(dir.join("jest-progress.cjs"), JEST_PROGRESS.as_bytes(), 0o444)?;
     create_new(dir.join("vitest-progress.mjs"), VITEST_PROGRESS.as_bytes(), 0o444)?;
     create_new(dir.join("fault.cjs"), FAULT.as_bytes(), 0o444)?;
+    create_new(dir.join("node-report.mjs"), NODE_REPORT.as_bytes(), 0o444)?;
     create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())

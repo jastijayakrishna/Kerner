@@ -120,7 +120,7 @@ fn every_runner_writes_its_report_to_a_file_kern_names() {
     assert!(joined("vitest").contains("--outputFile=/tmp/.kern-report.json"), "{}", joined("vitest"));
     assert!(joined("mocha").contains("--reporter-options output=/tmp/.kern-report.json"), "the plural is the one every mocha knows; AudienseCo/monorail's mocha refused the singular: {}", joined("mocha"));
     let node = kern::suite::test_command(&kern::suite::detect(Some(br#"{"scripts":{"test":"node --test"}}"#)).unwrap()).join(" ");
-    assert!(node.contains("--test-reporter=tap --test-reporter-destination=/tmp/.kern-report.json"), "{node}");
+    assert!(node.contains("--test-reporter=/kern/node-report.mjs --test-reporter-destination=/tmp/.kern-report.json"), "{node}");
     assert_eq!(kern::suite::test_command(&tests("jest"))[..kern::proof::command(&tests("jest")).len()], kern::proof::command(&tests("jest")), "jest writes the file through Kern's own results processor");
     assert!(joined("jest").ends_with("--bail=false --reporters=default --reporters=/kern/jest-progress.cjs"), "{}", joined("jest"));
     assert!(joined("vitest").ends_with("--bail=0 --sequence.shuffle=false --reporter=/kern/vitest-progress.mjs"),

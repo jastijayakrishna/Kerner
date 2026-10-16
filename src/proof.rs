@@ -35,7 +35,7 @@ pub fn command(tests: &Tests) -> Vec<String> {
         Runner::Mocha => c.extend(["--reporter".to_string(), "json".to_string()]),
         Runner::Jest => c.extend(["--ci".to_string(), "--testResultsProcessor=/kern/jest-report.cjs".to_string()]),
         Runner::Vitest => c.extend(["--reporter=json".to_string(), "--no-cache".to_string()]),
-        Runner::Node => { let at = c.iter().position(|a| a == "--test").map_or(c.len(), |i| i + 1); c.insert(at, "--test-reporter=tap".into()); }
+        Runner::Node => { let at = c.iter().position(|a| a == "--test").map_or(c.len(), |i| i + 1); c.insert(at, crate::sandbox::NODE_REPORTER.into()); }
     }
     c
 }
@@ -530,7 +530,12 @@ fn well_formed(out: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 }
 
 pub fn read_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
-    if runner == Runner::Node { return tap(out); }
+    match json_report(runner, out) {
+        Err(_) if runner == Runner::Node => tap(out),
+        r => r,
+    }
+}
+fn json_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
     let out = &*well_formed(out);
     let (mut found, mut at, mut attempts) = (Vec::new(), 0usize, 0u32);
     while at < out.len() {

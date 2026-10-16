@@ -688,7 +688,7 @@ fn contracts_can_require_a_proof_of_honest_fix() {
     denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--outputFile=x.json"])), "reporter");
     denied(with("jest", json!(["/workspace/node_modules/.bin/jest", "--testResultsProcessor=./mine.js"])), "reporter");
     for (runner, command, want) in [
-        ("node", json!(["/usr/local/bin/node", "--test", "test/"]), vec!["/usr/local/bin/node", "--test", "--test-reporter=tap", "test/"]),
+        ("node", json!(["/usr/local/bin/node", "--test", "test/"]), vec!["/usr/local/bin/node", "--test", "--test-reporter=/kern/node-report.mjs", "test/"]),
         ("mocha", json!(["/workspace/node_modules/.bin/mocha", "--recursive"]), vec!["/workspace/node_modules/.bin/mocha", "--recursive", "--reporter", "json"]),
         ("jest", json!(["/workspace/node_modules/.bin/jest"]), vec!["/workspace/node_modules/.bin/jest", "--ci", "--testResultsProcessor=/kern/jest-report.cjs"]),
         ("vitest", json!(["/workspace/node_modules/.bin/vitest", "run"]), vec!["/workspace/node_modules/.bin/vitest", "run", "--reporter=json", "--no-cache"]),
@@ -863,7 +863,7 @@ fn honest_fix_proof_compares_what_the_runner_says_ran() {
         "the existing suite on the old code, everything on the new code, the old tests alone on the new code, while the old code runs only the new tests, twice: a failure that shows the bug has to repeat");
     assert_eq!(evidence["new_tests"], json!([{ "test": "adds 2 + 2", "old": "failed", "new": "passed" }]));
     assert_eq!((evidence["fail_to_pass"].as_u64(), evidence["pass_to_pass"].as_u64(), evidence["existing_test_files"].as_u64(), evidence["runner"].as_str()), (Some(1), Some(1), Some(2), Some("node")), "{evidence}");
-    assert!(evidence["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "{evidence}");
+    assert!(evidence["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=/kern/node-report.mjs"), "{evidence}");
     let refuse = |new: &[(&str, &str)], old: &[(&str, &str)], why: &str| denied(prove_with("bugfix", &candidate, &|r, _| runs(r, &before, new, old)), why);
     refuse(&fixed, &fixed, "None of the new tests fails on the old code");
     refuse(&[("adds 2 + 2", "passed")], &failing, "Tests did not run on the new code: \"adds\"");
@@ -971,7 +971,7 @@ fn tests_that_already_fail_before_the_change_are_set_aside_but_must_keep_running
     }).unwrap();
     let plan = planted.expect("bugs are planted");
     assert_eq!((plan["known"].clone(), plan["runner"].as_str()), (json!(["needs internet"]), Some("node")), "{plan}");
-    assert!(plan["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=tap"), "the planting runs print the report they are judged by: {plan}");
+    assert!(plan["command"].as_array().unwrap().iter().any(|a| a == "--test-reporter=/kern/node-report.mjs"), "the planting runs print the report they are judged by: {plan}");
     assert!(evidence["test_edits"]["safety_net"]["checked"].as_u64() > Some(0), "{evidence}");
     use kern::proof::caught;
     let known = BTreeSet::from(["needs internet".to_string()]);

@@ -17,7 +17,7 @@ pub fn test_command(tests: &Tests) -> Vec<String> {
     match tests.runner {
         Runner::Vitest => c.extend([format!("--outputFile={REPORT}"), "--bail=0".into(), "--sequence.shuffle=false".into(), crate::sandbox::PROGRESS_ARGS[0].to_string()]),
         Runner::Mocha => c.extend(["--reporter-options".to_string(), format!("output={REPORT}")]),
-        Runner::Node => { if let Some(at) = c.iter().position(|a| a == "--test-reporter=tap") { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
+        Runner::Node => { if let Some(at) = c.iter().position(|a| a == crate::sandbox::NODE_REPORTER) { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
         Runner::Jest => c.extend(std::iter::once("--bail=false").chain(crate::sandbox::PROGRESS_ARGS[1..].iter().copied()).map(str::to_string)),
     }
     c
@@ -176,7 +176,24 @@ fn seen(b: proof::Count, c: proof::Count) -> Seen {
 pub fn compare(before: &Report, after: &Report, again: Option<&Report>) -> Value { judged(before, after, again, None) }
 
 const FOCUS: usize = 50;
+const NODE_VALUED: [&str; 24] = ["--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C", "--env-file", "--env-file-if-exists", "--test-name-pattern",
+    "--test-skip-pattern", "--test-concurrency", "--test-timeout", "--test-reporter", "--test-reporter-destination", "--test-shard", "--test-isolation", "--test-coverage-include",
+    "--test-coverage-exclude", "--test-global-setup", "--input-type", "--title", "--experimental-config-file", "--watch-path"];
+pub fn node_files(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tests> {
+    if files.is_empty() || files.len() > FOCUS || tests.command.is_empty() { return None; }
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let (mut command, mut value) = (vec![tests.command[0].clone()], false);
+    for a in &tests.command[1..] {
+        if value { command.push(a.clone()); value = false; continue; }
+        if a.starts_with('-') { value = NODE_VALUED.contains(&a.as_str()); command.push(a.clone()); }
+    }
+    for f in files { command.push(f.strip_prefix(&prefix)?.to_string()); }
+    let mut t = tests.clone();
+    t.command = command;
+    Some(t)
+}
 pub fn focused(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tests> {
+    if tests.runner == Runner::Node { return node_files(tests, files, dir); }
     if files.is_empty() || files.len() > FOCUS { return None; }
     let mut t = tests.clone();
     let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
@@ -507,7 +524,7 @@ pub fn kept_focus(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<
             for f in files { t.command.push(f.strip_prefix(&prefix)?.to_string()); }
             Some(t)
         }
-        Runner::Node => None,
+        Runner::Node => node_files(tests, files, dir),
     }
 }
 pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old: Option<&Report>) -> Value {
@@ -1154,7 +1171,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
         let mut c = if unconfirmed { judged(&old, &new, None, None) } else { confirmed(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref()) };
         let runner = suite.new.0.runner;
-        let named = |k: &str| if runner == Runner::Node && !suite.dir.is_empty() { format!("{}: {k}", suite.dir) } else { k.to_string() };
+        let named = |k: &str| if runner == Runner::Node && !suite.dir.is_empty() && !k.contains(" > ") { format!("{}: {k}", suite.dir) } else { k.to_string() };
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
         if c["status"] != "RAN" {
             not_run.push(json!({ "dir": suite.dir, "why": c["why"] }));
