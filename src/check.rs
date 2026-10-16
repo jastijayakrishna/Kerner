@@ -20,9 +20,12 @@ fn documentation(path: &str) -> bool {
 fn runnable(repo: &Path, head: &str, rules: &Value) -> bool {
     let paths: Vec<&str> = rules["changed"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();
     if paths.iter().any(|p| !documentation(p)) { return true; }
-    let names: BTreeSet<&str> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).filter(|n| !n.is_empty()).collect();
-    if names.is_empty() { return false; }
-    crate::git::mentions(repo, head, &names.into_iter().collect::<Vec<_>>()).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
+    let mut needles: BTreeSet<String> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p).to_string()).filter(|n| !n.is_empty()).collect();
+    for folder in paths.iter().filter_map(|p| p.rsplit_once('/').map(|(d, _)| d.rsplit('/').next().unwrap_or(d))).filter(|f| !f.is_empty()) {
+        needles.extend([format!("{folder}/"), format!("'{folder}'"), format!("\"{folder}\""), format!("`{folder}`")]);
+    }
+    if needles.is_empty() { return false; }
+    crate::git::mentions(repo, head, &needles.iter().map(String::as_str).collect::<Vec<_>>()).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
 }
 
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {

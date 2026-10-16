@@ -44,7 +44,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for t in strings(&tests["new_problems"]) {
         let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
-        if added(&t) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200)))); }
+        if added(t.split(" > ").next().unwrap_or(&t)) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200)))); }
         else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200)))); }
     }
     for x in rules["tricks"].as_array().into_iter().flatten() {
@@ -78,6 +78,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
     }
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
+    for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or("")))); }
     for t in strings(&tests["unconfirmed"]) { look.push(item("test-unconfirmed", format!("This failed once, and Kern's time ran out before it could run it again: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
@@ -111,12 +112,18 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) })))
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
             .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).collect();
-    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "base": d["base"], "head": d["head"], "decision": decision, "blocked": blocked, "look": look, "tests": tests,
+    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "base": d["base"], "head": d["head"], "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": blocked, "look": look, "tests": tests,
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": report["coverage"]["percent"], "lines": lines, "described": described, "not_mentioned": surprises },
         "rules": rules, "not_checked": not_checked })
 }
 fn plain(s: &str) -> String { s.chars().map(|c| match c { '<' => '‹', '`' => '\'', c if c.is_control() => ' ', c => c }).take(400).collect() }
 
+const OTHER_CODE: [&str; 28] = ["vue", "svelte", "astro", "py", "rb", "go", "rs", "java", "kt", "kts", "php", "cs", "swift", "c", "cc", "cpp", "h", "hpp", "sh", "bash",
+    "lua", "dart", "scala", "ex", "exs", "erl", "clj", "pl"];
+fn other_language(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.rsplit_once('.').is_some_and(|(_, ext)| OTHER_CODE.contains(&ext))
+}
 fn plural(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
 fn list(md: &mut String, items: &[Value]) {
     for x in items.iter().take(SHOWN) { md.push_str(&format!("- {}\n", x["what"].as_str().unwrap_or(""))); }
@@ -137,7 +144,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         Some("blocked") => format!("### ❌ Kern: Blocked — {}\n\n", plural(blocked.len(), "problem to fix", "problems to fix")),
         Some("look") => format!("### ⚠️ Kern: {} a look\n\n", plural(look.len(), "thing needs", "things need")),
         _ if tests_ran && tests["not_run"].as_array().is_some_and(|n| !n.is_empty()) => "### ✅ Kern: Nothing unexpected in what it ran\n\nSome packages' tests did not run (see below).\n\n".to_string(),
-        _ if tests_ran || behaviour_ran || nothing => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
+        _ if tests_ran || nothing => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
+        _ if behaviour_ran => "### ✅ Kern: Nothing unexpected in what it ran\n\nThe project's tests did not run (see below).\n\n".to_string(),
         _ => "### ✅ Kern: Nothing unexpected in the rules it checked\n\nNot run: the project's tests and its changed code (see below), so this receipt covers the rules only.\n\n".to_string(),
     };
     if !blocked.is_empty() {
@@ -179,7 +187,9 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         md += &format!("- ⏭️ Tests: Not run — {}\n", plain(tests["why"].as_str().unwrap_or("Kern found no tests it can run")));
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
-    let unread = look.iter().any(|x| x["kind"] == "not-checked-code");
+    let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(other_language));
+    let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code");
+    let skipped_code = r["drive_skipped"].as_bool() == Some(true);
     if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
     let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);
     if (tests_ran || nothing) && !unread && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
@@ -188,6 +198,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     }
     match behaviour["status"].as_str() {
         Some("RAN") => md += &format!("- {} {}% of the changed lines ran, on the old and the new code\n", if behaviour["percent"].as_u64().unwrap_or(0) >= 80 { "✅" } else { "⚠️" }, behaviour["percent"].as_u64().unwrap_or(0)),
+        Some("NOTHING_TO_RUN") if unread || skipped_code => md += "- ⏭️ Changed lines: none Kern can run here (it runs JavaScript and TypeScript, and leaves out generated or minified code)\n",
         Some("NOTHING_TO_RUN") => md += "- ✅ No changed line of code to run: only tests, docs, configuration or types changed\n",
         Some("OFF") => md += "- ⏭️ Changed lines: Not run. Add an AI key (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) and Kern runs every changed line on the old and the new code\n",
         _ => md += &format!("- ⏭️ Changed lines: Not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the run did not finish"))),
