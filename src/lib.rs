@@ -26,3 +26,4 @@ pub mod rules;
 pub mod receipt;
 pub mod check;
 pub mod twin;
+pub mod weaken;

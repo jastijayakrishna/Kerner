@@ -291,6 +291,16 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         }
     }
     let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p) && !moved_from.contains(p)).map(|(p, _)| json!({ "path": p })).collect();
+    let text = |files: &Files, p: &str| -> Option<String> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string) };
+    let now: BTreeMap<&String, BTreeMap<String, crate::weaken::Case>> = changes.iter().filter(|(p, op)| *op != "delete" && is_test(p) && is_code(p))
+        .filter_map(|(p, _)| text(&new, p).and_then(|t| crate::weaken::cases(p, &t)).map(|c| (p, c))).collect();
+    let mut weakened = Vec::new();
+    for (p, after) in &now {
+        let Some(before) = text(&old, p).and_then(|t| crate::weaken::cases(p, &t)) else { continue };
+        let elsewhere: BTreeSet<String> = now.iter().filter(|(q, _)| q != &p).flat_map(|(_, c)| c.keys().map(|k| crate::weaken::leaf(k).to_string())).collect();
+        let w = crate::weaken::compare(&before, after, &elsewhere);
+        if !w.is_empty() { weakened.push(json!({ "path": p, "removed": w.removed, "missing": w.missing, "emptied": w.emptied, "loosened": w.loosened })); }
+    }
     for (p, op) in changes.iter().filter(|(p, op)| base_name(p) == "package.json" && *op != "delete") {
         if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
             && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
@@ -323,5 +333,5 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     dependencies.retain(|d| d.get("harmless").is_none());
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
-        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "not_checked": not_checked }))
+        "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "not_checked": not_checked }))
 }

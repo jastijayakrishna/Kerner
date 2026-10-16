@@ -87,6 +87,25 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
     for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
+    let gone: std::collections::BTreeSet<String> = strings(&tests["gone"]).into_iter().collect();
+    for x in rules["weakened"].as_array().into_iter().flatten() {
+        let path = x["path"].as_str().unwrap_or("");
+        let listed = |key: &str| -> String {
+            let names = strings(&x[key]);
+            let shown: Vec<String> = names.iter().take(SHOWN).map(|n| code(n, 160)).collect();
+            format!("{}{}", shown.join(", "), if names.len() > SHOWN { format!(" and {} more", names.len() - SHOWN) } else { String::new() })
+        };
+        let removed = x["removed"].as_u64().unwrap_or(0);
+        let covered = strings(&x["missing"]).iter().all(|m| gone.contains(&format!("{path} > {m}")));
+        if removed > 0 && !covered {
+            look.push(item("tests-removed", format!("{}: the change removes {removed} test{} from this existing test file, so {} no longer check{} anything: {}",
+                code(path, 160), if removed == 1 { "" } else { "s" }, if removed == 1 { "it" } else { "they" }, if removed == 1 { "s" } else { "" }, listed("missing"))));
+        }
+        if !strings(&x["emptied"]).is_empty() { look.push(item("tests-emptied", format!("{}: tests that checked something now check nothing: {}", code(path, 160), listed("emptied")))); }
+        if !strings(&x["loosened"]).is_empty() {
+            look.push(item("tests-loosened", format!("{}: checks were loosened to ones that pass for almost any value (such as toBeDefined or toBeTruthy) in: {}", code(path, 160), listed("loosened"))));
+        }
+    }
     for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
         look.push(item("submodule", format!("{}: a submodule this change points at other code", code(x["path"].as_str().unwrap_or(""), 160))));
     }

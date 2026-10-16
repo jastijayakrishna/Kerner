@@ -228,3 +228,20 @@ fn notes_issue_forms_env_templates_and_a_packages_own_version_need_no_look_but_c
     assert!(r["agent_notes"].as_array().unwrap().iter().any(|x| x["path"] == ".github/copilot-instructions.md"), "{r}");
     assert_eq!(r["dependencies"][0]["fields"], json!(["scripts.postinstall"]), "{r}");
 }
+
+#[test]
+fn tests_removed_emptied_or_loosened_inside_an_existing_test_file_need_a_look_even_when_no_test_runs() {
+    let (t, base) = repo(&[("package.json", r#"{"name":"shop","devDependencies":{"vitest":"3.2.0"}}"#), ("src/total.js", TOTAL),
+        ("test/total.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest('adds', () => expect(total([1, 2])).toBe(3));\n\
+test('adds nothing', () => expect(total([])).toBe(0));\ntest('adds one', () => expect(total([5])).toBe(5));\ntest('is a number', () => expect(typeof total([1])).toBe('number'));\n")]);
+    let head = commit(&t, &[("test/total.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest('adds', () => { total([1, 2]); });\n\
+test('is a number', () => expect(total([1])).toBeDefined());\n")], &[]);
+    let r = rules(&t, &base, &head);
+    assert_eq!(r["weakened"], json!([{ "path": "test/total.test.js", "removed": 2, "missing": ["adds nothing", "adds one"], "emptied": ["adds"], "loosened": ["is a number"] }]), "{r}");
+    let d = json!({ "base": base, "head": head, "skipped": [], "unmeasured": [] });
+    let not_run = json!({ "status": "NOT_RUN", "why": "the tests need a database" });
+    let built = receipt::build(&d, &r, &not_run, &json!({ "status": "OFF", "why": "no AI key" }));
+    let kinds: Vec<&str> = built["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
+    for k in ["tests-removed", "tests-emptied", "tests-loosened"] { assert!(kinds.contains(&k), "{k}: {kinds:?}"); }
+    assert_eq!(built["decision"], "look");
+}
