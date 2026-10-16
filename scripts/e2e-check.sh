@@ -421,6 +421,27 @@ check installfail "$base"
 decision installfail look
 jq -e '(.tests.run_unconfirmed | length == 1) and (.tests.run_unconfirmed[0].why | test("installing its dependencies with npm failed"))' installfail/receipt.json > /dev/null || { jq .tests installfail/receipt.json; fail "installfail: a failed install on the new code was not named, or it blocked"; }
 
+say "When only some test files miss an unbuilt workspace package, Kern builds it on both sides and compares them all"
+git init -q partialrepo && cd partialrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/lib/src packages/app/test
+printf '%s\n' '{"name":"partial","private":true,"type":"module","workspaces":["packages/*"],"scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' '{"name":"@p/lib","version":"1.0.0","type":"module","main":"dist/index.js","scripts":{"build":"node build.mjs"}}' > packages/lib/package.json
+printf '%s\n' "import { mkdirSync, copyFileSync } from 'node:fs';" "mkdirSync(new URL('./dist/', import.meta.url), { recursive: true });" "copyFileSync(new URL('./src/index.js', import.meta.url), new URL('./dist/index.js', import.meta.url));" > packages/lib/build.mjs
+printf '%s\n' "export const add = (a, b) => a + b;" > packages/lib/src/index.js
+printf '%s\n' '{"name":"@p/app","version":"1.0.0","type":"module","dependencies":{"@p/lib":"1.0.0"}}' > packages/app/package.json
+printf '%s\n' "import { test, expect } from 'vitest';" "import { add } from '@p/lib';" '' "test('adds', () => expect(add(2, 3)).toBe(5));" > packages/app/test/add.test.js
+printf '%s\n' "import { test, expect } from 'vitest';" '' "test('stands alone', () => expect(1 + 1).toBe(2));" > packages/app/test/alone.test.js
+printf 'dist/\n' > .gitignore
+git add -A && git commit -qm base && partial_base=$(git rev-parse HEAD)
+printf '%s\n' "export const add = (a, b) => a + b + 1;" > packages/lib/src/index.js
+git commit -qam "Add one more" && git rev-parse HEAD > "$W/partial.head"
+cd "$W"
+check partial "$partial_base" partialrepo
+decision partial blocked
+jq -e '.tests.status == "RAN" and .tests.before.passed == 2 and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build"))' partial/receipt.json > /dev/null \
+  || { jq .tests partial/receipt.json; fail "partial: a test file that missed an unbuilt package, while another passed, was set aside instead of built for"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

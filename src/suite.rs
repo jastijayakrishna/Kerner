@@ -820,6 +820,15 @@ fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], 
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
     Ok(log)
 }
+pub fn partly_missing(r: &Report) -> Option<String> {
+    let markers = ["Cannot find module", "Cannot find package", "Failed to resolve import", "Failed to resolve entry for package", "Failed to load url", "Could not resolve"];
+    let text: Vec<&String> = r.why.values().filter(|w| markers.iter().any(|m| w.contains(m))).collect();
+    (!text.is_empty()).then(|| text.iter().map(|w| w.as_str()).collect::<Vec<_>>().join("\n"))
+}
+pub fn own_build(why: &str) -> bool {
+    let dirs = ["dist", "build", "lib", "out", "es", "esm", "cjs"];
+    why.split(['\'', '"', ' ', '(', ')', ',', '`']).any(|spec| (spec.starts_with("./") || spec.starts_with("../")) && spec.split('/').any(|seg| dirs.contains(&seg)))
+}
 fn cannot_load(old: Option<&Side>) -> Option<String> {
     match old {
         Some(Side::Nothing(why)) => Some(why.clone()),
@@ -938,14 +947,16 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     if cannot_load(Some(&run)).is_some() { tried = format!(" (even after Kern ran {} first)", pending.join(", ")); } else { built = std::mem::take(&mut pending); }
                     pending.clear();
                 }
-                if repairable && let Some(why) = cannot_load(Some(&run)) {
+                let partial = match &run { Side::Ran(r, _) => partly_missing(r), _ => None };
+                if repairable && let Some(why) = cannot_load(Some(&run)).or(partial) {
                     repairable = false;
                     let missing = missing_packages(&why);
                     let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
                     let compiled = why.contains("No test files found");
                     let package = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok());
                     let pretest = package.as_ref().filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
-                    let before = match package.as_ref().map(crate::script::found) { Some(crate::script::Found::Run(i)) if generated || compiled => i.before, _ => Vec::new() };
+                    let mut before = match package.as_ref().map(crate::script::found) { Some(crate::script::Found::Run(i)) if generated || compiled => i.before, _ => Vec::new() };
+                    if own_build(&why) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
                     let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref(), (&suite.dir, &before));
                     if !steps.is_empty() {
                         let at = now_ms();

@@ -933,3 +933,15 @@ fn a_project_with_no_lockfile_is_installed_with_the_package_manager_it_declares(
     write(&v.0, "package.json", r#"{"name":"plain"}"#);
     assert_eq!(kern::sandbox::install_plan(&v.0).0, "npm");
 }
+
+#[test]
+fn test_files_that_miss_only_an_unbuilt_package_are_repaired_even_when_others_pass() {
+    let mut r = report(&[("packages/app/test/other.test.ts > works", 1, 0, 0)], &["packages/app/test/uses-lib.test.ts"]);
+    r.why.insert("packages/app/test/uses-lib.test.ts".into(), "Failed to resolve entry for package \"@adobe/data\". The package may have incorrect main/module/exports specified".into());
+    let why = suite::partly_missing(&r).expect("adobe/data's run passed 16 tests while 4,583 tests across 73 pull requests missed an unbuilt workspace package");
+    assert!(suite::missing_packages(&why).contains("@adobe/data"));
+    let plain = report(&[("test/a.test.ts > works", 1, 1, 0)], &[]);
+    assert_eq!(suite::partly_missing(&plain), None, "an ordinary failure is not a missing module");
+    assert!(suite::own_build("Cannot find module '../../dist/assembly/index.js' from 'test/a.test.ts'"), "the package's own build output");
+    assert!(!suite::own_build("Cannot find module './helpers' from 'test/a.test.ts'"));
+}
