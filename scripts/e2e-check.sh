@@ -232,6 +232,25 @@ check edits "$base"
 decision edits clear
 grep -q 'their old versions still pass on the new code (1 test file)' edits/receipt.md || { cat edits/receipt.md; fail "edits: the old version of the edited test file did not run on the new code"; }
 
+say "In a monorepo whose tests need a workspace package built first, Kern builds it with its own script, on both sides, and then compares"
+git init -q builtrepo && cd builtrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/lib/src packages/app/test
+printf '%s\n' '{"name":"built","private":true,"type":"module","workspaces":["packages/*"],"scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' '{"name":"@mono/lib","version":"1.0.0","type":"module","main":"dist/index.js","scripts":{"build":"node build.mjs"}}' > packages/lib/package.json
+printf '%s\n' "import { mkdirSync, copyFileSync } from 'node:fs';" "mkdirSync(new URL('./dist/', import.meta.url), { recursive: true });" "copyFileSync(new URL('./src/index.js', import.meta.url), new URL('./dist/index.js', import.meta.url));" > packages/lib/build.mjs
+printf '%s\n' "export const add = (a, b) => a + b;" > packages/lib/src/index.js
+printf '%s\n' '{"name":"@mono/app","version":"1.0.0","type":"module","dependencies":{"@mono/lib":"1.0.0"}}' > packages/app/package.json
+printf '%s\n' "import { test, expect } from 'vitest';" "import { add } from '@mono/lib';" "" "test('adds', () => expect(add(2, 3)).toBe(5));" > packages/app/test/add.test.js
+printf 'dist/\n' > .gitignore
+git add -A && git commit -qm base && built_base=$(git rev-parse HEAD)
+printf '%s\n' "export const add = (a, b) => a + b + 1;" > packages/lib/src/index.js
+git commit -qam "Add one more" && git rev-parse HEAD > "$W/built.head"
+cd "$W"
+check built "$built_base" builtrepo
+decision built blocked
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build"))' built/receipt.json > /dev/null || { jq .tests built/receipt.json; fail "built: the workspace package was not built before the tests ran"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

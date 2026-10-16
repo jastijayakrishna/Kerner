@@ -605,3 +605,35 @@ fn many_items_in_one_test_file_are_one_line() {
     assert_eq!(what.len(), 2, "five failing tests in one file are one item, the one in another file its own: {what:#?}");
     assert!(what[0].starts_with("5 tests this change adds fail on the new code in `test/price.test.js`") && what[0].ends_with(", …"), "{what:#?}");
 }
+
+#[test]
+fn the_package_a_test_cannot_load_is_read_from_the_runners_own_error() {
+    let errors = [
+        "src/config/lightdashConfig.mock.ts:1:55 - error TS2307: Cannot find module '@lightdash/common' or its corresponding type declarations.",
+        "Cannot find module 'gatsby-worker' from '.jestSetup.js'",
+        "Failed to load url @midscene/shared/env (resolved id: @midscene/shared/env) in /workspace/packages/android/tests/unit-test/agent.test.ts. Does the file exist?",
+        "Error: Failed to resolve entry for package \"@mono/lib\". The package may have incorrect main/module/exports specified in its package.json.",
+        "Cannot find module './version' from 'components/version/index.tsx'",
+        "Cannot find module 'node:fs/promises'",
+        "Error: Cannot find module '/workspace/node_modules/@acme/core/dist/index.js'",
+    ];
+    let found = suite::missing_packages(&errors.join("\n"));
+    assert_eq!(found.into_iter().collect::<Vec<_>>(), ["@acme/core", "@lightdash/common", "@midscene/shared", "@mono/lib", "gatsby-worker"], "relative files and node's own modules are not packages");
+}
+
+#[test]
+fn the_packages_a_test_needs_are_built_after_the_ones_they_need() {
+    let pkg = |name: &str, deps: &[&str], build: bool| -> Value {
+        let mut v = json!({ "name": name, "dependencies": deps.iter().map(|d| (d.to_string(), json!("workspace:*"))).collect::<serde_json::Map<String, Value>>() });
+        if build { v["scripts"] = json!({ "build": "tsc -b" }); }
+        v
+    };
+    let mut ws = suite::Workspace::new();
+    ws.insert("@acme/app".into(), ("packages/app".into(), pkg("@acme/app", &["@acme/ui", "react"], true)));
+    ws.insert("@acme/ui".into(), ("packages/ui".into(), pkg("@acme/ui", &["@acme/core"], true)));
+    ws.insert("@acme/core".into(), ("packages/core".into(), pkg("@acme/core", &[], true)));
+    ws.insert("@acme/types".into(), ("packages/types".into(), pkg("@acme/types", &[], false)));
+    let steps = suite::repair_steps(&ws, &["@acme/ui".to_string(), "@acme/types".to_string()].into_iter().collect(), Some(""));
+    assert_eq!(steps, [("packages/core".to_string(), "build".to_string()), ("packages/ui".to_string(), "build".to_string()), (String::new(), "pretest".to_string())],
+        "ui needs core built first; app is not needed; types has nothing to build; the root's pretest runs last, as npm test would run it");
+}

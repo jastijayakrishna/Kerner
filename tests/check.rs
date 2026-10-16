@@ -41,6 +41,25 @@ fn a_test_run_writes_only_its_own_tree_without_network() {
 }
 
 #[test]
+fn a_seal_owns_only_its_tree_as_root_without_network_and_two_rights() {
+    let t = Temp::new();
+    let l = limits();
+    let seal = Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &l, entry: vec!["__drive_seal".into()], network: "none", volumes: vec![], root: true,
+        home_mb: 0, scratch: false, workspace: Some(("kern-deps-tree", false)) };
+    let a = sandbox::container_args(&seal, "kern-x").unwrap().join(" ");
+    for want in ["--network=none", "--user=0:0", "--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "type=volume,source=kern-deps-tree,target=/workspace"] {
+        assert!(a.contains(want), "{want}: {a}");
+    }
+    assert_eq!(a.matches("--cap-add").count(), 2, "{a}");
+    let tools = vec![("kern-deps-tools", "/kern-tools/node_modules", true)];
+    for bad in [Spec { root: false, ..seal.clone() }, Spec { network: "bridge", ..seal.clone() }, Spec { workspace: Some(("kern-deps-tree", true)), ..seal.clone() }, Spec { volumes: tools, ..seal.clone() }] {
+        assert!(sandbox::container_args(&bad, "kern-x").is_err(), "a seal is root, offline and writes one tree only");
+    }
+    let test = Spec { entry: vec!["__drive_test".into()], root: false, ..seal.clone() };
+    assert!(!sandbox::container_args(&test, "kern-x").unwrap().join(" ").contains("--cap-add"), "no other run gets a right back");
+}
+
+#[test]
 fn a_test_run_report_is_read_by_length() {
     let mut out = Vec::new();
     for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("created", b"src/total.mjs"), ("ending", b"exit 1")] {

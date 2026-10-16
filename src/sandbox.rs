@@ -196,7 +196,12 @@ fn cpus(spec: &Spec) -> usize {
 pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     let (drive, drive_setup) = (spec.entry.first().is_some_and(|e| e == "__drive"), spec.entry.first().is_some_and(|e| e == "__drive_setup"));
     let drive_test = spec.entry.first().is_some_and(|e| e == "__drive_test");
+    let drive_seal = spec.entry.first().is_some_and(|e| e == "__drive_seal");
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
+    if drive_seal {
+        ensure!(matches!(spec.workspace, Some((_, false))) && spec.network == "none" && spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
+            "A seal takes ownership of what a prepare step made, as root without a network, in one tree volume");
+    }
     if drive_test {
         ensure!(spec.workspace.is_some() && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
             "A test run uses one installed tree, as an unprivileged user without a network or another volume");
@@ -204,7 +209,8 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
     ensure!(spec.volumes.iter().all(|(v, t, ro)| v.starts_with("kern-deps-") && (*t == "/workspace/node_modules" || (*t == "/kern-tools/node_modules" && *ro && drive))), "Unexpected volume");
     if drive { ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch, "A drive run reads an installed tree read-only, as an unprivileged user without a network"); }
     if drive_setup { ensure!(matches!(spec.workspace, Some((_, false))) && spec.network == "bridge" && spec.root && spec.volumes.is_empty() && spec.writable.is_empty() && !spec.scratch, "A drive setup installs into its own tree volume as root with a network, and mounts nothing else"); }
-    ensure!(spec.workspace.is_none_or(|(v, _)| (drive || drive_setup || drive_test) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive || drive_setup || drive_test)), "Only drive runs, their test runs and their setup mount a tree volume, and only one Kern made");
+    ensure!(spec.workspace.is_none_or(|(v, _)| (drive || drive_setup || drive_test || drive_seal) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive || drive_setup || drive_test || drive_seal)),
+        "Only drive runs, their test runs and their setup mount a tree volume, and only one Kern made");
     ensure!(spec.entry.first().is_some_and(|e| e.starts_with("__")), "Sandbox entry must be a Kern entry point");
     ensure!(!spec.scratch || (spec.writable.is_empty() && !spec.root && spec.network == "none"), "A scratch workspace is only for an unprivileged run without write grants or network");
     ensure!(spec.scratch || !matches!(spec.entry[0].as_str(), "__exec" | "__mutate"), "Tests run only on a throwaway copy of the workspace");
@@ -217,6 +223,7 @@ pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> {
         "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
         "--ulimit", files, "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
     ].iter().map(|s| s.to_string()).collect();
+    if drive_seal { a.extend(["--cap-add=CHOWN".to_string(), "--cap-add=DAC_OVERRIDE".to_string()]); }
     a.extend(["--tmpfs".to_string(), format!("/tmp:rw,noexec,nosuid,nodev,size={},mode=1777", if drive_test { 1u64 << 30 } else { 64 << 20 })]);
     match spec.workspace {
         Some((volume, readonly)) => {
@@ -264,6 +271,9 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         ensure!(h["Runtime"] == "runsc" && h["NetworkMode"] == spec.network && h["ReadonlyRootfs"] == true && i["Config"]["User"] == if spec.root { "0:0" } else { "1000:1000" }, "Container configuration does not match the required boundary");
         ensure!(h["Memory"] == memory && h["MemorySwap"] == memory && h["PidsLimit"] == spec.limits.pids && h["NanoCpus"] == cpus(spec) as u64 * 1_000_000_000, "Container resource limits not applied");
         ensure!(h["Privileged"] == false && h["CapDrop"].as_array().is_some_and(|c| c.iter().any(|x| x == "ALL")) && h["SecurityOpt"].as_array().is_some_and(|s| s.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("no-new-privileges")))), "Container privilege constraints not applied");
+        let added: Vec<String> = h["CapAdd"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|c| c.trim_start_matches("CAP_").to_string()).collect();
+        let allowed: &[&str] = if spec.entry.first().is_some_and(|e| e == "__drive_seal") { &["CHOWN", "DAC_OVERRIDE"] } else { &[] };
+        ensure!(added.len() == allowed.len() && allowed.iter().all(|w| added.iter().any(|a| a == w)), "Container capabilities do not match the required boundary");
         let mounts = i["Mounts"].as_array().cloned().unwrap_or_default();
         let binds: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "bind").collect();
         let volumes: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "volume").collect();
@@ -724,6 +734,27 @@ mod inside {
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())
     }
+    fn seal(path: &Path, inside: bool, roots: &mut Vec<PathBuf>, count: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(path) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+            if path.file_name().is_some_and(|n| n == "node_modules") && e.file_name().to_str().is_some_and(|n| CACHE_DIRS.contains(&n)) { continue; }
+            let made = meta.uid() == TEST_USER && std::os::unix::fs::lchown(&p, Some(0), Some(0)).is_ok();
+            if made { *count += 1; if !inside { roots.push(p.clone()); } }
+            if meta.is_dir() { seal(&p, inside || made, roots, count); }
+        }
+    }
+    pub fn drive_seal() -> R<()> {
+        let c = config("drive-seal.json")?;
+        exact(&c, &["version"], "seal")?;
+        ensure!(c["version"] == 1, "Unsupported seal");
+        let (mut roots, mut count) = (Vec::new(), 0usize);
+        seal(Path::new("/workspace"), false, &mut roots, &mut count);
+        for r in &roots { lock_down(r); }
+        println!("{}", json!({ "version": 1, "sealed": count }));
+        Ok(())
+    }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
         exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files"], "test run")?;
@@ -798,5 +829,6 @@ mod inside {
     pub fn drive() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive_setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive_test() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
+    pub fn drive_seal() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
 }
-pub use inside::{drive, drive_setup, drive_test, exec, mutate, runner, setup};
+pub use inside::{drive, drive_seal, drive_setup, drive_test, exec, mutate, runner, setup};

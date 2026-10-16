@@ -674,6 +674,84 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
 struct Suite { dir: String, old: Option<(Tests, Env)>, new: (Tests, Env) }
 
 pub const SINGLE_FILES: &str = "Kern runs single test files only with jest, vitest and mocha";
+pub fn missing_packages(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (start, end) in [("Cannot find module '", "'"), ("Cannot find package '", "'"), ("Failed to load url ", " "), ("Failed to resolve entry for package \"", "\""),
+        ("Could not resolve \"", "\""), ("Failed to resolve import \"", "\"")] {
+        let mut rest = text;
+        while let Some(i) = rest.find(start) {
+            rest = &rest[i + start.len()..];
+            let spec = rest.split(end).next().unwrap_or("").trim_end_matches(['.', ',', ')']);
+            let spec = spec.rsplit_once("node_modules/").map_or(spec, |(_, after)| after);
+            if spec.is_empty() || spec.starts_with(['.', '/', '#']) || spec.starts_with("node:") || spec.contains(char::is_whitespace) { continue; }
+            let mut parts = spec.split('/');
+            let first = parts.next().unwrap_or("");
+            let name = if first.starts_with('@') { format!("{first}/{}", parts.next().unwrap_or("")) } else { first.to_string() };
+            if !name.ends_with('/') { out.insert(name); }
+        }
+    }
+    out
+}
+pub type Workspace = std::collections::BTreeMap<String, (String, Value)>;
+pub fn workspace(repo: &Path, commit: &str) -> Workspace {
+    let items = crate::drive::listing(repo, commit).unwrap_or_default();
+    let manifests: Vec<&crate::drive::Item> = items.iter().filter(|i| i.path.rsplit('/').next() == Some("package.json") && !i.path.split('/').any(|c| c == "node_modules") && i.size <= 1 << 20).take(3000).collect();
+    let mut out = Workspace::new();
+    let _ = crate::drive::blobs(repo, &manifests, |item, bytes| {
+        if let Ok(v) = serde_json::from_slice::<Value>(bytes) && let Some(name) = v["name"].as_str() {
+            out.insert(name.to_string(), (item.path.trim_end_matches("package.json").trim_end_matches('/').to_string(), v));
+        }
+        Ok(())
+    });
+    out
+}
+pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: Option<&str>) -> Vec<(String, String)> {
+    fn visit(name: &str, packages: &Workspace, seen: &mut BTreeSet<String>, order: &mut Vec<(String, String)>) {
+        if !seen.insert(name.to_string()) || order.len() >= 20 { return; }
+        let Some((dir, v)) = packages.get(name) else { return };
+        for section in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+            for dep in v[section].as_object().into_iter().flatten().map(|(k, _)| k) { if packages.contains_key(dep) { visit(dep, packages, seen, order); } }
+        }
+        if v["scripts"]["build"].is_string() && crate::util::file_path(dir).is_ok() { order.push((dir.clone(), "build".into())); }
+    }
+    let (mut seen, mut order) = (BTreeSet::new(), Vec::new());
+    for m in missing { visit(m, packages, &mut seen, &mut order); }
+    if let Some(dir) = pretest { order.push((dir.to_string(), "pretest".into())); }
+    order
+}
+const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.KERN_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
+fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
+    let seconds = within(until, 600);
+    crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
+    let control = out.join(format!("prepare-{label}"));
+    if control.exists() { std::fs::remove_dir_all(&control)?; }
+    let env: Env = [("KERN_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
+    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {} }))))?;
+    let input = out.join("tests-input");
+    std::fs::create_dir_all(&input)?;
+    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
+    let spec = |entry: &str, root: bool, control: &Path| crate::sandbox::execute(&crate::sandbox::Spec { image: &op.image, snapshot: &input, control, writable: &[], limits: &limits,
+        entry: vec![entry.into()], network: "none", volumes: vec![], root, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
+    let run = spec("__drive_test", false, &control);
+    let _ = std::fs::remove_dir_all(&control);
+    let parts = crate::sandbox::parts(&run?.stdout, &crate::sandbox::TEST_PARTS)?;
+    let log = String::from_utf8_lossy(&parts["errors"]).to_string();
+    std::fs::write(out.join(format!("prepare-{label}.err")), &log)?;
+    let control = out.join(format!("seal-{label}"));
+    if control.exists() { std::fs::remove_dir_all(&control)?; }
+    crate::sandbox::control_dir(&control, Some(("drive-seal.json", &json!({ "version": 1 }))))?;
+    let sealed = spec("__drive_seal", true, &control);
+    let _ = std::fs::remove_dir_all(&control);
+    crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
+    Ok(log)
+}
+fn cannot_load(old: Option<&Side>) -> Option<String> {
+    match old {
+        Some(Side::Nothing(why)) => Some(why.clone()),
+        Some(Side::Ran(r, _)) if r.tests.values().all(|c| c.passed == 0) && !r.problems.is_empty() => Some(r.why.values().cloned().collect::<Vec<_>>().join("\n")),
+        _ => None,
+    }
+}
 type KeptRuns = (Result<Report, String>, Option<Report>, bool);
 #[allow(clippy::too_many_arguments)]
 fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, old: &Report, keep: &Kept, label: &str, until: u64, timed: &mut impl FnMut(String, u64)) -> KeptRuns {
@@ -752,7 +830,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds) = (None, 0u64);
-        let old_run = match &suite.old {
+        let mut old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
                 let at = now_ms();
@@ -769,6 +847,27 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Some(run)
             }
         };
+        let mut built = Vec::new();
+        if let (Some((t, env)), Some(why)) = (&suite.old, cannot_load(old_run.as_ref())) && narrowed.is_none() {
+            let missing = missing_packages(&why);
+            let pretest = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).filter(|v| v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
+            let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref());
+            if !steps.is_empty() {
+                let at = now_ms();
+                if prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until).is_ok() {
+                    let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
+                    old_seconds = (now_ms() - at) / 1000;
+                    if cannot_load(Some(&again)).is_none() {
+                        let new_steps = repair_steps(&workspace(repo, head), &missing, pretest.as_deref());
+                        if prepare(out, op, &volume("new"), &new_steps, &format!("new{label}"), until).is_ok() {
+                            built = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
+                            old_run = Some(again);
+                        }
+                    }
+                }
+                timed(format!("old-built{label}"), at);
+            }
+        }
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
             Some(Side::Nothing(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}") })); continue; }
@@ -895,6 +994,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         kept += c["kept"].as_u64().unwrap_or(0);
         let only = if narrowed.is_some() { format!(", only the tests related to the change: the whole suite takes over {} minutes", test_seconds() / 60) } else { String::new() };
+        let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
     }
     wrote_code.retain(|f| !old_created.contains(f));
