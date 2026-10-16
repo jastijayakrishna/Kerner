@@ -908,3 +908,28 @@ fn routine_updates_need_no_look_and_a_fresh_release_does() {
     let kinds: Vec<&str> = fresh["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
     assert!(kinds.contains(&"fresh-release") && kinds.contains(&"dependencies"), "{kinds:?}");
 }
+
+#[test]
+fn the_first_error_is_the_thrown_one_never_a_line_of_minified_code() {
+    let yarn = format!("file:///workspace/.kern-install/corepack/v1/yarn/4.10.3/yarn.js:4\n(()=>{{var DGe=Object.create;{}throw new Error(x)}})\n   ^\n\nTypeError: Cannot read properties of undefined (reading 'resolve')\n    at file:///workspace/yarn.js:9:46349\n\nNode.js v22.23.3\n", "var a=1;".repeat(80));
+    assert_eq!(kern::sandbox::first_error(&yarn), Some("TypeError: Cannot read properties of undefined (reading 'resolve')"),
+        "ipc, storybook and ripl's yarn 4 crash was quoted as 'Node.js v22.23.3'");
+    assert_eq!(kern::sandbox::first_error("npm error code EBADENGINE\nnpm error engine Unsupported engine\n"), Some("npm error code EBADENGINE"));
+    assert_eq!(kern::sandbox::first_error("Usage Error: Unrecognized or legacy configuration settings found: afterInstall\n"), Some("Usage Error: Unrecognized or legacy configuration settings found: afterInstall"));
+}
+
+#[test]
+fn a_project_with_no_lockfile_is_installed_with_the_package_manager_it_declares() {
+    let t = Temp::new();
+    write(&t.0, "package.json", r#"{"name":"lobehub","packageManager":"pnpm@10.18.0","dependencies":{"@lobechat/types":"workspace:*"}}"#);
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!(manager, "pnpm", "npm cannot read workspace: versions; lobehub said pnpm and had no lockfile");
+    assert!(attempts[0].0.iter().any(|a| a == "--no-frozen-lockfile"));
+    let u = Temp::new();
+    write(&u.0, "package.json", r#"{"name":"mono","private":true}"#);
+    write(&u.0, "pnpm-workspace.yaml", "packages:\n  - packages/*\n");
+    assert_eq!(kern::sandbox::install_plan(&u.0).0, "pnpm");
+    let v = Temp::new();
+    write(&v.0, "package.json", r#"{"name":"plain"}"#);
+    assert_eq!(kern::sandbox::install_plan(&v.0).0, "npm");
+}

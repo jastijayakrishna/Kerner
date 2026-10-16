@@ -224,10 +224,13 @@ pub fn early_stop(started_ms: u64, now_ms: u64, timeout: u64, progress: &str) ->
     (projected > 4 * timeout).then(|| format!("projected {projected} {elapsed}"))
 }
 pub fn first_error(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).find(|l| {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty() && l.len() <= 400).collect();
+    let thrown = |l: &str| l.split_once(": ").is_some_and(|(head, _)| head.len() < 40 && !head.contains(' ') && (head.ends_with("Error") || head.ends_with("Exception")) || head == "Usage Error");
+    let marked = |l: &str| {
         let x = l.to_ascii_lowercase();
         ["error", "invalid", "incompatible", "not compatible", "failed"].iter().any(|w| x.contains(w)) && !x.contains("failed with errors")
-    })
+    };
+    lines.iter().copied().find(|l| thrown(l)).or_else(|| lines.iter().copied().find(|l| marked(l)))
 }
 const STALE: &str = "installed from package.json (the lockfile is out of date)";
 pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
@@ -252,6 +255,15 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() {
         return ("npm", vec![(npm(&["ci", "--ignore-scripts"]), "installed"), (npm(&["install", "--ignore-scripts"]), STALE),
             (loose, "installed from package.json (the lockfile is out of date and npm's peer dependency checks were relaxed)")]);
+    }
+    let declared = std::fs::read(dir.join("package.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["packageManager"].as_str().map(|s| s.split('@').next().unwrap_or("").to_string())).unwrap_or_default();
+    if declared == "pnpm" || dir.join("pnpm-workspace.yaml").is_file() {
+        let store = "--store-dir=/workspace/.kern-pnpm-store";
+        return ("pnpm", vec![(node(&[corepack, "pnpm", "install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed from package.json (the project has no lockfile)")]);
+    }
+    if declared == "yarn" && dir.join(".yarnrc.yml").is_file() {
+        return ("yarn", vec![(node(&[corepack, "yarn", "install", "--mode=skip-build"]), "installed from package.json (the project has no lockfile)")]);
     }
     if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
         return ("bun", vec![(loose, "installed from package.json (Kern does not read Bun's lockfile)")]);
