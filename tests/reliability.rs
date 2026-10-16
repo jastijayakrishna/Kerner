@@ -952,3 +952,19 @@ fn an_env_file_is_read_the_way_dotenv_reads_it() {
     assert_eq!(suite::dotenv(text), [("DATABASE_URL".to_string(), "postgres://localhost/test".to_string()), ("API_KEY".to_string(), "abc def".to_string()),
         ("EMPTY".to_string(), String::new()), ("PORT".to_string(), "4000".to_string())]);
 }
+
+#[test]
+fn a_fresh_release_from_the_same_github_organization_as_the_change_is_its_own() {
+    use kern::deps::{aged, github_owner};
+    assert_eq!(github_owner(&json!({ "url": "git+https://github.com/runloopai/api-client-ts.git", "type": "git" })).as_deref(), Some("runloopai"));
+    assert_eq!(github_owner(&json!("github:Vercel/next.js")).as_deref(), Some("vercel"));
+    assert_eq!(github_owner(&json!("git@github.com:owner/repo.git")).as_deref(), Some("owner"));
+    assert_eq!(github_owner(&json!("owner/repo")).as_deref(), Some("owner"));
+    assert_eq!(github_owner(&json!("https://gitlab.com/a/b")), None);
+    let rules = json!({ "dependencies": [{ "path": "package.json", "moves": [{ "name": "@runloop/api-client", "from": "^1.6.0", "to": "^1.9.0" }, { "name": "left-pad", "from": "^1.0.0", "to": "^1.0.1" }] }] });
+    let now = kern::deps::rfc3339("2026-02-26T00:00:00Z").unwrap();
+    let fresh = |_: &str, _: &str| kern::deps::rfc3339("2026-02-25T21:42:48Z");
+    let out = aged(rules, now, &fresh, &|name: &str| name.starts_with("@runloop/"));
+    assert_eq!(out["dependencies"][0]["moves"][0]["age"], "routine", "runloopai/rl-cli moving to its own SDK release is not a stranger's new release");
+    assert_eq!(out["dependencies"][0]["moves"][1]["age"], "fresh");
+}

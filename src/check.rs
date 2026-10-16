@@ -36,13 +36,15 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     let rules = crate::rules::rules(repo, base, head)?;
     let now = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).unwrap_or(0);
     let times: std::cell::RefCell<std::collections::BTreeMap<String, Option<Value>>> = Default::default();
-    let published = |name: &str, version: &str| -> Option<u64> {
+    let meta = |name: &str| -> Option<Value> {
         let mut cache = times.borrow_mut();
         if !cache.contains_key(name) && cache.len() >= 30 { return None; }
-        let t = cache.entry(name.to_string()).or_insert_with(|| crate::deps::registry_times(name));
-        t.as_ref().and_then(|t| t[version].as_str()).and_then(crate::deps::rfc3339)
+        cache.entry(name.to_string()).or_insert_with(|| crate::deps::registry_meta(name)).clone()
     };
-    let rules = crate::deps::aged(rules, now, &published);
+    let owner = op.repository.split('/').next().unwrap_or("").to_ascii_lowercase();
+    let published = |name: &str, version: &str| -> Option<u64> { meta(name).and_then(|m| m["time"][version].as_str().and_then(crate::deps::rfc3339)) };
+    let own = |name: &str| -> bool { !owner.is_empty() && meta(name).and_then(|m| crate::deps::github_owner(&m["repository"])).is_some_and(|o| o == owner) };
+    let rules = crate::deps::aged(rules, now, &published, &own);
     let run = runnable(repo, head, &rules);
     let checked = now_ms();
     let behaviour = match ai {

@@ -87,23 +87,33 @@ pub fn age(from: Option<&str>, to: Option<&str>, published: &dyn Fn(&str) -> Opt
         Some(_) => serde_json::json!({ "age": "routine", "version": version }),
     }
 }
-pub fn aged(mut rules: Value, now: u64, published: &dyn Fn(&str, &str) -> Option<u64>) -> Value {
+pub fn github_owner(repository: &Value) -> Option<String> {
+    let url = repository.as_str().or_else(|| repository["url"].as_str())?.trim();
+    let rest = url.strip_prefix("github:").map(str::to_string)
+        .or_else(|| url.split_once("github.com/").map(|(_, r)| r.to_string()))
+        .or_else(|| url.split_once("github.com:").map(|(_, r)| r.to_string()))
+        .or_else(|| (url.matches('/').count() == 1 && !url.contains(':') && !url.starts_with('@')).then(|| url.to_string()))?;
+    let owner = rest.split('/').next()?.trim();
+    (!owner.is_empty()).then(|| owner.to_ascii_lowercase())
+}
+pub fn aged(mut rules: Value, now: u64, published: &dyn Fn(&str, &str) -> Option<u64>, own: &dyn Fn(&str) -> bool) -> Value {
     for d in rules["dependencies"].as_array_mut().into_iter().flatten() {
         for m in d["moves"].as_array_mut().into_iter().flatten() {
             let name = m["name"].as_str().unwrap_or("").to_string();
-            let verdict = age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now);
+            let mut verdict = age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now);
+            if verdict["age"] == "fresh" && own(&name) { verdict["age"] = "routine".into(); verdict["own"] = true.into(); }
             for (k, v) in verdict.as_object().into_iter().flatten() { m[k] = v.clone(); }
         }
     }
     rules
 }
-pub fn registry_times(name: &str) -> Option<Value> {
+pub fn registry_meta(name: &str) -> Option<Value> {
     if !valid_name(name) { return None; }
     let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(2).http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(20))).build().into();
     let mut response = agent.get(&format!("https://registry.npmjs.org/{}", name.replace('/', "%2F"))).header("Accept", "application/json").call().ok()?;
     if response.status() != 200 { return None; }
     let body = response.body_mut().with_config().limit(64 << 20).read_to_vec().ok()?;
-    serde_json::from_slice::<Value>(&body).ok().map(|v| v["time"].clone())
+    serde_json::from_slice::<Value>(&body).ok().map(|v| serde_json::json!({ "time": v["time"], "repository": v["repository"] }))
 }
 pub fn moves(old: &Value, new: &Value) -> Vec<String> {
     let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
