@@ -374,7 +374,7 @@ pub fn kept_plan(repo: &Path, (base, head): (&str, &str), changes: &[(String, &'
         if !known && code(p) && is_test_path(p) { if !gone.contains(p.as_str()) { k.skipped.push((p.clone(), NODE_FILES.into())); } }
         else if ran.contains(p.as_str()) { if !gone.contains(p.as_str()) { owners.insert(p.clone()); } }
         else if let Some(o) = snapshot_owner(p) { if ran.contains(o.as_str()) && !gone.contains(o.as_str()) { owners.insert(o); } }
-        else if infra(p, dir) && !(code(p) && named(p)) { data.insert(p.clone()); }
+        else if infra(p, dir) && !(code(p) && named(p)) && test_grant(p).is_none_or(|g| !g.ends_with('/') || ran.iter().any(|r| r.starts_with(g.as_str()))) { data.insert(p.clone()); }
     }
     if owners.is_empty() && data.is_empty() { return k; }
     let base_items = crate::drive::listing(repo, base).unwrap_or_default();
@@ -451,21 +451,24 @@ pub fn unkept(r: &Report, back: &std::collections::BTreeMap<String, String>) -> 
     Report { tests: r.tests.iter().filter_map(|(k, c)| Some((swap(k)?, *c))).collect(), problems: r.problems.iter().filter_map(|p| swap(p)).collect(),
         why: r.why.iter().filter_map(|(k, w)| Some((swap(k)?, w.clone()))).collect() }
 }
-pub struct Outcome { pub rewritten: Vec<String>, pub checked: usize, pub unchecked: Vec<(String, String)> }
+pub struct Outcome { pub rewritten: Vec<String>, pub checked: usize, pub unchecked: Vec<(String, String)>, pub held: Vec<String> }
 pub fn kept_outcome(old: &Report, keep: &Kept, first: Result<Report, String>, second: Option<&Report>) -> Outcome {
     let mut unchecked = keep.skipped.clone();
     let first = match first {
         Ok(r) => r,
         Err(why) => {
             unchecked.extend(keep.back.values().map(|o| (o.clone(), why.clone())));
-            return Outcome { rewritten: Vec::new(), checked: 0, unchecked };
+            return Outcome { rewritten: Vec::new(), checked: 0, unchecked, held: Vec::new() };
         }
     };
     let loaded: BTreeSet<&str> = first.tests.keys().map(|k| file_of(k)).collect();
     for o in keep.back.values().filter(|o| !loaded.contains(o.as_str())) {
         unchecked.push((o.clone(), first.why.get(o).cloned().unwrap_or_else(|| "its old version gave no test results on the new code".into())));
     }
-    Outcome { rewritten: rewritten(old, &first, second), checked: loaded.len(), unchecked }
+    let base = Report { tests: old.tests.iter().filter(|(k, _)| loaded.contains(file_of(k))).map(|(k, c)| (k.clone(), *c)).collect(), ..Report::default() };
+    let now = settled(&base, &first);
+    let held = base.tests.iter().filter(|(k, b)| b.passed > 0 && seen(**b, count(&now, k)) == Seen::Same).map(|(k, _)| k.clone()).collect();
+    Outcome { rewritten: rewritten(old, &first, second), checked: loaded.len(), unchecked, held }
 }
 pub fn rewritten(old: &Report, kept_new: &Report, kept_old: Option<&Report>) -> Vec<String> {
     let loaded: BTreeSet<&str> = kept_new.tests.keys().map(|k| file_of(k)).collect();
@@ -853,7 +856,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
         }
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
-        let c = if unconfirmed { judged(&old, &new, None, None) } else { confirmed(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref()) };
+        let mut c = if unconfirmed { judged(&old, &new, None, None) } else { confirmed(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref()) };
         let runner = suite.new.0.runner;
         let named = |k: &str| if runner == Runner::Node && !suite.dir.is_empty() { format!("{}: {k}", suite.dir) } else { k.to_string() };
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
@@ -866,8 +869,14 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let (first, second, cut) = kept_runs(out, op, (&volume("new"), &volume("old")), suite, &old, &keep, &label, until, &mut timed);
         late |= cut;
         let outcome = kept_outcome(&old, &keep, first, second.as_ref());
-        let failing: BTreeSet<&str> = ["broke", "new_problems"].iter().flat_map(|l| c[*l].as_array().into_iter().flatten()).filter_map(Value::as_str).collect();
+        let failing: BTreeSet<String> = ["broke", "new_problems"].iter().flat_map(|l| c[*l].as_array().into_iter().flatten()).filter_map(Value::as_str).map(str::to_string).collect();
         edited_files += outcome.checked;
+        let held: BTreeSet<&str> = outcome.held.iter().map(String::as_str).collect();
+        if let Some(g) = c["gone"].as_array_mut() {
+            let was = g.len();
+            g.retain(|x| x.as_str().is_none_or(|k| !held.contains(k)));
+            kept += (was - g.len()) as u64;
+        }
         edited_unchecked.extend(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })));
         test_data.extend(keep.data.iter().map(|p| json!(p)));
         if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(outcome.rewritten.iter().filter(|k| !failing.contains(k.as_str())).map(|k| json!(named(k)))); }

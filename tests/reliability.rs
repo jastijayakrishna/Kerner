@@ -542,3 +542,36 @@ fn the_old_copy_of_a_test_follows_moved_modules_and_reads_its_old_data() {
     assert!(old_text.contains("'../src/total'") && old_text.contains("'../src/sum.js'") && old_text.contains("'./fixtures/cases.kern-kept.json'"), "on the old code the copy keeps the old paths:\n{old_text}");
     assert!(keep.data.is_empty(), "the data file is checked through the old test, so it needs no look: {:?}", keep.data);
 }
+
+#[test]
+fn a_test_renamed_in_an_edited_file_whose_old_version_still_passes_is_not_gone() {
+    let t = Temp::new();
+    let test = |title: &str| format!("import {{ blocked }} from '../src/ssrf.js';\nimport {{ it, expect }} from 'vitest';\nit.each(['localhost', '169.254.169.254'])('{title}', (h) => expect(blocked(h)).toBe(true));\n");
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"shop","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#),
+        ("src/ssrf.js", "export const blocked = (h) => ['localhost', '169.254.169.254'].includes(h);\n"), ("test/ssrf.test.js", &test("blocks cloud metadata endpoint %s"))]);
+    let head = commit(&r, &[("src/ssrf.js", "export const blocked = (h) => ['localhost', '127.0.0.1', '169.254.169.254'].includes(h);\n"), ("test/ssrf.test.js", &test("blocks %s"))]);
+    let old_keys = ["test/ssrf.test.js > blocks cloud metadata endpoint localhost", "test/ssrf.test.js > blocks cloud metadata endpoint 169.254.169.254"];
+    let old = report(&old_keys.iter().map(|k| (*k, 1, 0, 0)).collect::<Vec<_>>(), &[]);
+    let keep = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, "");
+    let copy = keep.run.iter().next().expect("the edited test file is put back").clone();
+    let mut ran = Report::default();
+    for k in old_keys { ran.tests.insert(k.replace("test/ssrf.test.js", &copy), Count { passed: 1, failed: 0, skipped: 0 }); }
+    let outcome = suite::kept_outcome(&old, &keep, Ok(suite::unkept(&ran, &keep.back)), None);
+    assert_eq!(outcome.held.iter().collect::<std::collections::BTreeSet<_>>(), old_keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().iter().collect(),
+        "the change renames the tests' title template; their old versions still pass on the new code, so what they checked still holds and they are not gone");
+    assert!(outcome.rewritten.is_empty() && outcome.unchecked.is_empty());
+}
+
+#[test]
+fn changed_data_that_only_tests_kern_does_not_run_use_needs_no_look() {
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"shop","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#),
+        ("src/total.js", "export const total = (xs) => xs.reduce((a, b) => a + b, 0);\n"), ("test/total.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest('adds', () => expect(total([1, 2])).toBe(3));\n"),
+        ("e2e/fixtures/worker.js", "export default { fetch: () => new Response('ok') };\n"), ("test/fixtures/load.js", "export const load = (name) => import(`./${name}.js`);\n")]);
+    let head = commit(&r, &[("src/total.js", "export const total = (xs) => xs.reduce((a, b) => a + b, 1);\n"), ("e2e/fixtures/worker.js", "export default { fetch: () => new Response('ko') };\n"),
+        ("test/fixtures/load.js", "export const load = (name) => import(`./${name}.mjs`);\n")]);
+    let old = report(&[("test/total.test.js > adds", 1, 0, 0)], &[]);
+    let keep = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, "");
+    assert_eq!(keep.data, ["test/fixtures/load.js"],
+        "e2e/ holds only end-to-end tests Kern does not run, so a changed file there cannot hide a break in the tests it runs; test/fixtures/ sits beside the tests that ran, and no old test names it, so it needs a look");
+}
