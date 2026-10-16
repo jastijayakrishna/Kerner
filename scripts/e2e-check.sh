@@ -251,6 +251,28 @@ check built "$built_base" builtrepo
 decision built blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build"))' built/receipt.json > /dev/null || { jq .tests built/receipt.json; fail "built: the workspace package was not built before the tests ran"; }
 
+say "Tests that need a file made by the pretest script, in a suite too big for the time limit, are prepared first and then checked with the tests related to the change"
+git init -q genrepo && cd genrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test scripts
+printf '%s\n' '{"name":"gen","version":"1.0.0","private":true,"type":"module","scripts":{"pretest":"node scripts/gen.mjs","test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' 'import { writeFileSync } from "node:fs";' 'writeFileSync(new URL("../src/version.js", import.meta.url), "export const version = 1;\n");' > scripts/gen.mjs
+printf '%s\n' 'export default { test: { setupFiles: ["./test/setup.js"] } };' > vitest.config.js
+printf '%s\n' 'import "../src/version.js";' > test/setup.js
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("adds up a basket", () => expect(total([{ price: 2, qty: 3 }, { price: 1, qty: 4 }])).toBe(10));' > test/total.test.js
+printf '%s\n' 'import { test } from "vitest";' '' 'test("takes its time", async () => { await new Promise((r) => setTimeout(r, 150000)); }, 200000);' > test/slow.test.js
+printf 'src/version.js\n' > .gitignore
+git add -A && git commit -qm base && gen_base=$(git rev-parse HEAD)
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/gen.head"
+cd "$W"
+export KERN_TEST_MINUTES=1
+check gen "$gen_base" genrepo
+unset KERN_TEST_MINUTES
+decision gen blocked
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("pretest")) and (.tests.runner | test("related to the change"))' gen/receipt.json > /dev/null || { jq .tests gen/receipt.json; fail "gen: the pretest script did not run first, or the related tests did not run in place of the whole suite"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

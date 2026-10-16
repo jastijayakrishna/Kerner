@@ -833,14 +833,43 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds) = (None, 0u64);
-        let mut old_run = match &suite.old {
+        let (mut built, mut tried) = (Vec::new(), String::new());
+        let old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
                 let at = now_ms();
                 let mut run = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
                 timed(format!("old{label}"), at);
                 old_seconds = (now_ms() - at) / 1000;
-                if matches!(run, Side::Slow(_)) && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
+                if let Some(why) = cannot_load(Some(&run)) {
+                    let missing = missing_packages(&why);
+                    let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
+                    let pretest = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
+                    let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref());
+                    if !steps.is_empty() {
+                        let at = now_ms();
+                        let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
+                        match prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until) {
+                            Err(e) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
+                            Ok(_) => {
+                                let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
+                                old_seconds = (now_ms() - at) / 1000;
+                                if cannot_load(Some(&again)).is_some() {
+                                    tried = format!(" (even after Kern ran {} first)", names.join(", "));
+                                } else {
+                                    let new_steps = repair_steps(&workspace(repo, head), &missing, pretest.as_deref());
+                                    match prepare(out, op, &volume("new"), &new_steps, &format!("new{label}"), until) {
+                                        Ok(_) => built = names,
+                                        Err(e) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
+                                    }
+                                }
+                                if tried.is_empty() || cannot_load(Some(&again)).is_some() { run = again; }
+                            }
+                        }
+                        timed(format!("old-built{label}"), at);
+                    }
+                }
+                if matches!(run, Side::Slow(_)) && tried.is_empty() && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
                     let at = now_ms();
                     run = run_side(out, op, &volume("old"), (&o, env), &suite.dir, &format!("old-related{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
                     timed(format!("old-related{label}"), at);
@@ -850,35 +879,6 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Some(run)
             }
         };
-        let (mut built, mut tried) = (Vec::new(), String::new());
-        if let (Some((t, env)), Some(why)) = (&suite.old, cannot_load(old_run.as_ref())) && narrowed.is_none() {
-            let missing = missing_packages(&why);
-            let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
-            let pretest = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
-            let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref());
-            if !steps.is_empty() {
-                let at = now_ms();
-                let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
-                match prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until) {
-                    Err(e) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
-                    Ok(_) => {
-                        let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
-                        old_seconds = (now_ms() - at) / 1000;
-                        if cannot_load(Some(&again)).is_some() {
-                            tried = format!(" (even after Kern ran {} first)", names.join(", "));
-                            old_run = Some(again);
-                        } else {
-                            let new_steps = repair_steps(&workspace(repo, head), &missing, pretest.as_deref());
-                            match prepare(out, op, &volume("new"), &new_steps, &format!("new{label}"), until) {
-                                Ok(_) => { built = names; old_run = Some(again); }
-                                Err(e) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
-                            }
-                        }
-                    }
-                }
-                timed(format!("old-built{label}"), at);
-            }
-        }
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
             Some(Side::Nothing(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
