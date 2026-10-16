@@ -100,6 +100,7 @@ kinds() { jq -r --arg k "$2" '[.'"$3"'[] | select(.kind == $k)] | length' "$1/re
 
 say "A harmless change is clear, and every test still passes"
 check harmless "$base"
+[ "$(jq -r .canary harmless.json)" = passed ] || { jq . harmless.json; fail "harmless: Kern's self-test did not come out as known on this machine, so it judged no test"; }
 decision harmless clear
 [ "$(jq -r .tests.status harmless/receipt.json)" = RAN ] || { jq .tests harmless/receipt.json; fail "harmless: the tests did not run"; }
 [ "$(jq -r .tests.kept harmless/receipt.json)" = 3 ] || { jq .tests harmless/receipt.json; fail "harmless: expected 3 tests kept"; }

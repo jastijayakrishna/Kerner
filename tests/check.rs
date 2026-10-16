@@ -756,7 +756,11 @@ fn only_kern_at_a_branch_or_tag_of_its_own_repository_signs_a_receipt() {
         let (seal, token) = signed_fixture(name);
         denied(receipt::signed(&seal, &token, &keys, "acme/shop"), "branch or tag");
     }
-    assert!(receipt::kern_workflow(&json!({ "job_workflow_ref": "jastijayakrishna/Kerner/.github/workflows/kern.yml@refs/tags/v0.1.0" })).is_ok());
+    let at = |r: &str| json!({ "job_workflow_ref": format!("jastijayakrishna/Kerner/.github/workflows/kern.yml@{r}") });
+    for good in ["refs/tags/v0.1.0", "refs/tags/v1.2.3", "refs/heads/main", "refs/heads/one"] { assert!(receipt::kern_workflow(&at(good)).is_ok(), "{good}"); }
+    for bad in ["refs/heads/experiment", "refs/heads/old-sign-job", "refs/tags/latest", "refs/tags/v1", "refs/tags/v0.1.0-evil"] {
+        denied(receipt::kern_workflow(&at(bad)), "branch or tag");
+    }
     denied(receipt::kern_workflow(&json!({})), "branch or tag");
 }
 
@@ -820,8 +824,10 @@ fn sign_asks_github_for_a_token_over_the_receipt_s_seal() {
     let s = read_json(dir.0.join("seal.json")).unwrap();
     let r = read_json(dir.0.join("receipt.json")).unwrap();
     assert_eq!(s["token"], "signed-by-github");
-    assert_eq!(s["seal"], receipt::seal(&r, "acme/shop", 7).unwrap());
+    let md = std::fs::read_to_string(dir.0.join("receipt.md")).unwrap();
+    assert_eq!(s["seal"], receipt::seal(&r, &md, "acme/shop", 7).unwrap());
     assert_eq!(s["seal"]["receipt_sha256"], digest(&r).unwrap());
+    assert_eq!(s["seal"]["markdown_sha256"], receipt::text_digest(&md), "the seal names the exact text Kern posts");
     let fingerprint = kern::oidc::audience(&s["seal"]).unwrap().trim_start_matches("kern-receipt:").to_string();
     let asked = seen.lock().unwrap()[0].1.clone();
     assert!(asked.starts_with("/token?api-version=2.0&audience=kern-receipt") && asked.ends_with(&fingerprint), "{asked}");

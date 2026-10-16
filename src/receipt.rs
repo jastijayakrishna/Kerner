@@ -88,8 +88,9 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         else if added_file { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
         else { blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""))))); }
     }
-    let (described, surprises) = behaviour_items(&behaviour["report"]);
-    let sorted = behaviour["report"]["sorted"].is_object();
+    let summary = !behaviour["report"].is_object() && behaviour["not_mentioned"].is_array();
+    let (described, surprises) = if summary { (strings(&behaviour["described"]), strings(&behaviour["not_mentioned"])) } else { behaviour_items(&behaviour["report"]) };
+    let sorted = behaviour["report"]["sorted"].is_object() || behaviour["sorted"] == true;
     for s in &surprises { look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
     for s in &described { look.push(item("described", format!("The pull request says it changes this, which only a person can confirm: {s}"))); }
     for p in rules["powers"].as_array().into_iter().flatten() {
@@ -226,15 +227,41 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     let decision = if !blocked.is_empty() { "blocked" } else if !look.is_empty() { "look" } else { "clear" };
     let report = &behaviour["report"];
-    let lines = json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
-        "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) });
+    let lines = if summary { behaviour["lines"].clone() } else { json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
+        "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) }) };
+    let percent = if summary { behaviour["percent"].clone() } else { report["coverage"]["percent"].clone() };
     let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) }))
         .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""))) })))
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
             .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).collect();
     json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"], "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": blocked, "look": look, "tests": tests,
-        "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": report["coverage"]["percent"], "lines": lines, "described": described, "not_mentioned": surprises },
-        "rules": rules, "not_checked": not_checked })
+        "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": percent, "lines": lines, "described": described, "not_mentioned": surprises, "sorted": sorted },
+        "rules": rules, "not_checked": not_checked, "drive": { "skipped": d["skipped"], "unmeasured": d["unmeasured"] } })
+}
+pub fn rebuild(r: &Value) -> R<Value> {
+    let commit = |v: &Value| v.as_str().is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    ensure!(r["version"] == 1 && commit(&r["head"]) && commit(&r["base"]), "The receipt does not name the two commits it checked");
+    ensure!(matches!(r["sandbox"].as_str(), Some("throwaway" | "gvisor")), "The receipt names no sandbox Kern knows");
+    ensure!(r["kern"] == env!("CARGO_PKG_VERSION"), "The receipt was made by another version of Kern");
+    ensure!(r["tests"].is_object() && r["rules"].is_object() && r["behaviour"].is_object(), "The receipt is missing the facts its answer comes from");
+    let d = json!({ "base": r["base"], "head": r["head"], "skipped": r["drive"]["skipped"], "unmeasured": r["drive"]["unmeasured"] });
+    let mut out = build(&d, &r["rules"], &r["tests"], &r["behaviour"]);
+    out["sandbox"] = r["sandbox"].clone();
+    Ok(out)
+}
+const KERN_TAGS: [&str; 6] = ["<details>", "</details>", "<summary>", "</summary>", "<sub>", "</sub>"];
+fn kern_html_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, c) in text.char_indices() {
+        out.push(if c == '<' && !KERN_TAGS.iter().any(|t| text[i..].starts_with(t)) { '‹' } else { c });
+    }
+    out
+}
+const SIGNED_LINE: &str = "<sub>Signed by GitHub for Kern's own workflow.";
+pub fn text_digest(md: &str) -> String { sha256(md.replace("\r\n", "\n").trim_end().as_bytes()) }
+pub fn comment_matches(seal: &Value, body: &str) -> bool {
+    let Some(want) = seal["markdown_sha256"].as_str() else { return true };
+    body.rfind(SIGNED_LINE).is_some_and(|at| text_digest(&body[..at]) == want)
 }
 fn plain(s: &str) -> String { s.chars().map(|c| match c { '<' => '‹', '`' => '\'', c if c.is_control() => ' ', c => c }).take(400).collect() }
 
@@ -413,8 +440,8 @@ pub fn write(out: &Path, r: &Value, drive_comment: Option<&str>) -> R<()> {
     Ok(())
 }
 
-pub fn seal(r: &Value, repository: &str, number: u64) -> R<Value> {
-    Ok(json!({ "v": 1, "repository": repository, "pull": number, "base": r["base"], "head": r["head"], "decision": r["decision"], "receipt_sha256": digest(r)? }))
+pub fn seal(r: &Value, md: &str, repository: &str, number: u64) -> R<Value> {
+    Ok(json!({ "v": 1, "repository": repository, "pull": number, "base": r["base"], "head": r["head"], "decision": r["decision"], "receipt_sha256": digest(r)?, "markdown_sha256": text_digest(md) }))
 }
 pub fn seal_line(seal: &Value, token: &str) -> String { format!("{SEAL_MARK}{} -->", json!({ "seal": seal, "token": token })) }
 
@@ -422,17 +449,17 @@ pub fn render(out: &Path, head: &str) -> R<Value> {
     ensure!(head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit()), "Expected the pull request's head commit");
     let path = out.join("receipt.json");
     ensure!(std::fs::metadata(&path)?.len() <= 8 << 20, "The receipt is larger than 8 MiB");
-    let r = read_json(&path)?;
-    ensure!(r["version"] == 1 && r["head"].as_str() == Some(head), "The receipt is not for this pull request's head commit");
-    ensure!(matches!(r["decision"].as_str(), Some("clear" | "look" | "blocked")), "The receipt has no decision");
+    let given = read_json(&path)?;
+    ensure!(given["version"] == 1 && given["head"].as_str() == Some(head), "The receipt is not for this pull request's head commit");
     let _ = std::fs::remove_file(out.join("seal.json"));
-    let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|c| r["behaviour"]["status"] == "RAN" && c.len() <= 256 << 10);
+    let r = rebuild(&given)?;
+    let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|c| r["behaviour"]["status"] == "RAN" && c.len() <= 256 << 10).map(|c| kern_html_only(&c));
     write(out, &r, comment.as_deref())?;
     Ok(json!({ "status": "RENDERED", "decision": r["decision"], "head": head }))
 }
 pub fn sign(out: &Path, repository: &str, number: u64) -> R<Value> {
     ensure!(crate::github::repository(repository), "Expected the repository as owner/name");
-    let s = seal(&read_json(out.join("receipt.json"))?, repository, number)?;
+    let s = seal(&read_json(out.join("receipt.json"))?, &std::fs::read_to_string(out.join("receipt.md"))?, repository, number)?;
     let token = crate::oidc::request(&crate::oidc::audience(&s)?)?;
     std::fs::write(out.join("seal.json"), format!("{}\n", serde_json::to_string_pretty(&json!({ "seal": s, "token": token }))?))?;
     Ok(json!({ "status": "SIGNED", "decision": s["decision"], "head": s["head"] }))
@@ -443,9 +470,13 @@ pub fn signed(seal: &Value, token: &str, jwks: &Value, repository: &str) -> R<Va
     kern_workflow(&claims)?;
     Ok(claims)
 }
+const SIGNING_BRANCHES: [&str; 2] = ["refs/heads/main", "refs/heads/one"];
+fn release_tag(at: &str) -> bool {
+    at.strip_prefix("refs/tags/v").is_some_and(|v| v.split('.').count() == 3 && v.split('.').all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit())))
+}
 pub fn kern_workflow(claims: &Value) -> R<()> {
     let at = claims["job_workflow_ref"].as_str().and_then(|r| r.strip_prefix(crate::oidc::WORKFLOW)).unwrap_or("");
-    ensure!(at.starts_with("refs/heads/") || at.starts_with("refs/tags/"), "The receipt was not signed by Kern's workflow at a branch or tag of Kern's repository ({})", code(at, 80));
+    ensure!(SIGNING_BRANCHES.contains(&at) || release_tag(at), "The receipt was not signed by Kern's workflow at a branch or tag Kern releases from ({})", code(at, 80));
     Ok(())
 }
 
@@ -457,6 +488,9 @@ pub fn verify(api: &Api, repository: &str, number: u64, jwks: &Value, receipt: O
     let claims = match signed(&seal, &token, jwks, repository) { Ok(c) => c, Err(e) => return Ok(json!({ "status": "INVALID", "why": e.0 })) };
     if let Some(r) = receipt && seal["receipt_sha256"] != digest(r)?.as_str() {
         return Ok(json!({ "status": "INVALID", "why": "receipt.json is not the receipt this seal names" }));
+    }
+    if !comment_matches(&seal, c["body"].as_str().unwrap_or("")) {
+        return Ok(json!({ "status": "INVALID", "why": "the comment's text was changed after Kern signed it" }));
     }
     let head = head_of(api, repository, number)?;
     Ok(json!({ "status": "VERIFIED", "decision": seal["decision"], "head": seal["head"], "base": seal["base"], "current": seal["head"] == head.as_str(),
@@ -506,7 +540,7 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
     if now != head { return Ok(json!({ "status": "STALE", "checked": head, "head": now })); }
     let mut body = std::fs::read_to_string(out.join("receipt.md"))?;
     if let Ok(s) = read_json(out.join("seal.json")) {
-        body += &format!("<sub>Signed by GitHub for Kern's own workflow. Anyone can check this receipt: `kern receipt verify {repository} {number}`</sub>\n{}\n",
+        body += &format!("{SIGNED_LINE} Anyone can check this receipt: `kern receipt verify {repository} {number}`</sub>\n{}\n",
             seal_line(&s["seal"], s["token"].as_str().unwrap_or("")));
     }
     let edit = |c: &Value| -> R<(&str, Option<String>)> {

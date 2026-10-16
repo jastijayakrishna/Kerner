@@ -331,6 +331,7 @@ jobs:
           cat "$O/receipt.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sign
+        id: sign
         if: steps.render.outcome == 'success'
         env:
           KERN_BIN: ${{ steps.render.outputs.bin }}
@@ -352,7 +353,7 @@ jobs:
           [ "$decision" = clear ] || { echo "::error::Kern's decision is $decision; read the receipt in this job's summary"; exit 1; }
 
       - name: Say so if Kern could not finish
-        if: always() && (needs.run.result != 'success' || needs.build.result != 'success' || steps.render.outcome != 'success' || steps.post.outcome == 'failure')
+        if: always() && (needs.run.result != 'success' || needs.build.result != 'success' || steps.render.outcome != 'success' || steps.sign.outcome == 'failure' || steps.post.outcome == 'failure')
         env:
           GITHUB_TOKEN: ${{ github.token }}
           WHY: ${{ (needs.run.result == 'cancelled' || job.status == 'cancelled') && 'Kern was stopped before it finished; run the job again' || 'Kern could not finish; see the job log' }}

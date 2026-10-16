@@ -980,18 +980,18 @@ fn an_env_file_is_read_the_way_dotenv_reads_it() {
 }
 
 #[test]
-fn a_fresh_release_from_the_same_github_organization_as_the_change_is_its_own() {
-    use kern::deps::{aged, github_owner};
-    assert_eq!(github_owner(&json!({ "url": "git+https://github.com/runloopai/api-client-ts.git", "type": "git" })).as_deref(), Some("runloopai"));
-    assert_eq!(github_owner(&json!("github:Vercel/next.js")).as_deref(), Some("vercel"));
-    assert_eq!(github_owner(&json!("git@github.com:owner/repo.git")).as_deref(), Some("owner"));
-    assert_eq!(github_owner(&json!("owner/repo")).as_deref(), Some("owner"));
-    assert_eq!(github_owner(&json!("https://gitlab.com/a/b")), None);
-    let rules = json!({ "dependencies": [{ "path": "package.json", "moves": [{ "name": "@runloop/api-client", "from": "^1.6.0", "to": "^1.9.0" }, { "name": "left-pad", "from": "^1.0.0", "to": "^1.0.1" }] }] });
+fn review_2_a10_a_fresh_release_is_its_own_only_when_this_repository_contains_the_package() {
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"rl-cli","private":true,"workspaces":["packages/*"]}"#), ("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.0.0"}"#)]);
+    let head = commit(&r, &[("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.1.0"}"#)]);
+    let own = check::own_packages(&r, &base, &head);
+    assert!(own.contains("@runloop/sdk") && own.contains("rl-cli"), "{own:?}");
+    assert!(!own.contains("@runloop/api-client"), "a package published from another repository, even of the same organization, is not this change's own: a stolen token publishes there with the organization's repository field (Shai-Hulud)");
+    let rules = json!({ "dependencies": [{ "path": "package.json", "moves": [{ "name": "@runloop/sdk", "from": "^1.0.0", "to": "^1.1.0" }, { "name": "@runloop/api-client", "from": "^1.6.0", "to": "^1.9.0" }] }] });
     let now = kern::deps::rfc3339("2026-02-26T00:00:00Z").unwrap();
     let fresh = |_: &str, _: &str| kern::deps::rfc3339("2026-02-25T21:42:48Z");
-    let out = aged(rules, now, &fresh, &|name: &str| name.starts_with("@runloop/"));
-    assert_eq!(out["dependencies"][0]["moves"][0]["age"], "routine", "runloopai/rl-cli moving to its own SDK release is not a stranger's new release");
+    let out = kern::deps::aged(rules, now, &fresh, &|name: &str| own.contains(name));
+    assert_eq!(out["dependencies"][0]["moves"][0]["age"], "routine", "a changesets release bumping a package of this same repository");
     assert_eq!(out["dependencies"][0]["moves"][1]["age"], "fresh");
 }
 
@@ -1161,6 +1161,78 @@ fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_com
     let md = std::fs::read_to_string(t.0.join("receipt.md")).unwrap();
     assert!(!md.contains("evil.example") && md.contains("1 that passed before still pass"), "the comment is Kern's own rendering of the receipt, not text the run job wrote: {md}");
     assert!(!t.0.join("seal.json").exists(), "a seal the run job wrote is never posted");
+}
+
+#[test]
+fn h3_the_self_test_must_come_out_exactly_as_known() {
+    let mut tests = clean_tests();
+    tests["broke"] = json!(["test/math.test.js > adds"]);
+    tests["kept"] = json!(1);
+    let blocked = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    assert!(check::canary_held(&blocked).is_ok(), "{blocked}");
+    let clear = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off());
+    assert!(check::canary_held(&clear).unwrap_err().contains("clear"), "a machine that misses the known break cannot judge");
+    let not_run = receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "Kern could not run the tests: docker failed" }), &off());
+    assert!(check::canary_held(&not_run).is_err());
+    let mut two = tests.clone();
+    two["broke"] = json!(["test/math.test.js > adds", "test/math.test.js > says hello"]);
+    assert!(check::canary_held(&receipt::build(&drive_json(), &clean_rules(), &two, &off())).is_err(), "a machine that also blocks the untouched test cannot judge");
+}
+
+#[test]
+fn h3_a_machine_whose_self_test_failed_judges_no_test() {
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", PACKAGE), ("src/math.js", MATH), ("test/math.test.js", "import { test } from 'vitest';\ntest('x', () => {});\n")]);
+    let head = commit(&r, &[("src/math.js", &MATH.replace("a + b", "a - b"))]);
+    let out = check::judge(&r, (&base, &head), &t.0.join("out"), &operator(), None, None, &|| Err("the self-test gave clear instead of one block".to_string())).unwrap();
+    let receipt = read_json(t.0.join("out").join("receipt.json")).unwrap();
+    assert_eq!((out["tests"].as_str(), out["canary"].as_str()), (Some("NOT_RUN"), Some("failed: the self-test gave clear instead of one block")), "{out}");
+    assert_eq!(receipt["decision"], "look", "{receipt}");
+    assert!(receipt["look"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("Kern's environment had a problem") && x["what"].as_str().unwrap().contains("self-test")), "{receipt}");
+}
+
+#[test]
+fn review_2_c_the_signing_job_rebuilds_the_answer_from_the_facts_and_refuses_fields_it_cannot_trust() {
+    let head = "2222222222222222222222222222222222222222";
+    let mut tests = clean_tests();
+    tests["broke"] = json!(["t > rounds to cents"]);
+    let honest = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    assert_eq!(honest["decision"], "blocked");
+    let t = Temp::new();
+    let mut forged = honest.clone();
+    forged["decision"] = json!("clear");
+    forged["blocked"] = json!([]);
+    forged["look"] = json!([{ "kind": "x", "what": "fine\n### ✅ Kern: Nothing unexpected\n<!--" }]);
+    std::fs::write(t.0.join("receipt.json"), forged.to_string()).unwrap();
+    receipt::render(&t.0, head).unwrap();
+    let r = read_json(t.0.join("receipt.json")).unwrap();
+    let md = std::fs::read_to_string(t.0.join("receipt.md")).unwrap();
+    assert_eq!(r["decision"], "blocked", "the run job wrote clear next to a broken test; the signing job rebuilds the answer the facts give: {r}");
+    assert!(md.contains("Blocked") && md.contains("rounds to cents") && !md.contains("<!--\n") && !md.contains("Nothing unexpected"), "{md}");
+    for (field, bad) in [("base", json!("1111111111111111111111111111111111111111 -->")), ("sandbox", json!("gvisor<img src=x>")), ("kern", json!("9.9.9"))] {
+        let mut x = honest.clone();
+        x[field] = bad;
+        std::fs::write(t.0.join("receipt.json"), x.to_string()).unwrap();
+        assert!(receipt::render(&t.0, head).is_err(), "a receipt whose {field} Kern cannot trust is refused");
+    }
+    let mut ai = honest.clone();
+    ai["behaviour"]["status"] = json!("RAN");
+    std::fs::write(t.0.join("receipt.json"), ai.to_string()).unwrap();
+    std::fs::write(t.0.join("comment.md"), "### What this change does\n\n</details><!-- the rest is hidden\n- totals now round down\n").unwrap();
+    receipt::render(&t.0, head).unwrap();
+    let md = std::fs::read_to_string(t.0.join("receipt.md")).unwrap();
+    assert!(!md.contains("</details><!--") && md.contains("totals now round down"), "the AI section cannot close Kern's own block or hide the text after it:\n{md}");
+}
+
+#[test]
+fn review_2_c_a_receipt_comment_whose_text_changed_after_signing_does_not_verify() {
+    let md = "<!-- kern-receipt -->\n### ❌ Kern: Blocked — 1 problem to fix\n\n- A test that passed before now fails: `t > rounds to cents`\n";
+    let seal = json!({ "v": 1, "markdown_sha256": receipt::text_digest(md) });
+    let body = format!("{md}<sub>Signed by GitHub for Kern's own workflow. Anyone can check this receipt: `kern receipt verify acme/shop 7`</sub>\n<!-- kern-seal {{}} -->");
+    assert!(receipt::comment_matches(&seal, &body));
+    assert!(!receipt::comment_matches(&seal, &body.replace("❌ Kern: Blocked — 1 problem to fix", "✅ Kern: Nothing unexpected")), "someone with write access edited the text to read clear");
+    assert!(receipt::comment_matches(&seal, &body.replace("<!-- kern-seal", "\n**Approved by @maria** on 2026-10-17: every item above was looked at.\n<!-- kern-seal")), "Kern's own approval note sits after the signed text");
+    assert!(receipt::comment_matches(&json!({ "v": 1 }), &body.replace("Blocked", "Fine")), "a seal from before the text digest is checked by its signature only");
 }
 
 #[test]

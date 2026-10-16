@@ -92,15 +92,6 @@ pub fn age(from: Option<&str>, to: Option<&str>, published: &dyn Fn(&str) -> Opt
         Some(_) => serde_json::json!({ "age": "routine", "version": version }),
     }
 }
-pub fn github_owner(repository: &Value) -> Option<String> {
-    let url = repository.as_str().or_else(|| repository["url"].as_str())?.trim();
-    let rest = url.strip_prefix("github:").map(str::to_string)
-        .or_else(|| url.split_once("github.com/").map(|(_, r)| r.to_string()))
-        .or_else(|| url.split_once("github.com:").map(|(_, r)| r.to_string()))
-        .or_else(|| (url.matches('/').count() == 1 && !url.contains(':') && !url.starts_with('@')).then(|| url.to_string()))?;
-    let owner = rest.split('/').next()?.trim();
-    (!owner.is_empty()).then(|| owner.to_ascii_lowercase())
-}
 pub fn lock_age(to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
     let Some(version) = to else { return serde_json::json!({ "age": "removed" }) };
     match published(version) {

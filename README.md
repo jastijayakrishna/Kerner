@@ -43,7 +43,11 @@ start them with less (`id-token: write` is how GitHub signs each receipt).
 
 Two optional settings:
 
-- **Require the `Kern` status** (Settings, then Branches), so nothing merges without its receipt.
+- **Require the `Kern` status** (Settings, then Branches), so nothing merges without its receipt. A pull request can also edit
+  `.github/workflows/` itself, to skip Kern or set the status on its own, so the status only binds when workflow files cannot change
+  without you: make Kern a required workflow in a repository ruleset, or add `/.github/workflows/ @your-team` to `CODEOWNERS` and require
+  code-owner review. `kern receipt verify` accepts only receipts signed by Kern's own workflow at `main`, a release tag, or `one`
+  while Kern One is built there.
 - **Add an AI key** as an Actions secret, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). Kern then also
   runs every changed line on the old and the new code. Without a key, your code never leaves GitHub's runners.
 
