@@ -550,6 +550,27 @@ jq -e '.tests.status == "RAN" and .tests.kept == 2 and .tests.node.old.major == 
   || { jq '.tests | {status, kept, already_failing, node}' nvm/receipt.json; fail "nvm: the project's .nvmrc asked for Node 20 and its tests did not run on Node 20"; }
 grep -q 'Node: 20 on both sides, as the project asks' nvm/receipt.md || { cat nvm/receipt.md; fail "nvm: the receipt does not say which Node ran"; }
 
+if [ "${E2E_RUNTIME:-runsc}" = runc ]; then
+say "A project whose tests drive a browser gets the browser its Playwright expects, on its own Node"
+git init -q browserrepo && cd browserrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"browser","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4","playwright-core":"1.49.1"}}' > package.json
+printf '%s\n' 'export const title = (shop) => `<title>${shop}</title>`;' > src/page.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { chromium } from "playwright-core";' 'import { title } from "../src/page.js";' '' \
+  'test("a real browser reads the page title", async () => {' '  const browser = await chromium.launch();' '  const page = await browser.newPage();' \
+  '  await page.setContent(title("shop"));' '  expect(await page.title()).toBe("shop");' '  await browser.close();' '}, 120000);' > test/page.test.js
+npm install --package-lock-only --ignore-scripts --no-audit --no-fund > /dev/null
+git add -A && git commit -qm base && browser_base=$(git rev-parse HEAD)
+sed -i 's/(shop) => `<title>${shop}<\/title>`/(name) => `<title>${name}<\/title>`/' src/page.js
+git commit -qam "Clearer name" && git rev-parse HEAD > "$W/browser.head"
+cd "$W"
+check browser "$browser_base" browserrepo
+decision browser clear
+jq -e '.tests.status == "RAN" and .tests.kept == 1 and (.tests.already_failing | length == 0)' browser/receipt.json > /dev/null \
+  || { jq '.tests | {status, kept, already_failing, problem_why}' browser/receipt.json; jq '.new.browser, .old.browser' browser/setup.json 2>/dev/null; fail "browser: the test that drives Chromium did not pass on both sides"; }
+fi
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

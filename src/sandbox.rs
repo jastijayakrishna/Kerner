@@ -12,7 +12,7 @@ pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub const FAULT: &str = include_str!("fault.cjs");
 pub const NODE_REPORT: &str = include_str!("node-report.mjs");
 pub const NODE_REPORTER: &str = "--test-reporter=/kern/node-report.mjs";
-pub const INSTALL_ENV: [(&str, &str); 17] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
+pub const INSTALL_ENV: [(&str, &str); 18] = [("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_HOME", "/home/kern/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
     ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"), ("npm_config_cache", "/workspace/.kern-install/npm"),
     ("npm_config_store_dir", "/workspace/.kern-install/pnpm-store"), ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
@@ -333,6 +333,22 @@ pub fn pull_node(major: u64) -> R<String> {
     let id = docker_json(&["image", "inspect", &tag])?[0]["Id"].as_str().map(str::to_string).ok_or_else(|| Denied(format!("Docker has no {tag}")))?;
     validate_image(&id)
 }
+pub fn build_browser(base: &str, dockerfile: &dyn Fn(&str, &str) -> String, playwright: &str) -> R<String> {
+    ensure!(playwright.is_empty() || playwright.split('.').count() == 3 && playwright.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())), "Unexpected Playwright version");
+    let base = validate_image(base)?;
+    let tag = format!("kern-browser:{}", &sha256(format!("{base} {playwright}").as_bytes())[..16]);
+    if let Ok(i) = docker_json(&["image", "inspect", &tag]) && let Some(id) = i[0]["Id"].as_str() { return validate_image(id); }
+    let short = format!("kern-base:{}", &base.trim_start_matches("sha256:")[..16]);
+    docker(&["tag", &base, &short], Duration::from_secs(60), 1 << 20)?;
+    let dir = std::env::temp_dir().join(format!("kern-browser-{}", uuid4()?));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("Dockerfile"), dockerfile(&short, playwright))?;
+    let built = docker(&["build", "--quiet", "--tag", &tag, "--file", &dir.join("Dockerfile").to_string_lossy(), &dir.to_string_lossy()], Duration::from_secs(900), 1 << 20);
+    let _ = std::fs::remove_dir_all(&dir);
+    built?;
+    let id = docker_json(&["image", "inspect", &tag])?[0]["Id"].as_str().map(str::to_string).ok_or_else(|| Denied("The browser image was not built".into()))?;
+    validate_image(&id)
+}
 pub fn remove_volume(name: &str) { let _ = docker(&["volume", "rm", "--force", name], Duration::from_secs(120), 4096); }
 
 #[derive(Clone)]
@@ -381,7 +397,7 @@ pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<Strin
     let mut a: Vec<String> = [
         "create", "--name", name, "--pull=never", &format!("--runtime={runtime}"), &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
-        "--ulimit", files, "--ulimit", "core=0", "--ipc=private", "--shm-size=8m", "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
+        "--ulimit", files, "--ulimit", "core=0", "--ipc=private", if drive_test { "--shm-size=512m" } else { "--shm-size=8m" }, "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
     ].iter().map(|s| s.to_string()).collect();
     if drive_seal { a.extend(["--cap-add=CHOWN".to_string(), "--cap-add=DAC_OVERRIDE".to_string()]); }
     a.extend(["--tmpfs".to_string(), format!("/tmp:rw,noexec,nosuid,nodev,size={},mode=1777", if drive_test { 1u64 << 30 } else { 64 << 20 })]);
@@ -475,7 +491,7 @@ mod inside {
     use std::process::{Command, Stdio};
 
     const ENV: [(&str, &str); 3] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8")];
-    const TEST_ENV: [(&str, &str); 4] = [ENV[0], ENV[1], ENV[2], ("CI", "true")];
+    const TEST_ENV: [(&str, &str); 6] = [ENV[0], ENV[1], ENV[2], ("CI", "true"), ("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer")];
     fn config(name: &str) -> R<Value> { read_json(Path::new("/kern").join(name)) }
     fn ended(mut child: std::process::Child, timeout: Duration) -> R<bool> {
         let started = std::time::Instant::now();

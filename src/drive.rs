@@ -1016,6 +1016,51 @@ fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     Ok(files.iter().map(|i| i.path.clone()).collect())
 }
 
+pub const BROWSER_DEPS: [&str; 11] = ["@vitest/browser", "@vitest/browser-playwright", "@vitest/browser-webdriverio", "playwright", "playwright-core", "puppeteer", "puppeteer-core",
+    "jest-puppeteer", "jest-playwright-preset", "@web/test-runner-playwright", "@web/test-runner-puppeteer"];
+const PLAYWRIGHT_DEFAULT: &str = "1.49.1";
+pub fn lock_versions(name: &str, text: &str) -> Vec<crate::nodeapi::Version> {
+    let semver = |s: &str| -> Option<crate::nodeapi::Version> {
+        let s = s.trim_start_matches(['"', '\'', ' ', ':', '@', 'v']);
+        let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+        let parts: Vec<u64> = s[..end].split('.').filter_map(|p| p.parse().ok()).collect();
+        (parts.len() == 3).then(|| (parts[0], parts[1], parts[2]))
+    };
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices(name) {
+        let before = text[..at].chars().next_back();
+        let after = &text[at + name.len()..];
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') || after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-') { continue; }
+        if let Some(rest) = after.strip_prefix('@') && let Some(v) = semver(rest.trim_start_matches("npm:")) { found.push(v); continue; }
+        let window: String = after.chars().take(240).collect();
+        if let Some(i) = window.find("version") && let Some(v) = semver(&window[i + 7..]) { found.push(v); }
+    }
+    found
+}
+pub fn browser_need(manifests: &[String], locks: &[String]) -> Option<(String, String)> {
+    let named = manifests.iter().filter_map(|m| serde_json::from_str::<Value>(m).ok()).find_map(|m| {
+        ["dependencies", "devDependencies", "optionalDependencies"].iter().find_map(|s| BROWSER_DEPS.iter().find(|d| m[*s].get(**d).is_some()).map(|d| d.to_string()))
+    })?;
+    let version = locks.iter().flat_map(|l| lock_versions("playwright-core", l).into_iter().chain(lock_versions("playwright", l))).max();
+    Some(match version {
+        Some(v) => (format!("{}.{}.{}", v.0, v.1, v.2), format!("the project uses {named}")),
+        None => (String::new(), format!("the project uses {named}")),
+    })
+}
+pub fn browser_dockerfile(base: &str, playwright: &str) -> String {
+    let install = if playwright.is_empty() { format!("npx -y playwright@{PLAYWRIGHT_DEFAULT} install-deps chromium") } else { format!("npx -y playwright@{playwright} install --with-deps chromium") };
+    format!("FROM {base}\nENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright\nRUN mkdir -p /ms-playwright && {install} && chmod -R a+rX /ms-playwright && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache\n")
+}
+fn browser_image(image: &str, paths: &BTreeSet<String>, read: &dyn Fn(&str) -> Option<String>) -> (String, Value) {
+    let manifests: Vec<String> = paths.iter().filter(|p| p.rsplit('/').next() == Some("package.json") && !p.split('/').any(|s| s == "node_modules")).take(400).filter_map(|p| read(p)).collect();
+    let locks: Vec<String> = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "npm-shrinkwrap.json"].iter().filter_map(|p| read(p)).collect();
+    let Some((version, why)) = browser_need(&manifests, &locks) else { return (image.to_string(), Value::Null) };
+    if !crate::sandbox::throwaway() { return (image.to_string(), json!({ "why": why, "skipped": "browsers run only on a throwaway machine" })); }
+    match crate::sandbox::build_browser(image, &browser_dockerfile, &version) {
+        Ok(id) => (id, json!({ "why": why, "playwright": if version.is_empty() { Value::Null } else { json!(version) } })),
+        Err(e) => (image.to_string(), json!({ "why": why, "error": e.0 })),
+    }
+}
 pub fn node_image(op: &crate::policy::Operator, wanted: Option<(u64, String)>) -> (String, Value) {
     static DEFAULT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     let default = *DEFAULT.get_or_init(|| crate::sandbox::image_major(&op.image));
@@ -1047,6 +1092,7 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let read = |p: &str| std::fs::read_to_string(tree.join(p)).ok();
     let workflows: Vec<String> = paths.iter().filter(|p| p.starts_with(".github/workflows/") && (p.ends_with(".yml") || p.ends_with(".yaml"))).filter_map(|p| read(p)).collect();
     let (image, node) = node_image(op, crate::nodeapi::wanted_major(&read, &workflows));
+    let (image, browser) = browser_image(&image, &paths, &read);
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
     if control.exists() { std::fs::remove_dir_all(&control)?; }
@@ -1061,7 +1107,7 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
     let _ = std::fs::remove_dir_all(&tree);
     let _ = std::fs::remove_dir_all(&control);
-    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json"), "image": image, "node": node });
+    let entry = json!({ "volume": volume.0, "installs": record["installs"], "tsconfig": paths.contains("tsconfig.json"), "image": image, "node": node, "browser": browser });
     Ok((volume, entry))
 }
 
