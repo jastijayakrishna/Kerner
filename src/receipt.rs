@@ -63,6 +63,11 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         if added(t.split(" > ").next().unwrap_or(&t)) { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200)))); }
         else { blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200)))); }
     }
+    let (unproven_added, unproven): (Vec<String>, Vec<String>) = strings(&tests["unproven"]).into_iter().partition(|t| added(t.split(" > ").next().unwrap_or(t)));
+    for t in unproven_added {
+        let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w))).unwrap_or_default();
+        new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(&t, 200))));
+    }
     for x in rules["tricks"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");
         let reach = x["why"].as_str().is_some_and(|w| w.starts_with("Code outside the tests"));
@@ -121,6 +126,12 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     look.extend(per_file("test-gone", strings(&tests["gone"]), "A test that ran before no longer runs", "tests that ran before no longer run"));
     for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or("")))); }
+    let reasons = strings(&tests["uneven_why"]);
+    let because = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.iter().map(|r| plain(r)).collect::<Vec<_>>().join("; ")) };
+    look.extend(per_file("test-uneven", strings(&tests["uneven"]), &format!("This fails on the new code, but Kern did not set up both sides the same way{because}, so it does not block on it"),
+        &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it does not block on them")));
+    look.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it does not block on it",
+        "test files fail on the new code, and Kern has no record of them passing on the old code, so it does not block on them"));
     look.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests",
         "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests"));
     look.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));

@@ -150,7 +150,7 @@ fn a_hook_that_fails_in_a_test_file_the_change_adds_needs_a_look_not_a_block() {
     let jest = suite::judged(&before, &after(jest_shape), Some(&after(jest_shape)), None);
     assert_eq!(decision(&jest, &changed), "look", "a new jest or vitest test file that cannot reach its database here needs a look: {jest}");
     let mocha = suite::judged(&before, &after(mocha_shape), Some(&after(mocha_shape)), None);
-    assert_eq!(names(&mocha, "new_problems"), [mocha_shape], "{mocha}");
+    assert_eq!(names(&mocha, "unproven"), [mocha_shape], "a file with no record of passing on the old code is not proof of a break: {mocha}");
     assert_eq!(decision(&mocha, &changed), "look",
         "the same new test file under mocha: its before-all hook needs a database the sandbox does not have. mocha names the failure after the hook, not the file, so the receipt does not see that the change adds the file and blocks with 'A test file no longer runs', which an approval cannot clear: {mocha}");
 }

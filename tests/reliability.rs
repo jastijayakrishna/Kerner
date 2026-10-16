@@ -829,3 +829,42 @@ fn a_test_script_kern_cannot_follow_is_named_when_kern_runs_a_runner_directly() 
     assert_eq!(suite::guessed(&json!({ "scripts": { "test": "turbo run test" } })), None, "a script that hands the tests to each package is followed, not guessed");
     assert_eq!(suite::guessed(&json!({ "devDependencies": { "mocha": "10.0.0" } })), None, "no script, nothing to explain");
 }
+
+#[test]
+fn a_test_file_that_fails_on_the_new_code_with_no_record_of_passing_on_the_old_code_is_not_a_block() {
+    let before = report(&[("test/a.test.ts > works", 1, 0, 0)], &[]);
+    let after = report(&[("test/a.test.ts > works", 1, 0, 0)], &["test/b.test.ts"]);
+    let c = suite::judged(&before, &after, Some(&after), None);
+    assert_eq!(c["new_problems"], json!([]), "promptfoo's old run stopped early, so b never ran there and nine files were blocked: {c}");
+    assert_eq!(c["unproven"], json!(["test/b.test.ts"]));
+    let ran = report(&[("test/a.test.ts > works", 1, 0, 0), ("test/b.test.ts > loads", 1, 0, 0)], &[]);
+    let c = suite::judged(&ran, &after, Some(&after), None);
+    assert_eq!(c["new_problems"], json!(["test/b.test.ts"]), "a file that passed on the old code and no longer loads still blocks: {c}");
+}
+
+#[test]
+fn sides_set_up_differently_are_named() {
+    let setup = |old: &str, new: &str, parts: Value| json!({ "old": { "installs": [{ "dir": ".", "manager": "npm", "result": old, "parts": [] }] },
+        "new": { "installs": [{ "dir": ".", "manager": "npm", "result": new, "parts": parts }] } });
+    assert_eq!(suite::uneven(&setup("installed", "installed", json!([])), ""), None);
+    assert!(suite::uneven(&setup("installed", "installed from package.json (the lockfile is out of date)", json!([])), "").unwrap().contains("lockfile"),
+        "dependencies installed two different ways can differ in version");
+    assert!(suite::uneven(&setup("installed", "installed", json!(["@rollup/rollup-linux-x64-gnu@4.20.0"])), "packages/web").is_some());
+    let steps = |exit: &str| format!("building\nkern-step packages/lib build exit {exit}\n");
+    assert_eq!(suite::uneven_steps(&steps("0"), &steps("0")), None);
+    assert!(suite::uneven_steps(&steps("0"), &steps("1")).unwrap().contains("packages/lib build"), "a build that worked on one side only");
+}
+
+#[test]
+fn failures_on_sides_set_up_differently_or_without_proof_need_a_look_never_a_block() {
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 2, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 1, "skipped": 0 },
+        "kept": 1, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [],
+        "uneven": ["test/a.test.ts > adds"], "uneven_why": ["the old code's dependencies were installed and the new code's were installed from package.json"],
+        "unproven": ["test/b.test.ts"] });
+    let r = receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }));
+    let kinds: Vec<&str> = r["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
+    assert!(kinds.contains(&"test-uneven") && kinds.contains(&"test-unproven"), "{kinds:?}");
+    assert_eq!(r["decision"], "look", "{r}");
+}

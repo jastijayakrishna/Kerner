@@ -526,9 +526,13 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let (fresh, checkable): (Vec<String>, Vec<String>) = fresh_problems(before, after).into_iter().partition(|p| subject_is_new(p));
     let repeated = again.map(|g| matched(&checkable, &g.problems));
     let excused = alone_old.map(|o| matched(&checkable, &o.problems));
-    let (mut new_problems, mut unsteady, mut environmental) = (Vec::new(), Vec::new(), Vec::new());
+    let files_named = before.tests.keys().any(|k| crate::capability::is_code(file_of(k)));
+    let passed_before = |p: &str| !files_named || before.tests.iter().chain(alone_old.into_iter().flat_map(|o| o.tests.iter()))
+        .any(|(k, c)| c.passed > 0 && masked(file_of(k)) == masked(file_of(p)));
+    let (mut new_problems, mut unsteady, mut environmental, mut unproven) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, p) in checkable.iter().enumerate() {
         if excused.as_ref().is_some_and(|e| e[i]) { environmental.push(p.clone()); }
+        else if !passed_before(p) { unproven.push(p.clone()); }
         else if repeated.as_ref().is_none_or(|r| r[i]) { new_problems.push(p.clone()); }
         else { unsteady.push(p.clone()); }
     }
@@ -593,7 +597,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let problem_why: serde_json::Map<String, Value> = new_problems.iter().filter_map(|p| again.unwrap_or(after).why.get(p).or_else(|| after.why.get(p)).map(|w| (p.clone(), json!(w)))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(raw_after), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
         "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems, "problem_why": problem_why,
-        "environmental": environmental, "same_failure": same_failure })
+        "environmental": environmental, "same_failure": same_failure, "unproven": unproven })
 }
 
 fn lasting(s: u64) -> String { if s < 120 { format!("{s} seconds") } else { format!("{} minutes", s / 60) } }
@@ -618,10 +622,28 @@ pub fn stopped_early(ending: &[u8], errors: &[u8], output: &[u8]) -> bool {
     let empty = [&errors, &output].iter().any(|t| t.contains("No tests found") || t.contains("No test files found"));
     !empty && (ending != b"exit 0" || crate::sandbox::first_error(&errors).is_some())
 }
-pub fn install_failure(setup: &Value, side: &str, dir: &str) -> Option<String> {
+fn install_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Value> {
     let applies = |d: &str| d == "." || d == dir || dir.starts_with(&format!("{d}/"));
-    let record = setup[side]["installs"].as_array()?.iter().filter(|i| i["dir"].as_str().is_some_and(applies))
-        .max_by_key(|i| i["dir"].as_str().map_or(0, |d| if d == "." { 0 } else { d.len() }))?;
+    setup[side]["installs"].as_array()?.iter().filter(|i| i["dir"].as_str().is_some_and(applies)).max_by_key(|i| i["dir"].as_str().map_or(0, |d| if d == "." { 0 } else { d.len() }))
+}
+pub fn uneven(setup: &Value, dir: &str) -> Option<String> {
+    let (old, new) = (install_record(setup, "old", dir)?, install_record(setup, "new", dir)?);
+    let kind = |r: &Value| r["result"].as_str().unwrap_or("").split(['(', ':']).next().unwrap_or("").trim().to_string();
+    let said = |r: &Value| r["result"].as_str().unwrap_or("").chars().take(120).collect::<String>();
+    if kind(old) != kind(new) { return Some(format!("the old code's dependencies were {} and the new code's were {}", said(old), said(new))); }
+    let parts = |r: &Value| -> BTreeSet<String> { r["parts"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() };
+    (parts(old) != parts(new)).then(|| "Kern fetched a different set of Linux parts for the dependencies on each side".to_string())
+}
+pub fn uneven_steps(old: &str, new: &str) -> Option<String> {
+    let codes = |log: &str| -> std::collections::BTreeMap<String, String> {
+        log.lines().filter_map(|l| l.trim().strip_prefix("kern-step ")).filter_map(|r| r.rsplit_once(" exit ")).map(|(s, c)| (s.to_string(), c.to_string())).collect()
+    };
+    let (a, b) = (codes(old), codes(new));
+    let differ: Vec<&String> = a.iter().filter(|(s, c)| b.get(*s).is_some_and(|d| d != *c)).map(|(s, _)| s).collect();
+    (!differ.is_empty()).then(|| format!("{} worked on one side only", differ.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")))
+}
+pub fn install_failure(setup: &Value, side: &str, dir: &str) -> Option<String> {
+    let record = install_record(setup, side, dir)?;
     let result = record["result"].as_str()?;
     if result.starts_with("installed") { return None; }
     let with = record["manager"].as_str().map(|m| format!(" with {m}")).unwrap_or_default();
@@ -872,9 +894,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     if !out.join("setup.json").exists() { crate::drive::setup(out, op, until)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
-    const LISTS: [&str; 13] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten", "same_failure"];
+    const LISTS: [&str; 15] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
+        "same_failure", "uneven", "unproven"];
     let mut merged = serde_json::Map::new();
     for l in LISTS { merged.insert(l.into(), json!([])); }
+    merged.insert("uneven_why".into(), json!([]));
     merged.insert("problem_why".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
@@ -898,6 +922,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds, mut whole_why) = (None, 0u64, String::new());
+        let mut uneven_why = uneven(&s, &suite.dir);
         let (mut built, mut tried) = (Vec::new(), String::new());
         let old_run = match &suite.old {
             None => None,
@@ -922,7 +947,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                         match (on_old, on_new) {
                             (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
                             (Ok(_), Err(e)) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
-                            (Ok(_), Ok(_)) => {
+                            (Ok(lo), Ok(ln)) => {
+                                if let Some(u) = uneven_steps(&lo, &ln) { uneven_why = Some(u); }
                                 let again = run_side(out, op, &volume("old"), (t, env), &suite.dir, &format!("old-built{label}"), until).unwrap_or_else(|e| Side::Nothing(e.0));
                                 old_seconds = (now_ms() - at) / 1000;
                                 if cannot_load(Some(&again)).is_some() { tried = format!(" (even after Kern ran {} first)", names.join(", ")); } else { built = names; }
@@ -987,7 +1013,13 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     Ok(Side::Ran(r, created)) => { wrote_code.extend(created); r }
                     Ok(Side::Late) => { late = true; run_unconfirmed.push(cut("Kern's time ran out before it could run them again")); continue; }
                     Err(e) => { run_unconfirmed.push(cut(&format!("running them again failed: {}", e.0))); continue; }
-                    Ok(Side::Nothing(again) | Side::Slow(again)) => { run_broke.push(json!({ "dir": suite.dir, "why": again })); continue; }
+                    Ok(Side::Nothing(again) | Side::Slow(again)) => {
+                        match &uneven_why {
+                            Some(u) => run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} give no results on the new code ({again}), but the two sides were not set up the same way: {u}") })),
+                            None => run_broke.push(json!({ "dir": suite.dir, "why": again })),
+                        }
+                        continue;
+                    }
                 }
             }
         };
@@ -1058,8 +1090,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         edited_unchecked.extend(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })));
         test_data.extend(keep.data.iter().map(|p| json!(p)));
         if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(outcome.rewritten.iter().filter(|k| !failing.contains(k.as_str())).map(|k| json!(named(k)))); }
+        if let Some(u) = &uneven_why && ["broke", "new_problems"].iter().any(|l| c[*l].as_array().is_some_and(|a| !a.is_empty())) && let Some(a) = merged["uneven_why"].as_array_mut() {
+            a.push(json!(u));
+        }
         for l in LISTS.iter() {
-            let target: &str = if unconfirmed && (*l == "broke" || *l == "new_problems") { "unconfirmed" } else { l };
+            let target: &str = if unconfirmed && (*l == "broke" || *l == "new_problems") { "unconfirmed" } else if uneven_why.is_some() && (*l == "broke" || *l == "new_problems") { "uneven" } else { l };
             let items = list(&c[*l]);
             if let Some(a) = merged[target].as_array_mut() { a.extend(items); }
         }
