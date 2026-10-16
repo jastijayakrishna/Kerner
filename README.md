@@ -76,10 +76,13 @@ What Kern checks on every pull request:
    blocks, but only when it fails again when Kern runs its file alone on the new code, and not when the old code runs that file alone.
    A failure that shows only when the whole suite runs needs a look; one that does not repeat is called flaky. A test that stops running,
    or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside, and so is a new
-   test that fails here with the same error as they do (the sandbox lacks something, not the change). The old code's tests run first:
-   when they cannot load because a package of the same repository was never built, Kern runs that package's own build script (and
-   those of the packages it needs) as the test user without a network, makes the result read-only, and does the same on the new code;
-   when they still cannot run, Kern says why at once instead of running the new code too. When the change
+   test that fails here with the same error as they do (the sandbox lacks something, not the change). A project setting that stops
+   at the first failure or shuffles the order is turned off, so both sides run the whole suite in the same order. The old code's tests
+   run first: when they cannot load because a package of the same repository was never built, or because the steps the test script
+   names before its runner (`npm run build &&`, a `pre` script) did not run, Kern runs that build script or those steps as the test user
+   without a network, makes the result read-only, and always does the same on the new code; when they still cannot run, Kern says why
+   at once instead of running the new code too. A suite on course to take more than twice its time limit is stopped after a few minutes,
+   and a suite too big for the limit is checked with the tests related to the change. When the change
    edits, or moves and edits, an existing test file, its snapshot, or a data file or helper the test names, Kern also runs the old
    test, with its old data, on the new code (jest, vitest and mocha): a test whose old version now fails needs a look, because the
    change rewrote what it expected. So does an edited test file whose old version Kern cannot run there (node's test runner, for
@@ -90,8 +93,9 @@ What Kern checks on every pull request:
 3. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
    the tests that newly reads environment variables, needs a look. Ordinary imports, such as a UI library or a project's own modules,
    are not powers.
-4. **Files that steer everything else.** CI, secret and configuration files, test runner settings (the test script in `package.json`
-   included), and the files that instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
+4. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
+   templates aside), test runner settings (the test script in `package.json` included), and the files that instruct coding agents
+   (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
 5. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). A lockfile entry that now downloads a package from
    somewhere other than its own registry tarball needs a look.
 6. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
@@ -175,8 +179,9 @@ Next steps:
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. For other projects the receipt
   covers the rules only and says so; changed code in other languages is listed as "not checked", never passed quietly.
-- Kern runs the tests under Node 22, from the installed project, without its build step or `pretest` script. Tests that need a newer
-  Node, generated files or a build first cannot load, and the receipt says so with the first error instead of claiming anything.
+- Kern runs the tests under Node 22, even for a project that asks for another version (both sides run on the same Node, so the
+  comparison stays fair). It runs a build step or `pretest` script only when the tests cannot load without it. Tests that still cannot
+  load, or that need a newer Node, cannot be checked, and the receipt says so with the first error instead of claiming anything.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so
