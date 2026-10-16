@@ -644,3 +644,18 @@ fn the_build_steps_reach_the_sandbox_under_a_name_it_accepts() {
     let name = src.split("process.env.").nth(1).and_then(|s| s.split(')').next()).unwrap_or("");
     assert!(kern::script::env_name(name), "the test run refuses variable {name:?}, so the build step would never run (KERN_ names are Kern's own)");
 }
+
+#[test]
+fn a_runner_that_crashes_is_quoted_by_its_first_error_not_only_its_last_lines() {
+    let err = b"failed to load config from /workspace/apps/web/vite.config.ts
+
+Startup Error
+Error: Failed to load native binding
+    at Object.<anonymous> (/workspace/node_modules/@swc/core/binding.js:345:11)
+  [cause]: [
+  ]
+}
+";
+    let why = suite::no_results("the output contains no vitest report", b"exit 1", err, b"");
+    assert!(why.contains("its first error: failed to load config from /workspace/apps/web/vite.config.ts") && why.contains("the last lines it printed"), "{why}");
+}

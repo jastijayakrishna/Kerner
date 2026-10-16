@@ -604,7 +604,10 @@ pub fn no_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Str
     let last: Vec<&str> = source.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let from = last.iter().rposition(|l| !l.starts_with("at ")).unwrap_or(0).saturating_sub(1);
     let tail = last[from..].iter().take(3).copied().collect::<Vec<_>>().join(" / ");
+    let first = last.iter().find(|l| { let x = l.to_ascii_lowercase(); !l.starts_with("at ") && (x.contains("error") || x.contains("cannot find") || x.contains("failed to")) })
+        .map(|l| l.chars().take(240).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
     let mut s = format!("{why} ({})", String::from_utf8_lossy(ending).trim());
+    if let Some(f) = first { s += &format!("; its first error: {f}"); }
     if !tail.is_empty() { s += &format!("; the last lines it printed: {tail}"); }
     if s.chars().count() > 600 { s = format!("{}…", s.chars().take(599).collect::<String>()); }
     s
