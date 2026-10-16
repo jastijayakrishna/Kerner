@@ -396,6 +396,23 @@ check compiled "$compiled_base" compiledrepo
 decision compiled blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("after Kern ran \\. build"))' compiled/receipt.json > /dev/null || { jq .tests compiled/receipt.json; fail "compiled: the test script's build step was not run before its tests"; }
 
+say "In an nx-style monorepo, a changed project with no test script runs the runner its own config names"
+git init -q nxrepo && cd nxrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p libs/calc/src
+printf '%s\n' '{"name":"nxlike","private":true,"scripts":{"test":"nx run-many -t test"},"devDependencies":{"jest":"29.7.0"}}' > package.json
+printf '%s\n' '{"name":"calc","targets":{"test":{"executor":"@nx/jest:jest","options":{"jestConfig":"libs/calc/jest.config.js"}}}}' > libs/calc/project.json
+printf '%s\n' 'module.exports = { testEnvironment: "node" };' > libs/calc/jest.config.js
+printf '%s\n' 'module.exports = { total: (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0) };' > libs/calc/src/total.js
+printf '%s\n' 'const { total } = require("./total.js");' '' 'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > libs/calc/src/total.test.js
+git add -A && git commit -qm base && nx_base=$(git rev-parse HEAD)
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' libs/calc/src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/nx.head"
+cd "$W"
+check nx "$nx_base" nxrepo
+decision nx blocked
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("jest in libs/calc"))' nx/receipt.json > /dev/null || { jq .tests nx/receipt.json; fail "nx: the project's own jest config was not run"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

@@ -40,6 +40,13 @@ pub fn plan(package: Option<&[u8]>) -> Plan {
     }
 }
 fn ready(p: Plan) -> Option<(Tests, Env)> { match p { Plan::Run(t, e) => Some((t, e)), _ => None } }
+pub fn by_config(has: impl Fn(&str) -> bool) -> Option<(Tests, Env)> {
+    let any = |stem: &str| ["ts", "mts", "cts", "js", "mjs", "cjs", "json"].iter().any(|e| has(&format!("{stem}.{e}")));
+    let (runner, command) = if any("vitest.config") { (Runner::Vitest, vec!["/workspace/node_modules/.bin/vitest".to_string(), "run".to_string()]) }
+        else if any("jest.config") { (Runner::Jest, vec!["/workspace/node_modules/.bin/jest".to_string()]) }
+        else { return None };
+    Some((Tests { paths: Vec::new(), kind: Kind::Feature, runner, command, edits: Edits::Checked }, Env::new()))
+}
 
 fn test_grant(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('/').collect();
@@ -827,6 +834,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let path = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
         crate::git::git(repo, &["show", &format!("{commit}:{path}")], None).ok()
     };
+    let has = |commit: &str, path: String| crate::git::git(repo, &["cat-file", "-e", &format!("{commit}:{path}")], None).is_ok();
+    let planned = |commit: &str, dir: &str| ready(plan(manifest(commit, dir).as_deref())).or_else(|| {
+        let scripted = manifest(commit, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).is_some_and(|v| v["scripts"]["test"].is_string());
+        if dir.is_empty() || scripted { None } else { by_config(|f| has(commit, format!("{dir}/{f}"))) }
+    });
     let mut not_run = Vec::new();
     let suites: Vec<Suite> = match plan(manifest(head, "").as_deref()) {
         Plan::Run(t, env) => vec![Suite { dir: String::new(), old: ready(plan(manifest(base, "").as_deref())), new: (t, env) }],
@@ -834,14 +846,15 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let changed = crate::rules::changed(repo, base, head)?;
             let paths: Vec<&str> = changed.iter().map(|(p, _)| p.as_str()).collect();
             let mut list = Vec::new();
-            for dir in packages(&paths, |dir| manifest(head, dir).is_some() || manifest(base, dir).is_some()) {
-                let Some(new) = ready(plan(manifest(head, &dir).as_deref())) else {
+            let project = |dir: &str| !dir.is_empty() && [head, base].iter().any(|c| has(c, format!("{dir}/project.json")));
+            for dir in packages(&paths, |dir| manifest(head, dir).is_some() || manifest(base, dir).is_some() || project(dir)) {
+                let Some(new) = planned(head, &dir) else {
                     let script = manifest(head, &dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string));
                     if let Some(script) = script { not_run.push(json!({ "dir": dir, "why": format!("Kern cannot run this package's test script: {script}") })); }
                     continue;
                 };
                 if list.len() == MAX_PACKAGES { not_run.push(json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") })); continue; }
-                list.push(Suite { old: ready(plan(manifest(base, &dir).as_deref())), dir, new });
+                list.push(Suite { old: planned(base, &dir), dir, new });
             }
             list
         }

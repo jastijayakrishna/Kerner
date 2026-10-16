@@ -810,3 +810,13 @@ fn a_build_step_the_test_script_names_is_run_before_tests_that_find_no_files() {
     assert_eq!(suite::repair_steps(&ws, &missing, Some("packages/mcp"), ("packages/mcp", &["pretest".to_string(), "build".to_string()])),
         [("packages/mcp".to_string(), "pretest".to_string()), ("packages/mcp".to_string(), "build".to_string())], "pretest runs once");
 }
+
+#[test]
+fn a_package_without_a_test_script_runs_the_runner_its_own_config_names() {
+    let only = |files: &'static [&'static str]| suite::by_config(move |f| files.contains(&f));
+    let (jest, _) = only(&["jest.config.ts", "project.json"]).expect("nx keeps a package's tests in jest.config.ts and runs them through project.json");
+    assert_eq!((jest.runner, jest.command), (kern::policy::Runner::Jest, vec!["/workspace/node_modules/.bin/jest".to_string()]));
+    let (vitest, _) = only(&["vitest.config.mts"]).unwrap();
+    assert_eq!(vitest.command, ["/workspace/node_modules/.bin/vitest", "run"]);
+    assert!(only(&["vite.config.ts", "project.json"]).is_none(), "a vite config alone is an app, not tests");
+}
