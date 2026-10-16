@@ -388,6 +388,22 @@ fn markers(path: &str, source: &str, test: bool) -> R<BTreeMap<String, usize>> {
     }
     deny!("Changed code cannot be parsed for the test proof: {path}. Fix its syntax")
 }
+fn titled(m: &str) -> bool { marker_title(m).is_some() }
+fn marker_title(m: &str) -> Option<&str> {
+    if let Some((_, t)) = m.split_once("('") { return t.strip_suffix("')"); }
+    m.split_once(" in '").and_then(|(_, t)| t.strip_suffix('\''))
+}
+fn marker_kind(m: &str) -> String {
+    let m = m.split("('").next().unwrap_or(m);
+    let m = m.split(" in '").next().unwrap_or(m);
+    if m.ends_with("[a computed name]") { return "a computed name".to_string(); }
+    let word = m.trim_start_matches("the test context's ").trim_start_matches("this.").trim_start_matches("the ").trim_end_matches("()").trim_end_matches(" option");
+    match word.rsplit('.').next().unwrap_or(word) {
+        "xit" | "xtest" | "xdescribe" | "xcontext" | "xspecify" => "skip".to_string(),
+        "fit" | "fdescribe" | "ftest" => "only".to_string(),
+        w => w.to_string(),
+    }
+}
 fn text_of<'f>(files: &'f Files, path: &str) -> Option<&'f str> { files.get(path).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) }
 fn runner_config(name: &str) -> bool {
     RUNNER_CONFIG.iter().any(|c| name.starts_with(c))
@@ -414,7 +430,17 @@ pub fn screen(base: &Files, candidate: &Files, changed: &Value, tests: &Tests) -
         let found = markers(path, source, inside)?;
         let before = text_of(base, path).and_then(|s| markers(path, s, inside).ok()).unwrap_or_default();
         if inside {
-            let grown: Vec<&String> = found.iter().filter(|(k, n)| before.get(*k).copied().unwrap_or(0) < **n).map(|(k, _)| k).collect();
+            let kinds = |m: &BTreeMap<String, usize>| -> BTreeMap<String, usize> {
+                let mut out = BTreeMap::new();
+                for (name, n) in m.iter().filter(|(k, _)| !titled(k)) { *out.entry(marker_kind(name)).or_insert(0) += n; }
+                out
+            };
+            let (now, then) = (kinds(&found), kinds(&before));
+            let more = |m: &str| { let kind = marker_kind(m); now.get(&kind).copied().unwrap_or(0) > then.get(&kind).copied().unwrap_or(0) };
+            let pairs: BTreeSet<(String, &str)> = before.keys().filter_map(|k| marker_title(k).map(|t| (marker_kind(k), t))).collect();
+            let old_text = text_of(base, path).unwrap_or("");
+            let moved = |m: &str| marker_title(m).is_some_and(|t| !pairs.contains(&(marker_kind(m), t)) && ['\'', '"', '`'].iter().any(|q| old_text.contains(&format!("{q}{t}{q}"))));
+            let grown: Vec<&String> = found.iter().filter(|(k, n)| before.get(*k).copied().unwrap_or(0) < **n && (more(k.as_str()) || moved(k.as_str()))).map(|(k, _)| k).collect();
             if let Some(m) = grown.iter().find(|k| k.contains("('")).or(grown.first()) {
                 deny!("A test file skips, focuses or inverts tests: {path} uses {m}. Every test must run and check what it says, so remove it")
             }

@@ -5,6 +5,7 @@ module.exports = (results) => {
     testResults: (results.testResults || []).map((file) => ({
       name: file.testFilePath,
       status: file.testExecError || file.failureMessage ? 'failed' : 'passed',
+      message: (file.testExecError && file.testExecError.message) || file.failureMessage || '',
       assertionResults: (file.testResults || []).map((t) => ({ ancestorTitles: t.ancestorTitles, title: t.title, status: t.status })),
     })),
   };

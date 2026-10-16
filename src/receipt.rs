@@ -53,6 +53,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let reach = x["why"].as_str().is_some_and(|w| w.starts_with("Code outside the tests"));
         let added_file = x["operation"] == "add" && !tests_deleted;
         if added_file && reach { new_tests.push(item("new-runner-reach", format!("{}: a file this change adds, outside the test folders, uses the test runner; if it is a test, Kern does not run it", code(path, 160)))); }
+        else if reach { look.push(item("runner-reach", format!("{}: code outside the test folders uses the test runner; that is fine in test support code and a way to fake results in shipped code ({})", code(path, 160), plain(x["why"].as_str().unwrap_or(""))))); }
         else if added_file { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
         else { blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""))))); }
     }
@@ -63,6 +64,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let caps: Vec<String> = strings(&p["added"]).iter().map(|c| code(c, 80)).collect();
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
+    for t in strings(&tests["rewritten"]) { look.push(item("test-rewritten", format!("The change edits this test, and its old version fails on the new code: {}", code(&t, 200)))); }
     look.extend(new_tests);
     for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
     for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
@@ -189,6 +191,13 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         md += "\n";
         for n in tests["not_run"].as_array().into_iter().flatten() {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
+        }
+        let (edited, rewritten) = (tests["edited"].as_u64().unwrap_or(0), tests["rewritten"].as_array().map_or(0, Vec::len));
+        if rewritten > 0 { md += &format!("- ⚠️ Edited tests: the old versions of {} fail on the new code (see above)\n", plural(rewritten, "test", "tests")); }
+        else if edited > 0 { md += &format!("- ✅ Edited tests: the old versions of {} still pass on the new code\n", plural(edited as usize, "edited test file", "edited test files")); }
+        for n in tests["edited_not_run"].as_array().into_iter().flatten() {
+            let place = n["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
+            md += &format!("- ⏭️ Edited tests{place}: their old versions did not run on the new code — {}\n", plain(n["why"].as_str().unwrap_or("")));
         }
     } else if tests["status"] == "BROKE" {
         md += "- ❌ Tests: they run on the old code but give no results on the new code (see above)\n";

@@ -216,6 +216,21 @@ unset KERN_TEST_MINUTES
 decision big clear
 jq -e '.tests.status == "RAN" and .tests.kept == 3 and (.tests.runner | test("related to the change"))' big/receipt.json > /dev/null || { jq .tests big/receipt.json; fail "big: the related tests did not run in place of the whole suite"; }
 
+say "An edited test whose old version fails on the new code needs a look, and one whose old version still passes is clear"
+git -C calc checkout -q -b rewrites "$base"
+sed -i 's/amount >= 100/amount > 100/' calc/src/total.js
+sed -i 's/expect(discount(100)).toBe(90)/expect(discount(100)).toBe(100)/' calc/test/total.test.js
+git -C calc commit -qam "Discount above 100, and the test says so" && git -C calc rev-parse HEAD > rewrites.head && git -C calc checkout -q "$base"
+check rewrites "$base"
+decision rewrites look
+[ "$(kinds rewrites test-rewritten look)" = 1 ] && grep -q 'discount from 100' rewrites/receipt.md || { cat rewrites/receipt.md; fail "rewrites: the rewritten expectation was not reported"; }
+git -C calc checkout -q -b edits "$base"
+printf '%s\n' "test('discount of 200', () => expect(discount(200)).toBe(180));" >> calc/test/total.test.js
+git -C calc commit -qam "One more test" && git -C calc rev-parse HEAD > edits.head && git -C calc checkout -q "$base"
+check edits "$base"
+decision edits clear
+grep -q 'the old versions of 1 edited test file still pass' edits/receipt.md || { cat edits/receipt.md; fail "edits: the old version of the edited test file did not run on the new code"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"

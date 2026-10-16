@@ -80,10 +80,18 @@ pub fn lock_surprises(old: &Value, new: &Value) -> Vec<String> {
     let before: BTreeMap<String, Value> = entries(old).into_iter().collect();
     let known: BTreeSet<String> = before.values().filter_map(|e| e["resolved"].as_str().and_then(host)).chain(REGISTRIES.iter().map(|r| r.to_string())).collect();
     let (mut swaps, mut foreign, mut hosts) = (Vec::new(), Vec::new(), BTreeMap::<String, (usize, String)>::new());
-    for (key, entry) in entries(new).into_iter().filter(|(k, v)| before.get(k) != Some(v) && v["link"] != true) {
+    let aliases: BTreeSet<(String, String)> = entries(new).iter().flat_map(|(_, e)| {
+        ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].iter().flat_map(|k| e[*k].as_object().cloned().unwrap_or_default()).collect::<Vec<_>>()
+    }).filter_map(|(name, spec)| {
+        let target = spec.as_str()?.strip_prefix("npm:")?;
+        let at = target.rfind('@').filter(|i| *i > 0).unwrap_or(target.len());
+        Some((name, target[..at].to_string()))
+    }).collect();
+    let packaged = new["packages"].as_object().is_some_and(|p| !p.is_empty());
+    for (key, entry) in entries(new).into_iter().filter(|(k, v)| before.get(k) != Some(v) && v["link"] != true && (!packaged || k.contains("node_modules/"))) {
         let real = entry["name"].as_str().map_or_else(|| package_of(&key).to_string(), str::to_string);
         let was = before.get(&key).map_or_else(|| package_of(&key).to_string(), |o| o["name"].as_str().map_or_else(|| package_of(&key).to_string(), str::to_string));
-        if was != real { swaps.push(format!("{key} installs another package: {real} in place of {was}")); continue; }
+        if was != real && !aliases.contains(&(package_of(&key).to_string(), real.clone())) { swaps.push(format!("{key} installs another package: {real} in place of {was}")); continue; }
         let version = entry["version"].as_str().unwrap_or("");
         if let Some(o) = before.get(&key) && o["version"] == entry["version"] && o["integrity"].is_string() && o["integrity"] != entry["integrity"] {
             swaps.push(format!("{real} {version} has a new checksum without a new version: the file it downloads changed"));

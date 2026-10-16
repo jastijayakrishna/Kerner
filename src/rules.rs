@@ -76,6 +76,42 @@ pub fn changed(repo: &Path, base: &str, head: &str) -> R<Vec<(String, &'static s
     Ok(list)
 }
 
+pub fn renames(repo: &Path, base: &str, head: &str) -> R<Vec<(String, String)>> {
+    let out = git_with(repo, &["diff", "-M", "--diff-filter=R", "--name-status", "-z", base, head], None, 64 << 20)?;
+    let fields: Vec<String> = out.split(|b| *b == 0).filter(|f| !f.is_empty()).map(|f| String::from_utf8_lossy(f).to_string()).collect();
+    Ok(fields.chunks(3).filter(|c| c.len() == 3 && c[0].starts_with('R')).map(|c| (c[1].clone(), c[2].clone())).collect())
+}
+fn setup_files(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["setupFilesAfterEnv", "setupFiles", "globalSetup"] {
+        let mut from = 0;
+        while let Some(i) = text[from..].find(key) {
+            let at = from + i + key.len();
+            from = at;
+            let rest = text[at..].trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+            let Some(rest) = rest.strip_prefix(':') else { continue };
+            let rest = rest.trim_start();
+            let value = if rest.starts_with('[') { &rest[..rest.find(']').map_or(rest.len(), |e| e + 1)] } else { &rest[..rest.find([',', '}', '\n']).unwrap_or(rest.len())] };
+            out.extend(quoted(value));
+        }
+    }
+    out
+}
+fn quoted(text: &str) -> Vec<String> {
+    let (chars, mut out, mut i) = (text.chars().collect::<Vec<_>>(), Vec::new(), 0);
+    while i < chars.len() {
+        let q = chars[i];
+        if q == '\'' || q == '"' || q == '`' {
+            let start = i + 1;
+            i += 1;
+            while i < chars.len() && chars[i] != q { i += 1; }
+            out.push(chars[start..i.min(chars.len())].iter().collect());
+        }
+        i += 1;
+    }
+    out
+}
+
 fn files_for(repo: &Path, commit: &str, wanted: &BTreeSet<String>) -> R<Files> {
     let items = crate::drive::listing(repo, commit)?;
     let mut files: Files = items.iter().map(|i| (i.path.clone(), Entry { mode: i.mode.clone(), oid: i.oid.clone(), size: i.size, bytes: None })).collect();
@@ -120,7 +156,37 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let manifests: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.as_str())
         .filter(|p| base_name(p) == "package.json" && !p.split('/').any(|c| c == "node_modules")).take(MANIFESTS).map(str::to_string).collect();
     wanted.extend(manifests.iter().cloned());
-    let (old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);
+    let configs: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.clone()).filter(|p| {
+        let n = base_name(p).to_ascii_lowercase();
+        ["vitest.config.", "vite.config.", "jest.config.", "vitest.workspace."].iter().any(|c| n.starts_with(c)) && !p.split('/').any(|c| c == "node_modules")
+    }).take(MANIFESTS).collect();
+    wanted.extend(configs.iter().cloned());
+    let moved = renames(repo, base, head)?;
+    let (mut old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);
+    for (from, to) in &moved { if let Some(e) = old.get(from).cloned() && !old.contains_key(to) { old.insert(to.clone(), e); } }
+    let moved_from: BTreeSet<&String> = moved.iter().map(|(from, _)| from).collect();
+    let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
+    let mut named = BTreeSet::new();
+    let rooted = |f: &str| f.trim_start_matches("<rootDir>/").to_string();
+    for m in &manifests {
+        let dir = m.strip_suffix("package.json").unwrap_or("");
+        for files in [&old, &new] {
+            let Some(v) = json_of(files, m) else { continue };
+            if let crate::script::Found::Run(i) = crate::script::found(&v) { named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f))); }
+            for key in ["setupFiles", "setupFilesAfterEnv", "globalSetup"] {
+                let list = v["jest"][key].as_array().cloned().unwrap_or_else(|| v["jest"][key].as_str().map(|s| vec![json!(s)]).unwrap_or_default());
+                named.extend(list.iter().filter_map(Value::as_str).filter_map(|f| joined(dir, &rooted(f))));
+            }
+        }
+    }
+    for c in &configs {
+        let dir = c.rsplit_once('/').map_or("", |(d, _)| d);
+        for files in [&old, &new] {
+            if let Some(text) = files.get(c).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) {
+                named.extend(setup_files(text).iter().filter_map(|f| joined(dir, &rooted(f))));
+            }
+        }
+    }
     let (mut powers, mut tricks, mut settings, mut not_checked) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let none = BTreeMap::new();
     let test_files = crate::suite::test_paths(&paths);
@@ -151,26 +217,16 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
         if let Err(e) = crate::proof::screen(&old, &new, &one, &tests) {
             let item = json!({ "path": p, "operation": op, "why": e.0 });
-            if e.0.starts_with("Test runner configuration cannot change") { settings.push(item); }
+            if e.0.starts_with("Test runner configuration cannot change") || (named.contains(p) && e.0.starts_with("Code outside the tests reaches into the test runner")) { settings.push(item); }
             else if e.0.starts_with("A test file skips, focuses or inverts tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }
             else { not_checked.push(item); }
         }
     }
-    let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p)).map(|(p, _)| json!({ "path": p })).collect();
-    let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
+    let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p) && !moved_from.contains(p)).map(|(p, _)| json!({ "path": p })).collect();
     for (p, op) in changes.iter().filter(|(p, op)| base_name(p) == "package.json" && *op != "delete") {
         if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
             && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
             settings.push(json!({ "path": p, "operation": op, "why": "the test script or the test settings in package.json change" }));
-        }
-    }
-    let mut named = BTreeSet::new();
-    for m in &manifests {
-        let dir = m.strip_suffix("package.json").unwrap_or("");
-        for files in [&old, &new] {
-            if let Some(v) = json_of(files, m) && let crate::script::Found::Run(i) = crate::script::found(&v) {
-                named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f)));
-            }
         }
     }
     for (p, op) in &changes {

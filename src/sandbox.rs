@@ -726,7 +726,7 @@ mod inside {
     }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files"], "test run")?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
         ensure!(vars.len() <= 32, "Invalid test run environment");
@@ -745,6 +745,15 @@ mod inside {
         ensure!(Path::new(&command[0]).exists(), "The test runner is not installed in the project: {} does not exist (Kern needs node_modules; Yarn Plug'n'Play projects have none)", command[0]);
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         clear_added(Path::new("/workspace"));
+        let files = c["files"].as_object().filter(|f| f.len() <= 128).ok_or_else(|| Denied("Invalid test run files".into()))?;
+        for (p, text) in files {
+            file_path(p)?;
+            let text = text.as_str().ok_or_else(|| Denied("Invalid test run files".into()))?;
+            let target = Path::new("/workspace").join(p);
+            ensure!(!p.split('/').any(|c| c == "node_modules") && std::fs::symlink_metadata(&target).is_err(), "A test run file may not replace a project file: {p}");
+            if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+            create_new(&target, text.as_bytes(), 0o644)?;
+        }
         let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env)
             .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
             .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-test-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-test-err")?)).spawn()?;
