@@ -79,8 +79,7 @@ fn a_test_whose_file_did_not_load_and_that_fails_on_every_rerun_still_blocks() {
     let alone_new = report(&[(cart, 0, 1, 0)], &[]);
     let whole_again = report(&[(cart, 0, 1, 0), (total, 1, 0, 0)], &[]);
     let alone_old = report(&[(cart, 1, 0, 0)], &[]);
-    let again = suite::worse(&alone_new, &whole_again);
-    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
+    let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
     assert!(!names(&c, "broke").is_empty() || !names(&c, "new_problems").is_empty(),
         "the change breaks src/cart.test.ts: on the whole run the file does not load, alone and on the whole rerun it loads and its test fails, and on the old code alone the test passes. The load failure is called flaky because the reruns loaded the file, and the failing test is in no list because the first run has no failure for it and the reruns have it, so nothing is reported: {c}");
     assert_eq!(decision(&c, &[("src/cart.ts", "modify")]), "blocked", "a test that passed before is missing from one run and fails in two more, yet the receipt is clear: {c}");
@@ -94,8 +93,7 @@ fn a_test_that_fails_whole_and_whose_file_does_not_load_alone_is_not_flaky() {
     let alone_new = report(&[], &["src/cart.test.ts"]);
     let whole_again = report(&[(cart, 1, 0, 0)], &[]);
     let alone_old = report(&[(cart, 1, 0, 0)], &[]);
-    let again = suite::worse(&alone_new, &whole_again);
-    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
+    let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
     assert_eq!(names(&c, "broke"), [cart],
         "the test fails on the whole run; alone its file no longer loads on the new code while the old code alone loads and passes it; the whole rerun passes it. The alone run may only add failures, and its failure here is the file's, which worse() keeps as a problem the first run did not have and never turns into a failure of the test, so the test is called flaky: {c}");
 }
@@ -124,9 +122,8 @@ fn a_numbered_test_that_fails_alone_keeps_that_failure_when_the_whole_rerun_pass
     let alone_new = report(&[("src/api.test.ts > answers on port 9013", 0, 1, 0), (pool, 1, 0, 0)], &[]);
     let whole_again = report(&[("src/api.test.ts > answers on port 52019", 1, 0, 0), (pool, 0, 1, 0)], &[]);
     let alone_old = report(&[("src/api.test.ts > answers on port 41500", 1, 0, 0), (pool, 1, 0, 0)], &[]);
-    let again = suite::worse(&alone_new, &whole_again);
-    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
-    assert_eq!(names(&c, "broke"), [port, pool],
+    let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
+    assert_eq!((names(&c, "broke"), names(&c, "together")), (vec![port.to_string()], vec![pool.to_string()]),
         "the port test fails on the whole run and again when its file runs alone; the pool test does not repeat alone, so the whole suite runs again and worse() merges the two reruns, where the alone run may only add failures. worse() matches the alone run by its raw name, which carries another random port, so the alone failure is dropped and the test is called flaky: {c}");
 }
 

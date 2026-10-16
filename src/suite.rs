@@ -140,7 +140,8 @@ fn fresh_problems(old: &Report, new: &Report) -> Vec<String> {
 
 fn settled(base: &Report, r: &Report) -> Report {
     let mut r = renamed(r, &paired(base, r));
-    let broken: BTreeSet<String> = r.problems.iter().map(|p| file_of(p).to_string()).collect();
+    let loaded: BTreeSet<String> = r.tests.keys().map(|k| file_of(k).to_string()).collect();
+    let broken: BTreeSet<String> = r.problems.iter().map(|p| file_of(p).to_string()).filter(|f| !loaded.contains(f)).collect();
     for (k, b) in &base.tests {
         if broken.contains(file_of(k)) {
             let e = r.tests.entry(k.clone()).or_default();
@@ -210,24 +211,21 @@ pub fn related(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
     Some(t)
 }
 
-pub fn worse(alone: &Report, whole: &Report) -> Report {
-    let alone = renamed(alone, &paired(whole, alone));
-    let broken: BTreeSet<String> = alone.problems.iter().map(|p| file_of(p).to_string()).collect();
-    let mut out = whole.clone();
-    for (k, c) in out.tests.iter_mut() {
-        match alone.tests.get(k) {
-            Some(a) => {
-                c.passed = c.passed.min(a.passed);
-                c.failed = c.failed.max(a.failed);
-                c.skipped = c.skipped.max(a.skipped);
-            }
-            None if broken.contains(file_of(k)) => { c.failed = c.failed.max(c.total()); c.passed = 0; }
-            None => {}
-        }
-    }
-    for p in &alone.problems { if !out.problems.contains(p) { out.problems.push(p.clone()); } }
-    for (k, w) in &alone.why { out.why.entry(k.clone()).or_insert_with(|| w.clone()); }
-    out
+pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole: Option<&Report>, alone_old: Option<&Report>) -> Value {
+    let (Some(a), Some(w)) = (alone, whole) else { return judged(before, after, alone.or(whole), alone_old) };
+    let mut c = judged(before, after, Some(a), alone_old);
+    let wide = judged(before, after, Some(w), alone_old);
+    if c["status"] != "RAN" || wide["status"] != "RAN" { return c; }
+    let list = |v: &Value, k: &str| -> Vec<String> { v[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect() };
+    let narrow: BTreeSet<String> = list(&c, "broke").into_iter().chain(list(&c, "new_problems")).collect();
+    let together: Vec<String> = list(&wide, "broke").into_iter().chain(list(&wide, "new_problems")).filter(|k| !narrow.contains(k)).collect();
+    let mut gone = list(&c, "gone");
+    for g in list(&wide, "gone") { if !gone.contains(&g) { gone.push(g); } }
+    let flaky: Vec<String> = list(&c, "flaky").into_iter().filter(|k| !together.contains(k) && !gone.contains(k)).collect();
+    c["together"] = json!(together);
+    c["gone"] = json!(gone);
+    c["flaky"] = json!(flaky);
+    c
 }
 
 fn repeats(old: &Report, new: &Report, again: &Report) -> bool {
@@ -268,11 +266,13 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let reported: BTreeSet<String> = new_problems.iter().map(|p| file_of(p).to_string()).collect();
     let shaky: BTreeSet<String> = unsteady.iter().chain(&environmental).map(|p| file_of(p).to_string()).collect();
     let keys: BTreeSet<&String> = before.tests.keys().chain(after.tests.keys()).collect();
+    let before_broken: BTreeSet<&str> = before.problems.iter().map(|p| file_of(p)).collect();
     let (mut kept, mut broke, mut flaky, mut gone, mut newly_skipped, mut added, mut already_failing) = (0u64, Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut new_failing = Vec::new();
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
         if b.passed == 0 && b.failed == 0 {
+            if b.total() == 0 && before_broken.contains(file_of(k)) { already_failing.push(k.clone()); continue; }
             if b.total() == 0 || a.ran() > 0 { added.push(k.clone()); }
             if a.failed > 0 { new_failing.push(k.clone()); }
             continue;
@@ -441,7 +441,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     if !out.join("setup.json").exists() { crate::drive::setup(out, op, until)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
     let volume = |side: &str| s[side]["volume"].as_str().unwrap_or("").to_string();
-    const LISTS: [&str; 10] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental"];
+    const LISTS: [&str; 11] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together"];
     let mut merged = serde_json::Map::new();
     for l in LISTS { merged.insert(l.into(), json!([])); }
     merged.insert("problem_why".into(), json!({}));
@@ -539,33 +539,33 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         } else {
             vec![("new-again", "new", whole_new.0.clone(), whole_new.1)]
         };
-        let (mut second, mut second_old, mut unconfirmed) = (None, None, false);
+        let (mut alone_new, mut whole, mut second_old, mut unconfirmed) = (None, None, None, false);
         for (name, side, tests, env) in &plan {
             let at = now_ms();
             let r = run_side(out, op, &volume(side), (tests, env), &suite.dir, &format!("{name}{label}"), until);
             timed(format!("{name}{label}"), at);
             match r {
-                Ok(Side::Ran(r, created)) if *side == "new" => { wrote_code.extend(created); second = Some(r); }
+                Ok(Side::Ran(r, created)) if *name == "new-alone" => { wrote_code.extend(created); alone_new = Some(r); }
+                Ok(Side::Ran(r, created)) if *side == "new" => { wrote_code.extend(created); whole = Some(r); }
                 Ok(Side::Ran(r, _)) => second_old = Some(r),
                 Ok(Side::Late) => { late = true; unconfirmed = true; break; }
                 Err(_) => { unconfirmed = true; break; }
                 Ok(Side::Nothing(_) | Side::Slow(_)) => {}
             }
         }
-        if !unconfirmed && plan.first().is_some_and(|p| p.0 == "new-alone") && second.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
+        if !unconfirmed && plan.first().is_some_and(|p| p.0 == "new-alone") && alone_new.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
             let at = now_ms();
             let r = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
             timed(format!("new-again{label}"), at);
             match r {
-                Ok(Side::Ran(r, created)) => { wrote_code.extend(created); second = Some(match second { Some(g) => worse(&g, &r), None => r }); }
+                Ok(Side::Ran(r, created)) => { wrote_code.extend(created); whole = Some(r); }
                 Ok(Side::Late) => { late = true; unconfirmed = true; }
                 Err(_) => unconfirmed = true,
-                Ok(Side::Nothing(_) | Side::Slow(_)) => second = None,
+                Ok(Side::Nothing(_) | Side::Slow(_)) => {}
             }
         }
-        if !plan.is_empty() && second.is_none() { unconfirmed = true; }
-        if unconfirmed { second = None; second_old = None; }
-        let c = judged(&old, &new, second.as_ref(), second_old.as_ref());
+        if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
+        let c = if unconfirmed { judged(&old, &new, None, None) } else { confirmed(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref()) };
         let runner = suite.new.0.runner;
         let named = |k: &str| if runner == Runner::Node && !suite.dir.is_empty() { format!("{}: {k}", suite.dir) } else { k.to_string() };
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
@@ -574,7 +574,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             if let Some(a) = merged["new_failing"].as_array_mut() { a.extend(list(&c["new_failing"])); }
             continue;
         }
-        for l in LISTS.iter().filter(|l| **l != "unconfirmed") {
+        for l in LISTS.iter() {
             let target: &str = if unconfirmed && (*l == "broke" || *l == "new_problems") { "unconfirmed" } else { l };
             let items = list(&c[*l]);
             if let Some(a) = merged[target].as_array_mut() { a.extend(items); }

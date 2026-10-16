@@ -80,6 +80,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
     for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or("")))); }
+    for t in strings(&tests["together"]) { look.push(item("test-together", format!("This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests: {}", code(&t, 200)))); }
     for t in strings(&tests["unconfirmed"]) { look.push(item("test-unconfirmed", format!("This failed once, and Kern could not run it again to confirm it: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
@@ -165,7 +166,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"));
         let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
-        let doubtful = look.iter().any(|x| x["kind"] == "test-unconfirmed");
+        let doubtful = look.iter().any(|x| x["kind"] == "test-unconfirmed" || x["kind"] == "test-together");
         let mut line = if broke > 0 || files > 0 {
             let mut what = Vec::new();
             if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }

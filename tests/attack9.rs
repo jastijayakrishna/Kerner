@@ -55,9 +55,8 @@ fn a_test_missing_from_both_whole_runs_is_gone_even_when_it_comes_back_alone() {
     let alone_new = report(&[(cache, 1, 0, 0), (loads, 1, 0, 0), (lists, 1, 0, 0)], &[]);
     let whole_again = report(&[(cache, 0, 1, 0), (loads, 1, 0, 0)], &[]);
     let alone_old = report(&[(cache, 1, 0, 0), (loads, 1, 0, 0), (lists, 1, 0, 0)], &[]);
-    let again = suite::worse(&alone_new, &whole_again);
-    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
-    assert_eq!(names(&c, "broke"), [cache], "a failure through shared state blocks: {c}");
+    let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
+    assert_eq!(names(&c, "together"), [cache], "a failure that shows only when the whole suite runs needs a look: {c}");
     assert_eq!(names(&c, "gone"), [lists],
         "through the same shared state the change makes a test vanish from both whole runs; it only runs when its file runs alone. worse() keeps a test the whole rerun does not have at its alone result, so missing counts as passing and the test is not gone: {c}");
 }
@@ -71,9 +70,8 @@ fn a_failing_test_whose_file_no_longer_loads_on_the_whole_rerun_is_not_flaky() {
     let alone_new = report(&[(session, 1, 0, 0)], &[]);
     let whole_again = report(&[(cache, 1, 0, 0)], &["src/session.test.ts"]);
     let alone_old = report(&[(session, 1, 0, 0)], &[]);
-    let again = suite::worse(&alone_new, &whole_again);
-    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
-    assert!(!names(&c, "broke").is_empty() || !names(&c, "new_problems").is_empty(),
+    let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
+    assert!(!names(&c, "together").is_empty() && !names(&c, "flaky").contains(&session.to_string()),
         "the test fails on the whole run, passes alone, and on the whole rerun its file does not even load; worse() keeps the alone pass for a test the rerun lacks and drops the rerun's load failure because the first run did not have it, so the regression is flaky and the check is green: {c}");
 }
 

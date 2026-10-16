@@ -417,15 +417,14 @@ fn suspect_test_files_are_run_again_alone_with_the_project_s_own_options() {
 }
 
 #[test]
-fn a_failure_that_shows_only_when_files_run_together_still_blocks() {
+fn a_failure_that_shows_only_when_files_run_together_needs_a_look() {
     let before = report(&[("a.test.ts > shares state", 1, 0, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
     let after = report(&[("a.test.ts > shares state", 0, 1, 0), ("b.test.ts > flakes", 0, 1, 0)], &[]);
     let alone_new = report(&[("a.test.ts > shares state", 1, 0, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
     let whole_again = report(&[("a.test.ts > shares state", 0, 1, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
     let alone_old = report(&[("a.test.ts > shares state", 1, 0, 0), ("b.test.ts > flakes", 1, 0, 0)], &[]);
-    let again = suite::worse(&alone_new, &whole_again);
-    let c = suite::judged(&before, &after, Some(&again), Some(&alone_old));
-    assert_eq!(c["broke"], json!(["a.test.ts > shares state"]), "it passes alone but fails again in the whole suite: the change broke it through state the files share: {c}");
+    let c = suite::confirmed(&before, &after, Some(&alone_new), Some(&whole_again), Some(&alone_old));
+    assert_eq!(c["together"], json!(["a.test.ts > shares state"]), "it passes alone but fails again in the whole suite: a look, never a silent pass, and no block it cannot reproduce: {c}");
     assert_eq!(c["flaky"], json!(["b.test.ts > flakes"]), "{c}");
 }
 
@@ -476,4 +475,19 @@ fn a_suite_too_big_for_the_time_limit_runs_only_the_tests_related_to_the_change(
     assert!(suite::related(&tests(policy::Runner::Jest, &["/workspace/node_modules/.bin/jest"]), &std::collections::BTreeSet::new(), "").is_none(), "no changed code, nothing related");
     let focus = suite::focused(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "--project", "unit"]), &files, "packages/web");
     assert!(focus.is_some(), "an option's value is not a file filter");
+}
+
+#[test]
+fn farm_cases_a_replaced_test_is_gone_and_tests_of_a_file_that_did_not_load_before_are_not_new() {
+    let file = "packages/backend/src/verify.test.ts";
+    let before = report(&[(&format!("{file} > verifies a token"), 1, 0, 0), (&format!("{file} > verifies provided OAuth token"), 1, 0, 0)], &[]);
+    let after = report(&[(&format!("{file} > verifies a token"), 1, 0, 0), (&format!("{file} > verifies opaque OAuth token with aud=undefined"), 1, 0, 0)], &[file]);
+    let again = report(&[(&format!("{file} > verifies a token"), 1, 0, 0), (&format!("{file} > verifies opaque OAuth token with aud=undefined"), 1, 0, 0)], &[]);
+    let c = suite::compare(&before, &after, Some(&again));
+    assert_eq!(c["broke"], json!([]), "clerk#9585 replaced the test with an it.each; its file also reported an error, but its tests loaded: {c}");
+    assert_eq!(c["gone"], json!([format!("{file} > verifies provided OAuth token")]), "{c}");
+    let before = report(&[("core/a.test.js > works", 1, 0, 0)], &["core/members.test.js"]);
+    let after = report(&[("core/a.test.js > works", 1, 0, 0), ("core/members.test.js > lists", 0, 1, 0), ("core/members.test.js > adds", 0, 1, 0)], &[]);
+    let c = suite::compare(&before, &after, Some(&after));
+    assert_eq!((c["new_failing"].clone(), c["added"].clone()), (json!([]), json!([])), "Ghost#28552: a file that could not load on the old run has no baseline, so its tests are not new: {c}");
 }

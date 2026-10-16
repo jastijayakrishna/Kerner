@@ -73,9 +73,9 @@ What Kern checks on every pull request:
 1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests the way its own `test`
    script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
    package, each changed package's own script), in a sealed sandbox (gVisor) with the network off. A test that passed before and fails now
-   blocks, but only when it fails again when Kern runs its file once more, and not when the old code runs that file alone; otherwise it is
-   called flaky. A test that stops running, or is newly skipped, needs a look, checked the same way. Tests that already failed before the
-   change are set aside.
+   blocks, but only when it fails again when Kern runs its file alone on the new code, and not when the old code runs that file alone.
+   A failure that shows only when the whole suite runs needs a look; one that does not repeat is called flaky. A test that stops running,
+   or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside.
 2. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
