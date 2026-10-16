@@ -76,27 +76,53 @@ pub fn changed(repo: &Path, base: &str, head: &str) -> R<Vec<(String, &'static s
     Ok(list)
 }
 
-pub fn renames(repo: &Path, base: &str, head: &str) -> R<Vec<(String, String)>> {
+pub fn renames(repo: &Path, base: &str, head: &str) -> R<Vec<(String, String, bool)>> {
     let out = git_with(repo, &["diff", "-M", "--diff-filter=R", "--name-status", "-z", base, head], None, 64 << 20)?;
     let fields: Vec<String> = out.split(|b| *b == 0).filter(|f| !f.is_empty()).map(|f| String::from_utf8_lossy(f).to_string()).collect();
-    Ok(fields.chunks(3).filter(|c| c.len() == 3 && c[0].starts_with('R')).map(|c| (c[1].clone(), c[2].clone())).collect())
+    Ok(fields.chunks(3).filter(|c| c.len() == 3 && c[0].starts_with('R')).map(|c| (c[1].clone(), c[2].clone(), c[0] == "R100")).collect())
 }
-fn setup_files(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for key in ["setupFilesAfterEnv", "setupFiles", "globalSetup"] {
-        let mut from = 0;
-        while let Some(i) = text[from..].find(key) {
-            let at = from + i + key.len();
-            from = at;
-            let rest = text[at..].trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
-            let Some(rest) = rest.strip_prefix(':') else { continue };
-            let rest = rest.trim_start();
-            let value = if rest.starts_with('[') { &rest[..rest.find(']').map_or(rest.len(), |e| e + 1)] } else { &rest[..rest.find([',', '}', '\n']).unwrap_or(rest.len())] };
-            out.extend(quoted(value));
-        }
+const RUNNER_KEYS: [&str; 15] = ["setupFilesAfterEnv", "setupFiles", "globalSetup", "globalTeardown", "testEnvironment", "environment", "snapshotResolver", "testRunner",
+    "testSequencer", "sequencer", "resolver", "transform", "reporters", "snapshotSerializers", "moduleNameMapper"];
+fn values_of(text: &str, key: &str) -> Vec<String> {
+    let (mut out, mut from) = (Vec::new(), 0);
+    while let Some(i) = text[from..].find(key) {
+        let at = from + i + key.len();
+        from = at;
+        let rest = text[at..].trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let rest = rest.trim_start();
+        let end = match rest.chars().next() { Some('[') => rest.find(']').map(|e| e + 1), Some('{') => rest.find('}').map(|e| e + 1), _ => rest.find([',', '}', '\n']) };
+        out.extend(quoted(&rest[..end.unwrap_or(rest.len())]));
     }
     out
 }
+fn leaves(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(a) => a.iter().for_each(|x| leaves(x, out)),
+        Value::Object(o) => o.values().for_each(|x| leaves(x, out)),
+        _ => {}
+    }
+}
+fn under(dir: &str, path: &str) -> Option<String> {
+    if path.starts_with('/') || path.contains('\\') { return None; }
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for c in path.split('/') {
+        match c { "" | "." => {} ".." => { parts.pop()?; } c => parts.push(c) }
+    }
+    Some(parts.join("/"))
+}
+fn runner_path(root: &str, f: &str) -> Option<String> { joined(root, f.strip_prefix("<rootDir>").map_or(f, |r| r.trim_start_matches('/'))) }
+fn runner_config(p: &str) -> bool {
+    let n = base_name(p).to_ascii_lowercase();
+    ["vitest.", "vite.", "jest."].iter().any(|s| n.starts_with(s)) && [".config.", ".workspace."].iter().any(|m| n.contains(m)) && !p.split('/').any(|c| c == "node_modules")
+}
+fn mentioned(named: &BTreeSet<String>, p: &str) -> bool {
+    if named.contains(p) { return true; }
+    let Some((stem, _)) = p.rsplit_once('.').filter(|_| is_code(p)) else { return false };
+    named.contains(stem) || stem.strip_suffix("/index").is_some_and(|d| named.contains(d))
+}
+const SCRIPT_RUNNERS: [&str; 7] = ["node", "nodejs", "zx", "bun", "deno", "tsx", "ts-node"];
 fn quoted(text: &str) -> Vec<String> {
     let (chars, mut out, mut i) = (text.chars().collect::<Vec<_>>(), Vec::new(), 0);
     while i < chars.len() {
@@ -112,17 +138,17 @@ fn quoted(text: &str) -> Vec<String> {
     out
 }
 
-fn files_for(repo: &Path, commit: &str, wanted: &BTreeSet<String>) -> R<Files> {
-    let items = crate::drive::listing(repo, commit)?;
-    let mut files: Files = items.iter().map(|i| (i.path.clone(), Entry { mode: i.mode.clone(), oid: i.oid.clone(), size: i.size, bytes: None })).collect();
-    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && (i.size <= LARGEST || (npm_lockfile(&i.path) && i.size <= LARGEST_LOCKFILE)
-        || (is_code(&i.path) && i.size <= LARGEST_CODE)) && matches!(i.mode.as_str(), "100644" | "100755")).collect();
+fn files_from(items: &[crate::drive::Item]) -> Files {
+    items.iter().map(|i| (i.path.clone(), Entry { mode: i.mode.clone(), oid: i.oid.clone(), size: i.size, bytes: None })).collect()
+}
+fn fill(repo: &Path, files: &mut Files, items: &[crate::drive::Item], wanted: &BTreeSet<String>) -> R<()> {
+    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && files.get(&i.path).is_some_and(|e| e.bytes.is_none())
+        && (i.size <= LARGEST || (npm_lockfile(&i.path) && i.size <= LARGEST_LOCKFILE) || (is_code(&i.path) && i.size <= LARGEST_CODE)) && matches!(i.mode.as_str(), "100644" | "100755")).collect();
     crate::drive::blobs(repo, &load, |item, bytes| {
         let text = if is_code(&item.path) && std::str::from_utf8(bytes).is_err() { String::from_utf8_lossy(bytes).into_owned().into_bytes() } else { bytes.to_vec() };
         if let Some(e) = files.get_mut(&item.path) { e.bytes = Some(text); }
         Ok(())
-    })?;
-    Ok(files)
+    })
 }
 
 fn widened(message: &str) -> Option<Vec<Value>> {
@@ -156,44 +182,71 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let manifests: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.as_str())
         .filter(|p| base_name(p) == "package.json" && !p.split('/').any(|c| c == "node_modules")).take(MANIFESTS).map(str::to_string).collect();
     wanted.extend(manifests.iter().cloned());
-    let configs: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.clone()).filter(|p| {
-        let n = base_name(p).to_ascii_lowercase();
-        ["vitest.config.", "vite.config.", "jest.config.", "vitest.workspace."].iter().any(|c| n.starts_with(c)) && !p.split('/').any(|c| c == "node_modules")
-    }).take(MANIFESTS).collect();
+    let mut configs: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.clone()).filter(|p| runner_config(p)).take(MANIFESTS).collect();
     wanted.extend(configs.iter().cloned());
     let moved = renames(repo, base, head)?;
-    let (mut old, new) = (files_for(repo, base, &wanted)?, files_for(repo, head, &wanted)?);
-    for (from, to) in &moved { if let Some(e) = old.get(from).cloned() && !old.contains_key(to) { old.insert(to.clone(), e); } }
-    let moved_from: BTreeSet<&String> = moved.iter().map(|(from, _)| from).collect();
+    let (mut old, mut new) = (files_from(&base_listing), files_from(&head_listing));
+    fill(repo, &mut old, &base_listing, &wanted)?;
+    fill(repo, &mut new, &head_listing, &wanted)?;
     let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
     let mut named = BTreeSet::new();
-    let rooted = |f: &str| f.trim_start_matches("<rootDir>/").to_string();
+    for m in &manifests {
+        let dir = m.strip_suffix("package.json").unwrap_or("");
+        for files in [&old, &new] {
+            if let Some(v) = json_of(files, m) && let crate::script::Found::Run(i) = crate::script::found(&v) { named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f))); }
+        }
+    }
+    let scripted: BTreeSet<String> = named.iter().filter(|p| !wanted.contains(*p) && (is_code(p) || p.ends_with(".json"))).cloned().collect();
+    fill(repo, &mut old, &base_listing, &scripted)?;
+    fill(repo, &mut new, &head_listing, &scripted)?;
+    configs.extend(named.iter().filter(|p| is_code(p) || p.ends_with(".json")).cloned());
+    let mut moved_to = BTreeSet::new();
+    for (from, to, _) in &moved {
+        if crate::suite::is_test_path(from) == crate::suite::is_test_path(to) && let Some(e) = old.get(from).cloned() && !old.contains_key(to) {
+            old.insert(to.clone(), e);
+            moved_to.insert(to.clone());
+        }
+    }
+    let moved_from: BTreeSet<&String> = moved.iter().map(|(from, _, _)| from).collect();
     for m in &manifests {
         let dir = m.strip_suffix("package.json").unwrap_or("");
         for files in [&old, &new] {
             let Some(v) = json_of(files, m) else { continue };
-            if let crate::script::Found::Run(i) = crate::script::found(&v) { named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f))); }
-            for key in ["setupFiles", "setupFilesAfterEnv", "globalSetup"] {
-                let list = v["jest"][key].as_array().cloned().unwrap_or_else(|| v["jest"][key].as_str().map(|s| vec![json!(s)]).unwrap_or_default());
-                named.extend(list.iter().filter_map(Value::as_str).filter_map(|f| joined(dir, &rooted(f))));
-            }
+            let root = v["jest"]["rootDir"].as_str().and_then(|r| under(dir, r)).unwrap_or_else(|| dir.trim_end_matches('/').to_string());
+            let mut found = Vec::new();
+            for key in RUNNER_KEYS { leaves(&v["jest"][key], &mut found); }
+            named.extend(found.iter().filter_map(|f| runner_path(&root, f)));
         }
     }
     for c in &configs {
         let dir = c.rsplit_once('/').map_or("", |(d, _)| d);
         for files in [&old, &new] {
-            if let Some(text) = files.get(c).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) {
-                named.extend(setup_files(text).iter().filter_map(|f| joined(dir, &rooted(f))));
-            }
+            let Some(text) = files.get(c).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()) else { continue };
+            let root = values_of(text, "rootDir").first().and_then(|r| under(dir, r)).unwrap_or_else(|| dir.to_string());
+            let found: Vec<String> = RUNNER_KEYS.iter().flat_map(|k| values_of(text, k)).collect();
+            named.extend(found.iter().filter_map(|f| runner_path(&root, f)));
         }
     }
     let (mut powers, mut tricks, mut settings, mut not_checked) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut twins: Vec<(String, &str, String)> = Vec::new();
+    for (p, op) in changes.iter().filter(|(p, op)| *op != "delete" && !is_code(p) && !is_data(p) && !p.split('/').any(|c| c == "node_modules")) {
+        let Some(line) = new.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| b.split(|c| *c == b'\n').next()).and_then(|l| std::str::from_utf8(l).ok()).and_then(|l| l.strip_prefix("#!")) else { continue };
+        match line.split_whitespace().map(|w| w.rsplit('/').next().unwrap_or(w)).find(|w| SCRIPT_RUNNERS.contains(w)) {
+            Some(r) => {
+                let twin = format!("{p}.kern.{}", if ["node", "nodejs", "zx"].contains(&r) { "js" } else { "ts" });
+                for files in [&mut old, &mut new] { if let Some(e) = files.get(p).cloned() { files.insert(twin.clone(), e); } }
+                twins.push((twin, op, p.clone()));
+            }
+            None => not_checked.push(json!({ "path": p, "why": format!("a script run by {}, which Kern does not read", line.trim()), "code": true })),
+        }
+    }
     let none = BTreeMap::new();
     let test_files = crate::suite::test_paths(&paths);
     let is_test = |p: &str| test_files.iter().any(|t| if t.ends_with('/') { p.starts_with(t.as_str()) } else { p == t });
-    for (p, op) in &inspected {
+    let checks: Vec<(String, &str, String)> = inspected.iter().map(|(p, op)| (p.clone(), *op, p.clone())).chain(twins).collect();
+    for (p, op, real) in &checks {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
-        let test = is_test(p);
+        let test = is_test(real);
         match crate::capability::check(&old, &new, &one, &none) {
             Ok(_) => {}
             Err(e) => match widened(&e.0) {
@@ -201,9 +254,10 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                     let added: Vec<Value> = x["added"].as_array().into_iter().flatten().filter(|c| c.as_str().is_some_and(|c| risky(c) && !(test && c == "process:env"))).cloned().collect();
                     if added.is_empty() { return None; }
                     x["added"] = json!(added);
+                    x["path"] = json!(real);
                     Some(x)
                 })),
-                None => not_checked.push(json!({ "path": p, "why": e.0 })),
+                None => not_checked.push(json!({ "path": real, "why": e.0 })),
             },
         }
     }
@@ -216,8 +270,8 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     for (p, op) in &changes {
         let one = json!({ "files": [{ "path": p, "operation": op }] });
         if let Err(e) = crate::proof::screen(&old, &new, &one, &tests) {
-            let item = json!({ "path": p, "operation": op, "why": e.0 });
-            if e.0.starts_with("Test runner configuration cannot change") || (named.contains(p) && e.0.starts_with("Code outside the tests reaches into the test runner")) { settings.push(item); }
+            let item = json!({ "path": p, "operation": if moved_to.contains(p) { "modify" } else { op }, "why": e.0 });
+            if e.0.starts_with("Test runner configuration cannot change") || (mentioned(&named, p) && e.0.starts_with("Code outside the tests reaches into the test runner")) { settings.push(item); }
             else if e.0.starts_with("A test file skips, focuses or inverts tests") || e.0.starts_with("Code outside the tests reaches into the test runner") { tricks.push(item); }
             else { not_checked.push(item); }
         }
@@ -230,7 +284,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         }
     }
     for (p, op) in &changes {
-        if named.contains(p) && !settings.iter().any(|s| s["path"] == p.as_str()) {
+        if mentioned(&named, p) && !settings.iter().any(|s| s["path"] == p.as_str()) {
             settings.push(json!({ "path": p, "operation": op, "why": "the test script names this file as the test runner's config or setup" }));
         }
     }

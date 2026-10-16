@@ -35,7 +35,10 @@ fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
 pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
     let (mut blocked, mut look, mut new_tests) = (Vec::new(), Vec::new(), Vec::new());
     let changed = rules["changed"].as_array().cloned().unwrap_or_default();
-    let tests_deleted = changed.iter().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path));
+    let tests_deleted = match rules["deleted_tests"].as_array() {
+        Some(d) => !d.is_empty(),
+        None => changed.iter().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path)),
+    };
     let passing_lost = tests_deleted && tests["gone"].as_array().is_some_and(|g| !g.is_empty());
     let added = |p: &str| !passing_lost && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
     for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
@@ -65,6 +68,11 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
     for t in strings(&tests["rewritten"]) { look.push(item("test-rewritten", format!("The change edits this test, and its old version fails on the new code: {}", code(&t, 200)))); }
+    for x in tests["edited_unchecked"].as_array().into_iter().flatten() {
+        look.push(item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test file on the new code, so it cannot tell whether the change rewrote what the test expects ({})",
+            code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or("")))));
+    }
+    for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
     for x in rules["deleted_tests"].as_array().into_iter().flatten() { look.push(item("test-deleted", format!("{}: a test file this change deletes", code(x["path"].as_str().unwrap_or(""), 160)))); }
     for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
@@ -192,13 +200,14 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         for n in tests["not_run"].as_array().into_iter().flatten() {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
         }
-        let (edited, rewritten) = (tests["edited"].as_u64().unwrap_or(0), tests["rewritten"].as_array().map_or(0, Vec::len));
+        let count = |k: &str| tests[k].as_array().map_or(0, Vec::len);
+        let (edited, rewritten, unchecked) = (tests["edited"].as_u64().unwrap_or(0) as usize, count("rewritten"), count("edited_unchecked"));
         if rewritten > 0 { md += &format!("- ⚠️ Edited tests: the old versions of {} fail on the new code (see above)\n", plural(rewritten, "test", "tests")); }
-        else if edited > 0 { md += &format!("- ✅ Edited tests: the old versions of {} still pass on the new code\n", plural(edited as usize, "edited test file", "edited test files")); }
-        for n in tests["edited_not_run"].as_array().into_iter().flatten() {
-            let place = n["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
-            md += &format!("- ⏭️ Edited tests{place}: their old versions did not run on the new code — {}\n", plain(n["why"].as_str().unwrap_or("")));
+        else if unchecked > 0 {
+            let passed = if edited > 0 { format!("; the old versions of {edited} others still pass") } else { String::new() };
+            md += &format!("- ⚠️ Edited tests: Kern could not run the old versions of {} on the new code (see above){passed}\n", plural(unchecked, "edited test file", "edited test files"));
         }
+        else if edited > 0 { md += &format!("- ✅ Edited tests: the old versions of {} still pass on the new code\n", plural(edited, "edited test file", "edited test files")); }
     } else if tests["status"] == "BROKE" {
         md += "- ❌ Tests: they run on the old code but give no results on the new code (see above)\n";
     } else if nothing {
@@ -208,7 +217,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(other_language));
-    let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code");
+    let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"] == true);
     let skipped_code = r["drive_skipped"].as_bool() == Some(true);
     if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
     let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);

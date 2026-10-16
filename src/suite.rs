@@ -92,7 +92,7 @@ fn paired(before: &Report, after: &Report) -> std::collections::BTreeMap<String,
     pair_groups(before, after, &lost, &found, |k| format!("{} > {}", file_of(k), last(k)), &mut map);
     let used: BTreeSet<String> = map.values().cloned().collect();
     let lost: Vec<&String> = lost.into_iter().filter(|k| !used.contains(*k)).collect();
-    let found: Vec<&String> = found.into_iter().filter(|k| !map.contains_key(*k) && crate::capability::is_code(file_of(k)) && !old_files.contains(file_of(k))).collect();
+    let found: Vec<&String> = found.into_iter().filter(|k| !map.contains_key(*k) && crate::capability::is_code(file_of(k)) && !old_files.contains(file_of(k)) && rank(count(after, k)) <= 1).collect();
     pair_groups(before, after, &lost, &found, last, &mut map);
     map
 }
@@ -253,12 +253,16 @@ fn suspects(old: &Report, new: &Report) -> BTreeSet<String> {
 }
 
 #[derive(Default)]
-pub struct Kept { pub files: std::collections::BTreeMap<String, String>, pub run: BTreeSet<String>, pub back: std::collections::BTreeMap<String, String> }
+pub struct Kept {
+    pub files: std::collections::BTreeMap<String, String>, pub run: BTreeSet<String>, pub back: std::collections::BTreeMap<String, String>,
+    pub skipped: Vec<(String, String)>, pub data: Vec<String>,
+}
 const KEPT_BYTES: usize = 3 << 20;
-pub fn kept_name(path: &str) -> Option<String> {
+pub fn kept_name(path: &str, n: u32) -> Option<String> {
     let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
     let (stem, rest) = name.split_once('.').filter(|(s, _)| !s.is_empty())?;
-    Some(if dir.is_empty() { format!("{stem}.kern-kept.{rest}") } else { format!("{dir}/{stem}.kern-kept.{rest}") })
+    let tag = if n == 0 { "kern-kept".to_string() } else { format!("kern-kept{n}") };
+    Some(if dir.is_empty() { format!("{stem}.{tag}.{rest}") } else { format!("{dir}/{stem}.{tag}.{rest}") })
 }
 fn snapshot_of(path: &str) -> String { path.rsplit_once('/').map_or_else(|| format!("__snapshots__/{path}.snap"), |(d, n)| format!("{d}/__snapshots__/{n}.snap")) }
 fn snapshot_owner(path: &str) -> Option<String> {
@@ -266,21 +270,32 @@ fn snapshot_owner(path: &str) -> Option<String> {
     let parent = if dir == "__snapshots__" { "" } else { dir.strip_suffix("/__snapshots__")? };
     Some(if parent.is_empty() { file.to_string() } else { format!("{parent}/{file}") })
 }
-pub fn kept_plan(repo: &Path, base: &str, changes: &[(String, &'static str)], old: &Report, inside: impl Fn(&str) -> bool) -> Kept {
+pub fn kept_plan(repo: &Path, (base, head): (&str, &str), changes: &[(String, &'static str)], old: &Report, inside: impl Fn(&str) -> bool) -> Kept {
+    let mut k = Kept::default();
     let ran: BTreeSet<&str> = old.tests.iter().filter(|(_, c)| c.passed > 0).map(|(k, _)| file_of(k)).collect();
-    let deleted: BTreeSet<&str> = changes.iter().filter(|(_, op)| *op == "delete").map(|(p, _)| p.as_str()).collect();
+    if ran.is_empty() || changes.iter().all(|(p, _)| is_test_path(p)) { return k; }
+    let moved: std::collections::BTreeMap<String, bool> = crate::rules::renames(repo, base, head).unwrap_or_default().into_iter().map(|(from, _, same)| (from, same)).collect();
+    let gone: BTreeSet<&str> = changes.iter().filter(|(p, op)| *op == "delete" && !moved.contains_key(p)).map(|(p, _)| p.as_str()).collect();
+    let test_named = |p: &str| { let n = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase(); NAMES.iter().any(|m| n.contains(m)) };
     let mut owners = BTreeSet::new();
-    for (p, op) in changes.iter().filter(|(p, op)| *op != "add" && inside(p)) {
-        if *op == "modify" && ran.contains(p.as_str()) { owners.insert(p.clone()); }
-        else if let Some(o) = snapshot_owner(p) && ran.contains(o.as_str()) && !deleted.contains(o.as_str()) { owners.insert(o); }
+    for (p, _) in changes.iter().filter(|(p, op)| *op != "add" && inside(p) && moved.get(p) != Some(&true)) {
+        if ran.contains(p.as_str()) { if !gone.contains(p.as_str()) { owners.insert(p.clone()); } }
+        else if let Some(o) = snapshot_owner(p) { if ran.contains(o.as_str()) && !gone.contains(o.as_str()) { owners.insert(o); } }
+        else if is_test_path(p) && !test_named(p) { k.data.push(p.clone()); }
     }
+    if owners.is_empty() { return k; }
+    let present: BTreeSet<String> = [base, head].iter().flat_map(|c| crate::drive::listing(repo, c).unwrap_or_default()).map(|i| i.path).collect();
     let show = |p: &str| crate::git::git(repo, &["show", &format!("{base}:{p}")], None).ok().and_then(|b| String::from_utf8(b).ok());
-    let (mut k, mut bytes) = (Kept::default(), 0usize);
-    for f in owners.iter().take(FOCUS) {
-        let (Some(name), Some(text)) = (kept_name(f), show(f)) else { continue };
+    let escaped = |s: &str| serde_json::to_string(s).map_or(KEPT_BYTES + 1, |j| j.len());
+    let mut bytes = 0usize;
+    for (i, f) in owners.iter().enumerate() {
+        let mut skip = |why: &str| k.skipped.push((f.clone(), why.to_string()));
+        if i >= FOCUS { skip(&format!("Kern puts back at most {FOCUS} edited test files per check")); continue; }
+        let Some(name) = (0..10).filter_map(|n| kept_name(f, n)).find(|n| !present.contains(n) && !present.contains(&snapshot_of(n))) else { skip("Kern found no free name to put its old version back under"); continue };
+        let Some(text) = show(f) else { skip("Kern could not read its old version as text"); continue };
         let snap = show(&snapshot_of(f));
-        let size = text.len() + snap.as_ref().map_or(0, String::len);
-        if bytes + size > KEPT_BYTES { continue; }
+        let size = escaped(&text) + snap.as_deref().map_or(0, escaped);
+        if bytes + size > KEPT_BYTES { skip("its old version is too large for Kern to put back (3 MiB in all)"); continue; }
         bytes += size;
         if let Some(s) = snap { k.files.insert(snapshot_of(&name), s); }
         k.files.insert(name.clone(), text);
@@ -290,8 +305,25 @@ pub fn kept_plan(repo: &Path, base: &str, changes: &[(String, &'static str)], ol
     k
 }
 pub fn unkept(r: &Report, back: &std::collections::BTreeMap<String, String>) -> Report {
-    let swap = |k: &str| -> String { let f = file_of(k); back.get(f).map_or_else(|| k.to_string(), |o| format!("{o}{}", &k[f.len()..])) };
-    Report { tests: r.tests.iter().map(|(k, c)| (swap(k), *c)).collect(), problems: r.problems.iter().map(|p| swap(p)).collect(), why: r.why.iter().map(|(k, w)| (swap(k), w.clone())).collect() }
+    let swap = |k: &str| -> Option<String> { let f = file_of(k); back.get(f).map(|o| format!("{o}{}", &k[f.len()..])) };
+    Report { tests: r.tests.iter().filter_map(|(k, c)| Some((swap(k)?, *c))).collect(), problems: r.problems.iter().filter_map(|p| swap(p)).collect(),
+        why: r.why.iter().filter_map(|(k, w)| Some((swap(k)?, w.clone()))).collect() }
+}
+pub struct Outcome { pub rewritten: Vec<String>, pub checked: usize, pub unchecked: Vec<(String, String)> }
+pub fn kept_outcome(old: &Report, keep: &Kept, first: Result<Report, String>, second: Option<&Report>) -> Outcome {
+    let mut unchecked = keep.skipped.clone();
+    let first = match first {
+        Ok(r) => r,
+        Err(why) => {
+            unchecked.extend(keep.back.values().map(|o| (o.clone(), why.clone())));
+            return Outcome { rewritten: Vec::new(), checked: 0, unchecked };
+        }
+    };
+    let loaded: BTreeSet<&str> = first.tests.keys().map(|k| file_of(k)).collect();
+    for o in keep.back.values().filter(|o| !loaded.contains(o.as_str())) {
+        unchecked.push((o.clone(), first.why.get(o).cloned().unwrap_or_else(|| "its old version gave no test results on the new code".into())));
+    }
+    Outcome { rewritten: rewritten(old, &first, second), checked: loaded.len(), unchecked }
 }
 pub fn rewritten(old: &Report, kept_new: &Report, kept_old: Option<&Report>) -> Vec<String> {
     let loaded: BTreeSet<&str> = kept_new.tests.keys().map(|k| file_of(k)).collect();
@@ -467,35 +499,29 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
 
 struct Suite { dir: String, old: Option<(Tests, Env)>, new: (Tests, Env) }
 
-enum Edited { Ran(Vec<String>, usize), Not(String, bool) }
+pub const SINGLE_FILES: &str = "Kern runs single test files only with jest and vitest, when the test script names no test files";
+type KeptRuns = (Result<Report, String>, Option<Report>, bool);
 #[allow(clippy::too_many_arguments)]
-fn edited(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, old: &Report, keep: &Kept, label: &str, until: u64, timed: &mut impl FnMut(String, u64)) -> Edited {
-    let not = |why: String| Edited::Not(why, false);
-    let (Some(t), Some((old_tests, old_env))) = (focused(&suite.new.0, &keep.run, &suite.dir), &suite.old) else {
-        return not("Kern runs single test files only with jest and vitest, when the test script names no test files".into());
-    };
+fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, old: &Report, keep: &Kept, label: &str, until: u64, timed: &mut impl FnMut(String, u64)) -> KeptRuns {
+    if keep.run.is_empty() { return (Ok(Report::default()), None, false); }
+    let Some(t) = focused(&suite.new.0, &keep.run, &suite.dir) else { return (Err(SINGLE_FILES.into()), None, false) };
     let at = now_ms();
     let first = run_with(out, op, (volumes.0, &keep.files), (&t, &suite.new.1), &suite.dir, &format!("new-kept{label}"), until);
     timed(format!("new-kept{label}"), at);
     let first = match first {
         Ok(Side::Ran(r, _)) => unkept(&r, &keep.back),
-        Ok(Side::Late) => return Edited::Not(LATE.into(), true),
-        Ok(Side::Nothing(why) | Side::Slow(why)) => return not(why),
-        Err(e) => return not(e.0),
+        Ok(Side::Late) => return (Err(LATE.into()), None, true),
+        Ok(Side::Nothing(why) | Side::Slow(why)) => return (Err(why), None, false),
+        Err(e) => return (Err(e.0), None, false),
     };
-    let loaded = first.tests.keys().map(|k| file_of(k)).collect::<BTreeSet<_>>().len();
-    if loaded == 0 { return not("none of the old test files Kern put back loaded on the new code".into()); }
     let candidates = rewritten(old, &first, None);
-    if candidates.is_empty() { return Edited::Ran(candidates, loaded); }
     let files: BTreeSet<String> = keep.back.iter().filter(|(_, o)| candidates.iter().any(|c| file_of(c) == o.as_str())).map(|(k, _)| k.clone()).collect();
-    let Some(t) = focused(old_tests, &files, &suite.dir) else { return Edited::Ran(candidates, loaded) };
+    let Some((t, env)) = suite.old.as_ref().filter(|_| !files.is_empty()).and_then(|(t, e)| focused(t, &files, &suite.dir).map(|t| (t, e))) else { return (Ok(first), None, false) };
     let at = now_ms();
-    let second = run_with(out, op, (volumes.1, &keep.files), (&t, old_env), &suite.dir, &format!("old-kept{label}"), until);
+    let second = run_with(out, op, (volumes.1, &keep.files), (&t, env), &suite.dir, &format!("old-kept{label}"), until);
     timed(format!("old-kept{label}"), at);
-    match second {
-        Ok(Side::Ran(r, _)) => Edited::Ran(rewritten(old, &first, Some(&unkept(&r, &keep.back))), loaded),
-        _ => Edited::Ran(candidates, loaded),
-    }
+    let second = match second { Ok(Side::Ran(r, _)) => Some(unkept(&r, &keep.back)), _ => None };
+    (Ok(first), second, false)
 }
 
 pub const LATE: &str = "Kern's time for this check ran out before these tests could run";
@@ -543,7 +569,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
     let mut late = false;
-    let (mut old_created, mut edited_files, mut edited_not_run) = (BTreeSet::new(), 0usize, Vec::new());
+    let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
     let changes = crate::rules::changed(repo, base, head)?;
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
@@ -670,17 +696,15 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             if let Some(a) = merged["new_failing"].as_array_mut() { a.extend(list(&c["new_failing"])); }
             continue;
         }
-        let keep = kept_plan(repo, base, &changes, &old, inside);
-        if !keep.run.is_empty() {
-            let failing: BTreeSet<&str> = ["broke", "new_problems"].iter().flat_map(|l| c[*l].as_array().into_iter().flatten()).filter_map(Value::as_str).collect();
-            match edited(out, op, (&volume("new"), &volume("old")), suite, &old, &keep, &label, until, &mut timed) {
-                Edited::Ran(list, files) => {
-                    edited_files += files;
-                    if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(list.iter().filter(|k| !failing.contains(k.as_str())).map(|k| json!(named(k)))); }
-                }
-                Edited::Not(why, cut) => { late |= cut; edited_not_run.push(json!({ "dir": suite.dir, "why": why })); }
-            }
-        }
+        let keep = kept_plan(repo, (base, head), &changes, &old, inside);
+        let (first, second, cut) = kept_runs(out, op, (&volume("new"), &volume("old")), suite, &old, &keep, &label, until, &mut timed);
+        late |= cut;
+        let outcome = kept_outcome(&old, &keep, first, second.as_ref());
+        let failing: BTreeSet<&str> = ["broke", "new_problems"].iter().flat_map(|l| c[*l].as_array().into_iter().flatten()).filter_map(Value::as_str).collect();
+        edited_files += outcome.checked;
+        edited_unchecked.extend(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })));
+        test_data.extend(keep.data.iter().map(|p| json!(p)));
+        if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(outcome.rewritten.iter().filter(|k| !failing.contains(k.as_str())).map(|k| json!(named(k)))); }
         for l in LISTS.iter() {
             let target: &str = if unconfirmed && (*l == "broke" || *l == "new_problems") { "unconfirmed" } else { l };
             let items = list(&c[*l]);
@@ -695,7 +719,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
     }
     wrote_code.retain(|f| !old_created.contains(f));
-    let extra = json!({ "edited": edited_files, "edited_not_run": edited_not_run, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds });
+    let extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds });
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));

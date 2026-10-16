@@ -91,7 +91,7 @@ fn a_change_that_rewrites_what_an_existing_test_expects_is_not_cleared() {
         let rules = kern::rules::rules(&r, &base, &head).unwrap();
         let key = "test/total.test.js > adds";
         let old = report(&[(key, 1, 0, 0)], &[]);
-        let plan = suite::kept_plan(&r, &base, &kern::rules::changed(&r, &base, &head).unwrap(), &old, |_| true);
+        let plan = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, |_| true);
         let copy = "test/total.kern-kept.test.js";
         assert_eq!((plan.run.iter().map(String::as_str).collect::<Vec<_>>(), plan.files.get(copy)), (vec![copy], Some(&tests_before[0].1)), "{what}: the old test file is put back beside the new one: {:?}", plan.files.keys());
         if tests_before.len() == 2 { assert_eq!(plan.files.get("test/__snapshots__/total.kern-kept.test.js.snap"), Some(&snapshot(5)), "{what}: with its old snapshot"); }
@@ -285,15 +285,15 @@ fn only_edited_test_files_that_ran_are_put_back_and_only_real_failures_count() {
     let (r, base) = repo(&t, &[("package.json", PACKAGE), ("src/math.js", MATH), ("src/total.js", TOTAL), ("test/total.test.js", TOTAL_TEST), ("test/gone.test.js", TOTAL_TEST),
         ("test/snap.test.js", snapshot_test), ("test/__snapshots__/snap.test.js.snap", "exports[`snaps 1`] = `1`;\n"), ("test/never.test.js", TOTAL_TEST)]);
     std::fs::remove_file(r.join("test/gone.test.js")).unwrap();
-    let head = commit(&r, &[("test/total.test.js", &format!("{TOTAL_TEST}test('adds more', () => expect(total([1, 1])).toBe(2));\n")), ("test/new.test.js", TOTAL_TEST),
+    let head = commit(&r, &[("src/total.js", &TOTAL.replace("sum(items)", "sum([...items])")), ("test/total.test.js", &format!("{TOTAL_TEST}test('adds more', () => expect(total([1, 1])).toBe(2));\n")), ("test/new.test.js", TOTAL_TEST),
         ("test/__snapshots__/snap.test.js.snap", "exports[`snaps 1`] = `2`;\n"), ("test/never.test.js", &TOTAL_TEST.replace("toBe(5)", "toBe(6)"))]);
     let old = report(&[("test/total.test.js > adds", 1, 0, 0), ("test/gone.test.js > adds", 1, 0, 0), ("test/snap.test.js > snaps", 1, 0, 0), ("test/never.test.js > adds", 0, 1, 0)], &[]);
-    let plan = suite::kept_plan(&r, &base, &kern::rules::changed(&r, &base, &head).unwrap(), &old, |_| true);
+    let plan = suite::kept_plan(&r, (&base, &head), &kern::rules::changed(&r, &base, &head).unwrap(), &old, |_| true);
     assert_eq!(plan.run.iter().collect::<Vec<_>>(), ["test/snap.kern-kept.test.js", "test/total.kern-kept.test.js"],
         "an edited test file and the owner of an edited snapshot are put back; a deleted, an added and a never-passing test file are not: {:?}", plan.files.keys());
     assert_eq!(plan.files.get("test/snap.kern-kept.test.js").map(String::as_str), Some(snapshot_test));
-    assert_eq!(suite::kept_name("src/__tests__/cart.ts").as_deref(), Some("src/__tests__/cart.kern-kept.ts"));
-    assert_eq!(suite::kept_name("test/.hidden"), None);
+    assert_eq!(suite::kept_name("src/__tests__/cart.ts", 0).as_deref(), Some("src/__tests__/cart.kern-kept.ts"));
+    assert_eq!(suite::kept_name("test/.hidden", 0), None);
     let kept = |rows: &[(&str, u32, u32, u32)], problems: &[&str]| suite::unkept(&report(rows, problems), &plan.back);
     let passing = kept(&[("test/total.kern-kept.test.js > adds", 1, 0, 0), ("test/snap.kern-kept.test.js > snaps", 1, 0, 0)], &[]);
     assert!(suite::rewritten(&old, &passing, None).is_empty(), "old versions that still pass are not rewritten");

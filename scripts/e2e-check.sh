@@ -225,8 +225,9 @@ check rewrites "$base"
 decision rewrites look
 [ "$(kinds rewrites test-rewritten look)" = 1 ] && grep -q 'discount from 100' rewrites/receipt.md || { cat rewrites/receipt.md; fail "rewrites: the rewritten expectation was not reported"; }
 git -C calc checkout -q -b edits "$base"
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' calc/src/total.js
 printf '%s\n' "test('discount of 200', () => expect(discount(200)).toBe(180));" >> calc/test/total.test.js
-git -C calc commit -qam "One more test" && git -C calc rev-parse HEAD > edits.head && git -C calc checkout -q "$base"
+git -C calc commit -qam "Shorter names, and one more test" && git -C calc rev-parse HEAD > edits.head && git -C calc checkout -q "$base"
 check edits "$base"
 decision edits clear
 grep -q 'the old versions of 1 edited test file still pass' edits/receipt.md || { cat edits/receipt.md; fail "edits: the old version of the edited test file did not run on the new code"; }

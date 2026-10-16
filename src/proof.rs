@@ -399,8 +399,9 @@ fn marker_kind(m: &str) -> String {
     if m.ends_with("[a computed name]") { return "a computed name".to_string(); }
     let word = m.trim_start_matches("the test context's ").trim_start_matches("this.").trim_start_matches("the ").trim_end_matches("()").trim_end_matches(" option");
     match word.rsplit('.').next().unwrap_or(word) {
-        "xit" | "xtest" | "xdescribe" | "xcontext" | "xspecify" => "skip".to_string(),
+        "xit" | "xtest" | "xdescribe" | "xcontext" | "xspecify" | "todo" => "skip".to_string(),
         "fit" | "fdescribe" | "ftest" => "only".to_string(),
+        "failing" => "fails".to_string(),
         w => w.to_string(),
     }
 }
