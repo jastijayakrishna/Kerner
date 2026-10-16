@@ -17,6 +17,11 @@ fn code(s: &str, n: usize) -> String {
 }
 fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() }
 fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
+fn routine_deps(rules: &Value) -> bool {
+    let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
+    let moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
+    !moves.is_empty() && moves.iter().all(|m| m["age"] == "routine" || m["age"] == "removed") && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
+}
 fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> {
     let mut files: Vec<(String, Vec<String>)> = Vec::new();
     for k in keys {
@@ -184,7 +189,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
             code(&format!("{}@{}", m["name"].as_str().unwrap_or(""), m["version"].as_str().unwrap_or("")), 120),
             if days == 0 { "less than a day".to_string() } else if days == 1 { "1 day".to_string() } else { format!("{days} days") }, crate::deps::FRESH_DAYS)));
     }
-    let routine = !all_moves.is_empty() && all_moves.iter().all(|m| m["age"] == "routine") && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()));
+    let routine = routine_deps(rules);
     if !deps.is_empty() && !routine {
         let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
         let fields: std::collections::BTreeSet<String> = deps.iter().flat_map(|d| strings(&d["fields"])).collect();
@@ -320,6 +325,11 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             Some("new-errors") => md += &format!("- ❌ Types: {} in {config}, which had none on the old code (see above)\n", plural(p["count"].as_u64().unwrap_or(0) as usize, "new TypeScript error", "new TypeScript errors")),
             _ => md += &format!("- ⏭️ Types: {config} not compared — {}\n", plain(p["why"].as_str().unwrap_or("Kern could not run tsc on it"))),
         }
+    }
+    if routine_deps(&r["rules"]) {
+        let moved: Vec<String> = r["rules"]["dependencies"].as_array().into_iter().flatten().flat_map(|d| strings(&d["packages"])).collect();
+        md += &format!("- ✅ Dependencies: {}{} (removed, or updated within the same major version to releases out for at least {} days)\n",
+            moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "), if moved.len() > SHOWN { format!(" and {} more", moved.len() - SHOWN) } else { String::new() }, crate::deps::FRESH_DAYS);
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(other_language));

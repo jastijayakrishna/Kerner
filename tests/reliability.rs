@@ -978,3 +978,17 @@ fn a_jest_project_with_reporters_of_its_own_keeps_them() {
     assert!(!own_reporters("{\"configs\":[{}],\"globalConfig\":{}}"));
     assert!(!own_reporters("not json"));
 }
+
+#[test]
+fn removing_a_dependency_needs_no_look_and_the_receipt_still_names_it() {
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = |moves: serde_json::Value, packages: serde_json::Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
+        "dependencies": [{ "path": "package.json", "packages": packages, "fields": [], "moves": moves }] });
+    let tests = json!({ "status": "NOTHING_TO_RUN", "why": "x" });
+    let off = json!({ "status": "OFF", "why": "no AI key" });
+    let removed = kern::receipt::build(&d, &rules(json!([{ "name": "babel-plugin-styled-components", "age": "removed" }]), json!(["babel-plugin-styled-components (removed)"])), &tests, &off);
+    assert!(!removed["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "ETH-Taipei#322 removed a babel plugin: nothing new can come in by removing a package: {removed}");
+    assert!(kern::receipt::markdown(&removed, None).contains("✅ Dependencies: `babel-plugin-styled-components (removed)`"));
+    let added = kern::receipt::build(&d, &rules(json!([{ "name": "react-native-purchases", "to": "9.5.4", "age": "new" }]), json!(["react-native-purchases 9.5.4 (new)"])), &tests, &off);
+    assert!(added["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "a new package still needs a look");
+}
