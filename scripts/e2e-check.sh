@@ -311,7 +311,7 @@ jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("SHOP_DATABASE_URL must
 
 say "A suite on course to take far longer than its limit is stopped early and checked with the tests related to the change, with vitest and with jest"
 for runner in vitest jest; do
-  git init -q "early-$runner" && cd "early-$runner"
+  git init -q "early-$runner-repo" && cd "early-$runner-repo"
   git config user.email e2e@example.invalid && git config user.name e2e
   mkdir -p src test
   if [ "$runner" = vitest ]; then
@@ -332,7 +332,7 @@ for runner in vitest jest; do
   git commit -qam "Shorter names" && git rev-parse HEAD > "$W/early-$runner.head"
   cd "$W"
   export KERN_TEST_MINUTES=1
-  check "early-$runner" "$early_base" "early-$runner"
+  check "early-$runner" "$early_base" "early-$runner-repo"
   unset KERN_TEST_MINUTES
   decision "early-$runner" clear
   jq -e '.tests.status == "RAN" and (.tests.runner | test("related to the change: the whole suite was on course to take about"))' "early-$runner/receipt.json" > /dev/null \
