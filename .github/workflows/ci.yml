@@ -97,6 +97,22 @@ jobs:
           mkdir -p release && cp bin/kern release/kern-linux-x64 && (cd release && sha256sum kern-linux-x64 > SHA256SUMS)
           KERN_REPO=test/kern KERN_VERSION=v0.0.0 KERN_DOWNLOAD_URL="file://$PWD/release" KERN_INSTALL_DIR="$RUNNER_TEMP/bin" sh scripts/install.sh
           "$RUNNER_TEMP/bin/kern" --version
+  throwaway:
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: kern-linux-x64
+          path: bin
+      - name: Check end to end on a throwaway machine, with runc and no gVisor
+        run: |
+          chmod +x bin/kern
+          ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || { echo "::error::this job proves Kern without gVisor"; exit 1; }
+          E2E_RUNTIME=runc KERN_BIN="$PWD/bin/kern" sh scripts/e2e-check.sh
   windows:
     runs-on: windows-2025
     steps:

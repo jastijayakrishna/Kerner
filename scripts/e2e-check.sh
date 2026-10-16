@@ -11,14 +11,19 @@ hash() { sha256sum "$1" | cut -d' ' -f1; }
 volumes() { docker volume ls --quiet | grep -c '^kern-deps-' || true; }
 before=$(volumes)
 
-say "A throwaway verifier"
+say "A throwaway verifier (${E2E_RUNTIME:-runsc})"
 cd "$W"
-runsc=$(readlink -f "$(docker info --format '{{json .Runtimes.runsc}}' | jq -r .path)")
-printf '{"host":"e2e-check","deployment":"single-vm","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
-jq -n --arg docker "$(real docker)" --arg git "$(real git)" --arg runsc "$runsc" --arg version "$("$runsc" --version)" --arg policy "$W/host-policy.json" \
-  --arg dh "$(hash "$(real docker)")" --arg gh "$(hash "$(real git)")" --arg rh "$(hash "$runsc")" --arg ph "$(hash host-policy.json)" \
+if [ "${E2E_RUNTIME:-runsc}" = runc ]; then
+  runtime=$(real runc)
+  printf '{"host":"e2e-check","deployment":"single-vm","machine":"throwaway","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
+else
+  runtime=$(readlink -f "$(docker info --format '{{json .Runtimes.runsc}}' | jq -r .path)")
+  printf '{"host":"e2e-check","deployment":"single-vm","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
+fi
+jq -n --arg docker "$(real docker)" --arg git "$(real git)" --arg runtime "$runtime" --arg version "$("$runtime" --version)" --arg policy "$W/host-policy.json" \
+  --arg dh "$(hash "$(real docker)")" --arg gh "$(hash "$(real git)")" --arg rh "$(hash "$runtime")" --arg ph "$(hash host-policy.json)" --arg name "${E2E_RUNTIME:-runsc}" \
   '{ version: 1, role: "verifier", docker: { file: $docker, sha256: $dh, endpoint: "unix:///var/run/docker.sock" }, git: { file: $git, sha256: $gh },
-     runtime: { file: $runsc, sha256: $rh, version: $version, arguments: [] }, host_policy: { file: $policy, sha256: $ph } }' > verifier.json
+     runtime: { file: $runtime, sha256: $rh, version: $version, arguments: [], name: $name }, host_policy: { file: $policy, sha256: $ph } }' > verifier.json
 "$K" --control verifier.json doctor > doctor.json || { cat doctor.json; fail "kern doctor says this machine cannot run the sandbox"; }
 docker pull -q node:22-bookworm-slim > /dev/null
 image=$(docker image inspect --format '{{.Id}}' node:22-bookworm-slim)
