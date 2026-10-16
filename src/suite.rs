@@ -813,6 +813,7 @@ pub enum Side { Ran(Report, Vec<String>), Nothing(String), Slow(String), Cut(Str
 impl Side {
     fn ending(&self) -> &str { match self { Side::Nothing(w) | Side::Slow(w) | Side::Cut(w) => w, Side::Ran(..) => "it gave results", Side::Late => LATE } }
 }
+pub fn unreadable(refusal: Option<String>, error: String) -> Side { refusal.map_or(Side::Cut(error), |r| Side::Nothing(format!("Kern could not run the tests in the sandbox: {r}"))) }
 pub fn broke_run(first: &Side, again: &Side, uneven: bool) -> bool { matches!((first, again), (Side::Nothing(_), Side::Nothing(_))) && !uneven }
 
 fn run_side(out: &Path, op: &Operator, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
@@ -844,7 +845,7 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     };
     let parts = match crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) {
         Ok(p) => p,
-        Err(e) => return Ok(Side::Cut(crate::sandbox::refusal(&run.errors).map_or(e.0, |r| format!("Kern could not run the tests in the sandbox: {r}")))),
+        Err(e) => return Ok(unreadable(crate::sandbox::refusal(&run.errors), e.0)),
     };
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;

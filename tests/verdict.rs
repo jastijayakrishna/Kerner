@@ -99,6 +99,14 @@ fn a_new_run_cut_short_by_kerns_own_limits_never_proves_the_tests_broke() {
 }
 
 #[test]
+fn a_sandbox_that_refuses_for_a_reason_in_the_project_is_about_the_change_and_a_broken_report_is_kerns_limit() {
+    let refused = suite::unreadable(Some("The test runner is not installed in the project: /workspace/node_modules/.bin/jest does not exist".into()), "The run's report is incomplete".into());
+    assert!(matches!(&refused, suite::Side::Nothing(w) if w.contains("not installed in the project")), "the e2e 'missing' case: the change switched the test script to a runner it does not install: {refused:?}");
+    assert!(suite::broke_run(&refused, &suite::unreadable(Some("The test runner is not installed in the project".into()), String::new()), false), "twice, where the old code's tests ran: a block");
+    assert!(matches!(suite::unreadable(None, "The run's report is incomplete".into()), suite::Side::Cut(_)), "a report cut short with no reason given is Kern's own limit");
+}
+
+#[test]
 fn random_runs_never_block_a_test_the_raw_runs_do_not_prove_broken() {
     let names = ["a.test.js > one", "a.test.js > two", "b.test.js > three", "b.test.js > four", "c.test.js > five"];
     let errors = ["expected 1 to be 2", "connect ECONNREFUSED 127.0.0.1:5432", "Cannot find module 'bindings'", "TypeError: x is not a function"];
