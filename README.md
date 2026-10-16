@@ -72,7 +72,8 @@ What Kern checks on every pull request:
 
 1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests the way its own `test`
    script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
-   package, each changed package's own script), in a sealed sandbox (gVisor) with the network off. A test that passed before and fails now
+   package, each changed package's own script), on the Node version the project asks for (`.nvmrc`, `.node-version`, `.tool-versions`,
+   `volta`, `engines.node` or its CI), with the network off while the tests run. A test that passed before and fails now
    blocks, but only when it fails again when Kern runs its file alone on the new code, and not when the old code runs that file alone.
    A failure that shows only when the whole suite runs needs a look; one that does not repeat is called flaky. A test that stops running,
    or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside, and so is a new
@@ -119,6 +120,13 @@ What Kern checks on every pull request:
    that a Content-Security-Policy in the same change forbids.
 9. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
    it on the old and the new code and lists what behaves differently, with what the pull request does not mention first.
+
+Where the code runs: Kern's workflow has two jobs. The job that installs and tests the pull request's code holds no keys at all (its
+token can only read the repository) and runs on GitHub's throwaway machine, deleted when the job ends. There the code runs in locked
+containers (read-only system, no privileges, an unprivileged user, memory and process limits, the network off while tests run), and
+packages install with their own install scripts, the way CI installs them; when a script fails, Kern installs again without scripts.
+A second job never runs the pull request's code: it builds Kern itself from source with no cache, renders the receipt from the first
+job's results, signs it and posts it. On a machine that is kept between jobs, or when an AI key is set, the code runs in gVisor instead.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
 so an edited comment cannot change what `kern receipt verify owner/repo 12` reports, and `/kern approve` only counts signed receipts.
@@ -171,7 +179,7 @@ Kern is early, and there is no release yet, so build it from source. You need:
 
 - Rust, to build `kern`;
 - Node.js 22.3 or newer, for the twin and for `kern drive`;
-- Linux with Docker and gVisor, for the sealed sandbox (on Windows, use WSL2).
+- Linux with Docker, plus gVisor on a machine that is kept between checks (on Windows, use WSL2).
 
 ```sh
 git clone https://github.com/jastijayakrishna/Kerner.git
@@ -198,16 +206,16 @@ Next steps:
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. For other projects the receipt
   covers the rules only and says so; changed code in other languages is listed as "not checked", never passed quietly.
-- Kern runs the tests under Node 22, even for a project that asks for another version (both sides run on the same Node, so the
-  comparison stays fair). It runs a build step or `pretest` script only when the tests cannot load without it. Tests that still cannot
-  load, or that need a newer Node, cannot be checked, and the receipt says so with the first error instead of claiming anything.
+- Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
+  runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it. Tests that still
+  cannot load cannot be checked, and the receipt says so with the first error instead of claiming anything.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so
   Kern cannot comment or set its status there. The job fails unless the answer is ✅. If you require the `Kern` status, merge such a
   pull request after reading that summary.
 - Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
-  could in any CI; Kern flags new test-runner settings and hooks, and the sandbox keeps such code away from everything else.
+  could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, never as passed or failed.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).
