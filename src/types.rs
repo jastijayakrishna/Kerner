@@ -222,7 +222,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> Value {
     });
     let list: Vec<String> = list.into_iter().filter(|c| uses_typescript(head, c) && uses_typescript(base, c)).collect();
     if list.is_empty() { return json!({ "status": "NONE" }); }
-    if within(until, 900) < 240 { return json!({ "status": "NOT_RUN", "why": "Kern's time ran out before it could check the TypeScript types" }); }
+    if !crate::suite::types_fit(within(until, 900)) { return json!({ "status": "NOT_RUN", "why": "Kern's time ran out before it could check the TypeScript types" }); }
     if !out.join("setup.json").exists() && let Err(e) = crate::drive::setup(out, op, until) {
         return json!({ "status": "NOT_RUN", "why": format!("Kern could not install the project: {}", e.0) });
     }

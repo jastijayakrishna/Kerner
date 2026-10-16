@@ -7,6 +7,7 @@ use std::path::Path;
 pub struct Ai<'a> { pub agent: &'a [String], pub rounds: usize }
 
 const MINUTES: u64 = 55;
+const REGISTRY_NAMES_COUNT_MAX: usize = 30;
 const TESTS_MINUTES: u64 = 25;
 pub fn minutes() -> u64 { std::env::var("KERN_CHECK_MINUTES").ok().and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| (1..=1440).contains(m)).unwrap_or(MINUTES) }
 
@@ -28,17 +29,22 @@ fn runnable(repo: &Path, head: &str, rules: &Value) -> bool {
     crate::git::mentions(repo, head, &needles.iter().map(String::as_str).collect::<Vec<_>>()).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
 }
 
+pub fn clock(repo: &Path, head: &str) -> u64 {
+    let wall = now_ms() / 1000;
+    let commit = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).filter(|c| *c > 0);
+    commit.map_or(wall, |c| c.min(wall))
+}
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {
     let started = now_ms();
     let until = started + minutes() * 60_000;
     crate::drive::prepare(repo, base, head, out, pr)?;
     let d = read_json(out.join("drive.json"))?;
     let rules = crate::rules::rules(repo, base, head)?;
-    let now = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).unwrap_or(0);
+    let now = clock(repo, head);
     let times: std::cell::RefCell<std::collections::BTreeMap<String, Option<Value>>> = Default::default();
     let meta = |name: &str| -> Option<Value> {
         let mut cache = times.borrow_mut();
-        if !cache.contains_key(name) && cache.len() >= 30 { return None; }
+        if !cache.contains_key(name) && cache.len() >= REGISTRY_NAMES_COUNT_MAX { return None; }
         cache.entry(name.to_string()).or_insert_with(|| crate::deps::registry_meta(name)).clone()
     };
     let owner = op.repository.split('/').next().unwrap_or("").to_ascii_lowercase();

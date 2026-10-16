@@ -48,10 +48,15 @@ pub fn changed_versions(old: &Value, new: &Value) -> Vec<Value> {
         let (x, y) = (old[s].as_object().cloned().unwrap_or_default(), new[s].as_object().cloned().unwrap_or_default());
         for name in x.keys().chain(y.keys()) {
             let (a, b) = (x.get(name).map(spec), y.get(name).map(spec));
-            if a != b { out.insert(name.clone(), serde_json::json!({ "name": name, "from": a, "to": b })); }
+            if a != b { out.insert((name.clone(), s), serde_json::json!({ "name": name, "from": a, "to": b })); }
         }
     }
     out.into_values().collect()
+}
+pub fn top(spec: &str) -> Option<(u64, u64, u64)> {
+    let floors: Vec<Option<(u64, u64, u64)>> = spec.split("||").map(floor).collect();
+    if floors.iter().any(Option::is_none) { return None; }
+    floors.into_iter().flatten().max()
 }
 pub fn floor(spec: &str) -> Option<(u64, u64, u64)> {
     let s = spec.trim();
@@ -78,7 +83,7 @@ pub fn rfc3339(s: &str) -> Option<u64> {
 }
 pub fn age(from: Option<&str>, to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
     let (Some(f), Some(t)) = (from, to) else { return serde_json::json!({ "age": if from.is_none() { "new" } else { "removed" } }) };
-    let (Some(a), Some(b)) = (floor(f), floor(t)) else { return serde_json::json!({ "age": "unknown" }) };
+    let (Some(a), Some(b)) = (top(f), top(t)) else { return serde_json::json!({ "age": "unknown" }) };
     if a.0 != b.0 || (a.0 == 0 && a.1 != b.1) { return serde_json::json!({ "age": "major" }); }
     let version = format!("{}.{}.{}", b.0, b.1, b.2);
     match published(&version) {

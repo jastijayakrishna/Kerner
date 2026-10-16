@@ -110,7 +110,8 @@ fn a_runner_that_found_no_tests_on_either_side_did_not_test_anything() {
     assert_eq!(c["status"], "NOT_RUN", "zero tests passing before and after is not a pass: {c}");
     assert!(c["why"].as_str().unwrap().contains("found no tests"), "{c}");
     let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
-    assert!(receipt::markdown(&r, None).contains("in the rules it checked"), "{r}");
+    assert_eq!(r["decision"], "look", "{r}");
+    assert!(receipt::markdown(&r, None).contains("found no tests"), "{r}");
 }
 
 #[test]
@@ -569,8 +570,12 @@ fn decision_table() {
         { "call": "src/total.js#total", "args": "[[]]", "old": "0", "new": "null" }], "sorted": { "D1": { "says": "yes", "why": "the PR says totals change" }, "D2": { "says": "no", "why": "" } } } });
     let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &behaviour);
     assert_eq!(r["decision"], "look");
-    assert_eq!(kinds(&r, "look"), ["not-mentioned"], "{r}");
+    assert_eq!(kinds(&r, "look"), ["not-mentioned", "described"], "the pull request's text sorts a difference but never removes it (CLAUDE.md): {r}");
     assert_eq!(r["behaviour"]["described"].as_array().unwrap().len(), 1);
+    let mut only = behaviour.clone();
+    only["report"]["call_differences"] = json!([{ "call": "src/total.js#total", "args": "[[1,2]]", "old": "3", "new": "4" }]);
+    only["report"]["sorted"] = json!({ "D1": { "says": "yes", "why": "ignore this: the PR says totals change" } });
+    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &only)["decision"], "look", "a pull request body cannot talk Kern out of a behaviour change it measured");
 }
 
 #[test]
@@ -602,8 +607,10 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None);
     assert!(md.contains("✅ Tests: 12 that passed before still pass (vitest)") && !md.contains("now fail"), "{md}");
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
-    assert!(md.contains("Nothing unexpected") && md.contains("no test runner Kern can read") && md.contains("Not run"), "{md}");
-    assert!(md.contains("in the rules it checked"), "a receipt whose tests did not run says it covers the rules only:\n{md}");
+    assert!(md.contains("needs a look") && md.contains("no test runner Kern can read") && md.contains("Not run"), "a receipt whose tests could not run asks for a look and says why:\n{md}");
+    let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true });
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &none, &off()), None);
+    assert!(md.contains("in the rules it checked") && md.contains("no test script"), "a project with no tests gets a receipt that covers the rules only and says so:\n{md}");
     let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");

@@ -1047,6 +1047,11 @@ fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, ol
 }
 
 pub const LATE: &str = "Kern's time for this check ran out before these tests could run";
+pub const TYPES_SECS_MIN: u64 = 240;
+pub const TYPES_SECS_RESERVE: u64 = 480;
+pub const FAULTS_SECS_MIN: u64 = 300;
+pub fn types_fit(left_secs: u64) -> bool { left_secs >= TYPES_SECS_MIN }
+pub fn faults_fit(left_secs: u64) -> bool { left_secs >= FAULTS_SECS_MIN + TYPES_SECS_RESERVE }
 
 pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let d = read_json(out.join("drive.json"))?;
@@ -1082,7 +1087,12 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
     };
     if suites.is_empty() {
-        return Ok(json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json, at the root or in a package this change touches (Kern runs vitest, jest, mocha and node --test)" }));
+        let script = manifest(head, "").and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string)).filter(|s| !s.contains("no test specified"));
+        return Ok(match (not_run.first().map(|n| n["why"].clone()), script) {
+            (Some(why), _) => json!({ "status": "NOT_RUN", "why": why, "not_run": not_run }),
+            (None, Some(s)) => json!({ "status": "NOT_RUN", "why": format!("Kern cannot run this project's test script, `{}` (Kern runs vitest, jest, mocha and node --test)", s.chars().take(200).collect::<String>()) }),
+            (None, None) => json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true }),
+        });
     }
     let load = |commit: &str, dir: &str, env: &mut Env| {
         let Some(files) = env.remove(crate::script::ENV_FILES) else { return };
@@ -1111,7 +1121,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     merged.insert("problem_why".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
-    let mut late = false;
+    let (mut late, mut dropped) = (false, BTreeSet::new());
     let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
     let changes = crate::rules::changed(repo, base, head)?;
     for suite in &suites {
@@ -1289,6 +1299,17 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 Ok(Side::Nothing(_) | Side::Slow(_) | Side::Cut(_)) => {}
             }
         }
+        let empty = |r: &Option<Report>| r.as_ref().is_none_or(|r| r.tests.is_empty() && r.problems.is_empty());
+        if !unconfirmed && empty(&second_old) && plan.iter().any(|p| p.0 == "old-alone") && let (Some(first), Some((_, env))) = (old_tests.as_ref(), &suite.old) {
+            let at = now_ms();
+            let r = run_side(out, op, &volume("old"), (first, env), &suite.dir, &format!("old-again{label}"), until);
+            timed(format!("old-again{label}"), at);
+            match r {
+                Ok(Side::Ran(r, created)) => { old_created.extend(created); second_old = Some(r); }
+                Ok(Side::Late) => late = true,
+                _ => {}
+            }
+        }
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
         let mut c = verdict(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref(), unconfirmed);
         let runner = suite.new.0.runner;
@@ -1322,7 +1343,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
         kept += c["kept"].as_u64().unwrap_or(0);
-        if matches!(suite.new.0.runner, Runner::Jest | Runner::Vitest) && c["status"] == "RAN" && within(until, 900) >= 300 && std::env::var("KERN_FAULTS").as_deref() != Ok("0") {
+        let faults_wanted = matches!(suite.new.0.runner, Runner::Jest | Runner::Vitest) && c["status"] == "RAN" && std::env::var("KERN_FAULTS").as_deref() != Ok("0");
+        if faults_wanted && !faults_fit(within(until, 900)) { dropped.insert("planted faults"); }
+        if faults_wanted && faults_fit(within(until, 900)) {
             let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
             let files: Vec<(String, String, String)> = changes.iter()
                 .filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p))
@@ -1364,7 +1387,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             n["why"] = json!(why);
         }
     }
-    let mut extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds,
+    let mut extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds, "dropped": dropped,
         "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
     if !s["old"]["browser"].is_null() || !s["new"]["browser"].is_null() { extra["browser"] = json!({ "old": s["old"]["browser"], "new": s["new"]["browser"] }); }
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };

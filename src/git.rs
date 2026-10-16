@@ -269,8 +269,11 @@ fn stream_blob_to(repo: &Path, oid: &str, size: u64, target: &Path, mode: u32) -
 pub fn protected(name: &str) -> bool {
     let parts: Vec<String> = name.split('/').map(str::to_ascii_lowercase).collect();
     let base = parts.last().map(String::as_str).unwrap_or("");
-    parts.iter().any(|p| p == ".github" || p == "node_modules")
-        || ["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "cargo.toml", "cargo.lock", "go.mod", "go.sum", "pyproject.toml", ".gitmodules", ".gitattributes", ".npmrc", ".env"].contains(&base)
+    parts.iter().any(|p| [".github", "node_modules", ".circleci", ".devcontainer", ".buildkite", ".azure-pipelines"].contains(&p.as_str()))
+        || ["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "cargo.toml", "cargo.lock", "go.mod", "go.sum", "pyproject.toml", ".gitmodules", ".gitattributes", ".npmrc", ".env",
+            ".gitlab-ci.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", ".travis.yml", "jenkinsfile", ".drone.yml", ".yarnrc.yml", ".yarnrc", ".pnpmfile.cjs", "codeowners"].contains(&base)
+        || base == "dockerfile" || base.ends_with(".dockerfile") || base.starts_with("dockerfile.")
+        || (parts.len() >= 2 && parts[parts.len() - 2] == ".vscode" && ["tasks.json", "launch.json"].contains(&base))
         || base.starts_with(".env.")
         || (base.starts_with("requirements") && base.ends_with(".txt"))
 }

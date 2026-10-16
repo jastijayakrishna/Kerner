@@ -13,6 +13,7 @@ const AGENT_FOLDERS: [&str; 3] = [".cursor", ".claude", ".windsurf"];
 const LARGEST: u64 = 1 << 20;
 const LARGEST_LOCKFILE: u64 = 64 << 20;
 const SIBLINGS: usize = 200;
+const LOCK_MOVES_COUNT_MAX: usize = 200;
 const LARGEST_CODE: u64 = 16 << 20;
 const MANIFESTS: usize = 5000;
 fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
@@ -70,7 +71,9 @@ fn harmless_note(p: &str) -> bool {
         || lower.starts_with(".github/issue_template/")
 }
 const METADATA: [&str; 9] = ["version", "description", "keywords", "homepage", "repository", "bugs", "author", "contributors", "funding"];
-fn agent_note(p: &str) -> bool { AGENT_NOTES.contains(&base_name(p)) || p.split('/').next().is_some_and(|d| AGENT_FOLDERS.contains(&d)) }
+fn agent_note(p: &str) -> bool {
+    AGENT_NOTES.contains(&base_name(p)) || p.split('/').next().is_some_and(|d| AGENT_FOLDERS.contains(&d)) || [".github/instructions/", ".github/prompts/", ".github/chatmodes/"].iter().any(|d| p.starts_with(d))
+}
 
 pub fn changed(repo: &Path, base: &str, head: &str) -> R<Vec<(String, &'static str)>> {
     let out = git_with(repo, &["diff", "--no-renames", "--name-status", "-z", base, head], None, 64 << 20)?;
@@ -401,7 +404,11 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                 Some(b) => {
                     lockfile.extend(crate::deps::lock_surprises(&a, &b).into_iter().map(|why| json!({ "path": p, "why": why })));
                     let moves = crate::deps::lock_moves(&a, &b);
-                    if !moves.is_empty() && moves.len() <= 200 {
+                    if moves.len() > LOCK_MOVES_COUNT_MAX {
+                        not_checked.push(json!({ "path": p, "why": format!("{} versions move in this lockfile, more than the {LOCK_MOVES_COUNT_MAX} whose release dates Kern checks", moves.len()) }));
+                    }
+                    if moves.is_empty() { d["moves"] = json!([]); }
+                    if !moves.is_empty() && moves.len() <= LOCK_MOVES_COUNT_MAX {
                         d["packages"] = json!(moves.iter().map(|m| match (m["from"].as_str(), m["to"].as_str()) {
                             (Some(f), Some(t)) => format!("{} {f} → {t}", m["name"].as_str().unwrap_or("")),
                             (None, Some(t)) => format!("{} {t} (new)", m["name"].as_str().unwrap_or("")),

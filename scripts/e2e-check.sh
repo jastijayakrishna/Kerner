@@ -176,14 +176,14 @@ check broke "$base"
 decision broke blocked
 [ "$(kinds broke test-run-broke blocked)" = 1 ] || { jq .tests broke/receipt.json; fail "broke: tests that give nothing on the new code were not blocked"; }
 
-say "A check has one time limit, and a run it cuts short is reported as not run, never as a failure"
+say "A check has one time limit, and a run it cuts short is reported as not run and needs a look, never a failure or a green check"
 git -C calc checkout -q -b late "$base"
 printf '%s\n' "import { test } from 'vitest';" '' "test('never ends', () => { for (;;) {} });" > calc/test/late.test.js
 git -C calc add -A && git -C calc commit -qm "A test that never ends" && git -C calc rev-parse HEAD > late.head && git -C calc checkout -q "$base"
 export KERN_CHECK_MINUTES=3
 check late "$base"
 unset KERN_CHECK_MINUTES
-decision late clear
+decision late look
 jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("time for this check ran out"))' late/receipt.json > /dev/null || { jq .tests late/receipt.json; fail "late: the run the time limit cut short was not reported as not run"; }
 
 say "Kern runs the tests the way the project's own test script does: its config, its test files and its variables"

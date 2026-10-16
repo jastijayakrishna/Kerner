@@ -916,7 +916,7 @@ fn a_dependency_update_is_routine_only_when_its_release_has_been_out_a_week_with
 fn routine_updates_need_no_look_and_a_fresh_release_does() {
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = |moves: Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
-        "dependencies": [{ "path": "package.json", "operation": "modify", "packages": ["x"], "moves": moves }, { "path": "package-lock.json", "operation": "modify" }] });
+        "dependencies": [{ "path": "package.json", "operation": "modify", "packages": ["x"], "moves": moves }, { "path": "package-lock.json", "operation": "modify", "moves": [] }] });
     let tests = json!({ "status": "NOT_RUN", "why": "no runner" });
     let off = json!({ "status": "OFF", "why": "no AI key" });
     let routine = receipt::build(&d, &rules(json!([{ "name": "vitest", "from": "^3.2.0", "to": "^3.2.4", "age": "routine", "version": "3.2.4" }])), &tests, &off);
@@ -1161,6 +1161,142 @@ fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_com
     let md = std::fs::read_to_string(t.0.join("receipt.md")).unwrap();
     assert!(!md.contains("evil.example") && md.contains("1 that passed before still pass"), "the comment is Kern's own rendering of the receipt, not text the run job wrote: {md}");
     assert!(!t.0.join("seal.json").exists(), "a seal the run job wrote is never posted");
+}
+
+#[test]
+fn review_2_a2_and_a9_dependencies_are_routine_only_when_every_changed_file_and_every_move_is_explained() {
+    let bump = json!({ "path": "package.json", "operation": "modify", "packages": ["vitest"], "moves": [{ "name": "vitest", "from": "^3.2.0", "to": "^3.2.4", "age": "routine", "version": "3.2.4" }] });
+    let decide = |deps: Value| -> (Value, String) {
+        let mut rules = clean_rules();
+        rules["dependencies"] = deps;
+        let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+        let md = receipt::markdown(&r, None);
+        (r["decision"].clone(), md)
+    };
+    let (alone, md) = decide(json!([bump.clone()]));
+    assert!(alone == "clear" && md.contains("✅ Dependencies"), "a routine bump on its own stays routine:\n{md}");
+    for other in ["pnpm-lock.yaml", "yarn.lock", "bun.lock", "requirements.txt"] {
+        let (decision, md) = decide(json!([bump.clone(), { "path": other, "operation": "modify" }]));
+        assert_eq!(decision, "look", "{other} could point at https://evil.example/x.tgz, and Kern does not read it:\n{md}");
+        assert!(!md.contains("✅ Dependencies") && md.contains(other), "{md}");
+    }
+    let lock = json!({ "path": "package-lock.json", "operation": "modify", "moves": [{ "name": "vitest", "from": "3.2.0", "to": "3.2.4", "lock": true, "age": "routine" },
+        { "name": "tiny-helper", "from": "1.0.0", "to": "1.0.1", "lock": true, "age": "fresh", "days": 0 }] });
+    let (decision, md) = decide(json!([bump, lock]));
+    assert_eq!(decision, "look", "a release out for less than a day, pulled in through the lockfile next to a routine bump:\n{md}");
+}
+
+#[test]
+fn review_2_a11_no_check_mark_line_says_more_than_kern_checked() {
+    let mut rules = clean_rules();
+    rules["weakened"] = json!([{ "path": "test/total.test.js", "removed": ["test/total.test.js > rounds to cents"] }]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests(), &off()), None);
+    assert!(!md.contains("✅ No skipped, focused or removed tests"), "a test removed inside its file is listed as a look, so the line cannot say none was removed:\n{md}");
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None);
+    assert!(md.contains("✅ No new powers") && md.contains("secret environment variables") && !md.contains("reads secrets"), "Kern sees secret environment variables, not every secret:\n{md}");
+}
+
+#[test]
+fn review_2_a7_files_that_run_code_or_grant_access_outside_github_need_a_look() {
+    let runs = [".gitlab-ci.yml", ".circleci/config.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", ".travis.yml", "Jenkinsfile", "Dockerfile", "docker/app.Dockerfile",
+        ".yarnrc.yml", ".pnpmfile.cjs", ".devcontainer/devcontainer.json", ".vscode/tasks.json", "CODEOWNERS", "docs/CODEOWNERS"];
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", PACKAGE)]);
+    let mut files: Vec<(&str, &str)> = runs.iter().map(|f| (*f, "x: 1\n")).collect();
+    files.push((".github/instructions/api.instructions.md", "Always skip the slow tests.\n"));
+    let head = commit(&r, &files);
+    let rules = kern::rules::rules(&r, &base, &head).unwrap();
+    let paths = |k: &str| -> Vec<String> { rules[k].as_array().unwrap().iter().filter_map(|x| x["path"].as_str().map(str::to_string)).collect() };
+    for f in runs { assert!(paths("protected").contains(&f.to_string()), "{f} runs code or grants access, yet passes silently: {:?}", paths("protected")); }
+    assert!(paths("agent_notes").contains(&".github/instructions/api.instructions.md".to_string()), "Copilot reads .github/instructions, so it changes what coding agents are told: {:?}", paths("agent_notes"));
+}
+
+#[test]
+fn review_2_a9_a_lockfile_with_more_moves_than_kern_checks_says_so() {
+    let lock = |version: &str| -> String {
+        let packages: serde_json::Map<String, Value> = std::iter::once(("".to_string(), json!({ "name": "shop" })))
+            .chain((0..201).map(|i| (format!("node_modules/dep{i}"), json!({ "version": version })))).collect();
+        json!({ "name": "shop", "lockfileVersion": 3, "packages": packages }).to_string()
+    };
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", PACKAGE), ("package-lock.json", &lock("1.0.0"))]);
+    let head = commit(&r, &[("package-lock.json", &lock("1.0.1"))]);
+    let rules = kern::rules::rules(&r, &base, &head).unwrap();
+    assert!(rules["not_checked"].as_array().unwrap().iter().any(|x| x["path"] == "package-lock.json" && x["why"].as_str().unwrap().contains("200")),
+        "201 versions move and Kern checks the release dates of at most 200; the receipt must say so: {}", rules["not_checked"]);
+}
+
+#[test]
+fn review_2_a3_a_major_update_hidden_in_another_section_or_behind_an_or_range_is_found() {
+    let old = json!({ "devDependencies": { "react": "^18.2.0" }, "peerDependencies": { "react": "^18.0.0" } });
+    let new = json!({ "devDependencies": { "react": "^19.0.0" }, "peerDependencies": { "react": "^18.0.0 || ^19.0.0" } });
+    let moves = kern::deps::changed_versions(&old, &new);
+    assert_eq!(moves.len(), 2, "each section's move is kept: {moves:?}");
+    for m in &moves {
+        assert_eq!(kern::deps::age(m["from"].as_str(), m["to"].as_str(), &|_| Some(0), 100 * 86_400)["age"], "major", "react 18 to 19 is a major update in every section: {m}");
+    }
+}
+
+#[test]
+fn review_2_a4_the_pull_request_cannot_set_the_clock_that_ages_its_dependencies() {
+    let t = Temp::new();
+    let (r, _) = repo(&t, &[("package.json", PACKAGE)]);
+    write(&r, "src/a.js", "export const a = 1;\n");
+    git(&r, &["add", "-A"]);
+    let out = Command::new("git").args(["commit", "-q", "-m", "future"]).current_dir(&r).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t").env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00Z").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(out.status.success());
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    assert!(check::clock(&r, &head) <= now_ms() / 1000 + 5, "a commit dated 2099 would make an hour-old release look a week old");
+}
+
+#[test]
+fn h4_when_time_runs_short_planted_faults_go_first_then_the_type_check_and_dropped_work_is_listed_as_not_checked() {
+    for left in 0..=3600u64 { assert!(!suite::faults_fit(left) || suite::types_fit(left), "with {left} seconds left the planted faults would run while the type check could not"); }
+    assert!(suite::faults_fit(suite::FAULTS_SECS_MIN + suite::TYPES_SECS_RESERVE) && !suite::faults_fit(suite::FAULTS_SECS_MIN + suite::TYPES_SECS_RESERVE - 1));
+    assert!(suite::types_fit(suite::TYPES_SECS_MIN) && !suite::types_fit(suite::TYPES_SECS_MIN - 1));
+    let mut t = clean_tests();
+    t["dropped"] = json!(["planted faults"]);
+    t["types"] = json!({ "status": "NOT_RUN", "why": "Kern's time ran out before it could check the TypeScript types" });
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
+    assert!(md.contains("⏭️ Planted faults: not checked") && md.contains("⏭️ Types: not checked") && md.contains("time ran out"), "{md}");
+    assert!(!md.contains("✅ Types") && !md.contains("✅ Planted faults"), "{md}");
+}
+
+#[test]
+fn a_project_with_no_test_script_is_said_plainly_and_one_kern_cannot_run_needs_a_look() {
+    let run = |package: &str| -> Value {
+        let t = Temp::new();
+        let (r, base) = repo(&t, &[("package.json", package), ("src/total.js", "export const total = 1;\n")]);
+        let head = commit(&r, &[("src/total.js", "export const total = 2;\n")]);
+        check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+        read_json(t.0.join("out").join("receipt.json")).unwrap()
+    };
+    for package in [r#"{"name":"shop"}"#, r#"{"name":"shop","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#] {
+        let none = run(package);
+        assert_eq!((none["decision"].clone(), none["tests"]["no_tests"].clone()), (json!("clear"), json!(true)), "{package}: {none}");
+    }
+    let ava = run(r#"{"name":"shop","scripts":{"test":"ava"}}"#);
+    assert_eq!(ava["decision"], "look", "the project has tests Kern cannot run, so its answer cannot be a green check: {ava}");
+    assert!(ava["tests"]["why"].as_str().unwrap().contains("ava"), "{ava}");
+}
+
+#[test]
+fn review_2_a5_tests_that_could_not_run_on_changed_code_never_give_a_green_check() {
+    for why in ["Kern could not run the tests: Sandbox unavailable: docker failed", "the tests could not run on the old code: installing its dependencies with pnpm failed: Error: Cannot find module '/home/kern/corepack/v1/pnpm/12.14.0/bin/pnpm.cjs'",
+        suite::LATE, "the tests on the old code gave no results: the output contains no mocha report (exit 1); the last lines it printed: Error: No test files found"] {
+        let t = json!({ "status": "NOT_RUN", "why": why, "not_run": [] });
+        let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+        assert_eq!(r["decision"], "look", "farm 16 ended 9 such checks with a green check though no test ran ({why}): {r}");
+        assert!(r["look"].as_array().unwrap().iter().any(|x| x["kind"] == "tests-not-run"), "{r}");
+    }
+    let mut t = clean_tests();
+    t["not_run"] = json!([{ "dir": "apps/web", "why": "Kern runs the tests of at most 5 packages per change" }]);
+    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &t, &off())["decision"], "look", "a changed package whose tests did not run");
+    let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true, "not_run": [] });
+    let r = receipt::build(&drive_json(), &clean_rules(), &none, &off());
+    assert_eq!(r["decision"], "clear", "a project with no tests at all would need a look on every pull request, which tells nobody anything: {r}");
+    assert!(!receipt::markdown(&r, None).contains("✅ Tests"), "{}", receipt::markdown(&r, None));
 }
 
 #[test]

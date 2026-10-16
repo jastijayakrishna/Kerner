@@ -29,7 +29,8 @@ fn report(path: &Path, runner: Runner) -> Option<Report> {
 }
 fn suite(dir: &Path, label: &str, runner: Runner, unconfirmed: bool) -> Option<Value> {
     let run = |r: &str| report(&dir.join(format!("tests-{r}{label}.out")), runner);
-    let (alone, mut whole, old_alone) = (run("new-alone"), run("new-again"), run("old-alone").or_else(|| run("old-again")));
+    let old_alone = run("old-alone").filter(|r| !r.tests.is_empty() || !r.problems.is_empty()).or_else(|| run("old-again"));
+    let (alone, mut whole) = (run("new-alone"), run("new-again"));
     let old = OLD.iter().find(|r| dir.join(format!("tests-{r}{label}.out")).is_file()).and_then(|r| run(r))?;
     let new = run("new-related").or_else(|| run("new")).or_else(|| if alone.is_none() { whole.take() } else { None })?;
     let c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed);

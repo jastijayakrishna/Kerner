@@ -74,8 +74,10 @@ What Kern checks on every pull request:
    script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
    package, each changed package's own script), on the Node version the project asks for (`.nvmrc`, `.node-version`, `.tool-versions`,
    `volta`, `engines.node` or its CI), with the network off while the tests run. A test that passed before and fails now
-   blocks, but only when it fails again when Kern runs its file alone on the new code, and not when the old code runs that file alone.
-   A failure that shows only when the whole suite runs needs a look; one that does not repeat is called flaky. A test that stops running,
+   blocks only when it fails in every run of the new code that included it (the whole suite, its file alone, the whole suite again) and
+   passes in every run of the old code, including a second one. A failure that shows only when the whole suite runs, that does not repeat
+   in every run, that sits in a file whose other tests passed and failed by chance, or that comes from the sandbox (no network, a missing
+   program or native module, a crashed process) needs a look; one that never repeats is called flaky. A test that stops running,
    or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside, and so is a new
    test that fails here with the same error as they do (the sandbox lacks something, not the change). A block needs proof from both
    sides: a test file with no record of passing on the old code, or a failure on sides Kern could not set up the same way (installs,
@@ -204,8 +206,10 @@ Next steps:
 
 - Kern does not prove that code is correct or well meant. A person still decides whether a change is good.
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
-- Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. For other projects the receipt
-  covers the rules only and says so; changed code in other languages is listed as "not checked", never passed quietly.
+- Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
+  run (another runner, a failed install, no results, Kern's own environment failing), the answer needs a look and says why, never ✅. A
+  project with no test script gets a receipt that covers the rules only and says so; changed code in other languages is listed as "not
+  checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
   runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it. Tests that still
   cannot load cannot be checked, and the receipt says so with the first error instead of claiming anything.
@@ -216,7 +220,8 @@ Next steps:
   pull request after reading that summary.
 - Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
   could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code.
-- A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, never as passed or failed.
+- A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run and need a look, never passed or failed.
+  Kern's own limits (time, memory, a killed process, a broken report) never block.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).
 

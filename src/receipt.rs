@@ -20,10 +20,13 @@ fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what 
 fn routine_deps(rules: &Value) -> bool {
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
     let moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
-    let (locked, direct): (Vec<&Value>, Vec<&Value>) = moves.into_iter().partition(|m| m["lock"] == true);
+    let read = |d: &&Value| match d["path"].as_str().unwrap_or("").rsplit('/').next() {
+        Some("package.json") => true,
+        Some("package-lock.json" | "npm-shrinkwrap.json") => d["moves"].is_array(),
+        _ => false,
+    };
     let settled = |m: &&Value| m["age"] == "routine" || m["age"] == "removed";
-    let decided = if direct.is_empty() { &locked } else { &direct };
-    !decided.is_empty() && decided.iter().all(settled) && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
+    !moves.is_empty() && deps.iter().all(read) && moves.iter().all(settled) && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
 }
 fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> {
     let mut files: Vec<(String, Vec<String>)> = Vec::new();
@@ -88,6 +91,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let (described, surprises) = behaviour_items(&behaviour["report"]);
     let sorted = behaviour["report"]["sorted"].is_object();
     for s in &surprises { look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
+    for s in &described { look.push(item("described", format!("The pull request says it changes this, which only a person can confirm: {s}"))); }
     for p in rules["powers"].as_array().into_iter().flatten() {
         let caps: Vec<String> = strings(&p["added"]).iter().map(|c| code(c, 80)).collect();
         look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
@@ -210,6 +214,16 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for x in rules["lockfile"].as_array().into_iter().flatten() { look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""))))); }
     for x in rules["agent_notes"].as_array().into_iter().flatten() { look.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
+    let unchecked = |why: &str| -> String {
+        if why.starts_with("Kern could not run the tests") { format!("Kern's environment had a problem, so it could not check the tests: {}", plain(why)) }
+        else { format!("Kern could not run the tests here, so it cannot say this change kept them passing: {}", plain(why)) }
+    };
+    if tests["status"] == "NOT_RUN" && tests["no_tests"] != true { look.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
+    if tests["status"] == "RAN" {
+        for n in tests["not_run"].as_array().into_iter().flatten() {
+            look.push(item("tests-not-run", format!("{}: {}", code(n["dir"].as_str().filter(|d| !d.is_empty()).unwrap_or("."), 160), unchecked(n["why"].as_str().unwrap_or("no reason was given")))));
+        }
+    }
     let decision = if !blocked.is_empty() { "blocked" } else if !look.is_empty() { "look" } else { "clear" };
     let report = &behaviour["report"];
     let lines = json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
@@ -301,6 +315,9 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             md += &format!("- {} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
                 if missed.is_empty() { String::new() } else { format!("; not caught: {}", missed.join(", ")) });
         }
+        if tests["dropped"].as_array().is_some_and(|d| d.iter().any(|x| x == "planted faults")) {
+            md += "- ⏭️ Planted faults: not checked — Kern's time ran short, so it dropped them first (they rank below the tests and the type check)\n";
+        }
         for n in tests["not_run"].as_array().into_iter().flatten() {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
         }
@@ -330,6 +347,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             md += &format!("- ✅ Node: {b} on both sides, as the project asks{from}\n");
         }
     }
+    if tests["types"]["status"] == "NOT_RUN" { md += &format!("- ⏭️ Types: not checked — {}\n", plain(tests["types"]["why"].as_str().unwrap_or("Kern could not run tsc"))); }
     for p in tests["types"]["projects"].as_array().into_iter().flatten() {
         let config = code(p["config"].as_str().unwrap_or(""), 160);
         let version = p["version"].as_str().filter(|v| !v.is_empty()).map(|v| format!(", TypeScript {v}")).unwrap_or_default();
@@ -348,10 +366,10 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(other_language));
     let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"].is_string());
     let skipped_code = r["drive_skipped"].as_bool() == Some(true);
-    if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
+    if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secret environment variables\n"; }
     let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);
     if (tests_ran || nothing) && !unread && !blocked.iter().any(|x| x["kind"] == "test-file") && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
-        && none("gone") && none("newly_skipped") {
+        && r["rules"]["weakened"].as_array().is_none_or(Vec::is_empty) && none("gone") && none("newly_skipped") {
         md += "- ✅ No skipped, focused or removed tests\n";
     }
     match behaviour["status"].as_str() {
@@ -361,8 +379,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         Some("OFF") => md += "- ⏭️ Changed lines: Not run. Add an AI key (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) and Kern runs every changed line on the old and the new code\n",
         _ => md += &format!("- ⏭️ Changed lines: Not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the run did not finish"))),
     }
-    let described = behaviour["described"].as_array().map_or(0, Vec::len);
-    if described > 0 { md += &format!("- ✅ {} the pull request describes\n", plural(described, "behaviour change", "behaviour changes")); }
     md += "\n";
     if let Some(c) = drive_comment.filter(|c| !c.trim().is_empty()) {
         let body = c.lines().skip_while(|l| l.starts_with("### ") || l.trim().is_empty()).collect::<Vec<_>>().join("\n");

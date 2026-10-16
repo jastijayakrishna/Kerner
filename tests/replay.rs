@@ -160,6 +160,21 @@ fn a_stored_setup_whose_sides_differ_is_judged_with_todays_setup_comparison() {
 }
 
 #[test]
+fn an_old_file_run_that_gave_nothing_falls_back_to_the_old_whole_rerun() {
+    let t = Temp::new("old-again");
+    let dir = t.0.join("receipt-acme__shop__10");
+    stored(&dir, "vitest", json!({}), &[
+        ("old", vitest(&[(ADDS, "discounts", "passed")])),
+        ("new", vitest(&[(ADDS, "discounts", "failed")])),
+        ("new-alone", vitest(&[(ADDS, "discounts", "failed")])),
+        ("old-alone", vitest(&[])),
+        ("old-again", vitest(&[(ADDS, "discounts", "passed")])),
+    ]);
+    let r = kern::replay::rejudge(&dir).unwrap();
+    assert_eq!(r["receipt"]["tests"]["broke"], json!([format!("{ADDS} > discounts")]), "the file alone on the old code ran no test, so the old whole suite ran again and passed it: {r}");
+}
+
+#[test]
 fn a_result_whose_runs_were_not_kept_keeps_its_stored_verdict() {
     let t = Temp::new("bare");
     let dir = t.0.join("receipt-acme__shop__4");

@@ -1357,11 +1357,14 @@ fn capability_check_blocks_only_widening_with_file_directory_and_operator_baseli
         hidden.insert(name.into(), file("require('child_process').exec('id');\n"));
         denied(check(&hidden), "widens module capabilities");
     }
-    for name in ["src/Makefile", "src/Dockerfile", "src/LICENSE"] {
+    for name in ["src/Makefile", "src/LICENSE"] {
         let mut build = base.clone();
         build.insert(name.into(), file("all:\n\tcurl x\n"));
         denied(check(&build), "Unsupported changed file type");
     }
+    let mut docker = base.clone();
+    docker.insert("src/Dockerfile".into(), file("FROM node:22\nRUN curl x\n"));
+    denied(git::changes(&base, &docker, &contract(&policy_value()).unwrap()), "Protected dependency/configuration path: src/Dockerfile");
 }
 
 #[test]
