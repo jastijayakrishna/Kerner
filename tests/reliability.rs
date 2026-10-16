@@ -491,3 +491,13 @@ fn farm_cases_a_replaced_test_is_gone_and_tests_of_a_file_that_did_not_load_befo
     let c = suite::compare(&before, &after, Some(&after));
     assert_eq!((c["new_failing"].clone(), c["added"].clone()), (json!([]), json!([])), "Ghost#28552: a file that could not load on the old run has no baseline, so its tests are not new: {c}");
 }
+
+#[test]
+fn a_report_whose_test_titles_cut_an_emoji_in_half_is_still_read() {
+    let title = format!("{}\\ud83d ...", "\u{1f600}".repeat(3));
+    let jest = format!(r#"{{"numTotalTests":2,"testResults":[{{"name":"/workspace/test/a.test.js","status":"passed","message":"","assertionResults":[{{"ancestorTitles":["emoji"],"title":"{title}","status":"passed"}},{{"ancestorTitles":["emoji"],"title":"keeps \ud83d\ude00 pairs and \\ud83d text","status":"passed"}}]}}]}}"#);
+    let r = kern::proof::read_report(policy::Runner::Jest, jest.as_bytes()).unwrap_or_else(|e| panic!("a test title that a runner cut inside an emoji makes the whole report unreadable: {e}"));
+    let keys: Vec<&String> = r.tests.keys().collect();
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert!(keys.iter().any(|k| k.ends_with("\u{1f600}\u{1f600}\u{1f600}\u{fffd} ...")) && keys.iter().any(|k| k.ends_with("keeps \u{1f600} pairs and \\ud83d text")), "{keys:?}");
+}

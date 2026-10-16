@@ -491,8 +491,24 @@ pub fn first_lines(message: &str) -> String {
     if joined.chars().count() > 300 { format!("{}…", joined.chars().take(299).collect::<String>()) } else { joined }
 }
 
+fn well_formed(out: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let hex = |b: Option<&[u8]>| b.and_then(|b| std::str::from_utf8(b).ok()).filter(|s| s.bytes().all(|c| c.is_ascii_hexdigit())).and_then(|s| u16::from_str_radix(s, 16).ok());
+    let (mut fixed, mut i): (Option<Vec<u8>>, usize) = (None, 0);
+    while i + 1 < out.len() {
+        if out[i] != b'\\' { i += 1; continue; }
+        if out[i + 1] != b'u' { i += 2; continue; }
+        let Some(code) = hex(out.get(i + 2..i + 6)) else { i += 2; continue };
+        let low = out.get(i + 6..i + 8) == Some(b"\\u".as_slice()) && hex(out.get(i + 8..i + 12)).is_some_and(|c| (0xDC00..0xE000).contains(&c));
+        if (0xD800..0xDC00).contains(&code) && low { i += 12; continue; }
+        if (0xD800..0xE000).contains(&code) { fixed.get_or_insert_with(|| out.to_vec())[i + 2..i + 6].copy_from_slice(b"fffd"); }
+        i += 6;
+    }
+    fixed.map_or(std::borrow::Cow::Borrowed(out), std::borrow::Cow::Owned)
+}
+
 pub fn read_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
     if runner == Runner::Node { return tap(out); }
+    let out = &*well_formed(out);
     let (mut found, mut at, mut attempts) = (Vec::new(), 0usize, 0u32);
     while at < out.len() {
         if out[at] == b'{' && (at == 0 || out[at - 1] == b'\n') {
