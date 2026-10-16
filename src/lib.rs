@@ -30,3 +30,4 @@ pub mod weaken;
 pub mod nodeapi;
 pub mod surface;
 pub mod csp;
+pub mod types;

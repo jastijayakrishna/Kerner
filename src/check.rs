@@ -57,12 +57,14 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
         },
     };
     let behaved = now_ms();
-    let tests = if !run {
+    let mut tests = if !run {
         json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" })
     } else {
         crate::suite::run(out, op, until).unwrap_or_else(|e| json!({ "status": "NOT_RUN", "why": format!("Kern could not run the tests: {}", e.0) }))
     };
     let tested = now_ms();
+    if run && std::env::var("KERN_TYPES").as_deref() != Ok("0") { tests["types"] = crate::types::run(out, op, until); }
+    let typed = now_ms();
     let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|_| behaviour["status"] == "RAN");
     let receipt = crate::receipt::build(&d, &rules, &tests, &behaviour);
     crate::receipt::write(out, &receipt, comment.as_deref())?;
@@ -70,6 +72,6 @@ pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr:
     let cleaned = !keep && (out.join("setup.json").exists() || out.join("volumes.txt").exists()) && crate::drive::clean(out).is_ok();
     Ok(json!({ "status": "CHECKED", "cleaned": cleaned, "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
         "look": receipt["look"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": (now_ms() - started) / 1000,
-        "phases": { "rules": (checked - started) / 1000, "behaviour": (behaved - checked) / 1000, "tests": (tested - behaved) / 1000, "tests_detail": tests["seconds"] },
+        "phases": { "rules": (checked - started) / 1000, "behaviour": (behaved - checked) / 1000, "tests": (tested - behaved) / 1000, "types": (typed - tested) / 1000, "tests_detail": tests["seconds"] },
         "receipt": out.join("receipt.md").display().to_string() }))
 }

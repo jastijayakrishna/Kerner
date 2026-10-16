@@ -150,6 +150,18 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it does not block on them")));
     look.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it does not block on it",
         "test files fail on the new code, and Kern has no record of them passing on the old code, so it does not block on them"));
+    for p in tests["types"]["projects"].as_array().into_iter().flatten().filter(|p| p["result"] == "new-errors") {
+        let shown: Vec<String> = p["added"].as_array().into_iter().flatten().take(3)
+            .map(|d| code(&format!("{}:{} {} {}", d["file"].as_str().unwrap_or(""), d["line"], d["code"].as_str().unwrap_or(""), d["message"].as_str().unwrap_or("")), 200)).collect();
+        let count = p["count"].as_u64().unwrap_or(0) as usize;
+        let what = format!("The change brings {} to {}, which type-checked with none on the old code: {}{}", plural(count, "new TypeScript error", "new TypeScript errors"),
+            code(p["config"].as_str().unwrap_or(""), 160), shown.join(", "), if count > shown.len() { ", …" } else { "" });
+        match p["uneven"].as_str() {
+            _ if p["enforced"] != true => look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
+            Some(why) => look.push(item("types-new", format!("{what} (Kern does not block on it: {})", plain(why)))),
+            None => blocked.push(item("types-broke", what)),
+        }
+    }
     let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown").collect();
     if planted.len() >= 2 && planted.iter().all(|f| f["outcome"] != "caught") {
         let example = planted.first().map(|f| format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or(""))).unwrap_or_default();
@@ -299,6 +311,15 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         md += "- ✅ Tests: nothing to run — this change touches only documentation\n";
     } else {
         md += &format!("- ⏭️ Tests: Not run — {}\n", plain(tests["why"].as_str().unwrap_or("Kern found no tests it can run")));
+    }
+    for p in tests["types"]["projects"].as_array().into_iter().flatten() {
+        let config = code(p["config"].as_str().unwrap_or(""), 160);
+        let version = p["version"].as_str().filter(|v| !v.is_empty()).map(|v| format!(", TypeScript {v}")).unwrap_or_default();
+        match p["result"].as_str() {
+            Some("same") => md += &format!("- ✅ Types: no new TypeScript errors in {config} (tsc on the old and the new code{version})\n"),
+            Some("new-errors") => md += &format!("- ❌ Types: {} in {config}, which had none on the old code (see above)\n", plural(p["count"].as_u64().unwrap_or(0) as usize, "new TypeScript error", "new TypeScript errors")),
+            _ => md += &format!("- ⏭️ Types: {config} not compared — {}\n", plain(p["why"].as_str().unwrap_or("Kern could not run tsc on it"))),
+        }
     }
     let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(other_language));

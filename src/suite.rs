@@ -627,6 +627,12 @@ fn install_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Val
     let applies = |d: &str| d == "." || d == dir || dir.starts_with(&format!("{d}/"));
     setup[side]["installs"].as_array()?.iter().filter(|i| i["dir"].as_str().is_some_and(applies)).max_by_key(|i| i["dir"].as_str().map_or(0, |d| if d == "." { 0 } else { d.len() }))
 }
+pub fn unlocked(setup: &Value, dir: &str) -> Option<String> {
+    ["old", "new"].iter().find_map(|side| {
+        let result = install_record(setup, side, dir)?["result"].as_str()?;
+        result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}", result.chars().take(120).collect::<String>()))
+    })
+}
 pub fn uneven(setup: &Value, dir: &str) -> Option<String> {
     let (old, new) = (install_record(setup, "old", dir)?, install_record(setup, "new", dir)?);
     let kind = |r: &Value| r["result"].as_str().unwrap_or("").split(['(', ':']).next().unwrap_or("").trim().to_string();

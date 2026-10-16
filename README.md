@@ -95,25 +95,29 @@ What Kern checks on every pull request:
    is caught. The receipt says how many were caught and names the lines where none was, and when no test notices any of them the change
    needs a look: the tests pass, but nothing in them checks this change. A fault that only puts back the old line, logging calls, and a
    run in which the fault never reached the code are not counted.
-3. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
+3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
+   code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
+   cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both
+   sides got the same dependencies), and need a look otherwise. This works even when the tests cannot run.
+4. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
-4. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
+5. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
    the tests that newly reads environment variables, needs a look. Ordinary imports, such as a UI library or a project's own modules,
    are not powers.
-5. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
+6. **Files that steer everything else.** CI, secret and configuration files (notes such as Markdown files and `.env.example`
    templates aside), test runner settings (the test script in `package.json` included), and the files that instruct coding agents
    (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look.
-6. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
+7. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
    that has been on npm for a week needs no look; a release less than a week old is named, because that is where hijacked packages
    show up. A new package, a major update and a lockfile entry that downloads a package from somewhere other than its own registry
    tarball need a look.
-7. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
+8. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
    run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
    the package says it supports (`engines.node`, checked against Node's own documentation); and HTML that adds inline styles or scripts
    that a Content-Security-Policy in the same change forbids.
-8. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
+9. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
    it on the old and the new code and lists what behaves differently, with what the pull request does not mention first.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,

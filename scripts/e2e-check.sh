@@ -482,6 +482,34 @@ for runner in vitest jest; do
   [ "$(kinds "faults-none-$runner" untested-change look)" = 1 ] || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: a change no test checks does not need a look"; }
 done
 
+say "A change that brings TypeScript errors to a project that type-checked clean is blocked, even when its tests still pass"
+git init -q typesrepo && cd typesrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"typed","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run","typecheck":"tsc --noEmit"},"devDependencies":{"vitest":"3.2.4","typescript":"5.6.3"}}' > package.json
+printf '%s\n' '{ "compilerOptions": { "strict": true, "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "noEmit": true, "skipLibCheck": true, "types": [] }, "include": ["src"] }' > tsconfig.json
+printf '%s\n' 'export type Item = { price: number; qty: number };' '' 'export const total = (items: Item[]): number => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.ts
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.ts";' '' 'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/total.test.ts
+npm install --package-lock-only --ignore-scripts --no-audit --no-fund > /dev/null
+git add -A && git commit -qm base && types_base=$(git rev-parse HEAD)
+git checkout -q -b broke
+printf '%s\n' 'export const version: number = "1.0";' >> src/total.ts
+git commit -qam "Name the version" && git rev-parse HEAD > "$W/types-broke.head"
+git checkout -q -b fine "$types_base"
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.ts
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/types-fine.head"
+git checkout -q "$types_base"
+cd "$W"
+check types-broke "$types_base" typesrepo
+decision types-broke blocked
+[ "$(kinds types-broke types-broke blocked)" = 1 ] && grep -q 'src/total.ts:4 TS2322' types-broke/receipt.md \
+  || { cat types-broke/receipt.md; jq .tests.types types-broke/receipt.json; fail "types-broke: a new TypeScript error in a project that type-checked clean was not blocked"; }
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 0)' types-broke/receipt.json > /dev/null || { jq .tests types-broke/receipt.json; fail "types-broke: the tests should still pass"; }
+check types-fine "$types_base" typesrepo
+decision types-fine clear
+jq -e '.tests.types.projects[0].result == "same" and .tests.types.projects[0].version == "5.6.3"' types-fine/receipt.json > /dev/null \
+  || { jq .tests.types types-fine/receipt.json; fail "types-fine: the type check did not run on both sides"; }
+
 say "Kern check removes its own sandbox volumes"
 after=$(volumes)
 [ "$after" -le $(( before + 1 )) ] || fail "kern check left $(( after - before )) sandbox volumes behind"
