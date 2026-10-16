@@ -36,7 +36,8 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let (mut blocked, mut look, mut new_tests) = (Vec::new(), Vec::new(), Vec::new());
     let changed = rules["changed"].as_array().cloned().unwrap_or_default();
     let tests_deleted = changed.iter().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path));
-    let added = |p: &str| !tests_deleted && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
+    let passing_lost = tests_deleted && tests["gone"].as_array().is_some_and(|g| !g.is_empty());
+    let added = |p: &str| !passing_lost && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
     for t in strings(&tests["broke"]) { blocked.push(item("test-broke", format!("A test that passed before now fails: {}", code(&t, 200)))); }
     for x in tests["run_broke"].as_array().into_iter().flatten() {
         let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
@@ -79,7 +80,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for t in strings(&tests["gone"]) { look.push(item("test-gone", format!("A test that ran before no longer runs: {}", code(&t, 200)))); }
     for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or("")))); }
-    for t in strings(&tests["unconfirmed"]) { look.push(item("test-unconfirmed", format!("This failed once, and Kern's time ran out before it could run it again: {}", code(&t, 200)))); }
+    for t in strings(&tests["unconfirmed"]) { look.push(item("test-unconfirmed", format!("This failed once, and Kern could not run it again to confirm it: {}", code(&t, 200)))); }
     for t in strings(&tests["newly_skipped"]) { look.push(item("test-skipped", format!("A test that passed before is now skipped: {}", code(&t, 200)))); }
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
     for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run and how their results are read"), ("protected", "protected", "is a CI, secret or configuration file")] {
@@ -163,8 +164,15 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let kept = tests["kept"].as_u64().unwrap_or(0) as usize;
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"));
-        let mut line = if broke > 0 {
-            format!("- ❌ Tests: {broke} that passed before now {}; {kept} still pass ({runner})", if broke == 1 { "fails" } else { "fail" })
+        let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
+        let doubtful = look.iter().any(|x| x["kind"] == "test-unconfirmed");
+        let mut line = if broke > 0 || files > 0 {
+            let mut what = Vec::new();
+            if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }
+            if files > 0 { what.push(format!("{files} test {} no longer {}", if files == 1 { "file" } else { "files" }, if files == 1 { "loads" } else { "load" })); }
+            format!("- ❌ Tests: {}; {kept} still pass ({runner})", what.join(", "))
+        } else if doubtful {
+            format!("- ⚠️ Tests: {kept} that passed before still pass, and some that failed once could not be run again ({runner})")
         } else {
             format!("- ✅ Tests: {kept} that passed before still pass ({runner})")
         };
@@ -173,6 +181,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let flaky = tests["flaky"].as_array().map_or(0, Vec::len);
         if added > 0 { line += &format!(" · {} new", added); }
         if flaky > 0 { line += &format!(" · {} failed once and passed when run again (flaky)", flaky); }
+        let aside = tests["environmental"].as_array().map_or(0, Vec::len);
+        if aside > 0 { line += &format!(" · {aside} also fail on the old code when their files run alone (set aside)"); }
         if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }
         md += &line;
         md += "\n";
@@ -192,7 +202,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let skipped_code = r["drive_skipped"].as_bool() == Some(true);
     if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secrets\n"; }
     let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);
-    if (tests_ran || nothing) && !unread && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
+    if (tests_ran || nothing) && !unread && !blocked.iter().any(|x| x["kind"] == "test-file") && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
         && none("gone") && none("newly_skipped") {
         md += "- ✅ No skipped, focused or removed tests\n";
     }

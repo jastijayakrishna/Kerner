@@ -501,11 +501,15 @@ fn mocha(v: &Value) -> Option<Report> {
     for k in pending { r.add(k, Status::Skipped); }
     for (k, t) in failures.into_iter().zip(v.get("failures")?.as_array()?) {
         if known.contains(&k) { r.add(k, Status::Failed); continue; }
+        let k = hook(&k);
         let message = t.get("err").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("");
-        if !message.is_empty() { r.why.insert(k.clone(), first_lines(message)); }
-        r.problems.push(k);
+        if !message.is_empty() { r.why.entry(k.clone()).or_insert_with(|| first_lines(message)); }
+        if !r.problems.contains(&k) { r.problems.push(k); }
     }
     Some(r)
+}
+fn hook(key: &str) -> String {
+    match key.find("\" hook").and_then(|i| key[i..].find(" for \"").map(|j| i + j)) { Some(cut) => key[..cut].to_string(), None => key.to_string() }
 }
 fn jest(v: &Value) -> Option<Report> {
     v.get("numTotalTests")?.as_u64()?;
@@ -528,7 +532,7 @@ fn jest(v: &Value) -> Option<Report> {
     }
     Some(r)
 }
-struct Point { depth: usize, ok: bool, directive: Option<Status>, name: String, suite: bool }
+struct Point { depth: usize, ok: bool, directive: Option<Status>, name: String, suite: bool, file: bool }
 fn directive(rest: &str) -> (String, Option<Status>) {
     let mut escaped = false;
     for (i, c) in rest.char_indices() {
@@ -565,14 +569,14 @@ fn tap(out: &[u8]) -> Result<Report, String> {
         let rest = rest.trim_start().trim_start_matches(|c: char| c.is_ascii_digit());
         let (name, directive) = directive(rest.strip_prefix(" - ").or_else(|| rest.strip_prefix(' ')).unwrap_or(rest));
         let pad = " ".repeat(indent + 2);
-        let mut suite = false;
+        let (mut suite, mut file) = (false, false);
         if lines.get(i).is_some_and(|l| *l == format!("{pad}---")) {
-            let (end, kind) = (format!("{pad}..."), format!("{pad}type: 'suite'"));
+            let (end, kind, exit) = (format!("{pad}..."), format!("{pad}type: 'suite'"), format!("{pad}exitCode:"));
             i += 1;
-            while i < lines.len() && lines[i] != end { suite |= lines[i] == kind; i += 1; }
+            while i < lines.len() && lines[i] != end { suite |= lines[i] == kind; file |= lines[i].starts_with(&exit); i += 1; }
             i += 1;
         }
-        points.push(Point { depth: indent / 4, ok, directive, name, suite });
+        points.push(Point { depth: indent / 4, ok, directive, name, suite, file });
     }
     if plan != Some(points.iter().filter(|p| p.depth == 0).count()) { return Err(incomplete()); }
     let mut levels: Vec<Vec<(String, Option<Status>)>> = vec![Vec::new()];
@@ -581,6 +585,7 @@ fn tap(out: &[u8]) -> Result<Report, String> {
         let children = std::mem::take(&mut levels[p.depth + 1]);
         let status = p.directive.unwrap_or(if p.ok { Status::Passed } else { Status::Failed });
         if children.is_empty() && !p.suite {
+            if p.depth == 0 && p.file && status == Status::Failed { levels[0].push((rel(&p.name), None)); continue; }
             levels[p.depth].push((p.name, Some(status)));
             continue;
         }

@@ -814,7 +814,8 @@ fn runner_reports_are_read_test_by_test() {
         ("test/math.vitest.test.mjs > math > later", c(0, 0, 1)), ("test/math.vitest.test.mjs > math > skipped", c(0, 0, 1))]));
     let n = read_report(Runner::Node, &report_fixture("node.tap")).unwrap();
     assert_eq!(n.tests, tests(&[("adds", c(1, 0, 0)), ("fails", c(0, 1, 0)), ("group > inner", c(1, 0, 0)), ("later", c(0, 0, 1)), ("skipped", c(0, 0, 1))]));
-    assert_eq!(read_report(Runner::Node, &report_fixture("node-broken.tap")).unwrap().tests.get("test/broken.test.js"), Some(&c(0, 1, 0)));
+    let broken = read_report(Runner::Node, &report_fixture("node-broken.tap")).unwrap();
+    assert_eq!((broken.tests.get("test/broken.test.js"), broken.problems), (None, vec!["test/broken.test.js".to_string()]), "a test file that does not load is a problem of that file, not a failing test");
     let text = |name: &str| String::from_utf8(report_fixture(name)).unwrap();
     let (mocha, jest, tap, processed) = (text("mocha10.json"), text("jest.json"), text("node.tap"), text("jest-processor.out"));
     for (runner, out, why) in [

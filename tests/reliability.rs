@@ -398,7 +398,7 @@ fn a_failure_the_old_code_also_shows_when_its_file_runs_alone_never_blocks() {
     let c = suite::judged(&before, &after, Some(&alone_new), Some(&alone_old));
     assert_eq!(c["new_problems"], json!([]), "the file fails alone on the old code too (it needs a sibling package built), so the full run passing it was luck: {c}");
     assert_eq!(c["broke"], json!(["packages/core/merge.test.ts > merges"]), "this test fails alone on the new code and passes alone on the old code: {c}");
-    assert!(c["flaky"].as_array().unwrap().iter().any(|f| f == "packages/cli/build.test.ts"), "{c}");
+    assert!(c["environmental"].as_array().unwrap().iter().any(|f| f == "packages/cli/build.test.ts"), "the file fails on the old code alone too, so it is set aside: {c}");
     let shaky_old = report(&[("packages/core/merge.test.ts > merges", 0, 1, 0)], &[]);
     let c = suite::judged(&before, &after, Some(&alone_new), Some(&shaky_old));
     assert_eq!(c["broke"], json!([]), "a test that fails alone on the old code is not broken by the change: {c}");
