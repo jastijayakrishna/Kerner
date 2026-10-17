@@ -1072,6 +1072,13 @@ pub fn side_image(out: &Path, volume: &str, op: &crate::policy::Operator) -> Str
 }
 pub const SETUP_SECS_MAX: u64 = 1500;
 const SETUP_SECS_MIN: u64 = 120;
+const SETUP_ERROR_CHARS_MAX: usize = 300;
+pub fn setup_failure(side: &str, exit_code: i64, errors: &[u8]) -> String {
+    let text = String::from_utf8_lossy(errors);
+    let why = crate::sandbox::first_error(&text).or_else(|| text.lines().map(str::trim).rev().find(|l| !l.is_empty()));
+    let said = format!("Setting up the {side} code failed in the sandbox (exit code {exit_code})");
+    why.map_or(said.clone(), |w| format!("{said}: {}", w.chars().take(SETUP_ERROR_CHARS_MAX).collect::<String>()))
+}
 pub fn setup_seconds(until: u64) -> R<u64> {
     let seconds = within(until, SETUP_SECS_MAX);
     ensure!(seconds >= SETUP_SECS_MIN, "Kern's time for this check ran out before it could set up the code");
@@ -1113,7 +1120,7 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
         Err(e) if scripts && (e.0.contains("out of memory") || e.0.contains("exceeded limits")) => { let (v, r) = attempt(false)?; (v, r, false) }
         other => { let (v, r) = other?; (v, r, scripts) }
     };
-    ensure!(run.exit_code == 0, "Setting up the {side} code failed in the sandbox (exit code {})", run.exit_code);
+    ensure!(run.exit_code == 0, "{}", setup_failure(side, run.exit_code, &run.errors));
     let record: Value = serde_json::from_slice(&run.stdout).map_err(|_| Denied(format!("The {side} code's setup gave no record")))?;
     let _ = std::fs::remove_dir_all(&tree);
     let _ = std::fs::remove_dir_all(&control);

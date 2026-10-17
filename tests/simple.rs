@@ -1,4 +1,15 @@
 #[test]
+fn recallnet_js_recall_1130_a_setup_that_fails_in_the_sandbox_says_why() {
+    let errors = b"warn: something minor\nError: Unsupported input file type\n";
+    let said = kern::drive::setup_failure("old", 1, errors);
+    assert!(said.starts_with("Setting up the old code failed in the sandbox (exit code 1)") && said.contains("Unsupported input file type"),
+        "the receipt said only the exit code, so nobody could tell why the setup of js-recall#1130 and trpc#7350 stopped: {said}");
+    assert_eq!(kern::drive::setup_failure("new", 137, b""), "Setting up the new code failed in the sandbox (exit code 137)");
+    let long = format!("Error: {}", "x".repeat(2000));
+    assert!(kern::drive::setup_failure("old", 1, long.as_bytes()).chars().count() < 400, "the quote is cut to a sane length");
+}
+
+#[test]
 fn review_2_d_kern_has_one_markdown_escaper_and_it_neutralises_markup() {
     assert_eq!(kern::util::code("a`b<details>\n\u{1b}c", 200), "`a'b‹details>  c`");
     assert_eq!(kern::util::code("  abcdef ", 3), "`abc…`");

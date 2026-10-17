@@ -379,6 +379,15 @@ fn pinned_major(dir: &Path, manager: &str) -> Option<u64> {
     if name != manager { return None; }
     version.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
+const PNPM_RANGE_CHARS_MAX: usize = 64;
+fn pnpm_range(dir: &Path) -> Option<String> {
+    let read = |d: &Path| std::fs::read(d.join("package.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let packages: Vec<Value> = [read(dir), read(Path::new("/workspace"))].into_iter().flatten().collect();
+    if packages.iter().any(|p| p["packageManager"].is_string()) { return None; }
+    let range = packages.iter().find_map(|p| p["engines"]["pnpm"].as_str())?.trim();
+    let valid = range.len() <= PNPM_RANGE_CHARS_MAX && range.bytes().any(|b| b.is_ascii_digit()) && range.bytes().all(|b| b.is_ascii_digit() || b" .*xX^~<>=|-".contains(&b));
+    valid.then(|| range.to_string())
+}
 pub fn shim(launcher: &[String]) -> String {
     let words: Vec<String> = launcher.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))).collect();
     format!("#!/bin/sh\nexec {} \"$@\"\n", words.join(" "))
@@ -388,9 +397,11 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     let npm = |args: &[&str]| -> Vec<String> {
         node(&[&["/usr/local/lib/node_modules/npm/bin/npm-cli.js"], args, &["--engine-strict=false", "--no-audit", "--no-fund", "--no-update-notifier"]].concat())
     };
-    let corepack = if pinned_major(dir, "pnpm").is_some_and(|m| m >= PNPM_OWN_COREPACK_MAJOR_MIN) { own_corepack() } else { IMAGE_COREPACK.to_string() };
-    let corepack = corepack.as_str();
-    let pnpm = |args: &[&str]| -> Vec<String> { node(&[&[corepack, "pnpm"], args].concat()) };
+    let range = pnpm_range(dir);
+    let own = range.is_some() || pinned_major(dir, "pnpm").is_some_and(|m| m >= PNPM_OWN_COREPACK_MAJOR_MIN);
+    let corepack = if own { own_corepack() } else { IMAGE_COREPACK.to_string() };
+    let (corepack, pnpm_name) = (corepack.as_str(), range.map_or_else(|| "pnpm".to_string(), |r| format!("pnpm@{r}")));
+    let pnpm = |args: &[&str]| -> Vec<String> { node(&[&[corepack, pnpm_name.as_str()], args].concat()) };
     if dir.join("pnpm-lock.yaml").is_file() {
         let store = "--store-dir=/workspace/.kern-pnpm-store";
         return ("pnpm", vec![(pnpm(&["install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed"),

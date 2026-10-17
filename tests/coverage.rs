@@ -48,6 +48,20 @@ fn cap_go_capgo_app_2789_a_pattern_the_shell_would_expand_is_never_read_as_no_te
 }
 
 #[test]
+fn saleor_apps_2046_avatax_a_project_that_shuffles_its_tests_still_runs_in_one_fixed_order() {
+    use kern::script::{Found, found};
+    let run = |script: &str| match found(&json!({ "scripts": { "test": script } })) { Found::Run(i) => i.command, other => panic!("{script}: {other:?}") };
+    for script in ["vitest --project units --sequence.shuffle", "vitest run --sequence.shuffle=true src", "vitest --sequence.shuffle.files --sequence.shuffle.tests"] {
+        let command = run(script);
+        assert!(!command.iter().any(|a| a.starts_with("--sequence.shuffle")), "{script}: Kern runs the tests in one fixed order (it adds --sequence.shuffle=false), and vitest refuses a flag given twice: {command:?}");
+    }
+    assert!(run("vitest --project units --sequence.shuffle").iter().any(|a| a == "units"), "the project filter stays");
+    assert!(run("vitest run --sequence.shuffle src").iter().any(|a| a == "src"), "a flag that takes no value never swallows the name after it");
+    let jest = run("jest --randomize --ci");
+    assert!(!jest.iter().any(|a| a == "--randomize") && jest.iter().any(|a| a == "--ci"), "jest's random order is dropped the same way, and nothing else is: {jest:?}");
+}
+
+#[test]
 fn a_test_script_kern_cannot_follow_still_counts_as_changed_when_its_words_change() {
     let pkg = |s: &str| json!({ "scripts": { "test": s } });
     assert!(!kern::script::same_tests(&pkg("vitest run src/**/*.test.ts"), &pkg("vitest run src/a*.test.ts")), "narrowing a pattern changes which tests run, though Kern can follow neither script");
@@ -96,6 +110,28 @@ fn posthog_js_5291_and_openclaw_134760_each_pnpm_runs_through_a_corepack_that_kn
         assert_eq!(manager, "pnpm");
         for (argv, _) in &attempts { assert_eq!(&argv[..3], ["/usr/local/bin/node", corepack, "pnpm"], "{pin}: {why}: {argv:?}"); }
         assert!(attempts[0].0.iter().any(|a| a == "--frozen-lockfile"));
+    }
+}
+
+#[test]
+fn expo_expo_49716_and_public_ui_kolibri_10041_a_pnpm_range_in_engines_picks_a_pnpm_inside_it() {
+    let t = Temp::new();
+    std::fs::write(t.0.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    let own = "/workspace/.kern-tools/corepack/node_modules/corepack/dist/corepack.js";
+    let launcher = |package: &str| {
+        std::fs::write(t.0.join("package.json"), package).unwrap();
+        let (_, attempts) = kern::sandbox::install_plan(&t.0);
+        attempts.iter().map(|(argv, _)| argv[..3].to_vec()).collect::<Vec<_>>()
+    };
+    for (range, why) in [("^10.33.0", "expo asks for pnpm 10.33 or later in 10, and corepack's own default, 11.24.0, is outside it"), ("^10", "kolibri"), (">=8.6.0 <11", "a range with two ends")] {
+        let got = launcher(&format!(r#"{{"name":"x","engines":{{"pnpm":"{range}"}}}}"#));
+        assert!(got.iter().all(|a| a == &["/usr/local/bin/node", own, &format!("pnpm@{range}")]), "{why}: corepack picks the newest pnpm inside the range, online when installing and from its cache when the tests run: {got:?}");
+    }
+    let pinned = launcher(r#"{"name":"x","packageManager":"pnpm@10.12.1","engines":{"pnpm":"^10"}}"#);
+    assert_eq!(pinned[0][2], "pnpm", "an exact pin in packageManager wins over a range: {pinned:?}");
+    for odd in ["https://example.com/pnpm.tgz", "^10 && curl x", "latest", ""] {
+        let got = launcher(&format!(r#"{{"name":"x","engines":{{"pnpm":"{odd}"}}}}"#));
+        assert_eq!(got[0][2], "pnpm", "{odd:?} is not a version range, so Kern does not hand it to corepack: {got:?}");
     }
 }
 

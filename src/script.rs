@@ -327,15 +327,16 @@ fn dropped(runner: Runner, flag: &str) -> Option<Takes> {
     let name = flag.split_once('=').map_or(flag, |(n, _)| n);
     let has = |list: &[&str]| list.contains(&name);
     let (valued, numbered, plain): (&[&str], &[&str], &[&str]) = match runner {
-        Runner::Vitest => (&["--reporter", "--outputFile"], &["--bail"], &["--watch", "-w", "--ui", "--open", "--run", "-u", "--update", "--coverage"]),
+        Runner::Vitest => (&["--reporter", "--outputFile"], &["--bail"], &["--watch", "-w", "--ui", "--open", "--run", "-u", "--update", "--coverage", "--sequence.shuffle"]),
         Runner::Jest => (&["--reporters", "--outputFile", "--testResultsProcessor", "--changedSince", "--coverageReporters", "--coverageDirectory", "--json-output"], &["--bail", "-b"],
-            &["--watch", "--watchAll", "--coverage", "--collectCoverage", "--json", "--notify", "-u", "--updateSnapshot", "-o", "--onlyChanged", "--lastCommit", "--listTests"]),
+            &["--watch", "--watchAll", "--coverage", "--collectCoverage", "--json", "--notify", "-u", "--updateSnapshot", "-o", "--onlyChanged", "--lastCommit", "--listTests", "--randomize"]),
         Runner::Mocha => (&["--reporter", "-R", "--reporter-option", "--reporter-options", "-O"], &[], &["--watch", "-w", "--bail", "-b"]),
         Runner::Node => (&["--test-reporter", "--test-reporter-destination"], &[], &["--experimental-test-coverage", "--watch", "--test-only"]),
     };
     let inline = flag.contains('=');
     if has(valued) { return Some(if inline { Takes::Nothing } else { Takes::Value }); }
     if has(numbered) { return Some(if inline { Takes::Nothing } else { Takes::Number }); }
+    if runner == Runner::Vitest && name.starts_with("--sequence.shuffle.") { return Some(Takes::Nothing); }
     if runner == Runner::Vitest && name.starts_with("--coverage.") { return Some(if inline { Takes::Nothing } else { Takes::Maybe }); }
     has(plain).then_some(Takes::Nothing)
 }
