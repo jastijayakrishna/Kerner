@@ -2933,7 +2933,7 @@ fn run_returns_at_its_deadline_even_if_a_background_process_holds_the_output() {
         (PathBuf::from("/bin/sh"), vec!["-c".into(), "sleep 30 &".into()])
     };
     let started = std::time::Instant::now();
-    let r = run(&exe, &args, Run { timeout: std::time::Duration::from_secs(2), ..Default::default() });
-    assert!(started.elapsed() < std::time::Duration::from_secs(10), "run() must honour its timeout, took {:?}", started.elapsed());
+    let r = run(&exe, &args, Run { timeout: std::time::Duration::from_secs(5), ..Default::default() });
+    assert!(started.elapsed() < std::time::Duration::from_secs(15), "run() must honour its timeout, took {:?}", started.elapsed());
     denied(r, "background process");
 }

@@ -451,12 +451,14 @@ check nx "$nx_base" nxrepo
 decision nx blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("jest in libs/calc"))' nx/receipt.json > /dev/null || { jq .tests nx/receipt.json; fail "nx: the project's own jest config was not run"; }
 
-say "When only the new code's install fails, the receipt quotes the install and says it could not verify, instead of blaming the tests"
+say "When only the new code's install fails, the receipt quotes the install as not verified instead of blaming the tests, and the new package that cannot install is still a look"
 git -C calc checkout -q -b installfail "$base"
 sed -i 's/"devDependencies":{"vitest":"3.2.4"}/"devDependencies":{"vitest":"3.2.4","@kern-e2e\/does-not-exist":"1.0.0"}/' calc/package.json
 git -C calc commit -qam "Add a package that does not exist" && git -C calc rev-parse HEAD > installfail.head && git -C calc checkout -q "$base"
 check installfail "$base"
-decision installfail unverified
+decision installfail look
+[ "$(kinds installfail dependencies look)" = 1 ] && [ "$(kinds installfail test-unconfirmed unverified)" = 1 ] && [ "$(kinds installfail tests-not-run unverified)" = 0 ] \
+  || { cat installfail/receipt.md; fail "installfail: the new package is not a look, or the failed install is not listed once as not verified"; }
 jq -e '(.tests.run_unconfirmed | length == 1) and (.tests.run_unconfirmed[0].why | test("installing its dependencies with npm failed"))' installfail/receipt.json > /dev/null || { jq .tests installfail/receipt.json; fail "installfail: a failed install on the new code was not named, or it blocked"; }
 
 say "When only some test files miss an unbuilt workspace package, Kern builds it on both sides and compares them all"

@@ -328,7 +328,8 @@ fn not_run_items(f: &mut Found, tests: &Value) {
         if why.starts_with("Kern could not run the tests") { format!("Kern's environment had a problem, so it could not check the tests: {}", plain(why, 400)) }
         else { format!("Kern could not run the tests here, so it cannot say this change kept them passing: {}", plain(why, 400)) }
     };
-    if tests["status"] == "NOT_RUN" && tests["no_tests"] != true { f.unverified.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
+    let said = tests["run_unconfirmed"].as_array().into_iter().flatten().any(|x| x["why"] == tests["why"]);
+    if tests["status"] == "NOT_RUN" && tests["no_tests"] != true && !said { f.unverified.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
     if tests["status"] == "RAN" {
         for n in tests["not_run"].as_array().into_iter().flatten() {
             f.unverified.push(item("tests-not-run", format!("{}: {}", code(n["dir"].as_str().filter(|d| !d.is_empty()).unwrap_or("."), 160), unchecked(n["why"].as_str().unwrap_or("no reason was given")))));
