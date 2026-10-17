@@ -54,7 +54,12 @@ pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
 pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
 pub const TRACE_BYTES_MAX: usize = 8 << 20;
-pub const INSTALL_SCRATCH: [&str; 2] = ["/workspace/.kern-install", "/workspace/.kern-pnpm-store"];
+pub const INSTALL_SCRATCH: [&str; 1] = ["/workspace/.kern-install"];
+pub const PNPM_STORE: &str = "/workspace/.kern-pnpm-store";
+const STORE_VERSIONS_COUNT_MAX: usize = 16;
+pub fn store_links_back(store: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(store).into_iter().flatten().flatten().take(STORE_VERSIONS_COUNT_MAX).map(|e| e.path().join("projects")).filter(|p| p.symlink_metadata().is_ok()).collect()
+}
 pub const SERVE_FILES_COUNT_MAX: usize = 40;
 pub const VALUES_BYTES_MAX: usize = 1 << 20;
 pub const FAULTS_COUNT_MAX: usize = 24;
@@ -409,7 +414,7 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     let (corepack, pnpm_name) = (corepack.as_str(), range.map_or_else(|| "pnpm".to_string(), |r| format!("pnpm@{r}")));
     let pnpm = |args: &[&str]| -> Vec<String> { node(&[&[corepack, pnpm_name.as_str()], args].concat()) };
     if dir.join("pnpm-lock.yaml").is_file() {
-        let store = "--store-dir=/workspace/.kern-pnpm-store";
+        let store = &format!("--store-dir={PNPM_STORE}");
         return ("pnpm", vec![(pnpm(&["install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed"),
             (pnpm(&["install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), STALE)]);
     }
@@ -429,7 +434,7 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     let declared = std::fs::read(dir.join("package.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|v| v["packageManager"].as_str().map(|s| s.split('@').next().unwrap_or("").to_string())).unwrap_or_default();
     if declared == "pnpm" || dir.join("pnpm-workspace.yaml").is_file() {
-        let store = "--store-dir=/workspace/.kern-pnpm-store";
+        let store = &format!("--store-dir={PNPM_STORE}");
         return ("pnpm", vec![(pnpm(&["install", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed from package.json (the project has no lockfile)")]);
     }
     if declared == "yarn" && dir.join(".yarnrc.yml").is_file() {
@@ -908,7 +913,7 @@ mod inside {
         }
     }
     const TEST_USER: u32 = 1000;
-    const KERN_DIRS: [&str; 1] = [".kern-tools"];
+    const KERN_DIRS: [&str; 2] = [".kern-pnpm-store", ".kern-tools"];
     pub fn read_only_tree(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
         if !meta.is_dir() && !meta.is_file() { return; }
@@ -964,13 +969,13 @@ mod inside {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
             if super::with_workspace(d, dir.join("node_modules").exists(), &records) { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
-            let keep: Vec<PathBuf> = super::INSTALL_SCRATCH.iter().chain([&super::TOOLS]).map(PathBuf::from)
+            let keep: Vec<PathBuf> = super::INSTALL_SCRATCH.iter().chain([&super::PNPM_STORE, &super::TOOLS]).map(PathBuf::from)
                 .chain(records.iter().filter_map(|r| r["dir"].as_str()).filter(|r| *r != ".").map(|r| Path::new("/workspace").join(r))).collect();
             let (record, launcher) = install_dir(d, &dir, scripts, (budget, started), &keep, &mut dirty)?;
             if let (Some(m), Some(l)) = (record["manager"].as_str(), launcher) { launchers.entry(m.to_string()).or_insert(l); }
             records.push(record);
         }
-        for dir in super::INSTALL_SCRATCH { let _ = std::fs::remove_dir_all(dir); }
+        for dir in super::INSTALL_SCRATCH.iter().map(PathBuf::from).chain(super::store_links_back(Path::new(super::PNPM_STORE))) { let _ = std::fs::remove_dir_all(dir); }
         let (tools, bin) = (Path::new(super::TOOLS), Path::new(super::TOOLS).join("bin"));
         for (manager, launcher) in &launchers {
             std::fs::create_dir_all(&bin)?;

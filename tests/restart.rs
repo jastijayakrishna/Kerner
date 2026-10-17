@@ -35,20 +35,26 @@ fn comfy_desktop_1732_every_install_retry_starts_again_from_the_committed_tree()
 }
 
 #[test]
-fn langchain_macaw_32_every_cache_kern_makes_inside_the_project_is_removed_before_tests_run() {
+fn posthog_4869_the_pnpm_store_stays_for_the_tests_and_only_its_links_back_into_the_project_go() {
     let inside = |p: &str| p.starts_with("/workspace/") && !p.starts_with("/workspace/node_modules/");
     let scratch = |p: &str| kern::sandbox::INSTALL_SCRATCH.iter().any(|s| p == *s || p.starts_with(&format!("{s}/")));
     for (key, value) in kern::sandbox::INSTALL_ENV.iter().filter(|(_, v)| inside(v)) {
         assert!(scratch(value), "{key}={value} sits inside the project, where its test runner can find it, and is not removed after install");
     }
+    assert!(!scratch(kern::sandbox::PNPM_STORE), "PostHog/posthog-js#4869: pnpm's global virtual store keeps vitest itself in the store, and node_modules links into it, so the store must outlive the install");
     let t = Temp::new();
     write(&t.0, "package.json", "{\"name\":\"p\",\"packageManager\":\"pnpm@10.18.0\"}");
     write(&t.0, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
     let (_, attempts) = kern::sandbox::install_plan(&t.0);
-    for arg in attempts.iter().flat_map(|(argv, _)| argv.iter()).filter_map(|a| a.strip_prefix("--store-dir=")) {
-        assert!(scratch(arg), "langchain-ai/macaw-design-system#32: pnpm 10 keeps a link from its store back to the project, so vitest ran every test a second time through {arg}");
-    }
-    assert!(attempts.iter().any(|(argv, _)| argv.iter().any(|a| a.starts_with("--store-dir="))), "pnpm still installs from a store Kern names");
+    let stores: Vec<&str> = attempts.iter().flat_map(|(argv, _)| argv.iter()).filter_map(|a| a.strip_prefix("--store-dir=")).collect();
+    assert!(!stores.is_empty() && stores.iter().all(|s| *s == kern::sandbox::PNPM_STORE), "{stores:?}");
+    let store = Temp::new();
+    for p in ["v10/projects/c52ddf65/packages/components/src/__tests__/cli.test.ts", "v10/files/00/ab", "v10/index/aa",
+        "v11/links/@/vitest/1.6.1/aeab4f17/node_modules/vitest/vitest.mjs", "v11/projects/9f/a.test.ts"] { write(&store.0, p, "x"); }
+    let mut gone = kern::sandbox::store_links_back(&store.0);
+    gone.sort();
+    assert_eq!(gone, [store.0.join("v10").join("projects"), store.0.join("v11").join("projects")],
+        "langchain-ai/macaw-design-system#32: pnpm keeps a link from its store back to the project, so vitest ran every test a second time through it; the packages in links/ stay");
 }
 
 #[test]
