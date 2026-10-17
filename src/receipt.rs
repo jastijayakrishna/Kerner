@@ -279,7 +279,8 @@ fn agent_md(r: &Value) -> String {
         let u = Unit { path: c["path"].as_str().unwrap_or("").to_string(), target: c["target"].as_str().map(str::to_string), outcome: String::new(), ran: strings(&c["tests"]), caught_by: Vec::new() };
         let ask = if c["kind"] == "unasserted" {
             let who = if u.ran.is_empty() { "A test".to_string() } else { u.ran.iter().map(|t| code(t, 160)).collect::<Vec<_>>().join(", ") };
-            format!("{who} runs it, but still passes when your change is undone. If the change is meant to alter behaviour, add an assertion there that fails on the old code and passes on yours; if it keeps behaviour the same, say so in the pull request.{}", c["example"].as_str().unwrap_or(""))
+            let (run, pass) = if u.ran.len() > 1 { ("run", "pass") } else { ("runs", "passes") };
+            format!("{who} {run} it, but still {pass} when your change is undone. If the change is meant to alter behaviour, add an assertion there that fails on the old code and passes on yours; if it keeps behaviour the same, say so in the pull request.{}", c["example"].as_str().unwrap_or(""))
         } else {
             "No test reaches this file. If it can run on its own, add a test that fails on the old code and passes on yours; if it needs a database, a network or other services, say in the pull request why it cannot be tested here.".to_string()
         };

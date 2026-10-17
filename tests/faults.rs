@@ -198,6 +198,24 @@ fn every_change_no_test_checks_becomes_an_exact_task_for_the_agent_and_the_claim
 }
 
 #[test]
+fn authkit_session_46_a_claim_quotes_the_full_values_the_test_compared_not_chai_s_shortened_message() {
+    use kern::policy::Runner::Vitest;
+    let title = "gives a user-facing message";
+    let short = "expected PKCECookieMissingError: PKCE verifier coo\u{2026} { data: undefined } to match object { Object (name, message) }";
+    let result = |status: &str, message: &str| json!({ "ancestorTitles": ["AuthKitCore"], "title": title, "status": status, "failureMessages": if message.is_empty() { json!([]) } else { json!([message]) } });
+    let report = |status: &str, message: &str| json!({ "numTotalTests": 1, "testResults": [{ "name": "/workspace/src/core/AuthKitCore.spec.ts", "status": "passed", "assertionResults": [result(status, message)] }] }).to_string();
+    let new = kern::proof::read_report(Vitest, report("passed", "").as_bytes()).unwrap();
+    let placebo = json!({ "finished": true, "served": true, "output": report("passed", ""), "errors": "", "values": "" });
+    let values = json!({ "file": "/workspace/src/core/AuthKitCore.spec.ts", "names": ["AuthKitCore"], "name": title, "message": short,
+        "expected": "Object {\n  \"message\": \"Sign-in session could not be verified.\",\n}", "actual": "Object {\n  \"message\": \"PKCE verifier cookie missing\",\n}" }).to_string();
+    let caught = json!({ "finished": true, "served": true, "errors": "", "values": format!("{values}\n{{\"file\": \"cut off"), "output": report("failed", &format!("Error: {short}")) });
+    let claims = kern::suite::fault_claims(Vitest, &new, Some(&placebo), &[caught]);
+    let claim = &claims[0]["caught_by"][0];
+    assert!(claim["now"].as_str().is_some_and(|v| v.contains("Sign-in session could not be verified.")) && claim["before"].as_str().is_some_and(|v| v.contains("PKCE verifier cookie missing")),
+        "the claim shows what the test expects and what it got in full, and a values file cut off mid-line is read up to the cut: {claims:?}");
+}
+
+#[test]
 fn a_test_the_change_never_touched_that_fails_with_one_of_two_linked_functions_undone_is_not_called_the_change_s_own() {
     let faults = json!([
         { "path": "src/store.js", "line": 2, "what": "undoes the change to save", "kind": "undo", "target": "save", "outcome": "caught",
@@ -249,6 +267,14 @@ fn faults_some_jest_a_check_mark_is_never_lent_from_a_neighbour_or_from_part_of_
     assert!(!md.contains("✅ Checked by a test"), "{md}");
     let (r, _) = receipt_with(json!([undo(json!("discount"), [0, 60]), op(10, "caught"), op(40, "unknown")]), json!({}));
     assert_eq!(r["challenges"][0]["target"], "discount", "a fault whose run Kern could not finish proves nothing: {r}");
+}
+
+#[test]
+fn authkit_session_46_a_task_reads_right_when_several_test_files_run_the_code() {
+    let faults = json!([{ "path": "src/core/AuthKitCore.ts", "line": 9, "what": "undoes the change to AuthKitCore.verifyCallbackState", "kind": "undo",
+        "target": "AuthKitCore.verifyCallbackState", "outcome": "missed", "ran": ["src/core/AuthKitCore.spec.ts", "src/service/AuthService.spec.ts"] }]);
+    let (_, md) = receipt_with(faults, json!({}));
+    assert!(md.contains("`src/core/AuthKitCore.spec.ts`, `src/service/AuthService.spec.ts` run it, but still pass when your change is undone"), "{md}");
 }
 
 #[test]

@@ -62,6 +62,7 @@ pub fn store_links_back(store: &Path) -> Vec<PathBuf> {
 }
 pub const SERVE_FILES_COUNT_MAX: usize = 40;
 pub const VALUES_BYTES_MAX: usize = 1 << 20;
+pub const FAULT_VALUES_BYTES_MAX: usize = 64 << 10;
 pub const FAULTS_COUNT_MAX: usize = 24;
 pub fn test_dir(cwd: &str) -> R<String> {
     if cwd.is_empty() { return Ok("/workspace".into()); }
@@ -1195,17 +1196,17 @@ mod inside {
                 let body = std::fs::read_to_string(&target).unwrap_or_default();
                 if started.elapsed() > timeout || body.get(start..end) != Some(original) { results.push(json!({ "finished": false })); continue; }
                 std::fs::write("/tmp/.kern-fault-src", format!("{}{}{}", &body[..start], replacement, &body[end..]))?;
-                for f in ["/tmp/.kern-report.json", "/tmp/.kern-fault-served"] { let _ = std::fs::remove_file(f); }
+                for f in ["/tmp/.kern-report.json", "/tmp/.kern-fault-served", "/tmp/.kern-fault-values"] { let _ = std::fs::remove_file(f); }
                 let child = Command::new(&run[0]).args(&run[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
                     .env("NODE_OPTIONS", format!("--require=/kern/fault.cjs{options}")).env("KERN_REPORT", "/tmp/.kern-report.json")
-                    .env("KERN_FAULT_FILE", &target).env("KERN_FAULT_SOURCE", "/tmp/.kern-fault-src").env("KERN_FAULT_SERVED", "/tmp/.kern-fault-served")
+                    .env("KERN_FAULT_FILE", &target).env("KERN_FAULT_SOURCE", "/tmp/.kern-fault-src").env("KERN_FAULT_SERVED", "/tmp/.kern-fault-served").env("KERN_VALUES", "/tmp/.kern-fault-values")
                     .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-fault-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-fault-err")?)).spawn()?;
                 let finished = ended(child, timeout.saturating_sub(started.elapsed()).min(Duration::from_secs(120)))?;
                 quiesce()?;
                 let report = some_of("/tmp/.kern-report.json", 4 << 20, false);
                 let output = if report.iter().any(|b| !b.is_ascii_whitespace()) { report } else { some_of("/tmp/.kern-fault-out", 4 << 20, true) };
                 results.push(json!({ "finished": finished, "served": Path::new("/tmp/.kern-fault-served").exists(), "output": String::from_utf8_lossy(&output),
-                    "errors": String::from_utf8_lossy(&some_of("/tmp/.kern-fault-err", 16 << 10, true)) }));
+                    "errors": String::from_utf8_lossy(&some_of("/tmp/.kern-fault-err", 16 << 10, true)), "values": String::from_utf8_lossy(&some_of("/tmp/.kern-fault-values", super::FAULT_VALUES_BYTES_MAX, false)) }));
             }
             for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"faults".to_vec()), ("values", Vec::new()),
                 ("trace", Vec::new())] { part(name, &body)?; }

@@ -1076,7 +1076,7 @@ pub fn fault_claims(runner: Runner, new: &Report, placebo: Option<&Value>, resul
         let output = r["output"].as_str().unwrap_or("").as_bytes();
         match outcome {
             "caught" => {
-                let claims: Vec<Value> = proof::failures(runner, output, b"").into_iter().filter(|(k, _)| !known.contains(k)).take(CLAIMS_PER_FAULT_COUNT_MAX).map(|(test, f)| {
+                let claims: Vec<Value> = proof::failures(runner, output, r["values"].as_str().unwrap_or("").as_bytes()).into_iter().filter(|(k, _)| !known.contains(k)).take(CLAIMS_PER_FAULT_COUNT_MAX).map(|(test, f)| {
                     let read = crate::polarity::read(&f.message, f.expected.as_deref(), f.actual.as_deref());
                     if read.was.is_empty() && read.now.is_empty() { json!({ "test": test, "why": proof::first_lines(&f.message) }) } else { json!({ "test": test, "now": read.was, "before": read.now }) }
                 }).collect();
@@ -1098,7 +1098,7 @@ const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run
 type FaultRun = (Vec<Value>, Vec<Value>, BTreeSet<String>);
 fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> FaultRun {
     let (tests, dir) = (&suite.new.0, suite.dir.as_str());
-    let command = |paths: BTreeSet<String>| related(tests, &paths, dir).map(|t| test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect::<Vec<String>>());
+    let command = |paths: BTreeSet<String>| related(tests, &paths, dir).map(|t| test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS[1..].contains(&a.as_str())).collect::<Vec<String>>());
     let limit = crate::sandbox::FAULTS_COUNT_MAX - 1;
     let planted = faults(files, limit);
     let kept: Vec<(&crate::proof::Mutant, Vec<String>)> = planted.iter().filter_map(|m| Some((m, command([m.path.clone()].into())?))).collect();
