@@ -1016,13 +1016,53 @@ pub fn run_limit(left: std::time::Duration, limit: Option<std::time::Duration>) 
 const MAX_PLANTED: usize = 40;
 const MAX_TARGETS: usize = 40;
 const EXTENSIONS: [&str; 8] = [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".mts", ".cts"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultKind { Operator, Undo }
+impl FaultKind {
+    pub fn name(self) -> &'static str { match self { FaultKind::Operator => "operator", FaultKind::Undo => "undo" } }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mutant { pub id: usize, pub path: String, pub line: usize, pub start: usize, pub end: usize, pub original: String, pub replacement: String, what: String,
-    pub tests: Vec<String> }
+    pub tests: Vec<String>, pub kind: FaultKind }
 impl Mutant {
     pub fn describe(&self) -> String { format!("{}:{} {}", self.path, self.line, self.what) }
     pub fn what(&self) -> &str { &self.what }
 }
+const UNDO_BYTES_MAX: usize = 64 << 10;
+pub fn undo(path: &str, old: &str, new: &str) -> Option<Mutant> {
+    if old.is_empty() || old == new || same_behaviour(path, old, new) { return None; }
+    let (a, b) = (old.as_bytes(), new.as_bytes());
+    let mut pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    while !(old.is_char_boundary(pre) && new.is_char_boundary(pre)) { pre -= 1; }
+    let room = a.len().min(b.len()) - pre;
+    let mut suf = a.iter().rev().zip(b.iter().rev()).take(room).take_while(|(x, y)| x == y).count();
+    while !(old.is_char_boundary(a.len() - suf) && new.is_char_boundary(b.len() - suf)) { suf -= 1; }
+    let (original, replacement) = (&new[pre..b.len() - suf], &old[pre..a.len() - suf]);
+    if original.len().max(replacement.len()) > UNDO_BYTES_MAX { return None; }
+    Some(Mutant { id: 0, path: path.to_string(), line: new[..pre].matches('\n').count() + 1, start: pre, end: b.len() - suf, original: original.to_string(),
+        replacement: replacement.to_string(), what: "undoes the change".to_string(), tests: Vec::new(), kind: FaultKind::Undo })
+}
+struct Logs(Vec<(usize, usize)>);
+impl<'a> Visit<'a> for Logs {
+    fn visit_statements(&mut self, it: &oxc_allocator::Vec<'a, Statement<'a>>) {
+        for s in it {
+            if let Statement::ExpressionStatement(e) = s && let Expression::CallExpression(c) = &e.expression && logging(&c.callee) { self.0.push((e.span.start as usize, e.span.end as usize)); continue; }
+            self.visit_statement(s);
+        }
+    }
+}
+fn without_logging(path: &str, source: &str) -> String {
+    let spans = parsed(path, source, |program, _| { let mut v = Logs(Vec::new()); v.visit_program(program); v.0 }).unwrap_or_default();
+    let (mut out, mut at) = (String::with_capacity(source.len()), 0);
+    for (start, end) in spans.into_iter().filter(|(s, e)| s < e && *e <= source.len()) {
+        if start < at || !source.is_char_boundary(start) || !source.is_char_boundary(end) { continue; }
+        out.push_str(&source[at..start]);
+        at = end;
+    }
+    out.push_str(&source[at..]);
+    out
+}
+pub fn same_behaviour(path: &str, old: &str, new: &str) -> bool { crate::capability::same_program(path, &without_logging(path, old), &without_logging(path, new)) }
 #[derive(Clone, Debug)]
 pub struct Plan { pub targets: Vec<String>, pub mutants: Vec<Mutant>, pub command: Vec<String>, pub tests_paths: Vec<String>, pub old_files: Vec<String>, pub runner: Runner, pub known: Vec<String> }
 pub fn split_planting(plan: &Plan, n: usize) -> Vec<Plan> {
@@ -1256,7 +1296,8 @@ fn planted(path: &str, source: &str, keep: &dyn Fn(usize, &str) -> bool) -> Vec<
         if !keep(line, &format!("{}{}{}", &source[from..f.0], f.3, &source[f.1..to])) { continue; }
         if best.get(&line).is_none_or(|b| (f.5, f.0) < (b.5, b.0)) { best.insert(line, f); }
     }
-    best.into_iter().map(|(line, (start, end, original, replacement, what, _))| Mutant { id: 0, path: path.to_string(), line, start, end, original, replacement, what, tests: Vec::new() }).collect()
+    best.into_iter().map(|(line, (start, end, original, replacement, what, _))| Mutant { id: 0, path: path.to_string(), line, start, end, original, replacement, what, tests: Vec::new(),
+        kind: FaultKind::Operator }).collect()
 }
 pub fn plan(tests: &Tests, base: &Files, candidate: &Files, screened: &Value) -> R<Plan> {
     let starts: Vec<String> = ["changed_test_files", "deleted_test_files"].iter().flat_map(|k| screened[*k].as_array().cloned().unwrap_or_default()).filter_map(|v| v.as_str().map(str::to_string)).collect();

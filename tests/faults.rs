@@ -1,3 +1,4 @@
+use kern::proof::FaultKind;
 use kern::receipt;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -22,9 +23,10 @@ fn faults_are_planted_only_in_product_code() {
 #[test]
 fn a_fault_that_only_puts_back_the_old_line_is_not_planted() {
     let file = |old: &str, new: &str| vec![("src/a.js".to_string(), old.to_string(), new.to_string())];
-    let back = kern::suite::faults(&file("export const f = (a) => a >= 1;\n", "export const f = (a) => a > 1;\n"), 6);
-    assert!(back.is_empty(), "turning > back into >= is the old code, not a fault: {:?}", back.iter().map(|m| m.describe()).collect::<Vec<_>>());
-    let other = kern::suite::faults(&file("export const f = (a) => (a >= 1 ? 1 : 0);\n", "export const f = (a) => (a > 1 ? 1 : 0);\n"), 6);
+    let operators = |planted: Vec<kern::proof::Mutant>| planted.into_iter().filter(|m| m.kind == FaultKind::Operator).collect::<Vec<_>>();
+    let back = operators(kern::suite::faults(&file("export const f = (a) => a >= 1;\n", "export const f = (a) => a > 1;\n"), 6));
+    assert!(back.is_empty(), "turning > back into >= is the old code, which the undo fault already is: {:?}", back.iter().map(|m| m.describe()).collect::<Vec<_>>());
+    let other = operators(kern::suite::faults(&file("export const f = (a) => (a >= 1 ? 1 : 0);\n", "export const f = (a) => (a > 1 ? 1 : 0);\n"), 6));
     assert_eq!(other.iter().map(|m| m.what().to_string()).collect::<Vec<_>>(), ["negates the condition"], "the next fault on the line is planted instead");
 }
 
@@ -41,6 +43,86 @@ fn faults_spread_across_changed_files_and_stop_at_the_limit() {
     assert_eq!(planted.len(), 6);
     let files: BTreeSet<&str> = planted.iter().map(|m| m.path.as_str()).collect();
     assert_eq!(files.len(), 6, "one per file before a second in any");
+}
+
+fn applied(m: &kern::proof::Mutant, new: &str) -> String { format!("{}{}{}", &new[..m.start], m.replacement, &new[m.end..]) }
+
+#[test]
+fn undoing_the_change_comes_first_in_every_changed_file_and_gives_back_the_old_code() {
+    let zustand_old = "export const persist = (config) => {\n  let hydrating = false;\n  const clear = () => storage.removeItem(name);\n  return { clear, hydrating };\n};\n";
+    let zustand_new = "export const persist = (config) => {\n  let hydrating = false;\n  let version = 0;\n  const clear = () => { version += 1; storage.removeItem(name); };\n  return { clear, hydrating, current: () => version > 0 };\n};\n";
+    let other_old = "export const f = (a) => a + 1;\n";
+    let other_new = "export const f = (a) => (a > 2 ? a + 1 : a);\n";
+    let files = vec![("src/middleware/persist.ts".to_string(), zustand_old.to_string(), zustand_new.to_string()), ("src/f.ts".to_string(), other_old.to_string(), other_new.to_string())];
+    let planted = kern::suite::faults(&files, 24);
+    let kinds: Vec<(&str, FaultKind)> = planted.iter().map(|m| (m.path.as_str(), m.kind)).collect();
+    assert_eq!(&kinds[..2], [("src/middleware/persist.ts", FaultKind::Undo), ("src/f.ts", FaultKind::Undo)], "pmndrs/zustand#3555 was reverted with its tests passing: first ask whether any test can tell the old code from the new: {kinds:?}");
+    assert!(kinds[2..].iter().all(|(_, k)| *k == FaultKind::Operator) && kinds.len() > 2, "{kinds:?}");
+    assert_eq!(applied(&planted[0], zustand_new), zustand_old);
+    assert_eq!(applied(&planted[1], other_new), other_old);
+    assert_eq!(planted[0].line, 3, "the undo starts at the first changed line");
+    assert_eq!(planted[0].what(), "undoes the change");
+    assert!(planted.iter().filter(|m| m.path == "src/f.ts" && m.kind == FaultKind::Operator).count() <= 3, "at most three small faults per file, spread over its changed lines");
+}
+
+#[test]
+fn nothing_is_undone_when_only_comments_formatting_or_logging_changed() {
+    let old = "export function total(items) {\n  return items.reduce((s, i) => s + i.price, 0);\n}\n";
+    for (why, new) in [
+        ("a comment", "// adds up the prices\nexport function total(items) {\n  return items.reduce((s, i) => s + i.price, 0);\n}\n"),
+        ("formatting", "export function total(items) {\n  return items.reduce(\n    (s, i) => s + i.price,\n    0,\n  );\n}\n"),
+        ("a log line", "export function total(items) {\n  console.debug('total', items.length);\n  return items.reduce((s, i) => s + i.price, 0);\n}\n"),
+    ] {
+        let planted = kern::suite::faults(&[("src/total.js".to_string(), old.to_string(), new.to_string())], 24);
+        assert!(planted.iter().all(|m| m.kind != FaultKind::Undo), "{why}: no behaviour changed, so undoing it proves nothing");
+    }
+    let real = "export function total(items) {\n  return items.reduce((s, i) => s + i.price * i.count, 0);\n}\n";
+    assert!(kern::suite::faults(&[("src/total.js".to_string(), old.to_string(), real.to_string())], 24).iter().any(|m| m.kind == FaultKind::Undo));
+}
+
+#[test]
+fn a_change_too_big_to_diff_line_by_line_still_gets_faults() {
+    let old: String = (0..1200).map(|i| format!("export const v{i} = {i};\n")).collect();
+    let new: String = (0..1200).map(|i| format!("export const v{i} = {i} > 1 ? {i} : 0;\n")).collect();
+    let (removed, added) = kern::compare::changed_lines(&old.lines().collect::<Vec<_>>(), &new.lines().collect::<Vec<_>>());
+    assert_eq!((removed.len(), added.len()), (1200, 1200), "a diff past the step limit counts every line in the changed middle, never none");
+    let planted = kern::suite::faults(&[("src/consts.js".to_string(), old.clone(), new.clone())], 24);
+    let lines: BTreeSet<usize> = planted.iter().filter(|m| m.kind == FaultKind::Operator).map(|m| m.line).collect();
+    assert!(lines.len() >= 2 && lines.first() < Some(&100) && lines.last() > Some(&1100), "faults go where the change is, spread across it: {lines:?}");
+}
+
+fn jest(tests: &[(&str, &str)]) -> String {
+    let results: Vec<serde_json::Value> = tests.iter().map(|(t, s)| json!({ "ancestorTitles": ["price"], "title": t, "status": s, "failureMessages": [] })).collect();
+    json!({ "numTotalTests": tests.len(), "testResults": [{ "name": "/workspace/a.test.js", "status": "passed", "assertionResults": results }] }).to_string()
+}
+
+#[test]
+fn a_test_that_fails_with_nothing_changed_proves_nothing_about_a_fault() {
+    use kern::policy::Runner::Jest;
+    let new = kern::proof::read_report(Jest, jest(&[("rounds", "passed"), ("discounts", "passed")]).as_bytes()).unwrap();
+    let run = |tests: &[(&str, &str)]| json!({ "finished": true, "served": true, "output": jest(tests), "errors": "" });
+    let faults = [run(&[("rounds", "passed"), ("discounts", "failed")]), run(&[("rounds", "failed"), ("discounts", "passed")])];
+    assert_eq!(kern::suite::fault_outcomes(Jest, &new, None, &faults), ["caught", "caught"], "stored runs without a control are judged as before");
+    let placebo = run(&[("rounds", "passed"), ("discounts", "failed")]);
+    assert_eq!(kern::suite::fault_outcomes(Jest, &new, Some(&placebo), &faults), ["missed", "caught"],
+        "discounts fails under Kern's fault machinery even when the served file is unchanged, so its failure under a fault is not the fault's doing: a test that looks for Kern, or a flaky one, cannot catch a fault");
+    let unfinished = json!({ "finished": false, "served": false, "output": "", "errors": "" });
+    assert_eq!(kern::suite::fault_outcomes(Jest, &new, Some(&unfinished), &faults), ["unknown", "unknown"], "without a control run, a caught fault is not evidence");
+    let missed = [run(&[("rounds", "passed"), ("discounts", "passed")])];
+    assert_eq!(kern::suite::fault_outcomes(Jest, &new, Some(&unfinished), &missed), ["missed"], "a fault no test noticed needs no control");
+}
+
+#[test]
+fn a_changed_file_kern_put_no_fault_in_is_named_with_why() {
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 3, "failed": 0, "skipped": 0 }, "after": { "passed": 3, "failed": 0, "skipped": 0 },
+        "kept": 3, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [],
+        "faults": [{ "path": "packages/backend/src/queryBuilder.ts", "line": 347, "what": "changes > to >=", "kind": "operator", "outcome": "caught" }],
+        "faults_missing": [{ "path": "packages/backend/src/services/ProjectService/ProjectService.ts", "why": "Kern could not pick the tests related to this file" }] });
+    let md = receipt::markdown(&receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" })), None);
+    assert!(md.contains("No fault planted in") && md.contains("ProjectService.ts") && md.contains("Kern could not pick the tests related to this file"),
+        "lightdash/lightdash#12942 was reverted after its bug landed in ProjectService.ts, a changed file Kern put no fault in and said nothing about: {md}");
 }
 
 #[test]
@@ -83,7 +165,7 @@ fn faults_no_test_noticed_are_named_and_a_change_no_test_checks_needs_a_look() {
     let off = json!({ "status": "OFF", "why": "no AI key" });
     let none = receipt::build(&d, &rules, &tests(&["missed", "untested", "missed"]), &off);
     assert_eq!(none["decision"], "clear", "no test checking a change is shown, not a look: 14 of 118 real pull requests changed code no test reaches, many of them CI scripts and examples: {none}");
-    assert!(receipt::markdown(&none, None).contains("the tests caught 0 of 3 small faults"));
+    assert!(receipt::markdown(&none, None).contains("the tests caught 0 of 3 faults"));
     let some = receipt::build(&d, &rules, &tests(&["caught", "missed", "caught"]), &off);
     assert!(!some["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change"));
     let md = receipt::markdown(&some, None);

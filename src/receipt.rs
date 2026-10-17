@@ -195,7 +195,7 @@ fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Valu
         match reach.iter_mut().find(|(p, _, _)| *p == path) { Some((_, all, any)) => { *all &= never; *any |= crashed; } None => reach.push((path, never, crashed)) }
     }
     for (path, _, _) in reach.iter().filter(|(p, all, any)| *all && *any && !p.is_empty()) {
-        f.unverified.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put small faults in the changed lines, and no test loaded them), so the tests say nothing about it", code(path, 160))));
+        f.unverified.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put faults in the changed code, and no test loaded them), so the tests say nothing about it", code(path, 160))));
     }
 }
 fn rule_items(f: &mut Found, d: &Value, rules: &Value, tests: &Value) {
@@ -470,8 +470,17 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             let caught = planted.iter().filter(|f| f["outcome"] == "caught").count();
             let missed: Vec<String> = planted.iter().filter(|f| f["outcome"] != "caught").take(SHOWN)
                 .map(|f| code(&format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or("")), 200)).collect();
-            md += &format!("- {} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
+            md += &format!("- {} Planted faults: the tests caught {caught} of {} faults Kern put in the changed code{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
                 if missed.is_empty() { String::new() } else { format!("; not caught: {}", missed.join(", ")) });
+        }
+        let mut no_fault: Vec<(String, Vec<String>)> = Vec::new();
+        for x in tests["faults_missing"].as_array().into_iter().flatten() {
+            let (path, why) = (code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400));
+            match no_fault.iter_mut().find(|(w, _)| *w == why) { Some((_, paths)) => paths.push(path), None => no_fault.push((why, vec![path])) }
+        }
+        for (why, paths) in &no_fault {
+            let more = if paths.len() > SHOWN { format!(" and {} more", paths.len() - SHOWN) } else { String::new() };
+            md += &format!("- ⏭️ No fault planted in {}{more}: {why}\n", paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", "));
         }
         if tests["dropped"].as_array().is_some_and(|d| d.iter().any(|x| x == "planted faults")) {
             md += "- ⏭️ Planted faults: not checked — Kern's time ran short, so it dropped them first (they rank below the tests and the type check)\n";

@@ -185,24 +185,28 @@ pub fn plan(base: &Files, candidate: &Files, changed: &Value, policy: &Contract,
         "changes": changes, "examples": examples, "removals": removals(base, candidate, changed, policy), "app": policy.app.as_ref().map(app_json) }))
 }
 
-fn pure_removals(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
+fn pure_removals(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
     let (mut out, mut hunk) = (Vec::new(), Vec::new());
-    for s in edits(a, b)?.into_iter().chain(std::iter::once(Step::Keep)) {
+    for s in edits(a, b).into_iter().chain(std::iter::once(Step::Keep)) {
         if !matches!(s, Step::Keep) { hunk.push(s); continue; }
         let deleted: Vec<usize> = hunk.iter().filter_map(|h| if let Step::Delete(i) = h { Some(*i) } else { None }).collect();
         if !hunk.is_empty() && deleted.len() == hunk.len() { out.push((deleted.iter().min().copied().unwrap_or(0), deleted.len())); }
         hunk.clear();
     }
-    Some(out)
+    out
 }
-pub fn changed_lines(a: &[&str], b: &[&str]) -> Option<(Vec<usize>, Vec<usize>)> {
+pub fn changed_lines(a: &[&str], b: &[&str]) -> (Vec<usize>, Vec<usize>) {
     let (mut old, mut new) = (Vec::new(), Vec::new());
-    for s in edits(a, b)? {
+    for s in edits(a, b) {
         match s { Step::Delete(i) => old.push(i), Step::Insert(j) => new.push(j), Step::Keep => {} }
     }
-    Some((old, new))
+    (old, new)
 }
-fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
+const EDIT_STEPS_COUNT_MAX: isize = 1000;
+fn replaced(pre: usize, old: usize, new: usize, suf: usize) -> Vec<Step> {
+    std::iter::repeat_n(Step::Keep, pre).chain((pre..pre + old).map(Step::Delete)).chain((pre..pre + new).map(Step::Insert)).chain(std::iter::repeat_n(Step::Keep, suf)).collect()
+}
+fn edits(a: &[&str], b: &[&str]) -> Vec<Step> {
     let mut pre = 0;
     while pre < a.len() && pre < b.len() && a[pre] == b[pre] { pre += 1; }
     let mut suf = 0;
@@ -214,7 +218,7 @@ fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
     let mut v = vec![0isize; 2 * max + 3];
     let mut trace: Vec<Vec<isize>> = Vec::new();
     let mut end = None;
-    'search: for d in 0..=(max as isize).min(1000) {
+    'search: for d in 0..=(max as isize).min(EDIT_STEPS_COUNT_MAX) {
         trace.push(v[(off - d - 1) as usize..=(off + d + 1) as usize].to_vec());
         for k in (-d..=d).step_by(2) {
             let i = (k + off) as usize;
@@ -225,7 +229,7 @@ fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
             if px >= n && py >= m { end = Some(d); break 'search; }
         }
     }
-    let end = end?;
+    let Some(end) = end else { return replaced(pre, x.len(), y.len(), suf) };
     let (mut px, mut py, mut steps) = (n, m, vec![Step::Keep; suf]);
     for d in (0..=end).rev() {
         let w = &trace[d as usize];
@@ -240,7 +244,7 @@ fn edits(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
     }
     steps.extend(std::iter::repeat_n(Step::Keep, pre));
     steps.reverse();
-    Some(steps)
+    steps
 }
 #[derive(Clone, Copy)]
 enum Step { Keep, Delete(usize), Insert(usize) }
@@ -254,7 +258,7 @@ fn removals(base: &Files, candidate: &Files, changed: &Value, policy: &Contract)
         if op == "delete" { out.push(json!({ "path": path, "start": 1, "count": text_of(base, path).map_or(0, |s| s.lines().count()), "file": true })); }
         else if op == "modify" && let (Some(a), Some(b)) = (text_of(base, path), text_of(candidate, path)) {
             let (x, y): (Vec<&str>, Vec<&str>) = (a.split('\n').collect(), b.split('\n').collect());
-            for (start, count) in pure_removals(&x, &y).unwrap_or_default() { out.push(json!({ "path": path, "start": start + 1, "count": count, "file": false })); }
+            for (start, count) in pure_removals(&x, &y) { out.push(json!({ "path": path, "start": start + 1, "count": count, "file": false })); }
         }
     }
     out.truncate(KEEP);

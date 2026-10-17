@@ -1024,22 +1024,70 @@ pub fn product_code(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     !path.split('/').any(|s| NOT_PRODUCT.contains(&s)) && !name.contains(".config.") && !name.contains(".stories.") && !name.contains(".story.")
 }
+const OPERATOR_FAULTS_PER_FILE_COUNT_MAX: usize = 3;
+fn spread<T: Clone>(all: Vec<T>, n: usize) -> Vec<T> {
+    if all.len() <= n || n < 2 { return all.into_iter().take(n).collect(); }
+    (0..n).map(|i| all[i * (all.len() - 1) / (n - 1)].clone()).collect()
+}
 pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::proof::Mutant> {
     let mut per_file: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| {
         let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-        let (removed, added) = crate::compare::changed_lines(&a, &b).unwrap_or_default();
+        let (removed, added) = crate::compare::changed_lines(&a, &b);
         let lines: BTreeSet<usize> = added.into_iter().map(|i| i + 1).collect();
         let gone: BTreeSet<String> = removed.into_iter().filter_map(|i| a.get(i)).map(|l| l.trim().to_string()).collect();
-        crate::proof::plant_lines(path, new, &lines, &gone).into_iter().collect()
+        spread(crate::proof::plant_lines(path, new, &lines, &gone), OPERATOR_FAULTS_PER_FILE_COUNT_MAX).into_iter().collect()
     }).collect();
-    let mut out = Vec::new();
+    let mut out: Vec<crate::proof::Mutant> = files.iter().filter_map(|(path, old, new)| crate::proof::undo(path, old, new)).take(limit).collect();
     while out.len() < limit && per_file.iter().any(|f| !f.is_empty()) {
         for f in per_file.iter_mut() { if out.len() < limit && let Some(m) = f.pop_front() { out.push(m); } }
     }
     out
 }
-fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, until: u64) -> Vec<Value> {
-    let seconds = within(until, 300);
+pub fn fault_outcomes(runner: Runner, new: &Report, placebo: Option<&Value>, results: &[Value]) -> Vec<&'static str> {
+    let control = placebo.map(|p| if p["finished"] == true { proof::read_report(runner, p["output"].as_str().unwrap_or("").as_bytes()).ok() } else { None });
+    let mut baseline = new.clone();
+    if let Some(Some(r)) = &control {
+        for (k, c) in r.tests.iter().filter(|(_, c)| c.failed > 0) { baseline.tests.entry(k.clone()).or_default().failed += c.failed; }
+        baseline.problems.extend(r.problems.iter().filter(|p| !new.problems.contains(p)).cloned());
+    }
+    results.iter().map(|r| {
+        let text = |k: &str| r[k].as_str().unwrap_or("").as_bytes().to_vec();
+        let outcome = proof::fault_verdict(runner, &baseline, (r["finished"] == true, r["served"] == true), &text("output"), &text("errors"));
+        if outcome == "caught" && matches!(control, Some(None)) { "unknown" } else { outcome }
+    }).collect()
+}
+const NO_FAULT_RELATED: &str = "Kern could not pick the tests related to this file";
+const NO_FAULT_CHANGE: &str = "Kern found nothing in its change to put a fault in (only comments, formatting or logging changed, or no line it knows how to change)";
+const NO_FAULT_RESULTS: &str = "Kern's fault run gave no results";
+const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run under jest or vitest";
+#[allow(clippy::too_many_arguments)]
+fn planted_faults(out: &Path, op: &Operator, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> (Vec<Value>, Vec<Value>) {
+    let (tests, dir) = (&suite.new.0, suite.dir.as_str());
+    let command = |paths: BTreeSet<String>| related(tests, &paths, dir).map(|t| test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect::<Vec<String>>());
+    let limit = crate::sandbox::FAULTS_COUNT_MAX - 1;
+    let planted = faults(files, limit);
+    let kept: Vec<(&crate::proof::Mutant, Vec<String>)> = planted.iter().filter_map(|m| Some((m, command([m.path.clone()].into())?))).collect();
+    let mut missing: Vec<Value> = files.iter().filter(|(p, _, _)| !kept.iter().any(|(m, _)| m.path == *p)).map(|f| {
+        let why = if planted.iter().any(|m| m.path == f.0) { NO_FAULT_RELATED.to_string() }
+            else if !faults(std::slice::from_ref(f), limit).is_empty() { format!("Kern puts at most {limit} faults in one check, and the other changed files took them") }
+            else { NO_FAULT_CHANGE.to_string() };
+        json!({ "path": f.0, "why": why })
+    }).collect();
+    let Some(first) = kept.first() else { return (Vec::new(), missing) };
+    let paths: BTreeSet<String> = kept.iter().map(|(m, _)| m.path.clone()).collect();
+    let control = command(paths.clone()).unwrap_or_else(|| first.1.clone());
+    let placebo = json!({ "path": first.0.path, "start": 0, "end": 0, "original": "", "replacement": "", "command": control });
+    let specs: Vec<Value> = std::iter::once(placebo).chain(kept.iter().map(|(m, c)| json!({ "path": m.path, "start": m.start, "end": m.end, "original": m.original, "replacement": m.replacement, "command": c }))).collect();
+    let results = run_faults(out, op, volume, (tests, &suite.new.1), dir, specs, seconds);
+    let Some((placebo, runs)) = results.split_first().filter(|(_, runs)| runs.len() == kept.len()) else {
+        missing.extend(paths.iter().map(|p| json!({ "path": p, "why": NO_FAULT_RESULTS })));
+        return (Vec::new(), missing);
+    };
+    let _ = std::fs::write(out.join(format!("faults{label}.json")), serde_json::to_vec(&json!({ "placebo": placebo, "faults": runs })).unwrap_or_default());
+    let outcomes = fault_outcomes(tests.runner, new, Some(placebo), runs);
+    (kept.iter().zip(outcomes).map(|((m, _), o)| json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "outcome": o })).collect(), missing)
+}
+fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, seconds: u64) -> Vec<Value> {
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
     let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults });
     let Ok(run) = in_test_box(out, op, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
@@ -1110,8 +1158,11 @@ pub const LATE: &str = "Kern's time for this check ran out before these tests co
 pub const TYPES_SECS_MIN: u64 = 240;
 pub const TYPES_SECS_RESERVE: u64 = 480;
 pub const FAULTS_SECS_MIN: u64 = 300;
+pub const FAULTS_SECS_MAX: u64 = 480;
+pub const FAULT_FILES_COUNT_MAX: usize = 20;
 pub fn types_fit(left_secs: u64) -> bool { left_secs >= TYPES_SECS_MIN }
-pub fn faults_fit(left_secs: u64) -> bool { left_secs >= FAULTS_SECS_MIN + TYPES_SECS_RESERVE }
+pub fn fault_seconds(left_secs: u64) -> u64 { left_secs.saturating_sub(TYPES_SECS_RESERVE).min(FAULTS_SECS_MAX) }
+pub fn faults_fit(left_secs: u64) -> bool { fault_seconds(left_secs) >= FAULTS_SECS_MIN }
 
 pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let d = read_json(out.join("drive.json"))?;
@@ -1183,6 +1234,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     for l in LISTS { merged.insert(l.into(), json!([])); }
     merged.insert("uneven_why".into(), json!([]));
     merged.insert("faults".into(), json!([]));
+    merged.insert("faults_missing".into(), json!([]));
     merged.insert("problem_why".into(), json!({}));
     merged.insert("polarity".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
@@ -1424,32 +1476,25 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
         kept += c["kept"].as_u64().unwrap_or(0);
-        let faults_wanted = matches!(suite.new.0.runner, Runner::Jest | Runner::Vitest) && c["status"] == "RAN" && std::env::var("KERN_FAULTS").as_deref() != Ok("0");
-        if faults_wanted && !faults_fit(within(until, 900)) { dropped.insert("planted faults"); }
-        if faults_wanted && faults_fit(within(until, 900)) {
+        if std::env::var("KERN_FAULTS").as_deref() != Ok("0") {
             let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
-            let files: Vec<(String, String, String)> = changes.iter()
-                .filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p))
-                .take(20).filter_map(|(p, _)| Some((p.clone(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
-            let planted = faults(&files, 6);
-            let mut kept_faults = Vec::new();
-            let specs: Vec<Value> = planted.iter().filter_map(|m| {
-                let t = related(&suite.new.0, &[m.path.clone()].into_iter().collect(), &suite.dir)?;
-                let command: Vec<String> = test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
-                kept_faults.push(m);
-                Some(json!({ "path": m.path, "start": m.start, "end": m.end, "original": m.original, "replacement": m.replacement, "command": command }))
-            }).collect();
-            let at = now_ms();
-            let results = run_faults(out, op, &volume("new"), (&suite.new.0, &suite.new.1), &suite.dir, specs, until);
-            if !results.is_empty() { timed(format!("faults{label}"), at); }
-            let _ = std::fs::write(out.join(format!("faults{label}.json")), serde_json::to_vec(&results).unwrap_or_default());
-            if let Some(a) = merged["faults"].as_array_mut() {
-                a.extend(kept_faults.iter().zip(&results).map(|(m, r)| {
-                    let text = |k: &str| r[k].as_str().unwrap_or("").as_bytes().to_vec();
-                    let outcome = proof::fault_verdict(runner, &new, (r["finished"] == true, r["served"] == true), &text("output"), &text("errors"));
-                    json!({ "path": m.path, "line": m.line, "what": m.what(), "outcome": outcome })
-                }));
+            let product: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p)).map(|(p, _)| p).collect();
+            let files: Vec<(String, String, String)> = product.iter().take(FAULT_FILES_COUNT_MAX).filter_map(|p| Some((p.to_string(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
+            let mut missing: Vec<Value> = product.iter().skip(FAULT_FILES_COUNT_MAX).map(|p| json!({ "path": p, "why": format!("Kern puts faults in at most {FAULT_FILES_COUNT_MAX} changed files per check") })).collect();
+            let mut found = Vec::new();
+            let left = within(until, FAULTS_SECS_MAX + TYPES_SECS_RESERVE);
+            if files.is_empty() {}
+            else if !matches!(runner, Runner::Jest | Runner::Vitest) { missing.extend(files.iter().map(|(p, _, _)| json!({ "path": p, "why": NO_FAULT_RUNNER }))); }
+            else if !faults_fit(left) { dropped.insert("planted faults"); }
+            else {
+                let at = now_ms();
+                let (planted, lacking) = planted_faults(out, op, &volume("new"), suite, &new, &files, &label, fault_seconds(left));
+                timed(format!("faults{label}"), at);
+                found = planted;
+                missing.extend(lacking);
             }
+            if let Some(a) = merged["faults"].as_array_mut() { a.extend(found); }
+            if let Some(a) = merged["faults_missing"].as_array_mut() { a.extend(missing); }
         }
         let only = if narrowed.is_some() { format!(", only the tests related to the change: {whole_why}") } else { String::new() };
         let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };

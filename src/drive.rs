@@ -17,10 +17,8 @@ pub fn changed(old: &str, new: &str) -> (Vec<u32>, Vec<u32>) {
     fn split(s: &str) -> Vec<&str> { if s.is_empty() { Vec::new() } else { s.split('\n').collect() } }
     let (a, b) = (split(old), split(new));
     let number = |v: Vec<usize>| v.into_iter().map(|i| i as u32 + 1).collect();
-    match crate::compare::changed_lines(&a, &b) {
-        Some((x, y)) => (number(x), number(y)),
-        None => (number((0..a.len()).collect()), number((0..b.len()).collect())),
-    }
+    let (x, y) = crate::compare::changed_lines(&a, &b);
+    (number(x), number(y))
 }
 
 struct Inert { spans: Vec<(u32, u32)>, inner: Vec<(u32, u32)> }

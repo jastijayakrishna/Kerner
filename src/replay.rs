@@ -44,12 +44,10 @@ fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec
         let path = dir.join(format!("faults{label}.json"));
         if !path.is_file() { continue; }
         if std::fs::metadata(&path).ok()?.len() > FAULTS_BYTES_MAX { return None; }
-        let raw: Vec<Value> = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        let (placebo, runs) = match &raw { Value::Array(a) => (None, a.clone()), v => (Some(v["placebo"].clone()), v["faults"].as_array()?.clone()) };
         let new = ["new-related", "new"].iter().find_map(|r| report(&dir.join(format!("tests-{r}{label}.out")), *runner))?;
-        outcomes.extend(raw.iter().map(|x| {
-            let text = |k: &str| x[k].as_str().unwrap_or("").as_bytes().to_vec();
-            crate::proof::fault_verdict(*runner, &new, (x["finished"] == true, x["served"] == true), &text("output"), &text("errors"))
-        }));
+        outcomes.extend(crate::suite::fault_outcomes(*runner, &new, placebo.as_ref(), &runs));
     }
     let stored = stored.as_array()?;
     (outcomes.len() == stored.len()).then(|| stored.iter().zip(outcomes).map(|(f, o)| { let mut f = f.clone(); f["outcome"] = json!(o); f }).collect())

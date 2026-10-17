@@ -111,12 +111,17 @@ What Kern checks on every pull request:
    mock that no old test names needs a look. A test file the change only adds tests to needs no such run:
    its old tests are still in it, unchanged, and ran on the new code. A new test that fails only for want of something the sandbox does
    not have (the network, a program or a native module) is listed as not checked.
-2. **Whether the tests check the change at all.** When the tests pass, Kern plants a few small faults in the lines the change touched
-   (`>` turned into `>=`, a condition turned around, a call left out), one at a time, and runs the tests related to each file (jest and
-   vitest). The fault is put in as the file is read, so nothing on disk is edited. A fault that makes a test fail that passed without it
-   is caught. The receipt says how many were caught and names the lines where none was. When no test that runs here even loads a changed
-   file (its related tests cannot load, or there are none), that file is not verified, said plainly, and the Tests line has no ✅: the
-   tests pass, but none of them reaches that code. A fault that only puts back the old line, logging calls, and a run Kern could not finish are not counted.
+2. **Whether the tests check the change at all.** When the tests pass, Kern puts faults into each changed file of the product code, one at
+   a time, and runs the tests related to that file (jest and vitest). First it undoes the file's change, which shows whether any test can
+   tell the old code from the new; then it plants up to three small faults spread over the changed lines (`>` turned into `>=`, a condition
+   turned around, a call left out). Each fault is put in as the file is read, so nothing on disk is edited. Before the faults, Kern runs
+   the same tests once with the file served unchanged, as a control: a test that fails there (a flaky one, or one that notices Kern's
+   machinery) cannot catch a fault. A fault that makes a test fail that passed in the control is caught. The receipt says how many were
+   caught, names the lines where none was, and names every changed file Kern put no fault in, with why (another test runner, no related
+   tests it could pick, only comments, formatting or logging changed, or its limit of 23 faults in 20 files per check). When no test that
+   runs here even loads a changed file (its related tests cannot load, or there are none), that file is not verified, said plainly, and the
+   Tests line has no ✅: the tests pass, but none of them reaches that code. A small fault that only puts back the old line (the undo covers
+   that), logging calls, and a run Kern could not finish are not counted.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both

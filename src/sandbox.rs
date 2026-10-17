@@ -53,6 +53,7 @@ pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
 pub const TEST_PARTS: [&str; 6] = ["output", "errors", "behavior", "created", "ending", "values"];
 pub const VALUES_BYTES_MAX: usize = 1 << 20;
+pub const FAULTS_COUNT_MAX: usize = 24;
 pub fn test_dir(cwd: &str) -> R<String> {
     if cwd.is_empty() { return Ok("/workspace".into()); }
     ensure!(cwd.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', '\0'])), "A test run starts in a folder inside the tree");
@@ -1153,7 +1154,7 @@ mod inside {
             create_new(&target, text.as_bytes(), 0o644)?;
         }
         let faults = c["faults"].as_array().cloned().unwrap_or_default();
-        ensure!(faults.len() <= 12, "Too many planted faults");
+        ensure!(faults.len() <= super::FAULTS_COUNT_MAX, "Too many planted faults");
         if !faults.is_empty() {
             let started = std::time::Instant::now();
             let mut results = Vec::new();

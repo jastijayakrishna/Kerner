@@ -203,6 +203,25 @@ fn orval_labs_orval_3772_stored_fault_runs_are_judged_again_with_todays_rules() 
 }
 
 #[test]
+fn stored_fault_runs_with_a_control_are_judged_against_it() {
+    let t = Temp::new("placebo");
+    let dir = t.0.join("receipt-pmndrs__jotai__3363");
+    let faults = json!([{ "path": "src/vanilla/utils/unwrap.ts", "line": 40, "what": "undoes the change", "kind": "undo", "outcome": "unknown" },
+        { "path": "src/vanilla/utils/unwrap.ts", "line": 52, "what": "changes > to >=", "kind": "operator", "outcome": "unknown" }]);
+    stored(&dir, "vitest", json!({ "kept": 2, "faults": faults }), &[
+        ("old", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+        ("new", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+    ]);
+    let run = |results: &[(&str, &str, &str)]| json!({ "finished": true, "served": true, "output": vitest(results), "errors": "" });
+    let placebo = run(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "failed")]);
+    let runs = [run(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "failed")]), run(&[(ADDS, "adds", "failed"), (ADDS, "discounts", "passed")])];
+    std::fs::write(dir.join("faults.json"), json!({ "placebo": placebo, "faults": runs }).to_string()).unwrap();
+    let r = kern::replay::rejudge(&dir).unwrap();
+    let outcomes: Vec<&str> = r["receipt"]["tests"]["faults"].as_array().unwrap().iter().map(|f| f["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["missed", "caught"], "discounts also fails in the control run, so its failure under the undo is not the undo's doing: {r}");
+}
+
+#[test]
 fn calcom_28622_a_stored_old_test_failure_is_read_again_with_its_values() {
     let t = Temp::new("polarity");
     let dir = t.0.join("receipt-calcom__cal.diy__28622");
