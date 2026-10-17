@@ -275,6 +275,21 @@ r.onTaskUpdate([['t1', { state: 'fail', errors: [{ message: 'a second update of 
 fn error_text() -> &'static str { "AssertionError: expected { isValid: false, …(1) } to deeply equal { isValid: false, …(1) }\n    at /workspace/packages/lib/ssrfProtection.kern-kept.test.ts:113:20" }
 
 #[test]
+fn a_test_with_two_different_value_records_has_no_values_so_the_code_under_test_cannot_turn_a_look_into_a_note() {
+    let key = "test/user.kern-kept.test.ts > finds the user";
+    let report = json!({ "numTotalTests": 1, "testResults": [{ "name": "/workspace/test/user.kern-kept.test.ts", "assertionResults": [
+        { "ancestorTitles": [], "title": "finds the user", "status": "failed", "failureMessages": ["AssertionError: expected null to be { id: 1 }"] }] }] }).to_string();
+    let line = |expected: &str, actual: &str| json!({ "file": "/workspace/test/user.kern-kept.test.ts", "names": [], "name": "finds the user", "message": "expected null to be { id: 1 }", "expected": expected, "actual": actual }).to_string();
+    let honest = kern::proof::failures(kern::policy::Runner::Vitest, report.as_bytes(), format!("{}\n", line("{ id: 1 }", "null")).as_bytes());
+    assert_eq!(honest[key].expected.as_deref(), Some("{ id: 1 }"));
+    let forged = format!("{}\n{}\n", line("{ id: 1 }", "null"), line("\"a\"", "\"b\""));
+    let found = kern::proof::failures(kern::policy::Runner::Vitest, report.as_bytes(), forged.as_bytes());
+    assert_eq!((found[key].expected.as_deref(), found[key].actual.as_deref()), (None, None),
+        "the values file sits where the new code under test can write too; two records that disagree prove someone wrote one, so Kern reads the failure from its message alone");
+    assert_eq!(kern::polarity::read(&found[key].message, found[key].expected.as_deref(), found[key].actual.as_deref()).kind, kern::polarity::Kind::Flipped, "null against an object stays a look");
+}
+
+#[test]
 fn adobe_da_admin_271_mocha_hands_over_what_the_old_test_expected_and_what_the_new_code_gave() {
     let report = json!({ "stats": {}, "tests": [{ "fullTitle": "Version Put returns 500", "file": "/workspace/test/storage/version/put.kern-kept.test.js" }], "passes": [], "pending": [],
         "failures": [{ "fullTitle": "Version Put returns 500", "file": "/workspace/test/storage/version/put.kern-kept.test.js", "err": { "message": "must return 500", "expected": 500, "actual": 201, "operator": "strictEqual" } }] }).to_string();

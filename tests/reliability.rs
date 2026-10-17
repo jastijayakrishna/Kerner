@@ -1414,7 +1414,7 @@ fn babylonjs_18161_a_test_in_a_file_that_was_flaky_in_the_same_check_cannot_prov
     let other = "src/other.test.ts > adds";
     let all = |g: (u32, u32), t: (u32, u32), d: (u32, u32), o: (u32, u32)| report(&[(&gate, g.0, g.1, 0), (&throttle, t.0, t.1, 0), (&delay, d.0, d.1, 0), (other, o.0, o.1, 0)], &[]);
     let (pass, fail) = ((1, 0), (0, 1));
-    let c = suite::verdict(&all(pass, pass, pass, pass), &all(fail, fail, fail, fail), Some(&all(fail, pass, pass, fail)), Some(&all(fail, pass, fail, fail)), Some(&all(pass, pass, pass, pass)), false);
+    let c = suite::verdict(&all(pass, pass, pass, pass), &all(fail, fail, fail, fail), Some(&all(fail, pass, pass, fail)), Some(&all(fail, pass, fail, fail)), Some(&all(pass, pass, pass, pass)), false, false);
     assert_eq!(listed(&c, "broke"), [other], "{c}");
     assert_eq!(listed(&c, "unsteady"), [gate], "BabylonJS#18161 was blocked on a timing test whose file flipped other tests in the same check: {c}");
 }
@@ -1424,7 +1424,7 @@ fn a_test_that_passes_when_the_whole_suite_runs_again_cannot_prove_a_break_even_
     let (api, pool) = ("src/api.test.ts > answers", "src/db.test.ts > keeps one pool");
     let both = |a: (u32, u32), p: (u32, u32)| report(&[(api, a.0, a.1, 0), (pool, p.0, p.1, 0)], &[]);
     let (pass, fail) = ((1, 0), (0, 1));
-    let c = suite::verdict(&both(pass, pass), &both(fail, fail), Some(&both(fail, pass)), Some(&both(pass, fail)), Some(&both(pass, pass)), false);
+    let c = suite::verdict(&both(pass, pass), &both(fail, fail), Some(&both(fail, pass)), Some(&both(pass, fail)), Some(&both(pass, pass)), false, false);
     assert!(listed(&c, "broke").is_empty(), "the api test passed in one of the three new runs, so the change cannot have broken it for sure: {c}");
     assert_eq!(listed(&c, "unsteady"), [api], "{c}");
     assert_eq!(listed(&c, "together"), [pool], "{c}");
@@ -1436,7 +1436,7 @@ fn a_hook_that_fails_in_a_file_that_was_flaky_in_the_same_check_cannot_prove_a_b
     let hook = "test/server.test.js > \"after all\" hook in \"server\"";
     let run = |r: (u32, u32), problems: &[&str]| report(&[(answers, 1, 0, 0), (retries, r.0, r.1, 0)], problems);
     let (pass, fail) = ((1, 0), (0, 1));
-    let c = suite::verdict(&run(pass, &[]), &run(fail, &[hook]), Some(&run(pass, &[hook])), Some(&run(pass, &[hook])), Some(&run(pass, &[])), false);
+    let c = suite::verdict(&run(pass, &[]), &run(fail, &[hook]), Some(&run(pass, &[hook])), Some(&run(pass, &[hook])), Some(&run(pass, &[])), false, false);
     assert!(listed(&c, "new_problems").is_empty(), "a teardown hook failing in a file whose tests pass and fail by chance is no proof: {c}");
     assert_eq!(listed(&c, "unsteady"), [hook], "{c}");
 }

@@ -11,7 +11,7 @@ const REPORT_BYTES_MAX: u64 = 64 << 20;
 const ENTRIES_COUNT_MAX: usize = 10_000;
 const SUITES_COUNT_MAX: usize = 16;
 
-struct Judged { verdict: Value, runner: Runner, suite_dir: String, unconfirmed: bool, uneven: bool }
+struct Judged { verdict: Value, runner: Runner, suite_dir: String }
 fn role(stem: &str) -> Option<(&'static str, &str)> {
     ROLES.iter().find_map(|r| stem.strip_prefix(r).filter(|rest| rest.is_empty() || rest.starts_with('-')).map(|rest| (*r, rest)))
 }
@@ -27,13 +27,13 @@ fn report(path: &Path, runner: Runner) -> Option<Report> {
     if std::fs::metadata(path).ok()?.len() > REPORT_BYTES_MAX { return None; }
     crate::proof::read_report(runner, &std::fs::read(path).ok()?).ok()
 }
-fn suite(dir: &Path, label: &str, runner: Runner, unconfirmed: bool) -> Option<Value> {
+fn suite(dir: &Path, label: &str, runner: Runner, (unconfirmed, uneven): (bool, bool)) -> Option<Value> {
     let run = |r: &str| report(&dir.join(format!("tests-{r}{label}.out")), runner);
     let old_alone = run("old-alone").filter(|r| !r.tests.is_empty() || !r.problems.is_empty()).or_else(|| run("old-again"));
     let (alone, mut whole) = (run("new-alone"), run("new-again"));
     let old = OLD.iter().find(|r| dir.join(format!("tests-{r}{label}.out")).is_file()).and_then(|r| run(r))?;
     let new = run("new-related").or_else(|| run("new")).or_else(|| if alone.is_none() { whole.take() } else { None })?;
-    let c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed);
+    let c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed, uneven);
     (c["status"] == "RAN").then_some(c)
 }
 const FAULTS_BYTES_MAX: u64 = 16 << 20;
@@ -85,12 +85,12 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         let unconfirmed = tests["unconfirmed"].as_array().into_iter().flatten().filter_map(Value::as_str)
             .any(|k| suite_dir.is_empty() || k.starts_with(&format!("{suite_dir}/")) || k.starts_with(&format!("{suite_dir}: ")));
         let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, &suite_dir).is_some());
-        suite(dir, label, runner, unconfirmed).map(|verdict| Judged { verdict, runner, suite_dir, unconfirmed, uneven })
+        suite(dir, label, runner, (unconfirmed, uneven)).map(|verdict| Judged { verdict, runner, suite_dir })
     }).collect()).flatten();
     if let Some(judged) = &judged {
         let mut merged: serde_json::Map<String, Value> = crate::suite::LISTS.iter().map(|l| (l.to_string(), json!([]))).collect();
         merged.insert("problem_why".into(), json!({}));
-        for j in judged { crate::suite::fold(&mut merged, &j.verdict, &|k| crate::suite::in_suite(j.runner, &j.suite_dir, k), j.unconfirmed, j.uneven); }
+        for j in judged { crate::suite::fold(&mut merged, &j.verdict, &|k| crate::suite::in_suite(j.runner, &j.suite_dir, k)); }
         let kept_runs = labels.iter().any(|label| dir.join(format!("tests-new-kept{label}.out")).is_file());
         for l in crate::suite::LISTS.iter().filter(|l| **l != "rewritten" && !(kept_runs && **l == "gone")) { tests[*l] = merged[*l].clone(); }
         tests["problem_why"] = merged["problem_why"].clone();

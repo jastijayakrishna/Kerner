@@ -557,7 +557,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         Some("RAN") => md += &format!("- {} {}% of the changed lines ran, on the old and the new code\n", if behaviour["percent"].as_u64().unwrap_or(0) >= 80 { "✅" } else { "⚠️" }, behaviour["percent"].as_u64().unwrap_or(0)),
         Some("NOTHING_TO_RUN") if unread || skipped_code => md += "- ⏭️ Changed lines: none Kern can run here (it runs JavaScript and TypeScript, and leaves out generated or minified code)\n",
         Some("NOTHING_TO_RUN") => md += "- ✅ No changed line of code to run: only tests, docs, configuration or types changed\n",
-        Some("OFF") => md += "- ⏭️ Changed lines: Not run. Add an AI key (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) and Kern runs every changed line on the old and the new code\n",
+        Some("OFF") if behaviour["why"] == "no AI key" => md += "- ⏭️ Changed lines: Not run. Add an AI key (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) and Kern runs every changed line on the old and the new code\n",
+        Some("OFF") => md += &format!("- ⏭️ Changed lines: not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the AI step is off"), 400)),
         _ => md += &format!("- ⏭️ Changed lines: Not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the run did not finish"), 400)),
     }
     md += "\n";

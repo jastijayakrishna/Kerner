@@ -16,18 +16,20 @@ fn every_combination_of_run_outcomes_blocks_only_with_full_proof() {
     let all = [Passed, Failed, Skipped, Missing];
     let maybe: Vec<Option<Observed>> = std::iter::once(None).chain(all.iter().copied().map(Some)).collect();
     let (mut combinations, mut blocked) = (0u32, 0u32);
-    for old in all { for old_again in &maybe { for new in all { for a in &maybe { for b in &maybe { for shaky in [false, true] { for sandbox in [false, true] {
-        let e = Evidence { old, old_again: *old_again, new, new_again: [*a, *b], shaky, sandbox };
+    for old in all { for old_again in &maybe { for new in all { for a in &maybe { for b in &maybe { for shaky in [false, true] { for sandbox in [false, true] { for uneven in [false, true] {
+        let e = Evidence { old, old_again: *old_again, new, new_again: [*a, *b], shaky, sandbox, uneven };
         let reruns: Vec<Observed> = [*a, *b].into_iter().flatten().filter(|o| *o != Missing).collect();
-        let full = old == Passed && *old_again == Some(Passed) && new == Failed && !reruns.is_empty() && reruns.iter().all(|o| *o == Failed) && !shaky && !sandbox;
+        let proven = old == Passed && *old_again == Some(Passed) && new == Failed && !reruns.is_empty() && reruns.iter().all(|o| *o == Failed) && !shaky && !sandbox;
+        let full = proven && !uneven;
         combinations += 1;
-        assert_eq!(suite::blockable(e).is_ok(), full, "a block needs the test to pass in every old run including an old rerun, to fail in every new run that included it with at least one rerun, in a steady file, with no sandbox error: {e:?}");
+        assert_eq!(suite::blockable(e).is_ok(), full, "a block needs the test to pass in every old run including an old rerun, to fail in every new run that included it with at least one rerun, in a steady file, with no sandbox error, on two sides Kern set up the same way: {e:?}");
+        if proven && uneven { assert_eq!(suite::blockable(e), Err(Unproven::Uneven), "sides set up differently can never block: {e:?}"); }
         if *old_again == Some(Failed) { assert_eq!(suite::blockable(e), Err(Unproven::OldFailsToo), "{e:?}"); }
         else if sandbox && old == Passed { assert_eq!(suite::blockable(e), Err(Unproven::Sandbox), "{e:?}"); }
         else if old == Passed && new == Failed && (shaky || reruns.iter().any(|o| *o != Failed)) { assert_eq!(suite::blockable(e), Err(Unproven::Unsteady), "{e:?}"); }
         if full { blocked += 1; }
-    }}}}}}}
-    assert_eq!((combinations, blocked), (8000, 5), "of 8000 combinations only 5 block: both reruns failed, or one failed and the other did not run or did not include the test");
+    }}}}}}}}
+    assert_eq!((combinations, blocked), (16000, 5), "of 16000 combinations only 5 block: both reruns failed, or one failed and the other did not run or did not include the test, and the sides were set up the same way");
 }
 
 #[test]
@@ -37,10 +39,10 @@ fn ghost_28552_a_test_skipped_when_its_file_ran_alone_never_blocks_and_a_missing
     let (old, old_alone) = (report(&[(gift, 1, 0, 0)], &[], &[]), report(&[(gift, 1, 0, 0)], &[], &[]));
     let alone = report(&[(gift, 0, 0, 1)], &[], &[]);
     let plain = report(&[(gift, 0, 1, 0)], &[], &[(gift, "expected 'a' to not equal 'a'")]);
-    let c = suite::verdict(&old, &plain, Some(&alone), Some(&plain), Some(&old_alone), false);
+    let c = suite::verdict(&old, &plain, Some(&alone), Some(&plain), Some(&old_alone), false, false);
     assert_eq!((listed(&c, "broke"), listed(&c, "unsteady")), (vec![], vec![gift.to_string()]), "the run of its file alone skipped the test instead of failing it, so it did not fail in every new run: {c}");
     let native = report(&[(gift, 0, 1, 0)], &[], &[(gift, bindings)]);
-    let c = suite::verdict(&old, &native, Some(&alone), Some(&native), Some(&old_alone), false);
+    let c = suite::verdict(&old, &native, Some(&alone), Some(&native), Some(&old_alone), false, false);
     assert_eq!((listed(&c, "broke"), listed(&c, "sandbox")), (vec![], vec![gift.to_string()]), "sqlite3's native part was missing from the install, which is the sandbox, not the change: {c}");
 }
 
@@ -51,7 +53,7 @@ fn finance_tracker_36_a_test_file_whose_jest_worker_crashed_never_blocks() {
     let crash = "A jest worker process (pid=49) was terminated by another process: signal=SIGSEGV, exitCode=null. Operating system logs may contain more information on why this occurred.";
     let (old, old_alone) = (report(&[(test, 1, 0, 0)], &[], &[]), report(&[(test, 1, 0, 0)], &[], &[]));
     let crashed = report(&[], &[file], &[(file, crash)]);
-    let c = suite::verdict(&old, &crashed, Some(&crashed), None, Some(&old_alone), false);
+    let c = suite::verdict(&old, &crashed, Some(&crashed), None, Some(&old_alone), false, false);
     assert!(listed(&c, "new_problems").is_empty() && listed(&c, "broke").is_empty(), "a crashed process is the machine, not proof the change broke the file: {c}");
     assert_eq!(listed(&c, "sandbox"), [file], "{c}");
 }
@@ -63,7 +65,7 @@ fn a_failure_with_the_error_old_tests_already_fail_with_here_is_the_sandbox() {
     let old = report(&[(seed, 0, 1, 0), (cart, 1, 0, 0)], &[], &[(seed, refused)]);
     let new = report(&[(seed, 0, 1, 0), (cart, 0, 1, 0)], &[], &[(seed, refused), (cart, refused)]);
     let old_alone = report(&[(cart, 1, 0, 0)], &[], &[]);
-    let c = suite::verdict(&old, &new, Some(&new), None, Some(&old_alone), false);
+    let c = suite::verdict(&old, &new, Some(&new), None, Some(&old_alone), false, false);
     assert_eq!((listed(&c, "broke"), listed(&c, "sandbox")), (vec![], vec![cart.to_string()]), "the cart test now reaches the database the sandbox does not have, exactly as the seed test already did on the old code: {c}");
 }
 
@@ -72,7 +74,7 @@ fn a_test_broken_in_every_run_with_an_old_rerun_that_passes_still_blocks() {
     let total = "test/total.test.js > discount from 100";
     let (old, old_alone) = (report(&[(total, 1, 0, 0)], &[], &[]), report(&[(total, 1, 0, 0)], &[], &[]));
     let new = report(&[(total, 0, 1, 0)], &[], &[(total, "AssertionError: expected 100 to be 90")]);
-    let c = suite::verdict(&old, &new, Some(&new), Some(&new), Some(&old_alone), false);
+    let c = suite::verdict(&old, &new, Some(&new), Some(&new), Some(&old_alone), false, false);
     assert_eq!(listed(&c, "broke"), [total], "the e2e calc break: failed in all three new runs, passed in both old runs: {c}");
 }
 
@@ -81,7 +83,7 @@ fn a_break_with_no_old_rerun_is_unconfirmed_never_blocked() {
     let total = "test/total.test.js > discount from 100";
     let old = report(&[(total, 1, 0, 0)], &[], &[]);
     let new = report(&[(total, 0, 1, 0)], &[], &[(total, "AssertionError: expected 100 to be 90")]);
-    let c = suite::verdict(&old, &new, None, Some(&new), None, false);
+    let c = suite::verdict(&old, &new, None, Some(&new), None, false, false);
     assert_eq!((listed(&c, "broke"), listed(&c, "unconfirmed")), (vec![], vec![total.to_string()]), "mocha and vitest with file arguments got only a second new run; without an old rerun nothing can block (CLAUDE.md): {c}");
 }
 
@@ -124,7 +126,7 @@ fn random_runs_never_block_a_test_the_raw_runs_do_not_prove_broken() {
         };
         let (old, new) = (run(true).unwrap(), run(true).unwrap());
         let (alone, whole, old_alone) = (run(false), run(false), run(false));
-        let c = suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), false);
+        let c = suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), false, false);
         checked += 1;
         for k in listed(&c, "broke") {
             blocks += 1;

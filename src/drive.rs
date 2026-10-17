@@ -1064,9 +1064,11 @@ pub fn node_image(op: &crate::policy::Operator, wanted: Option<(u64, String)>) -
         None => (op.image.clone(), json!({ "major": default })),
     }
 }
-pub fn side_image(out: &Path, volume: &str, op: &crate::policy::Operator) -> String {
-    let s = read_own(out.join("setup.json")).unwrap_or(Value::Null);
-    ["old", "new"].iter().find(|side| s[**side]["volume"] == volume).and_then(|side| s[*side]["image"].as_str()).filter(|i| crate::policy::image(i)).unwrap_or(&op.image).to_string()
+pub fn side_image(out: &Path, volume: &str) -> R<String> {
+    let s = read_own(out.join("setup.json"))?;
+    let side = ["old", "new"].into_iter().find(|side| s[*side]["volume"] == volume).ok_or_else(|| Denied(format!("Kern's setup has no record of the volume {volume}")))?;
+    let image = s[side]["image"].as_str().filter(|i| crate::policy::image(i)).ok_or_else(|| Denied(format!("Kern's setup recorded no image pinned by digest for the {side} code")))?;
+    Ok(image.to_string())
 }
 pub const SETUP_SECS_MAX: u64 = 1500;
 const SETUP_SECS_MIN: u64 = 120;
@@ -1235,7 +1237,7 @@ pub fn run(out: &Path, op: &crate::policy::Operator, driver: &Path, until: u64) 
         create_new(control.join("driver.mjs"), &driver_bytes, 0o444)?;
         create_new(control.join("tsconfig.json"), tsconfig(s[side]["tsconfig"] == true).as_bytes(), 0o444)?;
         let volume = s[side]["volume"].as_str().unwrap_or("");
-        let image = side_image(out, volume, op);
+        let image = side_image(out, volume)?;
         let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive".into()],
             network: "none", volumes: vec![(&tools_volume, "/kern-tools/node_modules", true)], root: false, home_mb: 0, scratch: false, workspace: Some((volume, true)) });
         let _ = std::fs::remove_dir_all(&control);

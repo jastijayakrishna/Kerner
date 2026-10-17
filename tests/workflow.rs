@@ -19,6 +19,7 @@ fn review_2_c_the_reusable_workflow_keeps_its_trust_boundaries() {
     assert!(!build.contains("actions/cache") && !build.contains("pull_request.head"), "the job that builds the Kern the signer trusts never uses a cache or the pull request's code:\n{build}");
     let run = job(&text, "run");
     assert!(!permissions(&run).contains("id-token"), "the job that runs the pull request's code can never sign:\n{}", permissions(&run));
+    assert!(!run.contains("secrets."), "the job that runs the pull request's code holds no keys: an AI agent there reads the pull request's text and could be told to copy a key into what Kern posts:\n{run}");
     let sign = job(&text, "sign");
     assert!(!sign.contains("actions/checkout") && !sign.contains("actions/cache"), "the signing job never loads anything the run job could have touched:\n{sign}");
     assert!(sign.contains("sha256sum") && sign.contains("needs.build.outputs.sha256"), "the signing job checks the Kern binary is the one the build job made");

@@ -259,18 +259,20 @@ pub fn related(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tes
     Some(t)
 }
 
-pub fn verdict(old: &Report, new: &Report, alone: Option<&Report>, whole: Option<&Report>, old_alone: Option<&Report>, unconfirmed: bool) -> Value {
+pub fn verdict(old: &Report, new: &Report, alone: Option<&Report>, whole: Option<&Report>, old_alone: Option<&Report>, unconfirmed: bool, uneven: bool) -> Value {
     let c = steady(if unconfirmed { judged(old, new, None, None) } else { confirmed(old, new, alone, whole, old_alone) });
-    if unconfirmed { prove(c, old, new, [None, None], None) } else { prove(c, old, new, [alone, whole], old_alone) }
+    if unconfirmed { prove(c, old, new, ([None, None], None), uneven) } else { prove(c, old, new, ([alone, whole], old_alone), uneven) }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Observed { Passed, Failed, Skipped, Missing }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Evidence { pub old: Observed, pub old_again: Option<Observed>, pub new: Observed, pub new_again: [Option<Observed>; 2], pub shaky: bool, pub sandbox: bool }
+pub struct Evidence { pub old: Observed, pub old_again: Option<Observed>, pub new: Observed, pub new_again: [Option<Observed>; 2], pub shaky: bool, pub sandbox: bool, pub uneven: bool }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Unproven { OldFailsToo, Sandbox, Unsteady, Unconfirmed }
+pub enum Unproven { OldFailsToo, Sandbox, Unsteady, Unconfirmed, Uneven }
 impl Unproven {
-    pub fn list(self) -> &'static str { match self { Unproven::OldFailsToo => "environmental", Unproven::Sandbox => "sandbox", Unproven::Unsteady => "unsteady", Unproven::Unconfirmed => "unconfirmed" } }
+    pub fn list(self) -> &'static str {
+        match self { Unproven::OldFailsToo => "environmental", Unproven::Sandbox => "sandbox", Unproven::Unsteady => "unsteady", Unproven::Unconfirmed => "unconfirmed", Unproven::Uneven => "uneven" }
+    }
 }
 pub fn blockable(e: Evidence) -> Result<(), Unproven> {
     if e.old_again == Some(Observed::Failed) { return Err(Unproven::OldFailsToo); }
@@ -279,6 +281,7 @@ pub fn blockable(e: Evidence) -> Result<(), Unproven> {
     let reruns: Vec<Observed> = e.new_again.iter().flatten().copied().filter(|o| *o != Observed::Missing).collect();
     if e.new != Observed::Failed || e.shaky || reruns.iter().any(|o| *o != Observed::Failed) { return Err(Unproven::Unsteady); }
     if reruns.is_empty() || e.old_again != Some(Observed::Passed) { return Err(Unproven::Unconfirmed); }
+    if e.uneven { return Err(Unproven::Uneven); }
     Ok(())
 }
 const SANDBOX_ERRORS: [&str; 35] = ["getaddrinfo", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "fetch failed",
@@ -295,15 +298,16 @@ fn test_evidence(k: &str, old: &Report, new: &Report, again: &[Option<Report>; 2
     let b = count(old, k);
     let at = |r: &Report| outcome(b, count(r, k));
     Evidence { old: if b.passed > 0 && b.failed == 0 { Observed::Passed } else { Observed::Missing }, old_again: old_again.map(at), new: at(new),
-        new_again: [again[0].as_ref().map(at), again[1].as_ref().map(at)], shaky: false, sandbox: false }
+        new_again: [again[0].as_ref().map(at), again[1].as_ref().map(at)], shaky: false, sandbox: false, uneven: false }
 }
 fn problem_evidence(p: &str, old: &Report, new: &Report, again: [Option<&Report>; 2], old_again: Option<&Report>) -> Evidence {
     let ran_clean = |r: &Report| r.tests.iter().any(|(k, n)| file_of(k) == file_of(p) && n.passed > 0);
     let has = |r: &Report| matched(&[p.to_string()], &r.problems).first().copied().unwrap_or(false);
     let at = |r: &Report| if has(r) { Observed::Failed } else if ran_clean(r) { Observed::Passed } else { Observed::Missing };
-    Evidence { old: if !has(old) && ran_clean(old) { Observed::Passed } else { Observed::Missing }, old_again: old_again.map(at), new: at(new), new_again: again.map(|g| g.map(at)), shaky: false, sandbox: false }
+    Evidence { old: if !has(old) && ran_clean(old) { Observed::Passed } else { Observed::Missing }, old_again: old_again.map(at), new: at(new), new_again: again.map(|g| g.map(at)), shaky: false, sandbox: false,
+        uneven: false }
 }
-fn prove(mut c: Value, old: &Report, new: &Report, again: [Option<&Report>; 2], old_again: Option<&Report>) -> Value {
+fn prove(mut c: Value, old: &Report, new: &Report, (again, old_again): ([Option<&Report>; 2], Option<&Report>), uneven: bool) -> Value {
     if c["status"] != "RAN" { return c; }
     let (settled_new, settled_again, settled_old_again) = (settled(old, new), again.map(|g| g.map(|r| settled(old, r))), old_again.map(|r| settled(old, r)));
     let shaky: BTreeSet<String> = listed(&c, "flaky").iter().chain(&listed(&c, "unsteady")).map(|k| file_of(k).to_string()).collect();
@@ -315,7 +319,7 @@ fn prove(mut c: Value, old: &Report, new: &Report, again: [Option<&Report>; 2], 
         let mut held = Vec::new();
         for k in listed(&c, l) {
             let e = if l == "broke" { test_evidence(&k, old, &settled_new, &settled_again, settled_old_again.as_ref()) } else { problem_evidence(&k, old, new, again, old_again) };
-            match blockable(Evidence { shaky: shaky.contains(file_of(&k)), sandbox: sandboxed(&k), ..e }) {
+            match blockable(Evidence { shaky: shaky.contains(file_of(&k)), sandbox: sandboxed(&k), uneven, ..e }) {
                 Ok(()) => held.push(k),
                 Err(u) => match c[u.list()].as_array_mut() { Some(a) => a.push(json!(k)), None => c[u.list()] = json!([k]) },
             }
@@ -353,11 +357,10 @@ pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole:
 pub const LISTS: [&str; 18] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
     "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable"];
 pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
-pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String, unconfirmed: bool, uneven: bool) {
+pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String) {
     for l in LISTS {
-        let target = if (l == "broke" || l == "new_problems") && unconfirmed { "unconfirmed" } else if (l == "broke" || l == "new_problems") && uneven { "uneven" } else { l };
         let items: Vec<Value> = c[l].as_array().into_iter().flatten().filter_map(Value::as_str).map(|k| json!(named(k))).collect();
-        if let Some(a) = merged.get_mut(target).and_then(Value::as_array_mut) { a.extend(items); }
+        if let Some(a) = merged.get_mut(l).and_then(Value::as_array_mut) { a.extend(items); }
     }
     if let Some(why) = merged.get_mut("problem_why") { for (k, w) in c["problem_why"].as_object().into_iter().flatten() { why[named(k)] = w.clone(); } }
 }
@@ -868,33 +871,33 @@ pub fn without_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -
 pub fn unreadable(refusal: Option<String>, error: String) -> Side { refusal.map_or(Side::Cut(error), |r| Side::Nothing(format!("Kern could not run the tests in the sandbox: {r}"))) }
 pub fn broke_run(first: &Side, again: &Side, uneven: bool) -> bool { matches!((first, again), (Side::Nothing(_), Side::Nothing(_))) && !uneven }
 
-fn run_side(out: &Path, op: &Operator, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
-    run_with(out, op, (volume, &std::collections::BTreeMap::new(), test_seconds()), side, dir, label, until)
+fn run_side(out: &Path, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
+    run_with(out, (volume, &std::collections::BTreeMap::new(), test_seconds()), side, dir, label, until)
 }
-fn run_for(out: &Path, op: &Operator, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
-    run_with(out, op, (volume, &std::collections::BTreeMap::new(), limit), side, dir, label, until)
+fn run_for(out: &Path, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
+    run_with(out, (volume, &std::collections::BTreeMap::new(), limit), side, dir, label, until)
 }
 pub fn test_limits(seconds: u64) -> Limits {
     Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 }
 }
-pub fn in_test_box(out: &Path, op: &Operator, volume: &str, name: &str, config: (&str, &Value), (entry, root, seconds): (&str, bool, u64)) -> R<crate::sandbox::Execution> {
+pub fn in_test_box(out: &Path, volume: &str, name: &str, config: (&str, &Value), (entry, root, seconds): (&str, bool, u64)) -> R<crate::sandbox::Execution> {
     let control = out.join(name);
     if control.exists() { std::fs::remove_dir_all(&control)?; }
     crate::sandbox::control_dir(&control, Some(config))?;
     let input = out.join("tests-input");
     std::fs::create_dir_all(&input)?;
-    let image = crate::drive::side_image(out, volume, op);
+    let image = crate::drive::side_image(out, volume)?;
     let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &test_limits(seconds),
         entry: vec![entry.into()], network: "none", volumes: vec![], root, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
     let _ = std::fs::remove_dir_all(&control);
     run
 }
-fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::collections::BTreeMap<String, String>, u64), (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
+fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeMap<String, String>, u64), (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     let seconds = within(until, limit);
     if seconds < 60 { return Ok(Side::Late); }
     let cut = seconds < limit;
     let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files, "early": limit >= test_seconds(), "faults": [] });
-    let run = match in_test_box(out, op, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
+    let run = match in_test_box(out, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
         Err(e) if e.0.contains("exceeded limits") => return Ok(Side::Cut(format!("the run was stopped: {}", e.0))),
@@ -1005,16 +1008,16 @@ pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: O
     order
 }
 const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.PREPARE_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
-fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
+fn prepare(out: &Path, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
     let seconds = within(until, 480);
     crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
     let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
     let config = json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {}, "early": false, "faults": [] });
-    let run = in_test_box(out, op, volume, &format!("prepare-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds));
+    let run = in_test_box(out, volume, &format!("prepare-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds));
     let parts = crate::sandbox::parts(&run?.stdout, &crate::sandbox::TEST_PARTS)?;
     let log = String::from_utf8_lossy(&parts["errors"]).to_string();
     std::fs::write(out.join(format!("prepare-{label}.err")), &log)?;
-    let sealed = in_test_box(out, op, volume, &format!("seal-{label}"), ("drive-seal.json", &json!({ "version": 1 })), ("__drive_seal", true, seconds));
+    let sealed = in_test_box(out, volume, &format!("seal-{label}"), ("drive-seal.json", &json!({ "version": 1 })), ("__drive_seal", true, seconds));
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
     Ok(log)
 }
@@ -1061,7 +1064,7 @@ const NO_FAULT_CHANGE: &str = "Kern found nothing in its change to put a fault i
 const NO_FAULT_RESULTS: &str = "Kern's fault run gave no results";
 const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run under jest or vitest";
 #[allow(clippy::too_many_arguments)]
-fn planted_faults(out: &Path, op: &Operator, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> (Vec<Value>, Vec<Value>) {
+fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> (Vec<Value>, Vec<Value>) {
     let (tests, dir) = (&suite.new.0, suite.dir.as_str());
     let command = |paths: BTreeSet<String>| related(tests, &paths, dir).map(|t| test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect::<Vec<String>>());
     let limit = crate::sandbox::FAULTS_COUNT_MAX - 1;
@@ -1078,7 +1081,7 @@ fn planted_faults(out: &Path, op: &Operator, volume: &str, suite: &Suite, new: &
     let control = command(paths.clone()).unwrap_or_else(|| first.1.clone());
     let placebo = json!({ "path": first.0.path, "start": 0, "end": 0, "original": "", "replacement": "", "command": control });
     let specs: Vec<Value> = std::iter::once(placebo).chain(kept.iter().map(|(m, c)| json!({ "path": m.path, "start": m.start, "end": m.end, "original": m.original, "replacement": m.replacement, "command": c }))).collect();
-    let results = run_faults(out, op, volume, (tests, &suite.new.1), dir, specs, seconds);
+    let results = run_faults(out, volume, (tests, &suite.new.1), dir, specs, seconds);
     let Some((placebo, runs)) = results.split_first().filter(|(_, runs)| runs.len() == kept.len()) else {
         missing.extend(paths.iter().map(|p| json!({ "path": p, "why": NO_FAULT_RESULTS })));
         return (Vec::new(), missing);
@@ -1087,10 +1090,10 @@ fn planted_faults(out: &Path, op: &Operator, volume: &str, suite: &Suite, new: &
     let outcomes = fault_outcomes(tests.runner, new, Some(placebo), runs);
     (kept.iter().zip(outcomes).map(|((m, _), o)| json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "outcome": o })).collect(), missing)
 }
-fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, seconds: u64) -> Vec<Value> {
+fn run_faults(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, seconds: u64) -> Vec<Value> {
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
     let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults });
-    let Ok(run) = in_test_box(out, op, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
+    let Ok(run) = in_test_box(out, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return Vec::new() };
     serde_json::from_slice::<Vec<Value>>(&parts["output"]).unwrap_or_default()
 }
@@ -1132,11 +1135,11 @@ fn cannot_load(old: Option<&Side>) -> Option<String> {
 }
 type KeptRuns = (Result<Report, String>, Option<Report>, bool);
 #[allow(clippy::too_many_arguments)]
-fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, old: &Report, keep: &Kept, label: &str, until: u64, timed: &mut impl FnMut(String, u64)) -> KeptRuns {
+fn kept_runs(out: &Path, volumes: (&str, &str), suite: &Suite, old: &Report, keep: &Kept, label: &str, until: u64, timed: &mut impl FnMut(String, u64)) -> KeptRuns {
     if keep.run.is_empty() { return (Ok(Report::default()), None, false); }
     let Some(t) = kept_focus(&suite.new.0, &keep.run, &suite.dir) else { return (Err(SINGLE_FILES.into()), None, false) };
     let at = now_ms();
-    let first = run_with(out, op, (volumes.0, &keep.files, test_seconds()), (&t, &suite.new.1), &suite.dir, &format!("new-kept{label}"), until);
+    let first = run_with(out, (volumes.0, &keep.files, test_seconds()), (&t, &suite.new.1), &suite.dir, &format!("new-kept{label}"), until);
     timed(format!("new-kept{label}"), at);
     let first = match first {
         Ok(Side::Ran(r, _)) => unkept(&r, &keep.back),
@@ -1148,7 +1151,7 @@ fn kept_runs(out: &Path, op: &Operator, volumes: (&str, &str), suite: &Suite, ol
     let files: BTreeSet<String> = keep.back.iter().filter(|(_, o)| candidates.iter().any(|c| file_of(c) == o.as_str())).map(|(k, _)| k.clone()).collect();
     let Some((t, env)) = suite.old.as_ref().filter(|_| !files.is_empty()).and_then(|(t, e)| kept_focus(t, &files, &suite.dir).map(|t| (t, e))) else { return (Ok(first), None, false) };
     let at = now_ms();
-    let second = run_with(out, op, (volumes.1, &keep.old_files, test_seconds()), (&t, env), &suite.dir, &format!("old-kept{label}"), until);
+    let second = run_with(out, (volumes.1, &keep.old_files, test_seconds()), (&t, env), &suite.dir, &format!("old-kept{label}"), until);
     timed(format!("old-kept{label}"), at);
     let second = match second { Ok(Side::Ran(r, _)) => Some(unkept(&r, &keep.back)), _ => None };
     (Ok(first), second, false)
@@ -1270,7 +1273,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 let (mut tests, mut phase, mut repairable, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), true, true, Vec::new());
                 let run = loop {
                 let at = now_ms();
-                let run = run_side(out, op, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
+                let run = run_side(out, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
                 timed(phase.clone(), at);
                 old_seconds = secs_since(at);
                 if !pending.is_empty() {
@@ -1295,8 +1298,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     if !steps.is_empty() {
                         let at = now_ms();
                         let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
-                        let on_old = prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until);
-                        let on_new = prepare(out, op, &volume("new"), &repair_steps(&new_packages, &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
+                        let on_old = prepare(out, &volume("old"), &steps, &format!("old{label}"), until);
+                        let on_new = prepare(out, &volume("new"), &repair_steps(&new_packages, &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
                         timed(format!("prepare{label}"), at);
                         match (on_old, on_new) {
                             (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
@@ -1346,7 +1349,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let whole_new = (&new_tests, &suite.new.1);
         let name = if narrowed.is_some() { "new-related" } else { "new" };
         let at = now_ms();
-        let first = match run_for(out, op, (&volume("new"), budget), whole_new, &suite.dir, &format!("{name}{label}"), until) {
+        let first = match run_for(out, (&volume("new"), budget), whole_new, &suite.dir, &format!("{name}{label}"), until) {
             Ok(s) => s,
             Err(e) => { not_run.push(json!({ "dir": suite.dir, "why": format!("Kern could not run the tests{place}: {}", e.0) })); continue; }
         };
@@ -1364,7 +1367,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
             first => {
                 let at = now_ms();
-                let again = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
+                let again = run_side(out, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
                 timed(format!("new-again{label}"), at);
                 let cut = |why: &str| json!({ "dir": suite.dir, "why": format!("the tests{place} gave no results on the new code once, where the old code's tests ran, and {why}") });
                 match again {
@@ -1403,7 +1406,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let (mut alone_new, mut whole, mut second_old, mut unconfirmed) = (None, None, None, false);
         for (name, side, tests, env) in &plan {
             let at = now_ms();
-            let r = run_side(out, op, &volume(side), (tests, env), &suite.dir, &format!("{name}{label}"), until);
+            let r = run_side(out, &volume(side), (tests, env), &suite.dir, &format!("{name}{label}"), until);
             timed(format!("{name}{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) if *name == "new-alone" => { wrote_code.extend(created); alone_new = Some(r); }
@@ -1416,7 +1419,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         if !unconfirmed && plan.first().is_some_and(|p| p.0 == "new-alone") && alone_new.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
             let at = now_ms();
-            let r = run_side(out, op, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
+            let r = run_side(out, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
             timed(format!("new-again{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) => { wrote_code.extend(created); whole = Some(r); }
@@ -1428,7 +1431,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let empty = |r: &Option<Report>| r.as_ref().is_none_or(|r| r.tests.is_empty() && r.problems.is_empty());
         if !unconfirmed && empty(&second_old) && plan.iter().any(|p| p.0 == "old-alone") && let (Some(first), Some((_, env))) = (old_tests.as_ref(), &suite.old) {
             let at = now_ms();
-            let r = run_side(out, op, &volume("old"), (first, env), &suite.dir, &format!("old-again{label}"), until);
+            let r = run_side(out, &volume("old"), (first, env), &suite.dir, &format!("old-again{label}"), until);
             timed(format!("old-again{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) => { old_created.extend(created); second_old = Some(r); }
@@ -1437,7 +1440,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
         }
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
-        let mut c = verdict(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref(), unconfirmed);
+        let mut c = verdict(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref(), unconfirmed, uneven_why.is_some());
         let runner = suite.new.0.runner;
         let named = |k: &str| in_suite(runner, &suite.dir, k);
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
@@ -1448,7 +1451,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             continue;
         }
         let keep = kept_plan(repo, (base, head), &changes, &old, &suite.dir);
-        let (first, second, cut) = kept_runs(out, op, (&volume("new"), &volume("old")), suite, &old, &keep, &label, until, &mut timed);
+        let (first, second, cut) = kept_runs(out, (&volume("new"), &volume("old")), suite, &old, &keep, &label, until, &mut timed);
         late |= cut;
         let outcome = kept_outcome(&old, &keep, first, second.as_ref());
         let failing: BTreeSet<String> = ["broke", "new_problems"].iter().flat_map(|l| c[*l].as_array().into_iter().flatten()).filter_map(Value::as_str).map(str::to_string).collect();
@@ -1468,10 +1471,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let readings = polarity(&proof::failures(runner, &kept("out"), &kept("values")), &|f| keep.back.get(f).cloned(), &wanted);
             if let Some(p) = merged.get_mut("polarity").and_then(Value::as_object_mut) { for (k, v) in readings { p.insert(named(&k), v); } }
         }
-        if let Some(u) = &uneven_why && ["broke", "new_problems"].iter().any(|l| c[*l].as_array().is_some_and(|a| !a.is_empty())) && let Some(a) = merged["uneven_why"].as_array_mut() {
+        if let Some(u) = &uneven_why && c["uneven"].as_array().is_some_and(|a| !a.is_empty()) && let Some(a) = merged["uneven_why"].as_array_mut() {
             a.push(json!(u));
         }
-        fold(&mut merged, &c, &named, unconfirmed, uneven_why.is_some());
+        fold(&mut merged, &c, &named);
         for (i, (side, field)) in [("before", "passed"), ("before", "failed"), ("before", "skipped"), ("after", "passed"), ("after", "failed"), ("after", "skipped")].iter().enumerate() {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
@@ -1488,7 +1491,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             else if !faults_fit(left) { dropped.insert("planted faults"); }
             else {
                 let at = now_ms();
-                let (planted, lacking) = planted_faults(out, op, &volume("new"), suite, &new, &files, &label, fault_seconds(left));
+                let (planted, lacking) = planted_faults(out, &volume("new"), suite, &new, &files, &label, fault_seconds(left));
                 timed(format!("faults{label}"), at);
                 found = planted;
                 missing.extend(lacking);

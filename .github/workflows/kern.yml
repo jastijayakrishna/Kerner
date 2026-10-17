@@ -4,10 +4,10 @@ on:
   workflow_call:
     secrets:
       ANTHROPIC_API_KEY:
-        description: Optional. Lets Kern run every changed line on the old and the new code (Claude Code in a locked-down mode writes the driver)
+        description: Not used by this version. The job that runs the pull request's code holds no keys, so the AI step waits for a job of its own
         required: false
       CLAUDE_CODE_OAUTH_TOKEN:
-        description: Optional, in place of ANTHROPIC_API_KEY. A Claude subscription token from `claude setup-token`
+        description: Not used by this version, for the same reason
         required: false
 
 permissions: {}
@@ -99,14 +99,13 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       BASE_REF: ${{ github.event.pull_request.base.ref }}
       NUMBER: ${{ github.event.pull_request.number }}
-      HAS_AI: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - name: How this machine runs the pull request's code
         id: mode
         run: |
-          if [ "$HAS_AI" = true ] || [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+          if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
             echo "runtime=runsc" >> "$GITHUB_OUTPUT"
-            echo "This job holds an AI key or the machine is kept between jobs, so the pull request's code runs in gVisor"
+            echo "The machine is kept between jobs, so the pull request's code runs in gVisor"
           else
             echo "runtime=runc" >> "$GITHUB_OUTPUT"
             echo "This machine holds no keys and is deleted after the job, so the pull request's code runs in locked containers, the way CI runs it"
@@ -229,29 +228,15 @@ jobs:
             '{ version: 3, repository: $repo, deployment: "single-vm", executors: ["external"], image: $image,
                builders: { executor: null, verifier: $builder }, checks: [$check], registry: null, permissions: {} }' > operator.json
 
-      - name: Claude Code
-        if: env.HAS_AI == 'true'
-        env:
-          VERSION: 2.1.292
-        run: |
-          case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) echo "::error::No Claude Code build for $(uname -m)"; exit 1 ;; esac
-          d="$RUNNER_TEMP/claude-code" && rm -rf "$d" && mkdir -p "$d" && cd "$d"
-          npm pack --silent "@anthropic-ai/claude-code-linux-$arch@$VERSION" > /dev/null
-          tar -xzf ./*.tgz && rm -f ./*.tgz && chmod +x package/claude
-          echo "$d/package" >> "$GITHUB_PATH"
-
       - name: Check
         env:
           KERN_BIN: ${{ steps.install.outputs.bin }}
           KERN_KEEP: ${{ runner.environment == 'github-hosted' && '1' || '0' }}
           BASE: ${{ steps.base.outputs.sha }}
-          ANTHROPIC_API_KEY: ${{ steps.mode.outputs.runtime == 'runsc' && secrets.ANTHROPIC_API_KEY || '' }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.mode.outputs.runtime == 'runsc' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          KERN_CHECK_AI: "0"
         run: |
           set -euo pipefail
           W="$RUNNER_TEMP/kern"
-          [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
-          [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
           jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$W/pr.md"
           "$KERN_BIN" --control "$W/verifier.json" check "$GITHUB_WORKSPACE/repo" "$BASE" "$HEAD_SHA" "$W/out" "$W/operator.json" "$W/pr.md" | tee "$W/check.json"
           cat "$W/out/receipt.md" >> "$GITHUB_STEP_SUMMARY"
@@ -262,7 +247,6 @@ jobs:
           name: kern-run-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/kern/out/receipt.json
-            ${{ runner.temp }}/kern/out/comment.md
             ${{ runner.temp }}/kern/check.json
           if-no-files-found: ignore
           retention-days: 30
@@ -292,7 +276,6 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       NUMBER: ${{ github.event.pull_request.number }}
       FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-      HAS_AI: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - name: Kern, built where no pull request code ran
         id: trusted
@@ -326,7 +309,6 @@ jobs:
           src=$(find "$R" -name receipt.json -type f | head -n 1)
           [ -n "$src" ] || { echo "::error::The run gave no receipt"; exit 1; }
           cp "$src" "$O/receipt.json"
-          if [ "$HAS_AI" = true ] && [ -f "$(dirname "$src")/comment.md" ]; then cp "$(dirname "$src")/comment.md" "$O/comment.md"; fi
           "$K" receipt render "$O" "$HEAD_SHA"
           cat "$O/receipt.md" >> "$GITHUB_STEP_SUMMARY"
 

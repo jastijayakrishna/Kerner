@@ -903,3 +903,16 @@ fn a_yarnrc_keeps_only_the_settings_yarn_itself_knows_once_its_plugins_are_gone(
         assert!(clean.contains(kept), "{kept}: {clean}");
     }
 }
+
+#[test]
+fn a_side_whose_image_kern_did_not_record_fails_instead_of_running_on_the_default() {
+    let t = Temp::new();
+    let pinned = format!("sha256:{}", "a".repeat(64));
+    std::fs::write(t.join("setup.json"), serde_json::json!({ "old": { "volume": "kern-deps-old", "image": pinned }, "new": { "volume": "kern-deps-new", "image": "node:22" } }).to_string()).unwrap();
+    assert_eq!(drive::side_image(&t.0, "kern-deps-old").unwrap(), pinned);
+    let unpinned = drive::side_image(&t.0, "kern-deps-new").unwrap_err().0;
+    assert!(unpinned.contains("new"), "the new side's image is not pinned by digest, so its tests must not run on another image Kern guesses: {unpinned}");
+    assert!(drive::side_image(&t.0, "kern-deps-other").is_err(), "a volume setup.json does not know");
+    std::fs::write(t.join("setup.json"), "{ cut").unwrap();
+    assert!(drive::side_image(&t.0, "kern-deps-old").is_err(), "an unreadable setup.json is Kern's environment failing, never a reason to run both sides on one default image");
+}

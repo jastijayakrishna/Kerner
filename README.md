@@ -41,15 +41,16 @@ That is the whole install. There is no sign-up and no Kern server: Kern runs on 
 public repositories pay nothing for them. Keep the `permissions` as they are: Kern's jobs ask for exactly these, and GitHub does not
 start them with less (`id-token: write` is how GitHub signs each receipt).
 
-Two optional settings:
+One optional setting:
 
 - **Require the `Kern` status** (Settings, then Branches), so nothing merges without its receipt. A pull request can also edit
   `.github/workflows/` itself, to skip Kern or set the status on its own, so the status only binds when workflow files cannot change
   without you: make Kern a required workflow in a repository ruleset, or add `/.github/workflows/ @your-team` to `CODEOWNERS` and require
   code-owner review. `kern receipt verify` accepts only receipts signed by Kern's own workflow at `main`, a release tag, or `one`
   while Kern One is built there.
-- **Add an AI key** as an Actions secret, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). Kern then also
-  runs every changed line on the old and the new code. Without a key, your code never leaves GitHub's runners.
+
+Kern's workflow uses no AI key. The job that runs the pull request's code holds no keys at all, so an AI step that reads the pull
+request waits for a job of its own; a key you set is not passed to it. Your code never leaves GitHub's runners.
 
 See it on real pull requests: [kern-check-demo](https://github.com/jastijayakrishna/kern-check-demo/pulls?q=is%3Apr).
 
@@ -153,15 +154,16 @@ What Kern checks on every pull request:
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
    the package says it supports (`engines.node`, checked against Node's own documentation); and HTML that adds inline styles or scripts
    that a Content-Security-Policy in the same change forbids.
-9. **Behaviour, with an AI key.** Claude Code, in a locked-down mode, writes a small program that makes every changed line run. Kern runs
-   it on the old and the new code and lists what behaves differently, with what the pull request does not mention first.
+9. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
+   every changed line run; Kern runs it on the old and the new code and lists what behaves differently. It needs an AI key, so the
+   workflow does not run it until it has a job of its own that holds the key and never runs the pull request's code.
 
 Where the code runs: Kern's workflow has two jobs. The job that installs and tests the pull request's code holds no keys at all (its
 token can only read the repository) and runs on GitHub's throwaway machine, deleted when the job ends. There the code runs in locked
 containers (read-only system, no privileges, an unprivileged user, memory and process limits, the network off while tests run), and
 packages install with their own install scripts, the way CI installs them; when a script fails, Kern installs again without scripts.
 A second job never runs the pull request's code: it builds Kern itself from source with no cache, renders the receipt from the first
-job's results, signs it and posts it. On a machine that is kept between jobs, or when an AI key is set, the code runs in gVisor instead.
+job's results, signs it and posts it. On a machine that is kept between jobs, the code runs in gVisor instead.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
 so an edited comment cannot change what `kern receipt verify owner/repo 12` reports, and `/kern approve` only counts signed receipts.
@@ -255,7 +257,9 @@ Next steps:
   Kern cannot comment or set its status there. The job fails unless the answer is ✅. If you require the `Kern` status, merge such a
   pull request after reading that summary.
 - Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
-  could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code.
+  could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code. A test that notices Kern's
+  planted faults and fails on purpose fails in the control run too, so it catches nothing; two records that disagree about one test's
+  values are both ignored. A test written to hash its own source files can still tell a planted fault apart.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, and the answer is not verified, never passed or failed.
   Kern's own limits (time, memory, disk space, open files, a killed process, a broken report) never block.
 

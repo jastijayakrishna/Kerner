@@ -29,6 +29,7 @@ fn runnable(repo: &Path, head: &str, rules: &Value) -> bool {
     crate::git::mentions(repo, head, &needles.iter().map(String::as_str).collect::<Vec<_>>()).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
 }
 
+pub const NO_AI_STEP: &str = "this check runs no AI step: the job that runs the pull request's code holds no keys";
 const NO_CHANGE_TYPES: [&str; 3] = ["refactor", "perf", "style"];
 const NO_CHANGE_WORDS: [&str; 24] = ["no behavior change", "no behaviour change", "no behavioral change", "no behavioural change", "no functional change", "no functionality change",
     "without changing behavior", "without changing behaviour", "without changing functionality", "behavior-preserving", "behaviour-preserving", "behavior preserving",
@@ -119,6 +120,7 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let behaviour = match ai {
         _ if !run => json!({ "status": "NOTHING_TO_RUN" }),
         Some(_) if !trusted => json!({ "status": "OFF", "why": "Kern's self-test failed on this machine" }),
+        None if std::env::var("KERN_CHECK_AI").as_deref() == Ok("0") => json!({ "status": "OFF", "why": NO_AI_STEP }),
         None => json!({ "status": "OFF", "why": "no AI key" }),
         Some(a) => match crate::drive::auto(repo, base, head, out, op, pr, a.agent, a.rounds, until.saturating_sub(TESTS_MINUTES * 60_000).max(started)) {
             Ok(v) => json!({ "status": v["status"], "why": v["rounds"].as_array().and_then(|r| r.last()).and_then(|r| r["error"].as_str()).unwrap_or(""),

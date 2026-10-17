@@ -627,16 +627,23 @@ pub fn failures(runner: Runner, report: &[u8], values: &[u8]) -> BTreeMap<String
             }
         }
     }
+    let mut recorded: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    let mut conflicting = BTreeSet::new();
     for line in String::from_utf8_lossy(values).lines().take(VALUES_COUNT_MAX) {
         let Ok(x) = serde_json::from_str::<Value>(line) else { continue };
         let (Some(file), Some(name)) = (x["file"].as_str(), x["name"].as_str()) else { continue };
         let mut path: Vec<&str> = x["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         path.push(name);
-        let f = out.entry(format!("{} > {}", rel(file), path.join(" > "))).or_default();
+        let key = format!("{} > {}", rel(file), path.join(" > "));
+        let pair = (as_text(&x["expected"]), as_text(&x["actual"]));
+        if recorded.get(&key).is_some_and(|seen| *seen != pair) { conflicting.insert(key.clone()); }
+        recorded.insert(key.clone(), pair.clone());
+        let f = out.entry(key).or_default();
         if f.message.is_empty() { f.message = x["message"].as_str().map(capped).unwrap_or_default(); }
-        f.expected = as_text(&x["expected"]).or(f.expected.take());
-        f.actual = as_text(&x["actual"]).or(f.actual.take());
+        f.expected = pair.0.or(f.expected.take());
+        f.actual = pair.1.or(f.actual.take());
     }
+    for key in conflicting { if let Some(f) = out.get_mut(&key) { f.expected = None; f.actual = None; } }
     out
 }
 fn mocha_key(t: &Value) -> Option<String> {

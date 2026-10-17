@@ -167,12 +167,12 @@ pub fn spec(config: &str, seconds: u64, memory_mb: u64) -> Value {
     json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", CHECK, format!("/workspace/{config}"), heap.to_string()], "timeout_seconds": seconds, "cwd": parent(config), "env": {},
         "files": {}, "early": false, "faults": [] })
 }
-fn check_side(out: &Path, op: &Operator, volume: &str, config: &str, until: u64, label: &str) -> Value {
+fn check_side(out: &Path, volume: &str, config: &str, until: u64, label: &str) -> Value {
     let seconds = within(until, 240);
     if seconds < 90 { return json!({ "status": "unknown", "why": "Kern's time ran out" }); }
     let dir = parent(config);
     let memory_mb = crate::suite::test_limits(seconds).memory_mb;
-    let run = match crate::suite::in_test_box(out, op, volume, &format!("types-{label}"), ("drive-test.json", &spec(config, seconds, memory_mb)), ("__drive_test", false, seconds)) { Ok(r) => r, Err(e) => return json!({ "status": "unknown", "why": e.0 }) };
+    let run = match crate::suite::in_test_box(out, volume, &format!("types-{label}"), ("drive-test.json", &spec(config, seconds, memory_mb)), ("__drive_test", false, seconds)) { Ok(r) => r, Err(e) => return json!({ "status": "unknown", "why": e.0 }) };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else {
         return json!({ "status": "unknown", "why": crate::sandbox::refusal(&run.errors).map_or_else(|| "the run gave no report".to_string(), |r| format!("the sandbox refused the run: {r}")) });
     };
@@ -228,8 +228,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> Value {
             checked.push(json!({ "config": config, "result": "not-compared", "why": why }));
             continue;
         }
-        let old = check_side(out, op, &volume("old"), config, until, &format!("old-{i}"));
-        let new = if old["status"] == "clean" { check_side(out, op, &volume("new"), config, until, &format!("new-{i}")) } else { json!({ "status": "skipped" }) };
+        let old = check_side(out, &volume("old"), config, until, &format!("old-{i}"));
+        let new = if old["status"] == "clean" { check_side(out, &volume("new"), config, until, &format!("new-{i}")) } else { json!({ "status": "skipped" }) };
         let scripts: Vec<Value> = manifests(head, config).iter().chain(manifests(base, config).iter()).map(|m| m["scripts"].clone()).collect();
         let locked = |all: &BTreeSet<String>| {
             let mut at = dir.to_string();
