@@ -1139,17 +1139,94 @@ pub fn undos(path: &str, old: &str, new: &str) -> Vec<Mutant> {
     }
     out
 }
-struct Logs(Vec<(usize, usize)>);
-impl<'a> Visit<'a> for Logs {
-    fn visit_statements(&mut self, it: &oxc_allocator::Vec<'a, Statement<'a>>) {
-        for s in it {
-            if let Statement::ExpressionStatement(e) = s && let Expression::CallExpression(c) = &e.expression && logging(&c.callee) { self.0.push((e.span.start as usize, e.span.end as usize)); continue; }
-            self.visit_statement(s);
+fn erased_declaration(d: &Declaration) -> bool {
+    match d {
+        Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => true,
+        Declaration::VariableDeclaration(v) => v.declare,
+        Declaration::FunctionDeclaration(f) => f.declare || f.body.is_none(),
+        Declaration::ClassDeclaration(c) => c.declare,
+        Declaration::TSExternalModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_) => true,
+        Declaration::TSNamespaceDeclaration(n) => n.declare,
+        Declaration::TSEnumDeclaration(e) => e.declare,
+        _ => false,
+    }
+}
+fn erased_statement(s: &Statement) -> bool {
+    match s {
+        Statement::ImportDeclaration(i) => i.import_kind.is_type(),
+        Statement::ExportNamedDeclaration(e) => e.export_kind.is_type(),
+        Statement::ExportFromDeclaration(e) => e.export_kind.is_type(),
+        Statement::ExportDeclaration(e) => erased_declaration(&e.declaration),
+        Statement::ExportAllDeclaration(e) => e.export_kind.is_type(),
+        Statement::ExportDefaultDeclaration(e) => matches!(e.declaration, ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)),
+        Statement::ExpressionStatement(e) => matches!(&e.expression, Expression::CallExpression(c) if logging(&c.callee)),
+        _ => s.as_declaration().is_some_and(erased_declaration),
+    }
+}
+struct Erased<'s> { source: &'s str, spans: Vec<(usize, usize)> }
+impl Erased<'_> {
+    fn cut(&mut self, start: u32, end: u32) { self.spans.push((start as usize, end as usize)); }
+    fn cut_listed(&mut self, list: &[(oxc_span::Span, bool)]) {
+        for (i, (span, _)) in list.iter().enumerate().filter(|(_, (_, erased))| *erased) {
+            match (list.get(i + 1), i.checked_sub(1).and_then(|j| list.get(j))) {
+                (Some((next, _)), _) => self.cut(span.start, next.start),
+                (None, Some((prev, _))) => self.cut(prev.end, span.end),
+                (None, None) => self.cut(span.start, span.end),
+            }
         }
     }
 }
-fn without_logging(path: &str, source: &str) -> String {
-    let spans = parsed(path, source, |program, _| { let mut v = Logs(Vec::new()); v.visit_program(program); v.0 }).unwrap_or_default();
+impl<'a> Visit<'a> for Erased<'_> {
+    fn visit_statements(&mut self, it: &oxc_allocator::Vec<'a, Statement<'a>>) {
+        for s in it {
+            if erased_statement(s) { self.cut(s.span().start, s.span().end); continue; }
+            self.visit_statement(s);
+        }
+    }
+    fn visit_class_elements(&mut self, it: &oxc_allocator::Vec<'a, ClassElement<'a>>) {
+        for e in it {
+            let erased = match e {
+                ClassElement::TSIndexSignature(_) => true,
+                ClassElement::MethodDefinition(m) => m.value.body.is_none(),
+                ClassElement::PropertyDefinition(p) => p.declare || p.r#type == PropertyDefinitionType::TSAbstractPropertyDefinition,
+                _ => false,
+            };
+            if erased { self.cut(e.span().start, e.span().end); continue; }
+            self.visit_class_element(e);
+        }
+    }
+    fn visit_class(&mut self, it: &Class<'a>) {
+        if let (Some(first), Some(last)) = (it.implements.first(), it.implements.last())
+            && let Some(at) = self.source.get(..first.span.start as usize).and_then(|s| s.rfind("implements")) { self.spans.push((at, last.span.end as usize)); }
+        walk::walk_class(self, it);
+    }
+    fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
+        let list: Vec<(oxc_span::Span, bool)> = it.specifiers.iter().flatten().map(|s| match s {
+            ImportDeclarationSpecifier::ImportSpecifier(x) => (x.span, x.import_kind.is_type()),
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(x) => (x.span, false),
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(x) => (x.span, false),
+        }).collect();
+        self.cut_listed(&list);
+    }
+    fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
+        let list: Vec<(oxc_span::Span, bool)> = it.specifiers.iter().map(|s| (s.span, s.export_kind.is_type())).collect();
+        self.cut_listed(&list);
+    }
+    fn visit_export_from_declaration(&mut self, it: &ExportFromDeclaration<'a>) {
+        let list: Vec<(oxc_span::Span, bool)> = it.specifiers.iter().map(|s| (s.span, s.export_kind.is_type())).collect();
+        self.cut_listed(&list);
+    }
+    fn visit_ts_type_annotation(&mut self, it: &TSTypeAnnotation<'a>) { self.cut(it.span.start, it.span.end); }
+    fn visit_ts_type_parameter_declaration(&mut self, it: &TSTypeParameterDeclaration<'a>) { self.cut(it.span.start, it.span.end); }
+    fn visit_ts_type_parameter_instantiation(&mut self, it: &TSTypeParameterInstantiation<'a>) { self.cut(it.span.start, it.span.end); }
+    fn visit_ts_as_expression(&mut self, it: &TSAsExpression<'a>) { self.visit_expression(&it.expression); self.cut(it.expression.span().end, it.span.end); }
+    fn visit_ts_satisfies_expression(&mut self, it: &TSSatisfiesExpression<'a>) { self.visit_expression(&it.expression); self.cut(it.expression.span().end, it.span.end); }
+    fn visit_ts_non_null_expression(&mut self, it: &TSNonNullExpression<'a>) { self.visit_expression(&it.expression); self.cut(it.expression.span().end, it.span.end); }
+    fn visit_ts_type_assertion(&mut self, it: &TSTypeAssertion<'a>) { self.cut(it.span.start, it.expression.span().start); self.visit_expression(&it.expression); }
+}
+fn runtime_code(path: &str, source: &str) -> String {
+    let mut spans = parsed(path, source, |program, _| { let mut v = Erased { source, spans: Vec::new() }; v.visit_program(program); v.spans }).unwrap_or_default();
+    spans.sort_unstable();
     let (mut out, mut at) = (String::with_capacity(source.len()), 0);
     for (start, end) in spans.into_iter().filter(|(s, e)| s < e && *e <= source.len()) {
         if start < at || !source.is_char_boundary(start) || !source.is_char_boundary(end) { continue; }
@@ -1159,7 +1236,7 @@ fn without_logging(path: &str, source: &str) -> String {
     out.push_str(&source[at..]);
     out
 }
-pub fn same_behaviour(path: &str, old: &str, new: &str) -> bool { crate::capability::same_program(path, &without_logging(path, old), &without_logging(path, new)) }
+pub fn same_behaviour(path: &str, old: &str, new: &str) -> bool { crate::capability::same_program(path, &runtime_code(path, old), &runtime_code(path, new)) }
 #[derive(Clone, Debug)]
 pub struct Plan { pub targets: Vec<String>, pub mutants: Vec<Mutant>, pub command: Vec<String>, pub tests_paths: Vec<String>, pub old_files: Vec<String>, pub runner: Runner, pub known: Vec<String> }
 pub fn split_planting(plan: &Plan, n: usize) -> Vec<Plan> {

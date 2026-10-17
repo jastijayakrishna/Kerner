@@ -136,6 +136,31 @@ fn faults_some_jest_commonjs_exports_are_undone_one_function_at_a_time() {
 }
 
 #[test]
+fn ocean_web_1278_a_change_typescript_erases_is_not_behaviour() {
+    let same = [
+        ("export type { Row } from './content';\n", "export type {\n  Row,\n  Item,\n  Total,\n} from './content';\n"),
+        ("export { default } from './Summary';\nexport type { Props } from './Summary';\n", "export { default } from './Summary';\nexport type { Props } from './Summary';\nexport type { Row, Item } from './content';\n"),
+        ("export interface P { a: string }\nexport type Q = P;\n", "export interface P { a: string; b?: number }\nexport type Q = P & { c: boolean };\n"),
+        ("export function f(a: string): string { return a; }\n", "export function f(a: string | number): string { return a as string; }\n"),
+        ("import { type A, b } from 'm';\nexport const g = (x: A) => b(x!);\n", "import { type A, type C, b } from 'm';\nexport const g = <T,>(x: A | C) => b(x!);\n"),
+        ("export class K implements I { m(): void {} }\n", "export class K<T> implements I, J { m(): void {} }\n"),
+        ("declare const x: number;\nexport function h(v: number): number;\nexport function h(v: any) { return v; }\n", "declare const x: string;\nexport function h(v: number): number;\nexport function h(v: string): string;\nexport function h(v: any) { return v; }\n"),
+    ];
+    for (old, new) in same {
+        assert!(kern::proof::same_behaviour("src/a.ts", old, new), "only TypeScript types changed, which do not run:\n{old}\n->\n{new}");
+        assert!(undos(&[("src/a.ts", old, new)]).is_empty(), "nothing to undo:\n{new}");
+    }
+    let differ = [
+        ("export function f(a: string): string { return a; }\n", "export function f(a: string): string { return a.trim() as string; }\n"),
+        ("export enum E { A = 1 }\n", "export enum E { A = 2 }\n"),
+        ("import { type A, b } from 'm';\nexport const g = (x: A) => b(x);\n", "import { type A, c } from 'm';\nexport const g = (x: A) => c(x);\n"),
+    ];
+    for (old, new) in differ {
+        assert!(!kern::proof::same_behaviour("src/a.ts", old, new), "a change that runs is a change, however many types surround it:\n{old}\n->\n{new}");
+    }
+}
+
+#[test]
 fn a_name_kern_cannot_tell_apart_falls_back_to_the_whole_file() {
     let old = "export function f(a) { return a; }\nfunction g() { function f() { return 1; } return f(); }\n";
     let new = "export function f(a) { return a + 1; }\nfunction g() { function f() { return 1; } return f(); }\n";
@@ -167,7 +192,7 @@ fn receipt_with(faults: serde_json::Value, bystanders: serde_json::Value) -> (se
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = json!({ "status": "RAN", "runner": "jest", "before": { "passed": 4, "failed": 0, "skipped": 0 }, "after": { "passed": 4, "failed": 0, "skipped": 0 },
         "kept": 4, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "faults": faults, "bystanders": bystanders,
-        "faults_missing": [{ "path": "src/notes.js", "why": "Kern found nothing in its change to put a fault in (only comments, formatting or logging changed, or no line it knows how to change)" }] });
+        "faults_missing": [{ "path": "src/notes.js", "why": "Kern found nothing in its change to put a fault in (only comments, formatting, logging or TypeScript types changed, or no line it knows how to change)" }] });
     let r = receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }));
     let md = receipt::markdown(&r, None);
     (r, md)

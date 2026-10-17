@@ -1091,7 +1091,7 @@ pub fn fault_claims(runner: Runner, new: &Report, placebo: Option<&Value>, resul
     }).collect()
 }
 const NO_FAULT_RELATED: &str = "Kern could not pick the tests related to this file";
-const NO_FAULT_CHANGE: &str = "Kern found nothing in its change to put a fault in (only comments, formatting or logging changed, or no line it knows how to change)";
+const NO_FAULT_CHANGE: &str = "Kern found nothing in its change to put a fault in (only comments, formatting, logging or TypeScript types changed, or no line it knows how to change)";
 const NO_FAULT_RESULTS: &str = "Kern's fault run gave no results";
 const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run under jest or vitest";
 #[allow(clippy::too_many_arguments)]
