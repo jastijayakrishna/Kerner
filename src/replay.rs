@@ -47,10 +47,15 @@ fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec
         let raw: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
         let (placebo, runs) = match &raw { Value::Array(a) => (None, a.clone()), v => (Some(v["placebo"].clone()), v["faults"].as_array()?.clone()) };
         let new = ["new-related", "new"].iter().find_map(|r| report(&dir.join(format!("tests-{r}{label}.out")), *runner))?;
-        outcomes.extend(crate::suite::fault_outcomes(*runner, &new, placebo.as_ref(), &runs));
+        outcomes.extend(crate::suite::fault_outcomes(*runner, &new, placebo.as_ref(), &runs).into_iter().zip(crate::suite::fault_claims(*runner, &new, placebo.as_ref(), &runs)));
     }
     let stored = stored.as_array()?;
-    (outcomes.len() == stored.len()).then(|| stored.iter().zip(outcomes).map(|(f, o)| { let mut f = f.clone(); f["outcome"] = json!(o); f }).collect())
+    (outcomes.len() == stored.len()).then(|| stored.iter().zip(outcomes).map(|(f, (o, claim))| {
+        let mut f = f.clone();
+        f["outcome"] = json!(o);
+        if f["kind"] == "undo" { for (k, v) in claim.as_object().into_iter().flatten() { f[k] = v.clone(); } }
+        f
+    }).collect())
 }
 const VALUES_BYTES_MAX: u64 = 4 << 20;
 const TRACE_BYTES_MAX: u64 = 16 << 20;

@@ -112,22 +112,27 @@ What Kern checks on every pull request:
    mock that no old test names needs a look. A test file the change only adds tests to needs no such run:
    its old tests are still in it, unchanged, and ran on the new code. A new test that fails only for want of something the sandbox does
    not have (the network, a program or a native module) is listed as not checked.
-2. **Whether the tests check the change at all.** When the tests pass, Kern puts faults into each changed file of the product code, one at
-   a time, and runs the tests related to that file (jest and vitest). First it undoes the file's change, which shows whether any test can
-   tell the old code from the new; then it plants up to three small faults spread over the changed lines (`>` turned into `>=`, a condition
-   turned around, a call left out). Each fault is put in as the file is read, so nothing on disk is edited. Before the faults, Kern runs
-   the same tests once with the file served unchanged, as a control: a test that fails there (a flaky one, or one that notices Kern's
-   machinery) cannot catch a fault. A fault that makes a test fail that passed in the control is caught. The receipt says how many were
-   caught, names the lines where none was, and names every changed file Kern put no fault in, with why (another test runner, no related
-   tests it could pick, only comments, formatting or logging changed, or its limit of 23 faults in 20 files per check). When no test that
-   runs here even loads a changed file (its related tests cannot load, or there are none), that file is not verified, said plainly, and the
-   Tests line has no ✅: the tests pass, but none of them reaches that code. A small fault that only puts back the old line (the undo covers
-   that), logging calls, and a run Kern could not finish are not counted. Then Kern watches what the changed code gives the tests this
-   change does not touch: it rewrites each changed file so that its exported functions note every input and answer, runs those tests
-   (up to 40 files) on the old code twice and on the new code once, sets aside any input whose answer differs between the two old runs,
-   and lists each input whose answer changed on the new code as a note, with both answers. These notes do not change the answer yet;
-   Kern measures what they predict on real pull requests first. They come after the planted faults, and when time runs short they are
-   dropped first.
+2. **Whether the tests check the change at all.** When the tests pass, Kern undoes the change to each changed function of the product code,
+   one function at a time (and the rest of a file's change on its own), and runs the tests related to that file (jest and vitest); then it
+   plants up to three small faults spread over the changed lines (`>` turned into `>=`, a condition turned around, a call left out). Each
+   is put in as the file is read, so nothing on disk is edited. Before them, Kern runs the same tests once with the file served unchanged,
+   as a control: a test that fails there (a flaky one, or one that notices Kern's machinery) cannot catch anything. A changed function
+   counts as checked when a test fails with its change undone, or when its change is a rewrite the tests guard: a small fault in it is
+   caught, and no answer of it changed for the tests the change leaves untouched. The receipt says how many changed functions are checked,
+   and its Tests line has no ✅ when some are not. When a test catches an undo, the receipt quotes what the test expects and what it got
+   with that part of the change undone, so a reviewer judges the change as a few claims. For every changed function no test checks, the
+   receipt gives the agent that wrote the change an exact task: which test file already runs it (with an input whose answer changed, when
+   Kern saw one) and the assertion that is missing, or, for a rewrite meant to keep behaviour, to say so; where no test reaches the code,
+   the agent may say in the pull request why it cannot be tested there instead of writing tests that mock a database. The agent pushes, and
+   Kern checks again. Claims and tasks never change the answer. The receipt also names each changed file Kern put no fault in, with why
+   (another test runner, no related tests it could pick, only comments, formatting or logging changed, or its limit of 23 faults in 20
+   files per check). When no test that runs here even loads a changed file (its related tests cannot load, or there are none), that file is
+   not verified, said plainly. A small fault that only puts back the old line, logging calls, and a run Kern could not finish are not
+   counted. Then Kern watches what the changed code gives the tests this change does not touch: it rewrites each changed file so that its
+   exported functions note every input and answer, runs those tests (up to 40 files) on the old code twice and on the new code once, sets
+   aside any input whose answer differs between the two old runs, and lists each input whose answer changed on the new code as a note, with
+   both answers. These notes do not change the answer yet; Kern measures what they predict on real pull requests first. They come after the
+   planted faults, and when time runs short they are dropped first.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both

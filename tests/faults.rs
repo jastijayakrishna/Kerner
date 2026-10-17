@@ -61,7 +61,7 @@ fn undoing_the_change_comes_first_in_every_changed_file_and_gives_back_the_old_c
     assert_eq!(applied(&planted[0], zustand_new), zustand_old);
     assert_eq!(applied(&planted[1], other_new), other_old);
     assert_eq!(planted[0].line, 3, "the undo starts at the first changed line");
-    assert_eq!(planted[0].what(), "undoes the change");
+    assert_eq!(planted[0].what(), "undoes the change to persist");
     assert!(planted.iter().filter(|m| m.path == "src/f.ts" && m.kind == FaultKind::Operator).count() <= 3, "at most three small faults per file, spread over its changed lines");
 }
 
@@ -89,6 +89,147 @@ fn a_change_too_big_to_diff_line_by_line_still_gets_faults() {
     let planted = kern::suite::faults(&[("src/consts.js".to_string(), old.clone(), new.clone())], 24);
     let lines: BTreeSet<usize> = planted.iter().filter(|m| m.kind == FaultKind::Operator).map(|m| m.line).collect();
     assert!(lines.len() >= 2 && lines.first() < Some(&100) && lines.last() > Some(&1100), "faults go where the change is, spread across it: {lines:?}");
+}
+
+fn undos(files: &[(&str, &str, &str)]) -> Vec<kern::proof::Mutant> {
+    let files: Vec<(String, String, String)> = files.iter().map(|(p, o, n)| (p.to_string(), o.to_string(), n.to_string())).collect();
+    kern::suite::faults(&files, 23).into_iter().filter(|m| m.kind == FaultKind::Undo).collect()
+}
+
+#[test]
+fn foxschema_133_each_changed_function_is_undone_on_its_own_so_a_checked_one_cannot_hide_an_unchecked_one() {
+    let old = "export function split(sql) {\n  return sql.split(';');\n}\nexport function trim(s) {\n  return s.trim();\n}\nexport const quote = (s) => \"'\" + s + \"'\";\nexport function keep(s) { return s; }\n";
+    let new = "export function split(sql) {\n  return sql.split(/;\\s*/);\n}\nexport function trim(s) {\n  return s.trim().replace(/--.*$/, '');\n}\nexport const quote = (s) => \"'\" + s.replace(/'/g, \"''\") + \"'\";\nexport function keep(s) { return s; }\n";
+    let planted = undos(&[("packages/core/src/modules/sql-splitter.ts", old, new)]);
+    let targets: Vec<Option<String>> = planted.iter().map(|m| m.target.clone()).collect();
+    assert_eq!(targets, [Some("split".to_string()), Some("trim".to_string()), Some("quote".to_string())], "one undo per changed function, none for the unchanged one, and no whole-file undo when the functions cover the change: {planted:?}");
+    for m in &planted {
+        let back = applied(m, new);
+        assert!(back != new && back != old, "each undo puts back only its own function: {back}");
+        assert!(m.what().contains(m.target.as_deref().unwrap()), "{}", m.what());
+    }
+    assert_eq!(planted[1].line, 5, "the undo is reported at the first changed line inside the function");
+}
+
+#[test]
+fn a_change_outside_any_function_and_a_class_method_get_their_own_undos() {
+    let old = "export const LIMIT = 10;\nexport class Repo {\n  find(id) { return this.rows[id]; }\n  all() { return this.rows; }\n}\n";
+    let new = "export const LIMIT = 20;\nexport class Repo {\n  find(id) { return this.rows[id] ?? null; }\n  all() { return this.rows; }\n}\n";
+    let planted = undos(&[("src/repo.js", old, new)]);
+    assert_eq!(planted.iter().map(|m| m.target.clone()).collect::<Vec<_>>(), [Some("Repo.find".to_string()), None],
+        "the method is undone on its own, and the rest of the change (LIMIT) by a whole-file undo: {planted:?}");
+    assert_eq!(applied(&planted[1], new), old, "the whole-file undo still gives back the old file exactly");
+}
+
+#[test]
+fn a_name_kern_cannot_tell_apart_falls_back_to_the_whole_file() {
+    let old = "export function f(a) { return a; }\nfunction g() { function f() { return 1; } return f(); }\n";
+    let new = "export function f(a) { return a + 1; }\nfunction g() { function f() { return 1; } return f(); }\n";
+    let planted = undos(&[("src/f.js", old, new)]);
+    assert!(planted.iter().any(|m| m.target.as_deref() == Some("f")), "{planted:?}");
+    let twice_old = "if (a) { var h = () => 1; } else { var h = () => 2; }\nexport { h };\n";
+    let twice_new = "if (a) { var h = () => 3; } else { var h = () => 2; }\nexport { h };\n";
+    let planted = undos(&[("src/h.js", twice_old, twice_new)]);
+    assert_eq!(planted.iter().map(|m| m.target.clone()).collect::<Vec<_>>(), [None], "h is declared twice, so only the whole file is undone: {planted:?}");
+}
+
+#[test]
+fn a_test_the_pull_request_wrote_that_catches_the_undo_says_what_it_claims_the_change_does() {
+    use kern::policy::Runner::Jest;
+    let result = |status: &str, message: &str| json!({ "ancestorTitles": ["label"], "title": "labels many", "status": status, "failureMessages": if message.is_empty() { json!([]) } else { json!([message]) } });
+    let report = |status: &str, message: &str| json!({ "numTotalTests": 1, "testResults": [{ "name": "/workspace/test/label.test.js", "status": "passed", "assertionResults": [result(status, message)] }] }).to_string();
+    let new = kern::proof::read_report(Jest, report("passed", "").as_bytes()).unwrap();
+    let placebo = json!({ "finished": true, "served": true, "output": report("passed", ""), "errors": "" });
+    let caught = json!({ "finished": true, "served": true, "output": report("failed", "expect(received).toBe(expected)\n\nExpected: \"3 things\"\nReceived: \"3 items\"\n    at Object.<anonymous> (/workspace/test/label.test.js:4:30)"), "errors": "" });
+    let missed = json!({ "finished": true, "served": true, "output": report("passed", ""), "errors": "" });
+    let claims = kern::suite::fault_claims(Jest, &new, Some(&placebo), &[caught, missed]);
+    assert_eq!(claims[0], json!({ "caught_by": [{ "test": "test/label.test.js > label > labels many", "now": "\"3 things\"", "before": "\"3 items\"" }] }),
+        "the test expects the new answer and the old code gave the old one, so the reviewer reads the change as one claim");
+    assert_eq!(claims[1], json!({ "ran": ["test/label.test.js"] }), "a missed undo names the test files that ran the code and still passed");
+}
+
+fn receipt_with(faults: serde_json::Value, bystanders: serde_json::Value) -> (serde_json::Value, String) {
+    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let tests = json!({ "status": "RAN", "runner": "jest", "before": { "passed": 4, "failed": 0, "skipped": 0 }, "after": { "passed": 4, "failed": 0, "skipped": 0 },
+        "kept": 4, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "faults": faults, "bystanders": bystanders,
+        "faults_missing": [{ "path": "src/notes.js", "why": "Kern found nothing in its change to put a fault in (only comments, formatting or logging changed, or no line it knows how to change)" }] });
+    let r = receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }));
+    let md = receipt::markdown(&r, None);
+    (r, md)
+}
+
+#[test]
+fn every_change_no_test_checks_becomes_an_exact_task_for_the_agent_and_the_claims_its_tests_make_are_listed() {
+    let faults = json!([
+        { "path": "src/label.js", "line": 1, "what": "undoes the change to label", "kind": "undo", "target": "label", "outcome": "missed", "ran": ["test/label.test.js"] },
+        { "path": "src/price.js", "line": 3, "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "caught",
+          "caught_by": [{ "test": "test/price.test.js > discount > from 100", "now": "90", "before": "100" }] },
+        { "path": "packages/backend/src/services/ProjectService/ProjectService.ts", "line": 160, "what": "undoes the change to ProjectService.compile", "kind": "undo", "target": "ProjectService.compile", "outcome": "untested" },
+        { "path": "src/price.js", "line": 4, "what": "changes > to >=", "kind": "operator", "outcome": "caught" }]);
+    let seen = json!({ "status": "RAN", "compared": 2, "unstable": 0, "changed": 1, "tests": 1,
+        "differences": [{ "key": "src/label.js#label", "input": "[3]", "was": "returns \"3 items\"", "now": "returns \"3 things\"", "kind": "changed" }] });
+    let (r, md) = receipt_with(faults, seen);
+    assert_eq!(r["decision"], "clear", "tasks and claims never decide on their own: {r}");
+    let tasks: Vec<(String, String)> = r["challenges"].as_array().unwrap().iter().map(|c| (c["target"].as_str().unwrap().to_string(), c["kind"].as_str().unwrap().to_string())).collect();
+    assert_eq!(tasks, [("label".to_string(), "unasserted".to_string()), ("ProjectService.compile".to_string(), "unreached".to_string())], "{r}");
+    assert!(md.contains("For the agent that wrote this change"), "{md}");
+    assert!(md.contains("`test/label.test.js` runs it") && md.contains("`label(3)`") && md.contains("`\"3 items\"`") && md.contains("`\"3 things\"`"),
+        "the task names the test file that already runs the code and an input whose answer changed: {md}");
+    assert!(md.contains("No test reaches") && md.contains("ProjectService.ts") && md.contains("say in the pull request why"),
+        "where no test reaches the code, the agent may explain instead of mocking a database: {md}");
+    assert!(md.contains("`test/price.test.js > discount > from 100` expects `90`; with the change to `discount` undone it gets `100`"), "{md}");
+    assert!(md.contains("Checked by a test: 1 of 3 changed functions"), "comment- or format-only files do not count against it: {md}");
+    assert!(!md.contains("✅ Tests"), "the tests line never implies the change is tested when part of it is not: {md}");
+}
+
+#[test]
+fn a_test_the_change_never_touched_that_fails_with_one_of_two_linked_functions_undone_is_not_called_the_change_s_own() {
+    let faults = json!([
+        { "path": "src/store.js", "line": 2, "what": "undoes the change to save", "kind": "undo", "target": "save", "outcome": "caught",
+          "caught_by": [{ "test": "test/store.test.js > round trip", "now": "{\"total\":3}", "before": "undefined" }] },
+        { "path": "src/store.js", "line": 6, "what": "undoes the change to load", "kind": "undo", "target": "load", "outcome": "caught",
+          "caught_by": [{ "test": "test/store.test.js > round trip", "now": "{\"total\":3}", "before": "undefined" }] }]);
+    let (r, md) = receipt_with(faults, json!({}));
+    assert_eq!(r["decision"], "clear", "{r}");
+    assert!(!md.contains("written or edited by this pull request") && !md.contains("before this change `undefined`"),
+        "a test the change never touched can fail on a mix of old and new functions; the receipt must not say the change wrote it or that the old code gave that value: {md}");
+    assert!(md.contains("expects `{\"total\":3}`; with the change to `save` undone it gets `undefined`"), "{md}");
+}
+
+#[test]
+fn a_refactor_whose_code_the_tests_guard_counts_as_checked_unless_an_untouched_test_saw_its_answer_change() {
+    let faults = |extra: serde_json::Value| {
+        let mut list = vec![
+            json!({ "path": "src/price.js", "line": 1, "lines": [1, 1], "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "missed", "ran": ["test/price.test.js"] }),
+            json!({ "path": "src/price.js", "line": 1, "what": "changes < to <=", "kind": "operator", "outcome": "caught" })];
+        if !extra.is_null() { list.push(extra); }
+        json!(list)
+    };
+    let (r, md) = receipt_with(faults(serde_json::Value::Null), json!({}));
+    assert_eq!(r["challenges"], json!([]), "the tests catch a small fault in discount, and no answer of it changed, so undoing a same-behaviour rewrite proves nothing: {r}");
+    assert!(md.contains("✅ Checked by a test: every changed function (1)"), "{md}");
+    let seen = json!({ "status": "RAN", "compared": 1, "unstable": 0, "changed": 1, "tests": 1,
+        "differences": [{ "key": "src/price.js#discount", "input": "[150]", "was": "returns 135", "now": "returns 150", "kind": "changed" }] });
+    let (r, md) = receipt_with(faults(serde_json::Value::Null), seen);
+    assert_eq!(r["challenges"][0]["kind"], "unasserted", "an untouched test saw discount(150) change and no test asserts it: {r}");
+    assert!(md.contains("`discount(150)`") && md.contains("`135`") && md.contains("`150`"), "{md}");
+    let (r, _) = receipt_with(faults(json!({ "path": "src/price.js", "line": 9, "what": "changes > to >=", "kind": "operator", "outcome": "caught" })), json!({}));
+    assert_eq!(r["challenges"], json!([]), "{r}");
+    let elsewhere = json!([json!({ "path": "src/price.js", "line": 1, "lines": [1, 1], "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "missed", "ran": ["test/price.test.js"] }),
+        json!({ "path": "src/price.js", "line": 9, "what": "changes > to >=", "kind": "operator", "outcome": "caught" })]);
+    let (r, md) = receipt_with(elsewhere, json!({}));
+    assert_eq!(r["challenges"][0]["kind"], "unasserted", "a fault caught in another function says nothing about this one: {r}");
+    assert!(md.contains("if it keeps behaviour the same, say so"), "{md}");
+}
+
+#[test]
+fn a_change_every_test_checks_earns_its_check_mark_and_gives_the_agent_nothing_to_do() {
+    let faults = json!([{ "path": "src/price.js", "line": 3, "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "caught",
+        "caught_by": [{ "test": "test/price.test.js > discount > from 100", "now": "90", "before": "100" }] }]);
+    let (r, md) = receipt_with(faults, json!({}));
+    assert_eq!(r["challenges"], json!([]));
+    assert!(md.contains("✅ Checked by a test: every changed function (1)") && !md.contains("For the agent"), "{md}");
 }
 
 fn jest(tests: &[(&str, &str)]) -> String {
@@ -165,7 +306,7 @@ fn faults_no_test_noticed_are_named_and_a_change_no_test_checks_needs_a_look() {
     let off = json!({ "status": "OFF", "why": "no AI key" });
     let none = receipt::build(&d, &rules, &tests(&["missed", "untested", "missed"]), &off);
     assert_eq!(none["decision"], "clear", "no test checking a change is shown, not a look: 14 of 118 real pull requests changed code no test reaches, many of them CI scripts and examples: {none}");
-    assert!(receipt::markdown(&none, None).contains("the tests caught 0 of 3 faults"));
+    assert!(receipt::markdown(&none, None).contains("the tests caught 0 of 3 small faults"));
     let some = receipt::build(&d, &rules, &tests(&["caught", "missed", "caught"]), &off);
     assert!(!some["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change"));
     let md = receipt::markdown(&some, None);

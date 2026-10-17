@@ -1040,23 +1040,54 @@ pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::pr
         let gone: BTreeSet<String> = removed.into_iter().filter_map(|i| a.get(i)).map(|l| l.trim().to_string()).collect();
         spread(crate::proof::plant_lines(path, new, &lines, &gone), OPERATOR_FAULTS_PER_FILE_COUNT_MAX).into_iter().collect()
     }).collect();
-    let mut out: Vec<crate::proof::Mutant> = files.iter().filter_map(|(path, old, new)| crate::proof::undo(path, old, new)).take(limit).collect();
+    let mut undone: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| crate::proof::undos(path, old, new).into_iter().collect()).collect();
+    let mut out: Vec<crate::proof::Mutant> = Vec::new();
+    while out.len() < limit && undone.iter().any(|f| !f.is_empty()) {
+        for f in undone.iter_mut() { if out.len() < limit && let Some(m) = f.pop_front() { out.push(m); } }
+    }
     while out.len() < limit && per_file.iter().any(|f| !f.is_empty()) {
         for f in per_file.iter_mut() { if out.len() < limit && let Some(m) = f.pop_front() { out.push(m); } }
     }
     out
 }
-pub fn fault_outcomes(runner: Runner, new: &Report, placebo: Option<&Value>, results: &[Value]) -> Vec<&'static str> {
+fn controlled(runner: Runner, new: &Report, placebo: Option<&Value>) -> (Report, bool) {
     let control = placebo.map(|p| if p["finished"] == true { proof::read_report(runner, p["output"].as_str().unwrap_or("").as_bytes()).ok() } else { None });
     let mut baseline = new.clone();
     if let Some(Some(r)) = &control {
         for (k, c) in r.tests.iter().filter(|(_, c)| c.failed > 0) { baseline.tests.entry(k.clone()).or_default().failed += c.failed; }
         baseline.problems.extend(r.problems.iter().filter(|p| !new.problems.contains(p)).cloned());
     }
+    (baseline, matches!(control, Some(None)))
+}
+pub fn fault_outcomes(runner: Runner, new: &Report, placebo: Option<&Value>, results: &[Value]) -> Vec<&'static str> {
+    let (baseline, uncontrolled) = controlled(runner, new, placebo);
     results.iter().map(|r| {
         let text = |k: &str| r[k].as_str().unwrap_or("").as_bytes().to_vec();
         let outcome = proof::fault_verdict(runner, &baseline, (r["finished"] == true, r["served"] == true), &text("output"), &text("errors"));
-        if outcome == "caught" && matches!(control, Some(None)) { "unknown" } else { outcome }
+        if outcome == "caught" && uncontrolled { "unknown" } else { outcome }
+    }).collect()
+}
+const CLAIMS_PER_FAULT_COUNT_MAX: usize = 3;
+const RAN_FILES_COUNT_MAX: usize = 5;
+pub fn fault_claims(runner: Runner, new: &Report, placebo: Option<&Value>, results: &[Value]) -> Vec<Value> {
+    let (baseline, _) = controlled(runner, new, placebo);
+    let known: BTreeSet<String> = baseline.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k.clone()).chain(baseline.problems.iter().cloned()).collect();
+    fault_outcomes(runner, new, placebo, results).into_iter().zip(results).map(|(outcome, r)| {
+        let output = r["output"].as_str().unwrap_or("").as_bytes();
+        match outcome {
+            "caught" => {
+                let claims: Vec<Value> = proof::failures(runner, output, b"").into_iter().filter(|(k, _)| !known.contains(k)).take(CLAIMS_PER_FAULT_COUNT_MAX).map(|(test, f)| {
+                    let read = crate::polarity::read(&f.message, f.expected.as_deref(), f.actual.as_deref());
+                    if read.was.is_empty() && read.now.is_empty() { json!({ "test": test, "why": proof::first_lines(&f.message) }) } else { json!({ "test": test, "now": read.was, "before": read.now }) }
+                }).collect();
+                json!({ "caught_by": claims })
+            }
+            "missed" => {
+                let ran: BTreeSet<String> = proof::read_report(runner, output).map(|rep| rep.tests.keys().map(|k| file_of(k).to_string()).collect()).unwrap_or_default();
+                json!({ "ran": ran.into_iter().take(RAN_FILES_COUNT_MAX).collect::<Vec<_>>() })
+            }
+            _ => json!({}),
+        }
     }).collect()
 }
 const NO_FAULT_RELATED: &str = "Kern could not pick the tests related to this file";
@@ -1089,8 +1120,19 @@ fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: 
     };
     let _ = std::fs::write(out.join(format!("faults{label}.json")), serde_json::to_vec(&json!({ "placebo": placebo, "faults": runs })).unwrap_or_default());
     let outcomes = fault_outcomes(tests.runner, new, Some(placebo), runs);
+    let claims = fault_claims(tests.runner, new, Some(placebo), runs);
     let related: BTreeSet<String> = proof::read_report(tests.runner, placebo["output"].as_str().unwrap_or("").as_bytes()).map(|r| r.tests.keys().map(|k| file_of(k).to_string()).collect()).unwrap_or_default();
-    (kept.iter().zip(outcomes).map(|((m, _), o)| json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "outcome": o })).collect(), missing, related)
+    let entries = kept.iter().zip(outcomes).zip(claims).map(|(((m, _), o), claim)| {
+        let mut entry = json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "target": m.target, "outcome": o });
+        if m.kind == crate::proof::FaultKind::Undo {
+            for (k, v) in claim.as_object().into_iter().flatten() { entry[k] = v.clone(); }
+            if let Some((_, _, text)) = files.iter().find(|f| f.0 == m.path) && m.end <= text.len() {
+                entry["lines"] = json!([text[..m.start].matches('\n').count() + 1, text[..m.end].matches('\n').count() + 1]);
+            }
+        }
+        entry
+    }).collect();
+    (entries, missing, related)
 }
 pub const BYSTANDER_SECS_MIN: u64 = 240;
 pub const BYSTANDER_SECS_MAX: u64 = 480;

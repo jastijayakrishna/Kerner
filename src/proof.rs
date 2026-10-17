@@ -1030,7 +1030,7 @@ impl FaultKind {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mutant { pub id: usize, pub path: String, pub line: usize, pub start: usize, pub end: usize, pub original: String, pub replacement: String, what: String,
-    pub tests: Vec<String>, pub kind: FaultKind }
+    pub tests: Vec<String>, pub kind: FaultKind, pub target: Option<String> }
 impl Mutant {
     pub fn describe(&self) -> String { format!("{}:{} {}", self.path, self.line, self.what) }
     pub fn what(&self) -> &str { &self.what }
@@ -1047,7 +1047,77 @@ pub fn undo(path: &str, old: &str, new: &str) -> Option<Mutant> {
     let (original, replacement) = (&new[pre..b.len() - suf], &old[pre..a.len() - suf]);
     if original.len().max(replacement.len()) > UNDO_BYTES_MAX { return None; }
     Some(Mutant { id: 0, path: path.to_string(), line: new[..pre].matches('\n').count() + 1, start: pre, end: b.len() - suf, original: original.to_string(),
-        replacement: replacement.to_string(), what: "undoes the change".to_string(), tests: Vec::new(), kind: FaultKind::Undo })
+        replacement: replacement.to_string(), what: "undoes the change".to_string(), tests: Vec::new(), kind: FaultKind::Undo, target: None })
+}
+const FUNCTION_UNDOS_PER_FILE_COUNT_MAX: usize = 6;
+fn unit_of(name: String, span: oxc_span::Span, out: &mut Vec<(String, usize, usize)>) { out.push((name, span.start as usize, span.end as usize)); }
+fn object_units(owner: &str, o: &ObjectExpression, out: &mut Vec<(String, usize, usize)>) {
+    for p in &o.properties {
+        let ObjectPropertyKind::ObjectProperty(p) = p else { continue };
+        let Some(key) = p.key.static_name() else { continue };
+        if matches!(unwrap(&p.value), Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) { unit_of(format!("{owner}.{key}"), p.span, out); }
+    }
+}
+fn declared_units(d: &Declaration, out: &mut Vec<(String, usize, usize)>) {
+    match d {
+        Declaration::FunctionDeclaration(f) if f.body.is_some() => { if let Some(id) = &f.id { unit_of(id.name.to_string(), f.span, out); } }
+        Declaration::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                let (BindingPattern::BindingIdentifier(id), Some(init)) = (&d.id, &d.init) else { continue };
+                match unwrap(init) {
+                    Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => unit_of(id.name.to_string(), init.span(), out),
+                    Expression::ObjectExpression(o) => object_units(&id.name, o, out),
+                    _ => {}
+                }
+            }
+        }
+        Declaration::ClassDeclaration(c) => {
+            let Some(id) = &c.id else { return };
+            for e in &c.body.body {
+                if let ClassElement::MethodDefinition(m) = e && m.value.body.is_some() && let Some(key) = m.key.static_name() { unit_of(format!("{}.{key}", id.name), m.span, out); }
+            }
+        }
+        _ => {}
+    }
+}
+fn units(path: &str, source: &str) -> Option<BTreeMap<String, (usize, usize)>> {
+    parsed(path, source, |program, _| {
+        let mut found = Vec::new();
+        for s in &program.body {
+            match s {
+                Statement::ExportDeclaration(e) => declared_units(&e.declaration, &mut found),
+                Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) if f.body.is_some() => unit_of(f.id.as_ref().map_or("default".to_string(), |i| i.name.to_string()), f.span, &mut found),
+                    _ => {}
+                },
+                _ => if let Some(d) = s.as_declaration() { declared_units(d, &mut found) },
+            }
+        }
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for (n, _, _) in &found { *seen.entry(n.clone()).or_insert(0) += 1; }
+        found.into_iter().filter(|(n, _, _)| seen[n] == 1).map(|(n, s, e)| (n, (s, e))).collect()
+    })
+}
+fn first_difference(a: &str, b: &str) -> usize { a.char_indices().zip(b.chars()).find(|((_, x), y)| x != y).map_or(a.len().min(b.len()), |((i, _), _)| i) }
+pub fn undos(path: &str, old: &str, new: &str) -> Vec<Mutant> {
+    if old.is_empty() || old == new || same_behaviour(path, old, new) { return Vec::new(); }
+    let (Some(before), Some(after)) = (units(path, old), units(path, new)) else { return undo(path, old, new).into_iter().collect() };
+    let mut out = Vec::new();
+    for (name, (s, e)) in &after {
+        let Some((os, oe)) = before.get(name) else { continue };
+        let (original, replacement) = (&new[*s..*e], &old[*os..*oe]);
+        if original == replacement || out.len() >= FUNCTION_UNDOS_PER_FILE_COUNT_MAX { continue; }
+        let candidate = format!("{}{replacement}{}", &new[..*s], &new[*e..]);
+        if same_behaviour(path, new, &candidate) || parsed(path, &candidate, |_, _| ()).is_none() { continue; }
+        let line = new[..s + first_difference(original, replacement)].matches('\n').count() + 1;
+        out.push(Mutant { id: 0, path: path.to_string(), line, start: *s, end: *e, original: original.to_string(), replacement: replacement.to_string(),
+            what: format!("undoes the change to {name}"), tests: Vec::new(), kind: FaultKind::Undo, target: Some(name.clone()) });
+    }
+    out.sort_by_key(|m| m.start);
+    let mut back = new.to_string();
+    for m in out.iter().rev() { back.replace_range(m.start..m.end, &m.replacement); }
+    if !same_behaviour(path, &back, old) { out.extend(undo(path, old, new)); }
+    out
 }
 struct Logs(Vec<(usize, usize)>);
 impl<'a> Visit<'a> for Logs {
@@ -1304,7 +1374,7 @@ fn planted(path: &str, source: &str, keep: &dyn Fn(usize, &str) -> bool) -> Vec<
         if best.get(&line).is_none_or(|b| (f.5, f.0) < (b.5, b.0)) { best.insert(line, f); }
     }
     best.into_iter().map(|(line, (start, end, original, replacement, what, _))| Mutant { id: 0, path: path.to_string(), line, start, end, original, replacement, what, tests: Vec::new(),
-        kind: FaultKind::Operator }).collect()
+        kind: FaultKind::Operator, target: None }).collect()
 }
 pub fn plan(tests: &Tests, base: &Files, candidate: &Files, screened: &Value) -> R<Plan> {
     let starts: Vec<String> = ["changed_test_files", "deleted_test_files"].iter().flat_map(|k| screened[*k].as_array().cloned().unwrap_or_default()).filter_map(|v| v.as_str().map(str::to_string)).collect();

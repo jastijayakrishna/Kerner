@@ -35,6 +35,23 @@ fn comfy_desktop_1732_every_install_retry_starts_again_from_the_committed_tree()
 }
 
 #[test]
+fn langchain_macaw_32_every_cache_kern_makes_inside_the_project_is_removed_before_tests_run() {
+    let inside = |p: &str| p.starts_with("/workspace/") && !p.starts_with("/workspace/node_modules/");
+    let scratch = |p: &str| kern::sandbox::INSTALL_SCRATCH.iter().any(|s| p == *s || p.starts_with(&format!("{s}/")));
+    for (key, value) in kern::sandbox::INSTALL_ENV.iter().filter(|(_, v)| inside(v)) {
+        assert!(scratch(value), "{key}={value} sits inside the project, where its test runner can find it, and is not removed after install");
+    }
+    let t = Temp::new();
+    write(&t.0, "package.json", "{\"name\":\"p\",\"packageManager\":\"pnpm@10.18.0\"}");
+    write(&t.0, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    let (_, attempts) = kern::sandbox::install_plan(&t.0);
+    for arg in attempts.iter().flat_map(|(argv, _)| argv.iter()).filter_map(|a| a.strip_prefix("--store-dir=")) {
+        assert!(scratch(arg), "langchain-ai/macaw-design-system#32: pnpm 10 keeps a link from its store back to the project, so vitest ran every test a second time through {arg}");
+    }
+    assert!(attempts.iter().any(|(argv, _)| argv.iter().any(|a| a.starts_with("--store-dir="))), "pnpm still installs from a store Kern names");
+}
+
+#[test]
 fn a_package_counts_as_installed_with_the_workspace_only_when_the_workspace_install_worked() {
     let root = |result: &str| vec![json!({ "dir": ".", "manager": "npm", "result": result })];
     assert!(kern::sandbox::with_workspace("packages/app", true, &root("installed")));

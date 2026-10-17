@@ -198,6 +198,95 @@ fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Valu
         f.unverified.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put faults in the changed code, and no test loaded them), so the tests say nothing about it", code(path, 160))));
     }
 }
+const NOTHING_TO_CHANGE: &str = "Kern found nothing in its change";
+struct Unit { path: String, target: Option<String>, outcome: String, ran: Vec<String>, caught_by: Vec<Value> }
+fn guarded(faults: &[&Value], undo: &Value) -> bool {
+    let range = undo["lines"].as_array().and_then(|l| Some((l.first()?.as_u64()?, l.get(1)?.as_u64()?)));
+    let whole = undo["target"].is_null();
+    faults.iter().any(|f| f["kind"] != "undo" && f["path"] == undo["path"] && f["outcome"] == "caught"
+        && (whole || range.zip(f["line"].as_u64()).is_some_and(|((a, b), l)| (a..=b).contains(&l))))
+}
+fn units(tests: &Value) -> Vec<Unit> {
+    let faults: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().collect();
+    let mut out: Vec<Unit> = faults.iter().filter(|f| f["kind"] == "undo").map(|f| Unit { path: f["path"].as_str().unwrap_or("").to_string(), target: f["target"].as_str().map(str::to_string),
+        outcome: f["outcome"].as_str().unwrap_or("unknown").to_string(), ran: strings(&f["ran"]), caught_by: f["caught_by"].as_array().cloned().unwrap_or_default() }).collect();
+    for (u, f) in out.iter_mut().zip(faults.iter().filter(|f| f["kind"] == "undo")) {
+        if u.outcome == "missed" && guarded(&faults, f) && example(tests, u).is_none() { u.outcome = "covered".to_string(); }
+    }
+    let undone: std::collections::BTreeSet<String> = out.iter().map(|u| u.path.clone()).collect();
+    let mut others: Vec<(String, Vec<String>)> = Vec::new();
+    for f in faults.iter().filter(|f| f["kind"] != "undo") {
+        let (path, outcome) = (f["path"].as_str().unwrap_or("").to_string(), f["outcome"].as_str().unwrap_or("unknown").to_string());
+        if undone.contains(&path) { continue; }
+        match others.iter_mut().find(|(p, _)| *p == path) { Some((_, o)) => o.push(outcome), None => others.push((path, vec![outcome])) }
+    }
+    for (path, outcomes) in others {
+        let outcome = ["caught", "missed", "unreached", "untested"].into_iter().find(|o| outcomes.iter().any(|x| x == o)).unwrap_or("unknown").to_string();
+        out.push(Unit { path, target: None, outcome, ran: Vec::new(), caught_by: Vec::new() });
+    }
+    for m in tests["faults_missing"].as_array().into_iter().flatten().filter(|m| !m["why"].as_str().unwrap_or("").starts_with(NOTHING_TO_CHANGE)) {
+        out.push(Unit { path: m["path"].as_str().unwrap_or("").to_string(), target: None, outcome: "not checked".to_string(), ran: Vec::new(), caught_by: Vec::new() });
+    }
+    out
+}
+fn named(u: &Unit) -> String { u.target.as_ref().map_or_else(|| format!("The change in {}", code(&u.path, 160)), |t| format!("{} in {}", code(t, 120), code(&u.path, 160))) }
+fn example(tests: &Value, u: &Unit) -> Option<String> {
+    let names: Vec<String> = u.target.iter().flat_map(|t| [t.clone(), t.replace('.', "#")]).collect();
+    let keyed = |k: &str| k.strip_prefix(&format!("{}#", u.path)).is_some_and(|n| names.is_empty() || names.iter().any(|x| x == n));
+    let d = tests["bystanders"]["differences"].as_array().into_iter().flatten().find(|d| d["key"].as_str().is_some_and(keyed))?;
+    let name = d["key"].as_str()?.split_once('#')?.1.replace('#', ".");
+    let input = d["input"].as_str()?;
+    let args = input.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(input);
+    let answer = |k: &str| { let a = d[k].as_str().unwrap_or(""); a.strip_prefix("returns ").or_else(|| a.strip_prefix("resolves ")).unwrap_or(a).to_string() };
+    Some(format!(" For example, {} gave {} before and gives {} now.", code(&format!("{name}({args})"), 160), code(&answer("was"), 160), code(&answer("now"), 160)))
+}
+fn proof_items(tests: &Value) -> (Vec<Value>, Vec<Value>) {
+    let (mut claims, mut challenges) = (Vec::new(), Vec::new());
+    for u in units(tests) {
+        for c in &u.caught_by { claims.push(json!({ "path": u.path, "target": u.target, "test": c["test"], "now": c["now"], "before": c["before"], "why": c["why"] })); }
+        let kind = match u.outcome.as_str() { "missed" => "unasserted", "untested" | "unreached" => "unreached", _ => continue };
+        challenges.push(json!({ "path": u.path, "target": u.target, "kind": kind, "tests": u.ran, "example": example(tests, &u) }));
+    }
+    (claims, challenges)
+}
+fn claims_md(r: &Value) -> String {
+    let claims = r["claims"].as_array().cloned().unwrap_or_default();
+    if claims.is_empty() { return String::new(); }
+    let mut md = "**What the tests say this change does.** Each test below fails when Kern undoes part of the change; check that what it expects is right:\n\n".to_string();
+    for c in claims.iter().take(SHOWN) {
+        let test = code(c["test"].as_str().unwrap_or(""), 200);
+        let undone = c["target"].as_str().map_or_else(|| format!("the change in {}", code(c["path"].as_str().unwrap_or(""), 160)), |t| format!("the change to {}", code(t, 120)));
+        md += &match (c["now"].as_str(), c["before"].as_str()) {
+            (Some(now), Some(before)) => format!("- {test} expects {}; with {undone} undone it gets {}\n", code(now, 160), code(before, 160)),
+            _ => format!("- {test} fails with {undone} undone: {}\n", plain(c["why"].as_str().unwrap_or(""), 300)),
+        };
+    }
+    md + "\n"
+}
+fn checked_md(r: &Value, proved: &[Unit], checked: usize) -> String {
+    if proved.is_empty() { return String::new(); }
+    let open: Vec<String> = proved.iter().filter(|u| u.outcome != "caught" && u.outcome != "covered").take(SHOWN)
+        .map(|u| u.target.as_ref().map_or_else(|| code(&u.path, 160), |t| format!("{} ({})", code(t, 120), code(&u.path, 160)))).collect();
+    if open.is_empty() { return format!("- ✅ Checked by a test: every changed function ({})\n", proved.len()); }
+    let see = if r["challenges"].as_array().is_some_and(|c| !c.is_empty()) { " (see For the agent below)" } else { "" };
+    format!("- ⚠️ Checked by a test: {checked} of {} changed functions; not checked: {}{see}\n", proved.len(), open.join(", "))
+}
+fn agent_md(r: &Value) -> String {
+    let challenges = r["challenges"].as_array().cloned().unwrap_or_default();
+    if challenges.is_empty() { return String::new(); }
+    let mut md = "**For the agent that wrote this change.** No test checks these changes. Do what each line asks, then push; Kern checks again.\n\n".to_string();
+    for (i, c) in challenges.iter().take(SHOWN).enumerate() {
+        let u = Unit { path: c["path"].as_str().unwrap_or("").to_string(), target: c["target"].as_str().map(str::to_string), outcome: String::new(), ran: strings(&c["tests"]), caught_by: Vec::new() };
+        let ask = if c["kind"] == "unasserted" {
+            let who = if u.ran.is_empty() { "A test".to_string() } else { u.ran.iter().map(|t| code(t, 160)).collect::<Vec<_>>().join(", ") };
+            format!("{who} runs it, but still passes when your change is undone. If the change is meant to alter behaviour, add an assertion there that fails on the old code and passes on yours; if it keeps behaviour the same, say so in the pull request.{}", c["example"].as_str().unwrap_or(""))
+        } else {
+            "No test reaches this file. If it can run on its own, add a test that fails on the old code and passes on yours; if it needs a database, a network or other services, say in the pull request why it cannot be tested here.".to_string()
+        };
+        md += &format!("{}. {}: {ask}\n", i + 1, named(&u));
+    }
+    md + "\n"
+}
 fn bystander_items(f: &mut Found, tests: &Value) {
     for x in tests["bystanders"]["differences"].as_array().into_iter().flatten() {
         let what = match x["kind"].as_str() { Some("accepts") => "now accepts what it refused", Some("throws") => "now throws", Some("empty") => "now gives nothing back", _ => "now gives another answer" };
@@ -355,6 +444,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     steering_items(&mut f, rules);
     not_run_items(&mut f, tests);
     let decision = if !f.blocked.is_empty() { "blocked" } else if !f.look.is_empty() { "look" } else if !f.unverified.is_empty() { "unverified" } else { "clear" };
+    let (claims, challenges) = proof_items(tests);
     let report = &behaviour["report"];
     let lines = if summary { behaviour["lines"].clone() } else { json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
         "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) }) };
@@ -364,7 +454,8 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
             .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).chain(f.cannot_run).collect();
     json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"],
-        "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": f.blocked, "look": f.look, "unverified": f.unverified, "notes": f.notes, "tests": tests,
+        "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": f.blocked, "look": f.look, "unverified": f.unverified, "notes": f.notes,
+        "claims": claims, "challenges": challenges, "tests": tests,
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": percent, "lines": lines, "described": described, "not_mentioned": surprises, "sorted": sorted },
         "rules": rules, "not_checked": not_checked, "drive": { "skipped": d["skipped"], "unmeasured": d["unmeasured"] } })
 }
@@ -442,7 +533,10 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         list(&mut md, &notes);
         md += "\n";
     }
+    md += &claims_md(r);
     md += "**What Kern checked**\n\n";
+    let proved = units(tests);
+    let checked = proved.iter().filter(|u| u.outcome == "caught" || u.outcome == "covered").count();
     if tests_ran {
         let kept = tests["kept"].as_u64().unwrap_or(0) as usize;
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
@@ -458,6 +552,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             format!("- ⚠️ Tests: {kept} that passed before still pass, but Kern could not prove or rule out some failures (see Not verified above) ({runner})")
         } else if unverified.iter().any(|x| x["kind"] == "untested-change") {
             format!("- ⚠️ Tests: {kept} that passed before still pass, but no test that runs here reaches part of the changed code (see Not verified above) ({runner})")
+        } else if checked < proved.len() {
+            format!("- ⚠️ Tests: {kept} that passed before still pass, but they check only {checked} of {} changed functions (see below) ({runner})", proved.len())
         } else {
             format!("- ✅ Tests: {kept} that passed before still pass ({runner})")
         };
@@ -473,12 +569,13 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         if failing > 0 { line += &format!(" · {} already failing before this change (set aside)", failing); }
         md += &line;
         md += "\n";
-        let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown").collect();
+        md += &checked_md(r, &proved, checked);
+        let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown" && f["kind"] != "undo").collect();
         if !planted.is_empty() {
             let caught = planted.iter().filter(|f| f["outcome"] == "caught").count();
             let missed: Vec<String> = planted.iter().filter(|f| f["outcome"] != "caught").take(SHOWN)
                 .map(|f| code(&format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or("")), 200)).collect();
-            md += &format!("- {} Planted faults: the tests caught {caught} of {} faults Kern put in the changed code{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
+            md += &format!("- {} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
                 if missed.is_empty() { String::new() } else { format!("; not caught: {}", missed.join(", ")) });
         }
         let mut no_fault: Vec<(String, Vec<String>)> = Vec::new();
@@ -586,6 +683,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         list(&mut md, &not_checked);
         md += "\n";
     }
+    md += &agent_md(r);
     let short = |k: &str| r[k].as_str().filter(|h| h.len() >= 7).map(|h| h[..7].to_string()).unwrap_or_default();
     let sandbox = match (tests_ran || behaviour_ran, r["sandbox"].as_str()) {
         (false, _) => "",

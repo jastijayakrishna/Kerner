@@ -482,7 +482,7 @@ decision partial blocked
 jq -e '.tests.status == "RAN" and .tests.before.passed == 2 and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build"))' partial/receipt.json > /dev/null \
   || { jq .tests partial/receipt.json; fail "partial: a test file that missed an unbuilt package, while another passed, was set aside instead of built for"; }
 
-say "Kern undoes each change and plants small faults in the changed lines: one a test notices is caught, and a change no test checks is named, with vitest and with jest"
+say "Kern undoes each changed function and plants small faults in the changed lines: a same-behaviour rewrite the tests guard counts as checked, and a change no test checks becomes a task for the agent, with vitest and with jest"
 for runner in vitest jest; do
   git init -q "faults-$runner-repo" && cd "faults-$runner-repo"
   git config user.email e2e@example.invalid && git config user.name e2e
@@ -511,15 +511,17 @@ for runner in vitest jest; do
   cd "$W"
   check "faults-some-$runner" "$faults_base" "faults-$runner-repo"
   decision "faults-some-$runner" clear
-  jq -e '.tests.status == "RAN" and ([.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort == ["src/price.js:1 caught", "src/price.js:1 missed", "src/price.js:2 missed"])' "faults-some-$runner/receipt.json" > /dev/null \
+  jq -e '.tests.status == "RAN" and ([.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort == ["src/price.js:1 caught", "src/price.js:1 missed", "src/price.js:2 missed", "src/price.js:2 missed"])
+    and ([.challenges[] | "\(.target) \(.kind)"] == ["free unasserted"])' "faults-some-$runner/receipt.json" > /dev/null \
     || { jq .tests "faults-some-$runner/receipt.json"; fail "faults-some-$runner: the fault a test notices was not caught, or the one no test checks was not missed"; }
-  grep -q 'the tests caught 1 of 3 faults' "faults-some-$runner/receipt.md" && grep -q 'src/price.js:2' "faults-some-$runner/receipt.md" \
+  grep -q 'the tests caught 1 of 2 small faults' "faults-some-$runner/receipt.md" && grep -q 'Checked by a test: 1 of 2 changed functions' "faults-some-$runner/receipt.md" && grep -q 'For the agent that wrote this change' "faults-some-$runner/receipt.md" && grep -q 'src/price.js:2' "faults-some-$runner/receipt.md" \
     || { cat "faults-some-$runner/receipt.md"; fail "faults-some-$runner: the receipt does not say which planted fault no test noticed"; }
   check "faults-none-$runner" "$faults_base" "faults-$runner-repo"
   decision "faults-none-$runner" clear
-  jq -e '[.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort == ["src/price.js:2 missed", "src/price.js:2 missed", "src/ship.js:1 untested", "src/ship.js:1 untested"]' "faults-none-$runner/receipt.json" > /dev/null \
+  jq -e '([.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort) == ["src/price.js:2 missed", "src/price.js:2 missed", "src/ship.js:1 untested", "src/ship.js:1 untested"]
+    and ([.challenges[] | "\(.target) \(.kind)"] | sort) == ["free unasserted", "shipping unreached"]' "faults-none-$runner/receipt.json" > /dev/null \
     || { jq .tests "faults-none-$runner/receipt.json"; fail "faults-none-$runner: a change no test checks was not found"; }
-  grep -q 'the tests caught 0 of 4 faults' "faults-none-$runner/receipt.md" || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: the receipt does not say no test checks the change"; }
+  grep -q 'the tests caught 0 of 2 small faults' "faults-none-$runner/receipt.md" || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: the receipt does not say no test checks the change"; }
 done
 
 say "Kern watches what the changed code gives tests the change leaves untouched: an answer they never checked is named as a note, with vitest and with jest"
@@ -547,7 +549,8 @@ for runner in vitest jest; do
   check "watch-$runner" "$watch_base" "watch-$runner-repo"
   decision "watch-$runner" clear
   jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 1 and .tests.bystanders.differences[0].input == "[3]"
-    and (.tests.bystanders.differences[0].now | contains("3 things")) and ([.notes[].kind] | index("bystander") != null)' "watch-$runner/receipt.json" > /dev/null \
+    and (.tests.bystanders.differences[0].now | contains("3 things")) and ([.notes[].kind] | index("bystander") != null)
+    and ([.challenges[] | "\(.target) \(.kind)"] == ["label unasserted"]) and (.challenges[0].example | contains("label(3)"))' "watch-$runner/receipt.json" > /dev/null \
     || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named"; }
   grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
 done
@@ -609,6 +612,7 @@ git commit -qam "Shorter names" && git rev-parse HEAD > "$W/pnpm.head"
 cd "$W"
 check pnpm "$pnpm_base" pnpmrepo
 jq -e '.tests.status == "RAN" and .tests.kept == 2' pnpm/receipt.json > /dev/null || { jq .tests pnpm/receipt.json; jq . pnpm/setup.json 2>/dev/null | head -40; fail "pnpm: a pnpm 12 project did not install with its own pnpm, or its tests could not call pnpm"; }
+if grep -q 'kern-pnpm-store' pnpm/tests-new.out pnpm/tests-old.out; then fail "pnpm: the test runner found tests inside Kern's own package store"; fi
 
 say "A project whose .nvmrc asks for Node 20 is installed and tested on Node 20"
 git init -q nvmrepo && cd nvmrepo

@@ -54,6 +54,7 @@ pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
 pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
 pub const TRACE_BYTES_MAX: usize = 8 << 20;
+pub const INSTALL_SCRATCH: [&str; 2] = ["/workspace/.kern-install", "/workspace/.kern-pnpm-store"];
 pub const SERVE_FILES_COUNT_MAX: usize = 40;
 pub const VALUES_BYTES_MAX: usize = 1 << 20;
 pub const FAULTS_COUNT_MAX: usize = 24;
@@ -907,7 +908,7 @@ mod inside {
         }
     }
     const TEST_USER: u32 = 1000;
-    const KERN_DIRS: [&str; 2] = [".kern-pnpm-store", ".kern-tools"];
+    const KERN_DIRS: [&str; 1] = [".kern-tools"];
     pub fn read_only_tree(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
         if !meta.is_dir() && !meta.is_file() { return; }
@@ -963,13 +964,13 @@ mod inside {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
             if super::with_workspace(d, dir.join("node_modules").exists(), &records) { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
-            let keep: Vec<PathBuf> = [scratch.to_path_buf(), PathBuf::from("/workspace/.kern-pnpm-store"), PathBuf::from(super::TOOLS)].into_iter()
+            let keep: Vec<PathBuf> = super::INSTALL_SCRATCH.iter().chain([&super::TOOLS]).map(PathBuf::from)
                 .chain(records.iter().filter_map(|r| r["dir"].as_str()).filter(|r| *r != ".").map(|r| Path::new("/workspace").join(r))).collect();
             let (record, launcher) = install_dir(d, &dir, scripts, (budget, started), &keep, &mut dirty)?;
             if let (Some(m), Some(l)) = (record["manager"].as_str(), launcher) { launchers.entry(m.to_string()).or_insert(l); }
             records.push(record);
         }
-        let _ = std::fs::remove_dir_all(scratch);
+        for dir in super::INSTALL_SCRATCH { let _ = std::fs::remove_dir_all(dir); }
         let (tools, bin) = (Path::new(super::TOOLS), Path::new(super::TOOLS).join("bin"));
         for (manager, launcher) in &launchers {
             std::fs::create_dir_all(&bin)?;
