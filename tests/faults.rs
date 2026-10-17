@@ -117,8 +117,22 @@ fn a_change_outside_any_function_and_a_class_method_get_their_own_undos() {
     let new = "export const LIMIT = 20;\nexport class Repo {\n  find(id) { return this.rows[id] ?? null; }\n  all() { return this.rows; }\n}\n";
     let planted = undos(&[("src/repo.js", old, new)]);
     assert_eq!(planted.iter().map(|m| m.target.clone()).collect::<Vec<_>>(), [Some("Repo.find".to_string()), None],
-        "the method is undone on its own, and the rest of the change (LIMIT) by a whole-file undo: {planted:?}");
-    assert_eq!(applied(&planted[1], new), old, "the whole-file undo still gives back the old file exactly");
+        "the method is undone on its own, and the rest of the change (LIMIT) by an undo of its own: {planted:?}");
+    assert_eq!(applied(&planted[1], new), new.replace("LIMIT = 20", "LIMIT = 10"),
+        "the rest of the change puts back only what no function undo covers, so a test that catches Repo.find cannot make LIMIT look checked");
+    assert!(planted[1].what().contains("rest of the change"), "{}", planted[1].what());
+}
+
+#[test]
+fn faults_some_jest_commonjs_exports_are_undone_one_function_at_a_time() {
+    let old = "exports.discount = (amount) => (amount >= 100 ? amount * 0.9 : amount);\nexports.free = (total) => total >= 50;\n";
+    let new = "exports.discount = (amount) => (amount < 100 ? amount : amount * 0.9);\nexports.free = (total) => total > 60;\n";
+    let planted = undos(&[("src/price.js", old, new)]);
+    assert_eq!(planted.iter().map(|m| m.target.clone()).collect::<Vec<_>>(), [Some("discount".to_string()), Some("free".to_string())], "{planted:?}");
+    let old = "module.exports.load = function (k) { return db[k]; };\nmodule.exports = { save(k, v) { db[k] = v; }, drop: (k) => delete db[k] };\n";
+    let new = "module.exports.load = function (k) { return db[k] ?? null; };\nmodule.exports = { save(k, v) { db[k] = v ?? 0; }, drop: (k) => delete db[k] };\n";
+    let planted = undos(&[("src/store.js", old, new)]);
+    assert_eq!(planted.iter().map(|m| m.target.clone()).collect::<Vec<_>>(), [Some("load".to_string()), Some("save".to_string())], "{planted:?}");
 }
 
 #[test]
@@ -201,8 +215,8 @@ fn a_test_the_change_never_touched_that_fails_with_one_of_two_linked_functions_u
 fn a_refactor_whose_code_the_tests_guard_counts_as_checked_unless_an_untouched_test_saw_its_answer_change() {
     let faults = |extra: serde_json::Value| {
         let mut list = vec![
-            json!({ "path": "src/price.js", "line": 1, "lines": [1, 1], "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "missed", "ran": ["test/price.test.js"] }),
-            json!({ "path": "src/price.js", "line": 1, "what": "changes < to <=", "kind": "operator", "outcome": "caught" })];
+            json!({ "path": "src/price.js", "line": 1, "span": [0, 60], "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "missed", "ran": ["test/price.test.js"] }),
+            json!({ "path": "src/price.js", "line": 1, "span": [30, 31], "what": "changes < to <=", "kind": "operator", "outcome": "caught" })];
         if !extra.is_null() { list.push(extra); }
         json!(list)
     };
@@ -214,13 +228,27 @@ fn a_refactor_whose_code_the_tests_guard_counts_as_checked_unless_an_untouched_t
     let (r, md) = receipt_with(faults(serde_json::Value::Null), seen);
     assert_eq!(r["challenges"][0]["kind"], "unasserted", "an untouched test saw discount(150) change and no test asserts it: {r}");
     assert!(md.contains("`discount(150)`") && md.contains("`135`") && md.contains("`150`"), "{md}");
-    let (r, _) = receipt_with(faults(json!({ "path": "src/price.js", "line": 9, "what": "changes > to >=", "kind": "operator", "outcome": "caught" })), json!({}));
+    let (r, _) = receipt_with(faults(json!({ "path": "src/price.js", "line": 9, "span": [200, 201], "what": "changes > to >=", "kind": "operator", "outcome": "caught" })), json!({}));
     assert_eq!(r["challenges"], json!([]), "{r}");
-    let elsewhere = json!([json!({ "path": "src/price.js", "line": 1, "lines": [1, 1], "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "missed", "ran": ["test/price.test.js"] }),
-        json!({ "path": "src/price.js", "line": 9, "what": "changes > to >=", "kind": "operator", "outcome": "caught" })]);
+    let elsewhere = json!([json!({ "path": "src/price.js", "line": 1, "span": [0, 60], "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "missed", "ran": ["test/price.test.js"] }),
+        json!({ "path": "src/price.js", "line": 1, "span": [70, 71], "what": "changes > to >=", "kind": "operator", "outcome": "caught" })]);
     let (r, md) = receipt_with(elsewhere, json!({}));
     assert_eq!(r["challenges"][0]["kind"], "unasserted", "a fault caught in another function says nothing about this one: {r}");
     assert!(md.contains("if it keeps behaviour the same, say so"), "{md}");
+}
+
+#[test]
+fn faults_some_jest_a_check_mark_is_never_lent_from_a_neighbour_or_from_part_of_a_function() {
+    let undo = |target: serde_json::Value, span: [u64; 2]| json!({ "path": "src/price.js", "line": 1, "span": span, "what": "undoes the change", "kind": "undo", "target": target, "outcome": "missed", "ran": ["test/price.test.js"] });
+    let op = |at: u64, outcome: &str| json!({ "path": "src/price.js", "line": 1, "span": [at, at + 1], "what": "changes < to <=", "kind": "operator", "outcome": outcome });
+    let (r, md) = receipt_with(json!([undo(json!("discount"), [0, 60]), op(10, "caught"), op(40, "missed")]), json!({}));
+    assert_eq!(r["challenges"][0]["target"], "discount", "a small fault in discount that no test catches means part of it is unchecked: {r}");
+    assert!(!md.contains("✅ Checked by a test"), "{md}");
+    let (r, md) = receipt_with(json!([undo(serde_json::Value::Null, [0, 120]), op(10, "caught"), op(70, "caught")]), json!({}));
+    assert_eq!(r["challenges"][0]["kind"], "unasserted", "the rest of a file's change is checked only when its own undo is caught: {r}");
+    assert!(!md.contains("✅ Checked by a test"), "{md}");
+    let (r, _) = receipt_with(json!([undo(json!("discount"), [0, 60]), op(10, "caught"), op(40, "unknown")]), json!({}));
+    assert_eq!(r["challenges"][0]["target"], "discount", "a fault whose run Kern could not finish proves nothing: {r}");
 }
 
 #[test]

@@ -1051,11 +1051,25 @@ pub fn undo(path: &str, old: &str, new: &str) -> Option<Mutant> {
 }
 const FUNCTION_UNDOS_PER_FILE_COUNT_MAX: usize = 6;
 fn unit_of(name: String, span: oxc_span::Span, out: &mut Vec<(String, usize, usize)>) { out.push((name, span.start as usize, span.end as usize)); }
-fn object_units(owner: &str, o: &ObjectExpression, out: &mut Vec<(String, usize, usize)>) {
+fn object_units(owner: Option<&str>, o: &ObjectExpression, out: &mut Vec<(String, usize, usize)>) {
     for p in &o.properties {
         let ObjectPropertyKind::ObjectProperty(p) = p else { continue };
         let Some(key) = p.key.static_name() else { continue };
-        if matches!(unwrap(&p.value), Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) { unit_of(format!("{owner}.{key}"), p.span, out); }
+        if matches!(unwrap(&p.value), Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) { unit_of(owner.map_or_else(|| key.to_string(), |o| format!("{o}.{key}")), p.span, out); }
+    }
+}
+fn module_exports(e: &Expression) -> bool {
+    matches!(e, Expression::StaticMemberExpression(m) if m.property.name == "exports" && matches!(&m.object, Expression::Identifier(i) if i.name == "module"))
+}
+fn exported_units(e: &Expression, out: &mut Vec<(String, usize, usize)>) {
+    let Expression::AssignmentExpression(a) = e else { return };
+    let AssignmentTarget::StaticMemberExpression(m) = &a.left else { return };
+    let value = unwrap(&a.right);
+    if m.property.name == "exports" && matches!(&m.object, Expression::Identifier(i) if i.name == "module") {
+        if let Expression::ObjectExpression(o) = value { object_units(None, o, out); }
+    } else if (matches!(&m.object, Expression::Identifier(i) if i.name == "exports") || module_exports(&m.object))
+        && matches!(value, Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) {
+        unit_of(m.property.name.to_string(), a.right.span(), out);
     }
 }
 fn declared_units(d: &Declaration, out: &mut Vec<(String, usize, usize)>) {
@@ -1066,7 +1080,7 @@ fn declared_units(d: &Declaration, out: &mut Vec<(String, usize, usize)>) {
                 let (BindingPattern::BindingIdentifier(id), Some(init)) = (&d.id, &d.init) else { continue };
                 match unwrap(init) {
                     Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => unit_of(id.name.to_string(), init.span(), out),
-                    Expression::ObjectExpression(o) => object_units(&id.name, o, out),
+                    Expression::ObjectExpression(o) => object_units(Some(&id.name), o, out),
                     _ => {}
                 }
             }
@@ -1090,6 +1104,7 @@ fn units(path: &str, source: &str) -> Option<BTreeMap<String, (usize, usize)>> {
                     ExportDefaultDeclarationKind::FunctionDeclaration(f) if f.body.is_some() => unit_of(f.id.as_ref().map_or("default".to_string(), |i| i.name.to_string()), f.span, &mut found),
                     _ => {}
                 },
+                Statement::ExpressionStatement(e) => exported_units(&e.expression, &mut found),
                 _ => if let Some(d) = s.as_declaration() { declared_units(d, &mut found) },
             }
         }
@@ -1114,9 +1129,14 @@ pub fn undos(path: &str, old: &str, new: &str) -> Vec<Mutant> {
             what: format!("undoes the change to {name}"), tests: Vec::new(), kind: FaultKind::Undo, target: Some(name.clone()) });
     }
     out.sort_by_key(|m| m.start);
-    let mut back = new.to_string();
-    for m in out.iter().rev() { back.replace_range(m.start..m.end, &m.replacement); }
-    if !same_behaviour(path, &back, old) { out.extend(undo(path, old, new)); }
+    let mut forward = old.to_string();
+    let mut moved: Vec<(usize, usize, &str)> = out.iter().filter_map(|m| { let (s, e) = before.get(m.target.as_deref()?)?; Some((*s, *e, m.original.as_str())) }).collect();
+    moved.sort_by_key(|(s, _, _)| std::cmp::Reverse(*s));
+    for (s, e, text) in moved { forward.replace_range(s..e, text); }
+    if let Some(mut rest) = undo(path, &forward, new) {
+        if !out.is_empty() { rest.what = "undoes the rest of the change".to_string(); }
+        out.push(rest);
+    }
     out
 }
 struct Logs(Vec<(usize, usize)>);

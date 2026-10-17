@@ -1123,13 +1123,8 @@ fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: 
     let claims = fault_claims(tests.runner, new, Some(placebo), runs);
     let related: BTreeSet<String> = proof::read_report(tests.runner, placebo["output"].as_str().unwrap_or("").as_bytes()).map(|r| r.tests.keys().map(|k| file_of(k).to_string()).collect()).unwrap_or_default();
     let entries = kept.iter().zip(outcomes).zip(claims).map(|(((m, _), o), claim)| {
-        let mut entry = json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "target": m.target, "outcome": o });
-        if m.kind == crate::proof::FaultKind::Undo {
-            for (k, v) in claim.as_object().into_iter().flatten() { entry[k] = v.clone(); }
-            if let Some((_, _, text)) = files.iter().find(|f| f.0 == m.path) && m.end <= text.len() {
-                entry["lines"] = json!([text[..m.start].matches('\n').count() + 1, text[..m.end].matches('\n').count() + 1]);
-            }
-        }
+        let mut entry = json!({ "path": m.path, "line": m.line, "span": [m.start, m.end], "what": m.what(), "kind": m.kind.name(), "target": m.target, "outcome": o });
+        if m.kind == crate::proof::FaultKind::Undo { for (k, v) in claim.as_object().into_iter().flatten() { entry[k] = v.clone(); } }
         entry
     }).collect();
     (entries, missing, related)

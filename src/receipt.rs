@@ -201,10 +201,10 @@ fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Valu
 const NOTHING_TO_CHANGE: &str = "Kern found nothing in its change";
 struct Unit { path: String, target: Option<String>, outcome: String, ran: Vec<String>, caught_by: Vec<Value> }
 fn guarded(faults: &[&Value], undo: &Value) -> bool {
-    let range = undo["lines"].as_array().and_then(|l| Some((l.first()?.as_u64()?, l.get(1)?.as_u64()?)));
-    let whole = undo["target"].is_null();
-    faults.iter().any(|f| f["kind"] != "undo" && f["path"] == undo["path"] && f["outcome"] == "caught"
-        && (whole || range.zip(f["line"].as_u64()).is_some_and(|((a, b), l)| (a..=b).contains(&l))))
+    let span = |f: &Value| f["span"].as_array().and_then(|s| Some((s.first()?.as_u64()?, s.get(1)?.as_u64()?)));
+    let Some((start, end)) = span(undo).filter(|_| undo["target"].is_string()) else { return false };
+    let inside: Vec<&&Value> = faults.iter().filter(|f| f["kind"] != "undo" && f["path"] == undo["path"] && span(f).is_some_and(|(s, _)| start <= s && s < end)).collect();
+    !inside.is_empty() && inside.iter().all(|f| f["outcome"] == "caught")
 }
 fn units(tests: &Value) -> Vec<Unit> {
     let faults: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().collect();
