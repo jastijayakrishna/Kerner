@@ -533,7 +533,7 @@ cd "$W"
 check berry "$berry_base" berryrepo
 jq -e '.tests.status == "RAN" and .tests.kept == 1' berry/receipt.json > /dev/null || { jq .tests berry/receipt.json; jq . berry/setup.json 2>/dev/null | head -40; fail "berry: a yarn 4 project with type module did not install"; }
 
-say "A pnpm 12 project installs with the pnpm it pins, checked against its hash, and its tests can call pnpm"
+say "A pnpm 12 project installs with the pnpm it pins through Kern's own corepack, which checks its hash, and its tests can call pnpm offline"
 git init -q pnpmrepo && cd pnpmrepo
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p src test

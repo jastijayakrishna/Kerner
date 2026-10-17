@@ -78,8 +78,9 @@ What Kern checks on every pull request:
    script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
    package, each changed package's own script), on the Node version the project asks for (the CI workflow that runs its tests, the
    version file that workflow reads, `.nvmrc`, `.node-version`, `.tool-versions`, `volta` or `engines.node`), with the package manager it
-   pins (pnpm 11 and later come from npm, checked against the `packageManager` hash, and the tests and build steps can call it), with the
-   network off while the tests run. A test that passed before and fails now
+   pins (through corepack, which checks the `packageManager` hash; pnpm 12 and later through Kern's own pinned corepack, because the one
+   in older Node images cannot start them; a project that pins nothing gets corepack's own fixed version, never whatever is newest that
+   day; the tests and build steps can call it), with the network off while the tests run. A test that passed before and fails now
    blocks only when it fails in every run of the new code that included it (the whole suite, its file alone, the whole suite again) and
    passes in every run of the old code, including a second one. A failure that shows only when the whole suite runs, that does not repeat
    in every run, that sits in a file whose other tests passed and failed by chance, or that comes from the sandbox (no network, a missing
@@ -227,8 +228,8 @@ Next steps:
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
   runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it, or when the test
   script runs files from build output (`out/`, `dist/`) that are not in the repository. Tests that still cannot load cannot be checked,
-  and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to disk, not memory, and
-  a flood of test output is cut to its start and end, so neither fills the sandbox.
+  and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to a fresh folder on disk outside the project,
+  as on the project's own CI, and a flood of test output is cut to its start and end, so neither fills the sandbox.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so

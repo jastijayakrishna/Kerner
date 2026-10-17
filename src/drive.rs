@@ -1315,7 +1315,7 @@ pub fn clean(out: &Path) -> R<Value> {
     for v in volumes.iter().map(String::as_str).filter(|v| v.starts_with("kern-deps-") && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
         let filter = format!("volume={v}");
         if let Ok(ids) = crate::sandbox::docker(&["ps", "--all", "--quiet", "--filter", &filter, "--filter", "name=kern-"], std::time::Duration::from_secs(60), 1 << 16) {
-            for id in String::from_utf8_lossy(&ids).split_whitespace() { let _ = crate::sandbox::docker(&["rm", "--force", id], std::time::Duration::from_secs(60), 4096); }
+            for id in String::from_utf8_lossy(&ids).split_whitespace() { let _ = crate::sandbox::docker(&["rm", "--force", "--volumes", id], std::time::Duration::from_secs(60), 4096); }
         }
         crate::sandbox::docker(&["volume", "rm", "--force", v], std::time::Duration::from_secs(120), 4096)?;
         removed.push(v.to_string());

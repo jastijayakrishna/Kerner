@@ -12,11 +12,14 @@ pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub const FAULT: &str = include_str!("fault.cjs");
 pub const NODE_REPORT: &str = include_str!("node-report.mjs");
 pub const NODE_REPORTER: &str = "--test-reporter=/kern/node-report.mjs";
-pub const INSTALL_ENV: [(&str, &str); 21] = [("COREPACK_ENABLE_AUTO_PIN", "0"), ("HUSKY", "0"), ("HUSKY_SKIP_INSTALL", "1"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
+pub const INSTALL_ENV: [(&str, &str); 22] = [("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0"),("HUSKY", "0"), ("HUSKY_SKIP_INSTALL", "1"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_HOME", "/home/kern/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
     ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"), ("npm_config_cache", "/workspace/.kern-install/npm"),
     ("npm_config_store_dir", "/workspace/.kern-install/pnpm-store"), ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
     ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")];
+pub const TEST_ENV: [(&str, &str); 10] = [("PATH", "/workspace/.kern-tools/bin:/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8"), ("CI", "true"),
+    ("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("COREPACK_HOME", "/workspace/.kern-tools/corepack-home"),
+    ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0")];
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
@@ -366,21 +369,15 @@ impl Capped {
     }
 }
 pub const TOOLS: &str = "/workspace/.kern-tools";
-const PNPM_FROM_NPM_MAJOR_MIN: u64 = 11;
-pub fn pnpm_from_npm(dir: &Path) -> Option<(String, Option<String>)> {
+const IMAGE_COREPACK: &str = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
+fn own_corepack() -> String { format!("{TOOLS}/corepack/node_modules/corepack/dist/corepack.js") }
+const PNPM_OWN_COREPACK_MAJOR_MIN: u64 = 12;
+fn pinned_major(dir: &Path, manager: &str) -> Option<u64> {
     let declared = |d: &Path| std::fs::read(d.join("package.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["packageManager"].as_str().map(str::to_string));
     let spec = declared(dir).or_else(|| declared(Path::new("/workspace")))?;
-    let (name, rest) = spec.split_once('@')?;
-    let (version, pin) = rest.split_once('+').map_or((rest, None), |(v, h)| (v, Some(h.to_string())));
-    let major: u64 = version.split('.').next()?.parse().ok()?;
-    (name == "pnpm" && plain_version(version) && major >= PNPM_FROM_NPM_MAJOR_MIN).then(|| (version.to_string(), pin))
-}
-pub fn pnpm_launcher() -> Vec<String> { vec!["/bin/sh".to_string(), format!("{TOOLS}/pnpm/node_modules/pnpm/pnpm")] }
-pub fn hash_matches(integrity: &str, pinned: &str) -> bool {
-    use base64::Engine;
-    let Some(encoded) = integrity.split_whitespace().find_map(|i| i.strip_prefix("sha512-")) else { return false };
-    let Some(pin) = pinned.strip_prefix("sha512.") else { return false };
-    base64::engine::general_purpose::STANDARD.decode(encoded).is_ok_and(|d| hex::encode(d).eq_ignore_ascii_case(pin))
+    let (name, version) = spec.split_once('@')?;
+    if name != manager { return None; }
+    version.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 pub fn shim(launcher: &[String]) -> String {
     let words: Vec<String> = launcher.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))).collect();
@@ -391,11 +388,9 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     let npm = |args: &[&str]| -> Vec<String> {
         node(&[&["/usr/local/lib/node_modules/npm/bin/npm-cli.js"], args, &["--engine-strict=false", "--no-audit", "--no-fund", "--no-update-notifier"]].concat())
     };
-    let corepack = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
-    let from_npm = pnpm_from_npm(dir).is_some();
-    let pnpm = |args: &[&str]| -> Vec<String> {
-        if from_npm { pnpm_launcher().into_iter().chain(args.iter().map(|a| a.to_string())).collect() } else { node(&[&[corepack, "pnpm"], args].concat()) }
-    };
+    let corepack = if pinned_major(dir, "pnpm").is_some_and(|m| m >= PNPM_OWN_COREPACK_MAJOR_MIN) { own_corepack() } else { IMAGE_COREPACK.to_string() };
+    let corepack = corepack.as_str();
+    let pnpm = |args: &[&str]| -> Vec<String> { node(&[&[corepack, "pnpm"], args].concat()) };
     if dir.join("pnpm-lock.yaml").is_file() {
         let store = "--store-dir=/workspace/.kern-pnpm-store";
         return ("pnpm", vec![(pnpm(&["install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", store]), "installed"),
@@ -529,7 +524,7 @@ pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<Strin
         "--ulimit", files, "--ulimit", "core=0", "--ipc=private", if drive_test { "--shm-size=512m" } else { "--shm-size=8m" }, "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
     ].iter().map(|s| s.to_string()).collect();
     if drive_seal { a.extend(["--cap-add=CHOWN".to_string(), "--cap-add=DAC_OVERRIDE".to_string()]); }
-    a.extend(["--tmpfs".to_string(), format!("/tmp:rw,noexec,nosuid,nodev,size={},mode=1777", if drive_test { 1u64 << 30 } else { 64 << 20 })]);
+    if drive_test { a.extend(["--mount".to_string(), "type=volume,target=/tmp".to_string()]); } else { a.extend(["--tmpfs".to_string(), format!("/tmp:rw,noexec,nosuid,nodev,size={},mode=1777", 64 << 20)]); }
     match spec.workspace {
         Some((volume, readonly)) => {
             a.extend(["--mount".into(), format!("type=volume,source={volume},target=/workspace{}", if readonly { ",readonly" } else { "" })]);
@@ -584,7 +579,10 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         let volumes: Vec<&Value> = mounts.iter().filter(|m| m["Type"] == "volume").collect();
         ensure!(binds.len() == if spec.scratch || spec.workspace.is_some() { 2 } else { 3 } && binds.iter().all(|m| m["RW"] == false), "Unexpected or writable host mount");
         let tree: Vec<(&str, &str, bool)> = spec.workspace.iter().map(|(v, ro)| (*v, "/workspace", *ro)).collect();
-        ensure!(volumes.len() == spec.volumes.len() + tree.len() && spec.volumes.iter().chain(&tree).all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro)), "Unexpected volume mount");
+        let temporary = usize::from(spec.entry.first().is_some_and(|e| e == "__drive_test"));
+        let anonymous = |m: &Value| m["Destination"] == "/tmp" && m["RW"] == true && m["Name"].as_str().is_some_and(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()));
+        ensure!(volumes.len() == spec.volumes.len() + tree.len() + temporary && spec.volumes.iter().chain(&tree).all(|(v, t, ro)| volumes.iter().any(|m| m["Name"] == *v && m["Destination"] == *t && m["RW"] == !ro))
+            && volumes.iter().filter(|m| anonymous(m)).count() == temporary, "Unexpected volume mount");
         ensure!(mounts.iter().all(|m| m["Type"] == "bind" || m["Type"] == "volume" || m["Type"] == "tmpfs"), "Unexpected mount type");
         let (_, out, err) = docker_full(&["start", "--attach", &name], Duration::from_secs(spec.limits.timeout_seconds + 5), (spec.limits.total_bytes as usize) * 2 + 1048576)?;
         let f = &docker_json(&["inspect", &name])?[0]["State"];
@@ -592,7 +590,7 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         ensure!(f["Running"] == false && f["ExitCode"].is_i64(), "Sandbox failed or exceeded limits");
         Ok((out, err[err.len().saturating_sub(65536)..].to_vec(), f["ExitCode"].as_i64().unwrap_or(-1)))
     })();
-    docker(&["rm", "--force", &name], Duration::from_secs(120), 65536).map_err(|e| Denied(format!("Sandbox removal failed; no artifact accepted: {e}")))?;
+    docker(&["rm", "--force", "--volumes", &name], Duration::from_secs(120), 65536).map_err(|e| Denied(format!("Sandbox removal failed; no artifact accepted: {e}")))?;
     let (stdout, errors, exit_code) = outcome?;
     Ok(Execution { stdout, exit_code, builder, errors })
 }
@@ -620,10 +618,6 @@ mod inside {
     use std::process::{Command, Stdio};
 
     const ENV: [(&str, &str); 3] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8")];
-    const TEST_TMP: &str = "/workspace/node_modules/.cache/tmp";
-    const TEST_ENV: [(&str, &str); 10] = [("PATH", "/workspace/.kern-tools/bin:/usr/local/bin:/usr/bin:/bin"), ENV[1], ENV[2], ("CI", "true"), ("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"),
-        ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("COREPACK_HOME", "/workspace/.kern-tools/corepack-home"), ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"),
-        ("COREPACK_ENABLE_AUTO_PIN", "0"), ("TMPDIR", TEST_TMP)];
     const OUT_HEAD_BYTES_MAX: usize = 1 << 20;
     const OUT_TAIL_BYTES_MAX: usize = 32 << 20;
     const ERR_HEAD_BYTES_MAX: usize = 64 << 10;
@@ -978,28 +972,19 @@ mod inside {
         let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &prefix.to_string_lossy(), package, "--ignore-scripts",
             "--no-audit", "--no-fund", "--no-update-notifier"]).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
-    fn pnpm_from_npm(dir: &Path) -> Option<String> {
-        let (version, pin) = super::pnpm_from_npm(dir)?;
-        let prefix = Path::new(super::TOOLS).join("pnpm");
-        if !prefix.join("node_modules/pnpm/pnpm").exists() { npm_into(&prefix, &format!("pnpm@{version}")); }
-        if !prefix.join("node_modules/pnpm/pnpm").exists() { return Some(format!("failed: Kern could not install pnpm {version} with npm")); }
-        let lock: Value = std::fs::read(prefix.join("package-lock.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        let integrity = lock["packages"]["node_modules/pnpm"]["integrity"].as_str().unwrap_or("");
-        pin.filter(|p| !super::hash_matches(integrity, p)).map(|p| format!("failed: the pnpm {version} npm installed does not match the hash the project pins in packageManager ({p})"))
-    }
     fn install_dir(d: &str, dir: &Path, scripts: bool, (budget, started): (Duration, std::time::Instant), keep: &[PathBuf], dirty: &mut bool) -> R<(Value, Option<Vec<String>>)> {
         let (manager, mut attempts) = super::install_plan_for(dir, scripts);
-        let bundled = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
-        if attempts.iter().any(|(argv, _)| argv.iter().any(|a| a == bundled)) && !Path::new(bundled).exists() {
-            let tools = Path::new(super::TOOLS).join("corepack");
-            let own = tools.join("node_modules/corepack/dist/corepack.js");
-            if !own.exists() { npm_into(&tools, super::COREPACK); }
-            for (argv, _) in attempts.iter_mut() { for a in argv.iter_mut() { if a == bundled { *a = own.to_string_lossy().to_string(); } } }
+        let own = super::own_corepack();
+        if !Path::new(super::IMAGE_COREPACK).exists() {
+            for (argv, _) in attempts.iter_mut() { for a in argv.iter_mut() { if a == super::IMAGE_COREPACK { a.clone_from(&own); } } }
+        }
+        if attempts.iter().any(|(argv, _)| argv.contains(&own)) && !Path::new(&own).exists() {
+            npm_into(&Path::new(super::TOOLS).join("corepack"), super::COREPACK);
+            if !Path::new(&own).exists() {
+                return Ok((json!({ "dir": d, "manager": manager, "result": format!("failed: Kern could not install {} with npm", super::COREPACK), "parts": [] }), None));
+            }
         }
         let launcher: Option<Vec<String>> = attempts.first().and_then(|(argv, _)| argv.iter().position(|a| a == "install").map(|i| argv[..i].to_vec())).filter(|_| manager == "pnpm" || manager == "yarn");
-        if attempts.first().is_some_and(|(argv, _)| argv.get(1) == super::pnpm_launcher().get(1)) && let Some(failed) = pnpm_from_npm(dir) {
-            return Ok((json!({ "dir": d, "manager": manager, "result": failed, "parts": [] }), None));
-        }
         let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
         let committed = if d == "." { PathBuf::from("/input") } else { Path::new("/input").join(d) };
         let (mut result, mut originals, mut scripts_failed) = (json!("failed"), Vec::new(), None);
@@ -1196,7 +1181,6 @@ mod inside {
         }
         let started = std::time::Instant::now();
         let epoch = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        let _ = std::fs::create_dir_all(TEST_TMP);
         let mut ending;
         loop {
             let _ = std::fs::remove_file("/tmp/.kern-progress");

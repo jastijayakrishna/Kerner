@@ -52,37 +52,55 @@ impl Drop for Temp {
 }
 
 #[test]
-fn antvis_chart_visualization_skills_54_pnpm_12_comes_from_npm_because_corepack_cannot_run_it() {
+fn posthog_js_5291_and_openclaw_134760_each_pnpm_runs_through_a_corepack_that_knows_where_it_starts() {
     let t = Temp::new();
     std::fs::write(t.0.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-    std::fs::write(t.0.join("package.json"), r#"{"name":"skills","packageManager":"pnpm@12.14.0+sha512.0a1b"}"#).unwrap();
-    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
-    assert_eq!(manager, "pnpm");
-    assert_eq!(&attempts[0].0[..2], ["/bin/sh", "/workspace/.kern-tools/pnpm/node_modules/pnpm/pnpm"], "pnpm 12 ships a native program corepack 0.36 cannot find: {:?}", attempts[0].0);
-    assert!(attempts[0].0.iter().any(|a| a == "--frozen-lockfile"));
-    assert_eq!(kern::sandbox::pnpm_from_npm(&t.0), Some(("12.14.0".to_string(), Some("sha512.0a1b".to_string()))));
-    std::fs::write(t.0.join("package.json"), r#"{"name":"skills","packageManager":"pnpm@10.12.1"}"#).unwrap();
-    let (_, attempts) = kern::sandbox::install_plan(&t.0);
-    assert!(attempts[0].0[1].ends_with("corepack.js") && kern::sandbox::pnpm_from_npm(&t.0).is_none(), "pnpm 10 still comes from corepack: {:?}", attempts[0].0);
+    let image = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
+    let own = "/workspace/.kern-tools/corepack/node_modules/corepack/dist/corepack.js";
+    for (pin, corepack, why) in [
+        ("pnpm@10.12.1", image, "pnpm 10 has run through the image's corepack on every farm"),
+        ("pnpm@11.7.0", image, "pnpm 11 still ships bin/pnpm.cjs, the file the image's corepack starts, so PostHog/posthog-js#5291 installed this way on farms 16 to 18"),
+        ("pnpm@12.1.0+sha512.d9b8", own, "pnpm 12 ships only bin/pnpm.mjs, which the corepack in Node 24 and older images never looks for (openclaw/openclaw#134760)"),
+        ("pnpm@12.14.0", own, "every later pnpm 12 is the same"),
+        ("pnpm@13.0.0-rc.1", own, "and so is a release candidate of a later major"),
+    ] {
+        std::fs::write(t.0.join("package.json"), format!(r#"{{"name":"x","packageManager":"{pin}"}}"#)).unwrap();
+        let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+        assert_eq!(manager, "pnpm");
+        for (argv, _) in &attempts { assert_eq!(&argv[..3], ["/usr/local/bin/node", corepack, "pnpm"], "{pin}: {why}: {argv:?}"); }
+        assert!(attempts[0].0.iter().any(|a| a == "--frozen-lockfile"));
+    }
 }
 
 #[test]
-fn a_pinned_package_manager_must_be_the_exact_one_npm_installed() {
-    use base64::Engine;
-    use sha2::Digest;
-    let digest = sha2::Sha512::digest(b"the pnpm tarball");
-    let integrity = format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode(digest));
-    let pinned = format!("sha512.{}", hex::encode(digest));
-    assert!(kern::sandbox::hash_matches(&integrity, &pinned));
-    assert!(!kern::sandbox::hash_matches(&integrity, "sha512.00ff"), "another tarball under the same version");
-    assert!(!kern::sandbox::hash_matches(&integrity, &format!("sha224.{}", hex::encode(&digest[..28]))), "Kern can only compare a sha512 pin with what npm checked");
+fn antvis_chart_visualization_skills_54_a_project_that_pins_no_pnpm_gets_the_same_pnpm_on_every_check() {
+    for (step, env) in [("install", &kern::sandbox::INSTALL_ENV[..]), ("tests", &kern::sandbox::TEST_ENV[..])] {
+        assert!(env.contains(&("COREPACK_DEFAULT_TO_LATEST", "0")),
+            "{step}: with no pin corepack fetched the newest pnpm, 12.14.0 that day, which changes from one day to the next and which the image's corepack cannot start; its own known version is the same on every check and needs no network: {env:?}");
+    }
+}
+
+#[test]
+fn webpack_22695_and_vercel_workflow_3052_temporary_files_live_on_disk_outside_the_project() {
+    let t = Temp::new();
+    let limits = kern::policy::Limits { files_changed: 1, lines_changed: 1, file_bytes: 1, total_bytes: 1 << 20, timeout_seconds: 60, memory_mb: 512, pids: 64 };
+    let run = kern::sandbox::Spec { image: "sha256:x", snapshot: &t.0, control: &t.0, writable: &[], limits: &limits, entry: vec!["__drive_test".into()], network: "none", volumes: vec![],
+        root: false, home_mb: 0, scratch: false, workspace: Some(("kern-deps-x", false)) };
+    let args = kern::sandbox::container_args_for(&run, "kern-x", "runc").unwrap();
+    assert!(args.windows(2).any(|w| w[0] == "--mount" && w[1] == "type=volume,target=/tmp"),
+        "a test run's /tmp is a fresh volume on disk: gatsby's jest cache outgrew a /tmp in memory, and a temporary folder inside the project made webpack's and vercel/workflow's temporary projects find the repository's own files: {args:?}");
+    assert!(!args.iter().any(|a| a.starts_with("/tmp:")), "{args:?}");
+    assert!(!kern::sandbox::TEST_ENV.iter().any(|(k, _)| *k == "TMPDIR"), "the tests' temporary folder is /tmp, as on the project's own CI: {:?}", kern::sandbox::TEST_ENV);
+    let drive = kern::sandbox::Spec { entry: vec!["__drive".into()], volumes: vec![], workspace: Some(("kern-deps-x", true)), ..run };
+    let args = kern::sandbox::container_args_for(&drive, "kern-x", "runc").unwrap();
+    assert!(args.iter().any(|a| a.starts_with("/tmp:rw,noexec,nosuid,nodev,size=67108864")) && !args.iter().any(|a| a.ends_with("target=/tmp")), "other runs keep a small /tmp in memory: {args:?}");
 }
 
 #[test]
 fn the_package_manager_the_project_installs_with_is_on_the_path_when_its_tests_run() {
-    let shim = kern::sandbox::shim(&["/bin/sh".to_string(), "/workspace/.kern-tools/pnpm/node_modules/pnpm/pnpm".to_string()]);
-    assert_eq!(shim, "#!/bin/sh\nexec '/bin/sh' '/workspace/.kern-tools/pnpm/node_modules/pnpm/pnpm' \"$@\"\n");
-    let corepack = kern::sandbox::shim(&["/usr/local/bin/node".to_string(), "/workspace/.kern-tools/corepack/node_modules/corepack/dist/corepack.js".to_string(), "yarn".to_string()]);
+    let shim = kern::sandbox::shim(&["/usr/local/bin/node".to_string(), "/workspace/.kern-tools/corepack/node_modules/corepack/dist/corepack.js".to_string(), "pnpm".to_string()]);
+    assert_eq!(shim, "#!/bin/sh\nexec '/usr/local/bin/node' '/workspace/.kern-tools/corepack/node_modules/corepack/dist/corepack.js' 'pnpm' \"$@\"\n");
+    let corepack = kern::sandbox::shim(&["/usr/local/bin/node".to_string(), "/usr/local/lib/node_modules/corepack/dist/corepack.js".to_string(), "yarn".to_string()]);
     assert!(corepack.ends_with("corepack.js' 'yarn' \"$@\"\n"), "{corepack}");
     assert!(kern::sandbox::shim(&["/bin/sh".to_string(), "it's".to_string()]).contains(r#"'it'\''s'"#), "a quote in a path cannot end the word");
 }
