@@ -942,7 +942,24 @@ pub fn missing_packages(text: &str) -> BTreeSet<String> {
     }
     out
 }
+pub fn missing_files(text: &str) -> BTreeSet<String> {
+    let (mut out, lines) = (BTreeSet::new(), text.lines().collect::<Vec<_>>());
+    for (n, line) in lines.iter().enumerate() {
+        let Some(i) = line.find("Cannot find module ") else { continue };
+        let rest = &line[i + "Cannot find module ".len()..];
+        let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else { continue };
+        let spec = rest[1..].split(quote).next().unwrap_or("");
+        let requirer = line.split_once(" imported from ").map(|(_, f)| f.trim().to_string())
+            .or_else(|| lines[n + 1..].iter().skip_while(|l| !l.trim_start().starts_with("Require stack:")).nth(1).and_then(|l| l.trim().strip_prefix("- ").map(str::to_string)));
+        let file = if spec.starts_with('.') { requirer } else { Some(spec.to_string()) };
+        if let Some(rel) = file.as_deref().and_then(|f| f.strip_prefix("/workspace/")).filter(|r| !r.split('/').any(|s| s == "node_modules")) { out.insert(rel.to_string()); }
+    }
+    out
+}
 pub type Workspace = std::collections::BTreeMap<String, (String, Value)>;
+pub fn owners(packages: &Workspace, files: &BTreeSet<String>) -> BTreeSet<String> {
+    files.iter().filter_map(|f| packages.iter().filter(|(_, (dir, _))| !dir.is_empty() && f.starts_with(&format!("{dir}/"))).max_by_key(|(_, (dir, _))| dir.len()).map(|(name, _)| name.clone())).collect()
+}
 pub fn workspace(repo: &Path, commit: &str) -> Workspace {
     let items = crate::drive::listing(repo, commit).unwrap_or_default();
     let manifests: Vec<&crate::drive::Item> = items.iter().filter(|i| i.path.rsplit('/').next() == Some("package.json") && !i.path.split('/').any(|c| c == "node_modules") && i.size <= 1 << 20).take(3000).collect();
@@ -1193,7 +1210,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 let partial = match &run { Side::Ran(r, _) => partly_missing(r), _ => None };
                 if repairable && let Some(why) = cannot_load(Some(&run)).or(partial) {
                     repairable = false;
-                    let missing = missing_packages(&why);
+                    let (old_packages, new_packages) = (workspace(repo, base), workspace(repo, head));
+                    let mut missing = missing_packages(&why);
+                    missing.extend(owners(&old_packages, &missing_files(&why)));
                     let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
                     let compiled = no_test_files(&why);
                     let package = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok());
@@ -1202,12 +1221,12 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     let from_build = compiled && invocation.as_ref().is_some_and(|i| builds_tests(&i.command));
                     let mut before = invocation.filter(|_| generated || compiled).map(|i| i.before).unwrap_or_default();
                     if (own_build(&why) || from_build) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
-                    let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref(), (&suite.dir, &before));
+                    let steps = repair_steps(&old_packages, &missing, pretest.as_deref(), (&suite.dir, &before));
                     if !steps.is_empty() {
                         let at = now_ms();
                         let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
                         let on_old = prepare(out, op, &volume("old"), &steps, &format!("old{label}"), until);
-                        let on_new = prepare(out, op, &volume("new"), &repair_steps(&workspace(repo, head), &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
+                        let on_new = prepare(out, op, &volume("new"), &repair_steps(&new_packages, &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
                         timed(format!("prepare{label}"), at);
                         match (on_old, on_new) {
                             (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),

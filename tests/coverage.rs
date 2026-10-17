@@ -58,6 +58,21 @@ fn cap_go_capgo_app_2789_a_file_tests_write_under_a_random_name_on_both_sides_is
 }
 
 #[test]
+fn vitest_dev_vitest_8531_and_vercel_next_js_90813_a_missing_file_in_a_workspace_package_builds_that_package() {
+    let vitest = "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/workspace/packages/vitest/dist/cli.js' imported from /workspace/packages/vitest/vitest.mjs";
+    let next = "Error: Cannot find module './dist/build/jest/jest'\nRequire stack:\n- /workspace/packages/next/jest.js\n- /workspace/jest.config.js";
+    assert!(suite::missing_files(vitest).contains("packages/vitest/dist/cli.js"), "{:?}", suite::missing_files(vitest));
+    assert!(suite::missing_files(next).contains("packages/next/jest.js"), "the file that asked for the missing build output names its package: {:?}", suite::missing_files(next));
+    let mut ws = suite::Workspace::new();
+    ws.insert("vitest".into(), ("packages/vitest".into(), json!({ "name": "vitest", "scripts": { "build": "rollup -c" } })));
+    ws.insert("next".into(), ("packages/next".into(), json!({ "name": "next", "scripts": { "build": "taskr release" } })));
+    ws.insert("root".into(), (String::new(), json!({ "name": "root", "scripts": { "build": "turbo build" } })));
+    let names = suite::owners(&ws, &suite::missing_files(&format!("{vitest}\n{next}")));
+    assert_eq!(names, ["next".to_string(), "vitest".to_string()].into_iter().collect(), "each missing file is built by its own package, not by the whole repository");
+    assert!(suite::missing_files("Cannot find module '/workspace/node_modules/x/index.js'").is_empty(), "installed packages are not the project's to build");
+}
+
+#[test]
 fn facebook_docusaurus_12655_and_five_more_no_tests_needs_the_repository_to_agree() {
     let has = |paths: &[&str], dir: &str| suite::repo_has_tests(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), dir);
     assert!(has(&["src/a.ts", "__tests__/validate-package-json.test.ts"], ""), "docusaurus has 327 test files, so vitest finding none was Kern's run, not the project");
