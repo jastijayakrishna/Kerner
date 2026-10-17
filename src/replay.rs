@@ -53,6 +53,7 @@ fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec
     (outcomes.len() == stored.len()).then(|| stored.iter().zip(outcomes).map(|(f, o)| { let mut f = f.clone(); f["outcome"] = json!(o); f }).collect())
 }
 const VALUES_BYTES_MAX: u64 = 4 << 20;
+const TRACE_BYTES_MAX: u64 = 16 << 20;
 fn readings(dir: &Path, suites: &[(Runner, String)], labels: &BTreeSet<String>, wanted: &BTreeSet<String>) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
     for label in labels {
@@ -96,6 +97,18 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         tests["problem_why"] = merged["problem_why"].clone();
     }
     if let Some(f) = faults(dir, &suites, &tests["faults"]) { tests["faults"] = json!(f); }
+    let mut seen = json!({});
+    for label in &labels {
+        let read = |side: &str| std::fs::metadata(dir.join(format!("trace-{side}{label}.jsonl"))).ok().filter(|m| m.len() <= TRACE_BYTES_MAX)
+            .and_then(|_| std::fs::read_to_string(dir.join(format!("trace-{side}{label}.jsonl"))).ok());
+        if let (Some(old), Some(again), Some(new)) = (read("old"), read("old-again"), read("new")) {
+            let mut c = crate::trace::compare(&old, &again, &new);
+            c["status"] = json!("RAN");
+            c["tests"] = tests["bystanders"]["tests"].clone();
+            seen = crate::trace::merged(&seen, &c);
+        }
+    }
+    if seen["status"] == "RAN" { tests["bystanders"] = seen; }
     let wanted: BTreeSet<String> = tests["rewritten"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
     if !wanted.is_empty() { tests["polarity"] = Value::Object(readings(dir, &suites, &labels, &wanted)); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });

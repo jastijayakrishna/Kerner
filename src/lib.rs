@@ -33,3 +33,4 @@ pub mod csp;
 pub mod types;
 pub mod replay;
 pub mod polarity;
+pub mod trace;

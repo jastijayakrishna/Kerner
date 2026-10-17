@@ -11,6 +11,7 @@ pub const JEST_PROGRESS: &str = include_str!("jest-progress.cjs");
 pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub const FAULT: &str = include_str!("fault.cjs");
 pub const NODE_REPORT: &str = include_str!("node-report.mjs");
+pub const TRACE: &str = include_str!("trace.cjs");
 pub const NODE_REPORTER: &str = "--test-reporter=/kern/node-report.mjs";
 pub const INSTALL_ENV: [(&str, &str); 22] = [("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0"),("HUSKY", "0"), ("HUSKY_SKIP_INSTALL", "1"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_HOME", "/home/kern/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
@@ -51,7 +52,9 @@ pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
 }
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
-pub const TEST_PARTS: [&str; 6] = ["output", "errors", "behavior", "created", "ending", "values"];
+pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
+pub const TRACE_BYTES_MAX: usize = 8 << 20;
+pub const SERVE_FILES_COUNT_MAX: usize = 40;
 pub const VALUES_BYTES_MAX: usize = 1 << 20;
 pub const FAULTS_COUNT_MAX: usize = 24;
 pub fn test_dir(cwd: &str) -> R<String> {
@@ -619,6 +622,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     create_new(dir.join("vitest-progress.mjs"), VITEST_PROGRESS.as_bytes(), 0o444)?;
     create_new(dir.join("fault.cjs"), FAULT.as_bytes(), 0o444)?;
     create_new(dir.join("node-report.mjs"), NODE_REPORT.as_bytes(), 0o444)?;
+    create_new(dir.join("trace.cjs"), TRACE.as_bytes(), 0o444)?;
     create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
@@ -1122,9 +1126,24 @@ mod inside {
         println!("{}", json!({ "version": 1, "sealed": count }));
         Ok(())
     }
+    fn served(c: &Value) -> R<bool> {
+        let serve = c["serve"].as_object().filter(|f| f.len() <= super::SERVE_FILES_COUNT_MAX).ok_or_else(|| Denied("Invalid test run served files".into()))?;
+        if serve.is_empty() { return Ok(false); }
+        std::fs::create_dir_all("/tmp/.kern-serve")?;
+        let mut manifest = serde_json::Map::new();
+        for (i, (p, text)) in serve.iter().enumerate() {
+            file_path(p)?;
+            let text = text.as_str().ok_or_else(|| Denied("Invalid test run served files".into()))?;
+            let body = format!("/tmp/.kern-serve/{i}");
+            std::fs::write(&body, text)?;
+            manifest.insert(format!("/workspace/{p}"), json!(body));
+        }
+        std::fs::write("/tmp/.kern-serve.json", serde_json::to_vec(&manifest)?)?;
+        Ok(true)
+    }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early", "faults"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early", "faults", "serve"], "test run")?;
         let early = c["early"].as_bool().ok_or_else(|| Denied("Invalid test run".into()))?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
@@ -1153,6 +1172,7 @@ mod inside {
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
             create_new(&target, text.as_bytes(), 0o644)?;
         }
+        let serving = served(&c)?;
         let faults = c["faults"].as_array().cloned().unwrap_or_default();
         ensure!(faults.len() <= super::FAULTS_COUNT_MAX, "Too many planted faults");
         if !faults.is_empty() {
@@ -1181,7 +1201,8 @@ mod inside {
                 results.push(json!({ "finished": finished, "served": Path::new("/tmp/.kern-fault-served").exists(), "output": String::from_utf8_lossy(&output),
                     "errors": String::from_utf8_lossy(&some_of("/tmp/.kern-fault-err", 16 << 10, true)) }));
             }
-            for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"faults".to_vec()), ("values", Vec::new())] { part(name, &body)?; }
+            for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"faults".to_vec()), ("values", Vec::new()),
+                ("trace", Vec::new())] { part(name, &body)?; }
             std::io::Write::flush(&mut std::io::stdout())?;
             return Ok(());
         }
@@ -1198,11 +1219,13 @@ mod inside {
         let epoch = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let mut ending;
         loop {
-            for f in ["/tmp/.kern-progress", "/tmp/.kern-values"] { let _ = std::fs::remove_file(f); }
+            for f in ["/tmp/.kern-progress", "/tmp/.kern-values", "/tmp/.kern-trace"] { let _ = std::fs::remove_file(f); }
+            let hooks = if serving { format!("--require=/kern/monitor.cjs --require=/kern/fault.cjs{options}") } else { format!("--require=/kern/monitor.cjs{options}") };
+            let tracing: Vec<(&str, &str)> = if serving { vec![("KERN_SERVE", "/tmp/.kern-serve.json"), ("KERN_TRACE", "/tmp/.kern-trace")] } else { Vec::new() };
             let (begun, mut look) = (epoch(), Duration::from_secs(5));
             let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
-                .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
-                .env("KERN_PROGRESS", "/tmp/.kern-progress").env("KERN_VALUES", "/tmp/.kern-values")
+                .env("NODE_OPTIONS", &hooks).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
+                .env("KERN_PROGRESS", "/tmp/.kern-progress").env("KERN_VALUES", "/tmp/.kern-values").envs(tracing.iter().copied())
                 .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
             let readers = [capture(child.stdout.take(), "/tmp/.kern-test-out", OUT_HEAD_BYTES_MAX, OUT_TAIL_BYTES_MAX),
                 capture(child.stderr.take(), "/tmp/.kern-test-err", ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX)];
@@ -1238,6 +1261,7 @@ mod inside {
         part("created", created.join("\n").as_bytes())?;
         part("ending", ending.as_bytes())?;
         part("values", &some_of("/tmp/.kern-values", super::VALUES_BYTES_MAX, false))?;
+        part("trace", &some_of("/tmp/.kern-trace", super::TRACE_BYTES_MAX, false))?;
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())
     }

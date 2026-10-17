@@ -198,6 +198,13 @@ fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Valu
         f.unverified.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put faults in the changed code, and no test loaded them), so the tests say nothing about it", code(path, 160))));
     }
 }
+fn bystander_items(f: &mut Found, tests: &Value) {
+    for x in tests["bystanders"]["differences"].as_array().into_iter().flatten() {
+        let what = match x["kind"].as_str() { Some("accepts") => "now accepts what it refused", Some("throws") => "now throws", Some("empty") => "now gives nothing back", _ => "now gives another answer" };
+        f.notes.push(item("bystander", format!("Tests this change does not touch call {} with {}, and it {what}: {} before, {} now", code(x["key"].as_str().unwrap_or(""), 160),
+            code(x["input"].as_str().unwrap_or(""), 160), code(x["was"].as_str().unwrap_or(""), 160), code(x["now"].as_str().unwrap_or(""), 160))));
+    }
+}
 fn rule_items(f: &mut Found, d: &Value, rules: &Value, tests: &Value) {
     let gone_all = strings(&tests["gone"]);
     for p in &deleted_files(rules) {
@@ -342,6 +349,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     let (new_tests, unproven) = test_file_items(&mut f, rules, tests);
     let (summary, described, surprises, sorted) = behaviour_looks(&mut f, behaviour);
     change_items(&mut f, rules, tests, new_tests);
+    bystander_items(&mut f, tests);
     rule_items(&mut f, d, rules, tests);
     run_items(&mut f, rules, tests, unproven);
     steering_items(&mut f, rules);
@@ -481,6 +489,16 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         for (why, paths) in &no_fault {
             let more = if paths.len() > SHOWN { format!(" and {} more", paths.len() - SHOWN) } else { String::new() };
             md += &format!("- ⏭️ No fault planted in {}{more}: {why}\n", paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", "));
+        }
+        let seen = &tests["bystanders"];
+        if seen["status"] == "RAN" {
+            let (n, m) = (seen["compared"].as_u64().unwrap_or(0), seen["changed"].as_u64().unwrap_or(0));
+            md += &format!("- {} Untouched tests: Kern watched what the changed code gave {} that this change does not touch, for {n} inputs on the old and the new code{}\n",
+                if m == 0 { "✅" } else { "🔍" }, plural(seen["tests"].as_u64().unwrap_or(0) as usize, "test file", "test files"),
+                if m == 0 { "; every answer stayed the same".to_string() } else { format!("; {m} changed (see Notes)") });
+        } else if let Some(why) = seen["why"].as_str() { md += &format!("- ⏭️ Untouched tests: not compared — {}\n", plain(why, 400)); }
+        if tests["dropped"].as_array().is_some_and(|d| d.iter().any(|x| x == "untouched tests")) {
+            md += "- ⏭️ Untouched tests: not compared — Kern's time ran short, so it dropped them first\n";
         }
         if tests["dropped"].as_array().is_some_and(|d| d.iter().any(|x| x == "planted faults")) {
             md += "- ⏭️ Planted faults: not checked — Kern's time ran short, so it dropped them first (they rank below the tests and the type check)\n";

@@ -896,7 +896,7 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     let seconds = within(until, limit);
     if seconds < 60 { return Ok(Side::Late); }
     let cut = seconds < limit;
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files, "early": limit >= test_seconds(), "faults": [] });
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files, "early": limit >= test_seconds(), "faults": [], "serve": {} });
     let run = match in_test_box(out, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
@@ -1012,7 +1012,7 @@ fn prepare(out: &Path, volume: &str, steps: &[(String, String)], label: &str, un
     let seconds = within(until, 480);
     crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
     let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
-    let config = json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {}, "early": false, "faults": [] });
+    let config = json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {}, "early": false, "faults": [], "serve": {} });
     let run = in_test_box(out, volume, &format!("prepare-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds));
     let parts = crate::sandbox::parts(&run?.stdout, &crate::sandbox::TEST_PARTS)?;
     let log = String::from_utf8_lossy(&parts["errors"]).to_string();
@@ -1064,7 +1064,8 @@ const NO_FAULT_CHANGE: &str = "Kern found nothing in its change to put a fault i
 const NO_FAULT_RESULTS: &str = "Kern's fault run gave no results";
 const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run under jest or vitest";
 #[allow(clippy::too_many_arguments)]
-fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> (Vec<Value>, Vec<Value>) {
+type FaultRun = (Vec<Value>, Vec<Value>, BTreeSet<String>);
+fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> FaultRun {
     let (tests, dir) = (&suite.new.0, suite.dir.as_str());
     let command = |paths: BTreeSet<String>| related(tests, &paths, dir).map(|t| test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect::<Vec<String>>());
     let limit = crate::sandbox::FAULTS_COUNT_MAX - 1;
@@ -1076,7 +1077,7 @@ fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: 
             else { NO_FAULT_CHANGE.to_string() };
         json!({ "path": f.0, "why": why })
     }).collect();
-    let Some(first) = kept.first() else { return (Vec::new(), missing) };
+    let Some(first) = kept.first() else { return (Vec::new(), missing, BTreeSet::new()) };
     let paths: BTreeSet<String> = kept.iter().map(|(m, _)| m.path.clone()).collect();
     let control = command(paths.clone()).unwrap_or_else(|| first.1.clone());
     let placebo = json!({ "path": first.0.path, "start": 0, "end": 0, "original": "", "replacement": "", "command": control });
@@ -1084,15 +1085,61 @@ fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: 
     let results = run_faults(out, volume, (tests, &suite.new.1), dir, specs, seconds);
     let Some((placebo, runs)) = results.split_first().filter(|(_, runs)| runs.len() == kept.len()) else {
         missing.extend(paths.iter().map(|p| json!({ "path": p, "why": NO_FAULT_RESULTS })));
-        return (Vec::new(), missing);
+        return (Vec::new(), missing, BTreeSet::new());
     };
     let _ = std::fs::write(out.join(format!("faults{label}.json")), serde_json::to_vec(&json!({ "placebo": placebo, "faults": runs })).unwrap_or_default());
     let outcomes = fault_outcomes(tests.runner, new, Some(placebo), runs);
-    (kept.iter().zip(outcomes).map(|((m, _), o)| json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "outcome": o })).collect(), missing)
+    let related: BTreeSet<String> = proof::read_report(tests.runner, placebo["output"].as_str().unwrap_or("").as_bytes()).map(|r| r.tests.keys().map(|k| file_of(k).to_string()).collect()).unwrap_or_default();
+    (kept.iter().zip(outcomes).map(|((m, _), o)| json!({ "path": m.path, "line": m.line, "what": m.what(), "kind": m.kind.name(), "outcome": o })).collect(), missing, related)
+}
+pub const BYSTANDER_SECS_MIN: u64 = 240;
+pub const BYSTANDER_SECS_MAX: u64 = 480;
+const BYSTANDER_FILES_COUNT_MAX: usize = 40;
+const SERVE_BYTES_MAX: usize = 2 << 20;
+pub fn bystanders_fit(left_secs: u64) -> bool { left_secs >= BYSTANDER_SECS_MIN + TYPES_SECS_RESERVE }
+fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, serve: &serde_json::Map<String, Value>, label: &str, seconds: u64) -> Option<String> {
+    let command: Vec<String> = test_command(tests).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": [], "serve": serve });
+    let run = in_test_box(out, volume, &format!("trace-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)).ok()?;
+    let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).ok()?;
+    parts["ending"].starts_with(b"exit").then(|| String::from_utf8_lossy(&parts["trace"]).to_string())
+}
+fn watched(files: &[(String, String, String)], old_side: bool) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let mut bytes = 0usize;
+    for (path, old, new) in files {
+        let text = if old_side { old } else { new };
+        let Some(t) = (!text.is_empty()).then(|| crate::trace::instrument(path, text)).flatten() else { continue };
+        if bytes + t.len() > SERVE_BYTES_MAX || out.len() >= crate::sandbox::SERVE_FILES_COUNT_MAX { break; }
+        bytes += t.len();
+        out.insert(path.clone(), json!(t));
+    }
+    out
+}
+#[allow(clippy::too_many_arguments)]
+fn bystanders(out: &Path, (old_volume, new_volume): (&str, &str), suite: &Suite, files: &[(String, String, String)], related: &BTreeSet<String>, touched: &BTreeSet<String>, label: &str, seconds: u64) -> Value {
+    let none = |why: String| json!({ "status": "NONE", "why": why });
+    let Some((old_tests, old_env)) = suite.old.as_ref() else { return none("the old code has no test runner Kern can read".into()) };
+    let chosen: BTreeSet<String> = related.iter().filter(|f| !touched.contains(*f) && kept_back(f).is_none()).take(BYSTANDER_FILES_COUNT_MAX).cloned().collect();
+    if chosen.is_empty() { return none("no test this change leaves untouched loads the changed code".into()); }
+    let (old_serve, new_serve) = (watched(files, true), watched(files, false));
+    if old_serve.is_empty() || new_serve.is_empty() { return none("Kern could not rewrite the changed code to watch it".into()); }
+    let (Some(old_t), Some(new_t)) = (kept_focus(old_tests, &chosen, &suite.dir), kept_focus(&suite.new.0, &chosen, &suite.dir)) else { return none(SINGLE_FILES.into()) };
+    let each = (seconds / 3).max(60);
+    let mut traces = Vec::new();
+    for (side, volume, tests, serve) in [("old", old_volume, (&old_t, old_env), &old_serve), ("old-again", old_volume, (&old_t, old_env), &old_serve), ("new", new_volume, (&new_t, &suite.new.1), &new_serve)] {
+        let Some(trace) = traced_run(out, volume, tests, &suite.dir, serve, &format!("{side}{label}"), each) else { return none(format!("the {side} run of the untouched tests did not finish")) };
+        let _ = std::fs::write(out.join(format!("trace-{side}{label}.jsonl")), &trace);
+        traces.push(trace);
+    }
+    let mut c = crate::trace::compare(&traces[0], &traces[1], &traces[2]);
+    c["status"] = json!("RAN");
+    c["tests"] = json!(chosen.len());
+    c
 }
 fn run_faults(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, seconds: u64) -> Vec<Value> {
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults });
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults, "serve": {} });
     let Ok(run) = in_test_box(out, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return Vec::new() };
     serde_json::from_slice::<Vec<Value>>(&parts["output"]).unwrap_or_default()
@@ -1238,6 +1285,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     merged.insert("uneven_why".into(), json!([]));
     merged.insert("faults".into(), json!([]));
     merged.insert("faults_missing".into(), json!([]));
+    merged.insert("bystanders".into(), json!({}));
     merged.insert("problem_why".into(), json!({}));
     merged.insert("polarity".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
@@ -1491,10 +1539,19 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             else if !faults_fit(left) { dropped.insert("planted faults"); }
             else {
                 let at = now_ms();
-                let (planted, lacking) = planted_faults(out, &volume("new"), suite, &new, &files, &label, fault_seconds(left));
+                let (planted, lacking, related) = planted_faults(out, &volume("new"), suite, &new, &files, &label, fault_seconds(left));
                 timed(format!("faults{label}"), at);
                 found = planted;
                 missing.extend(lacking);
+                let left = within(until, BYSTANDER_SECS_MAX + TYPES_SECS_RESERVE);
+                if !related.is_empty() && !bystanders_fit(left) { dropped.insert("untouched tests"); }
+                if !related.is_empty() && bystanders_fit(left) {
+                    let at = now_ms();
+                    let touched: BTreeSet<String> = changes.iter().filter(|(p, _)| is_test_path(p)).map(|(p, _)| p.clone()).collect();
+                    let seen = bystanders(out, (&volume("old"), &volume("new")), suite, &files, &related, &touched, &label, left.saturating_sub(TYPES_SECS_RESERVE));
+                    timed(format!("trace{label}"), at);
+                    merged["bystanders"] = crate::trace::merged(&merged["bystanders"], &seen);
+                }
             }
             if let Some(a) = merged["faults"].as_array_mut() { a.extend(found); }
             if let Some(a) = merged["faults_missing"].as_array_mut() { a.extend(missing); }

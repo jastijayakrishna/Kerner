@@ -222,6 +222,24 @@ fn stored_fault_runs_with_a_control_are_judged_against_it() {
 }
 
 #[test]
+fn stored_traces_of_untouched_tests_are_compared_again() {
+    let t = Temp::new("traces");
+    let dir = t.0.join("receipt-lightdash__lightdash__12942");
+    stored(&dir, "vitest", json!({ "kept": 2, "bystanders": { "status": "RAN", "compared": 0, "unstable": 0, "changed": 0, "tests": 4, "differences": [] } }), &[
+        ("old", vitest(&[(ADDS, "adds", "passed")])),
+        ("new", vitest(&[(ADDS, "adds", "passed")])),
+    ]);
+    let line = |o: &str| format!("{}\n", json!({ "k": "packages/backend/src/queryBuilder.ts#stripComments", "a": "[\"SELECT 'http://a'\"]", "o": o }));
+    for (side, o) in [("old", "returns \"SELECT 'http://a'\""), ("old-again", "returns \"SELECT 'http://a'\""), ("new", "returns \"SELECT 'http:\"")] {
+        std::fs::write(dir.join(format!("trace-{side}.jsonl")), line(o)).unwrap();
+    }
+    let r = kern::replay::rejudge(&dir).unwrap();
+    let seen = &r["receipt"]["tests"]["bystanders"];
+    assert_eq!((seen["compared"].as_u64(), seen["changed"].as_u64(), seen["tests"].as_u64()), (Some(1), Some(1), Some(4)), "{seen}");
+    assert_eq!(r["receipt"]["notes"][0]["kind"], "bystander", "{}", r["receipt"]);
+}
+
+#[test]
 fn calcom_28622_a_stored_old_test_failure_is_read_again_with_its_values() {
     let t = Temp::new("polarity");
     let dir = t.0.join("receipt-calcom__cal.diy__28622");

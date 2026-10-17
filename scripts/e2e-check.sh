@@ -522,6 +522,36 @@ for runner in vitest jest; do
   grep -q 'the tests caught 0 of 4 faults' "faults-none-$runner/receipt.md" || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: the receipt does not say no test checks the change"; }
 done
 
+say "Kern watches what the changed code gives tests the change leaves untouched: an answer they never checked is named as a note, with vitest and with jest"
+for runner in vitest jest; do
+  git init -q "watch-$runner-repo" && cd "watch-$runner-repo"
+  git config user.email e2e@example.invalid && git config user.name e2e
+  mkdir -p src test
+  if [ "$runner" = vitest ]; then
+    printf '%s\n' '{"name":"watch","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+    def() { printf 'export const %s = %s;\n' "$1" "$2"; }
+    printf '%s\n' 'import { test, expect } from "vitest";' 'import { label } from "../src/label.js";' '' > test/label.test.js
+  else
+    printf '%s\n' '{"name":"watch","version":"1.0.0","private":true,"scripts":{"test":"jest"},"devDependencies":{"jest":"29.7.0"}}' > package.json
+    def() { printf 'exports.%s = %s;\n' "$1" "$2"; }
+    printf '%s\n' 'const { label } = require("../src/label.js");' '' > test/label.test.js
+  fi
+  printf '%s\n' 'test("labels one item", () => expect(label(1)).toBe("1 item"));' 'test("labels many", () => expect(label(3).length).toBeGreaterThan(0));' >> test/label.test.js
+  def label '(n) => (n === 1 ? "1 item" : n + " items")' > src/label.js
+  git add -A && git commit -qm base && watch_base=$(git rev-parse HEAD)
+  git checkout -q -b things
+  def label '(n) => (n === 1 ? "1 item" : n + " things")' > src/label.js
+  git commit -qam "Say things instead of items" && git rev-parse HEAD > "$W/watch-$runner.head"
+  git checkout -q "$watch_base"
+  cd "$W"
+  check "watch-$runner" "$watch_base" "watch-$runner-repo"
+  decision "watch-$runner" clear
+  jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 1 and .tests.bystanders.differences[0].input == "[3]"
+    and (.tests.bystanders.differences[0].now | contains("3 things")) and ([.notes[].kind] | index("bystander") != null)' "watch-$runner/receipt.json" > /dev/null \
+    || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named"; }
+  grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
+done
+
 say "A change that brings TypeScript errors to a project that type-checked clean is blocked, even when its tests still pass"
 git init -q typesrepo && cd typesrepo
 git config user.email e2e@example.invalid && git config user.name e2e

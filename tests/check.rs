@@ -62,13 +62,15 @@ fn a_seal_owns_only_its_tree_as_root_without_network_and_two_rights() {
 #[test]
 fn a_test_run_report_is_read_by_length() {
     let mut out = Vec::new();
-    for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("created", b"src/total.mjs"), ("ending", b"exit 1"), ("values", b"{\"name\":\"adds\"}\n")] {
+    for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("created", b"src/total.mjs"), ("ending", b"exit 1"), ("values", b"{\"name\":\"adds\"}\n"),
+        ("trace", b"{\"k\":\"src/total.mjs#total\",\"a\":\"[]\",\"o\":\"returns 0\"}\n")] {
         out.extend(format!("{}{name} {}\n", sandbox::DRIVE_MARK, body.len()).as_bytes());
         out.extend(body);
     }
     let parts = sandbox::parts(&out, &sandbox::TEST_PARTS).unwrap();
     assert_eq!(parts["ending"], b"exit 1");
     assert_eq!(parts["values"], b"{\"name\":\"adds\"}\n");
+    assert_eq!(parts["trace"], b"{\"k\":\"src/total.mjs#total\",\"a\":\"[]\",\"o\":\"returns 0\"}\n");
     assert_eq!(parts["behavior"], b"exec:id\n");
     assert_eq!(parts["created"], b"src/total.mjs");
     let mut forged = out.clone();
