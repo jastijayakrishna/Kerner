@@ -369,7 +369,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or(""), 400));
         }
         for d in tests["no_tests_in"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-            md += &format!("- ⏭️ Tests in {}: none — its test script finds no test files\n", code(if d.is_empty() { "." } else { d }, 160));
+            md += &format!("- ⏭️ Tests in {}: none — its test script runs no tests\n", code(if d.is_empty() { "." } else { d }, 160));
         }
         let count = |k: &str| tests[k].as_array().map_or(0, Vec::len);
         let (edited, rewritten, unchecked) = (tests["edited"].as_u64().unwrap_or(0) as usize, count("rewritten"), count("edited_unchecked"));
