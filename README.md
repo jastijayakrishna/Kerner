@@ -223,7 +223,7 @@ Next steps:
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
   run (another runner, a failed install, no results, Kern's own environment failing), the answer needs a look and says why, never ✅. A
-  project with no test script, or whose own test script finds no test files, gets a receipt that covers the rules only and says so;
+  project with no test script, whose own test script finds no test files, or whose test script only prints a message, gets a receipt that covers the rules only and says so;
   changed code in other languages is listed as "not checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
   runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it, or when the test

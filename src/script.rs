@@ -42,6 +42,11 @@ pub fn found(package: &Value) -> Found {
     if packages { Found::Packages } else { Found::Nothing }
 }
 
+const PRINTS_ONLY: [&str; 6] = ["echo", "printf", "exit", "true", "false", ":"];
+pub fn placeholder(script: &str) -> bool {
+    let commands = split(script);
+    !commands.is_empty() && commands.iter().all(|c| c.iter().all(|w| !w.expands) && c.first().is_some_and(|w| PRINTS_ONLY.contains(&base(&w.text))))
+}
 pub fn same_tests(a: &Value, b: &Value) -> bool {
     let (x, y) = (found(a), found(b));
     let words = |p: &Value| -> Vec<(String, Value)> {
@@ -303,13 +308,26 @@ fn skip_options(words: &[Word], mut i: usize, valued: &[&str]) -> usize {
     i
 }
 
+const NODE_ENV_FILES: [&str; 2] = ["--env-file", "--env-file-if-exists"];
 fn node(args: &[Word], mut env: BTreeMap<String, String>) -> Found {
-    let (mut flags, mut i, mut test) = (Vec::new(), 0, false);
+    let (mut flags, mut i, mut test, mut files) = (Vec::new(), 0, false, Vec::new());
     while i < args.len() && args[i].text.starts_with('-') {
         if args[i].text == "--test" { test = true; }
+        let text = args[i].text.clone();
+        let (name, inline) = text.split_once('=').map_or((text.as_str(), None), |(n, v)| (n, Some(v.to_string())));
+        if NODE_ENV_FILES.contains(&name) {
+            let value = match inline { Some(v) => Some(v), None => { i += 1; args.get(i).map(|w| w.text.clone()) } };
+            files.extend(value.filter(|v| !v.is_empty()));
+            i += 1;
+            continue;
+        }
         flags.push(args[i].clone());
         if !args[i].text.contains('=') && NODE_VALUED.contains(&args[i].text.as_str()) && i + 1 < args.len() { i += 1; flags.push(args[i].clone()); }
         i += 1;
+    }
+    if !files.is_empty() {
+        let had = env.remove(ENV_FILES);
+        env.insert(ENV_FILES.to_string(), had.into_iter().chain(files).collect::<Vec<_>>().join("\n"));
     }
     if test { return invocation(Runner::Node, Some("/usr/local/bin/node"), args, env); }
     let Some(path) = args.get(i) else { return Found::Nothing };

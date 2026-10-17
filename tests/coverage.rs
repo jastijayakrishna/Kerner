@@ -58,6 +58,39 @@ fn cap_go_capgo_app_2789_a_file_tests_write_under_a_random_name_on_both_sides_is
 }
 
 #[test]
+fn facebook_docusaurus_12655_and_five_more_no_tests_needs_the_repository_to_agree() {
+    let has = |paths: &[&str], dir: &str| suite::repo_has_tests(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), dir);
+    assert!(has(&["src/a.ts", "__tests__/validate-package-json.test.ts"], ""), "docusaurus has 327 test files, so vitest finding none was Kern's run, not the project");
+    assert!(has(&["lib/index.js", "test/core/actions/index_spec.js"], ""), "AudienseCo/monorail#100 runs mocha $(find test/ -name *_spec.js)");
+    assert!(has(&["packages/compass-indexes/src/components/create-index-form.spec.tsx"], "packages/compass-indexes"), "mongodb-js/compass#8022");
+    assert!(!has(&["packages/a/src/x.test.ts", "packages/b/src/y.ts"], "packages/b"), "tests in another package do not count");
+    assert!(!has(&["src/a.ts", "README.md", "test/fixtures/data.json"], ""), "data in a test folder is not a test");
+    assert!(!has(&["node_modules/x/test/a.test.js", "src/a.ts"], ""), "tests inside installed packages are not the project's");
+}
+
+#[test]
+fn rocketchat_41361_a_test_script_that_only_prints_a_message_means_no_tests() {
+    for s in [r#"echo "no tests" && exit 1"#, r#"echo "Error: no test specified" && exit 1"#, "exit 0", "true", r#"printf 'none\n'"#] {
+        assert!(kern::script::placeholder(s), "{s}: the script runs no test, so the package has none; Kern said it could not run it");
+    }
+    for s in ["vitest run", "echo start && vitest run", "node test.js", "", r#"echo "$(node test.js)""#] {
+        assert!(!kern::script::placeholder(s), "{s}: it runs something");
+    }
+}
+
+#[test]
+fn safe_global_safe_client_gateway_2715_node_env_file_flags_are_read_by_kern_not_put_in_node_options() {
+    use kern::script::{ENV_FILES, Found, found};
+    for script in ["node --env-file-if-exists=.env node_modules/.bin/jest", "node --env-file .env.test --env-file-if-exists=.env.local node_modules/.bin/jest --ci"] {
+        let Found::Run(i) = found(&json!({ "scripts": { "test": script } })) else { panic!("{script}") };
+        let options = i.env.get("NODE_OPTIONS").cloned().unwrap_or_default();
+        assert!(!options.contains("env-file"), "{script}: node refuses --env-file flags in NODE_OPTIONS, so the tests never started: {options}");
+        assert!(i.env.get(ENV_FILES).is_some_and(|f| f.contains(".env")), "{script}: Kern loads the files itself, as it does for dotenv: {:?}", i.env);
+        assert!(i.command.iter().any(|a| a.ends_with("jest")), "{script}: {:?}", i.command);
+    }
+}
+
+#[test]
 fn saleor_apps_2046_avatax_a_project_that_shuffles_its_tests_still_runs_in_one_fixed_order() {
     use kern::script::{Found, found};
     let run = |script: &str| match found(&json!({ "scripts": { "test": script } })) { Found::Run(i) => i.command, other => panic!("{script}: {other:?}") };

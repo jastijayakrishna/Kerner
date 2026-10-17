@@ -1005,7 +1005,7 @@ mod inside {
             if *said == super::UNSCRIPTED && scripts_failed.is_none() { scripts_failed = result.as_str().map(str::to_string); }
             let left = budget.saturating_sub(started.elapsed());
             if left.is_zero() { result = json!("out of time"); break; }
-            if *dirty { super::restore(&committed, dir, keep)?; }
+            if *dirty { quiesce()?; super::restore(&committed, dir, keep)?; }
             *dirty = true;
             if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
             originals = if manager == "bun" { bun_rewrite(dir)? } else { Vec::new() };
@@ -1020,6 +1020,7 @@ mod inside {
             let first = super::first_error(&String::from_utf8_lossy(&text)).map(|f| f.chars().take(300).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
             result = json!(format!("failed: {}{tail}", first.map_or(String::new(), |f| format!("{f}\n…\n"))));
         }
+        quiesce()?;
         for (path, text) in &originals { std::fs::write(path, text)?; }
         let parts = if result.as_str().is_some_and(|r| r.starts_with("installed")) && manager != "pnpm" { platform_parts(dir, (budget, started))? } else { Vec::new() };
         let mut record = json!({ "dir": d, "manager": manager, "result": result, "parts": parts });

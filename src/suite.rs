@@ -58,6 +58,10 @@ fn test_grant(path: &str) -> Option<String> {
 }
 
 pub fn is_test_path(path: &str) -> bool { test_grant(path).is_some() }
+pub fn repo_has_tests(paths: &[String], dir: &str) -> bool {
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    paths.iter().any(|p| p.starts_with(&prefix) && !p.split('/').any(|s| s == "node_modules") && crate::capability::is_code(p) && is_test_path(p))
+}
 
 pub fn test_paths(paths: &[&str]) -> Vec<String> { paths.iter().filter_map(|p| test_grant(p)).collect::<BTreeSet<_>>().into_iter().collect() }
 fn sum(r: &Report) -> Value {
@@ -1088,7 +1092,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let scripted = manifest(commit, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).is_some_and(|v| v["scripts"]["test"].is_string());
         if dir.is_empty() || scripted { None } else { by_config(|f| has(commit, format!("{dir}/{f}"))) }
     });
-    let mut not_run = Vec::new();
+    let (mut not_run, mut testless) = (Vec::new(), Vec::new());
     let suites: Vec<Suite> = match plan(manifest(head, "").as_deref()) {
         Plan::Run(t, env) => vec![Suite { dir: String::new(), old: ready(plan(manifest(base, "").as_deref())), new: (t, env) }],
         Plan::Packages | Plan::Nothing => {
@@ -1099,7 +1103,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             for dir in packages(&paths, |dir| manifest(head, dir).is_some() || manifest(base, dir).is_some() || project(dir)) {
                 let Some(new) = planned(head, &dir) else {
                     let script = manifest(head, &dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string));
-                    if let Some(script) = script { not_run.push(json!({ "dir": dir, "why": format!("Kern cannot run this package's test script: {script}") })); }
+                    match script {
+                        Some(s) if crate::script::placeholder(&s) => testless.push(dir.clone()),
+                        Some(s) => not_run.push(json!({ "dir": dir, "why": format!("Kern cannot run this package's test script: {s}") })),
+                        None => {}
+                    }
                     continue;
                 };
                 if list.len() == MAX_PACKAGES { not_run.push(json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") })); continue; }
@@ -1109,9 +1117,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
     };
     if suites.is_empty() {
-        let script = manifest(head, "").and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string)).filter(|s| !s.contains("no test specified"));
+        let script = manifest(head, "").and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string)).filter(|s| !crate::script::placeholder(s));
         return Ok(match (not_run.first().map(|n| n["why"].clone()), script) {
-            (Some(why), _) => json!({ "status": "NOT_RUN", "why": why, "not_run": not_run }),
+            (Some(why), _) => json!({ "status": "NOT_RUN", "why": why, "not_run": not_run, "no_tests_in": testless }),
+            (None, _) if !testless.is_empty() => json!({ "status": "NOT_RUN", "why": "the test scripts of the changed packages run no tests, so no test checks this change", "no_tests": true, "no_tests_in": testless }),
             (None, Some(s)) => json!({ "status": "NOT_RUN", "why": format!("Kern cannot run this project's test script, `{}` (Kern runs vitest, jest, mocha and node --test)", s.chars().take(200).collect::<String>()) }),
             (None, None) => json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true }),
         });
@@ -1143,10 +1152,12 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     merged.insert("problem_why".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
-    let (mut late, mut dropped, mut testless) = (false, BTreeSet::new(), Vec::new());
+    let (mut late, mut dropped) = (false, BTreeSet::new());
     let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
     let changes = crate::rules::changed(repo, base, head)?;
     let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().is_some_and(follows_script);
+    let head_paths: Option<Vec<String>> = crate::drive::listing(repo, head).ok().map(|items| items.into_iter().map(|i| i.path).collect());
+    let testless_here = |dir: &str| followed(dir) && head_paths.as_ref().is_some_and(|p| !repo_has_tests(p, dir));
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
@@ -1224,7 +1235,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         };
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-            Some(Side::Nothing(why)) if no_test_files(why) && tried.is_empty() && built.is_empty() && followed(&suite.dir) => { testless.push(suite.dir.clone()); continue; }
+            Some(Side::Nothing(why)) if no_test_files(why) && tried.is_empty() && built.is_empty() && testless_here(&suite.dir) => { testless.push(suite.dir.clone()); continue; }
             Some(Side::Nothing(why) | Side::Cut(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
             Some(Side::Slow(why)) => {
                 let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
@@ -1341,7 +1352,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let runner = suite.new.0.runner;
         let named = |k: &str| in_suite(runner, &suite.dir, k);
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
-        if c["status"] != "RAN" && c["why"] == FOUND_NONE && narrowed.is_none() && followed(&suite.dir) { testless.push(suite.dir.clone()); continue; }
+        if c["status"] != "RAN" && c["why"] == FOUND_NONE && narrowed.is_none() && testless_here(&suite.dir) { testless.push(suite.dir.clone()); continue; }
         if c["status"] != "RAN" {
             not_run.push(json!({ "dir": suite.dir, "why": c["why"] }));
             if let Some(a) = merged["new_failing"].as_array_mut() { a.extend(list(&c["new_failing"])); }
