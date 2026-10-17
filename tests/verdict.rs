@@ -153,3 +153,18 @@ fn vuetifyjs_0_840_a_runner_that_dies_because_the_sandbox_is_full_never_blocks()
     let broken = suite::without_results("the output contains no vitest report", b"exit 1", b"failed to load config from /workspace/vitest.config.ts\nSyntaxError: Unexpected token '}'\n", b"");
     assert!(matches!(broken, suite::Side::Nothing(_)), "a config the change broke gives nothing for a reason in the project: {broken:?}");
 }
+
+#[test]
+fn tryghost_ghost_28552_a_file_that_failed_once_and_passed_when_run_again_is_chance_even_with_no_old_record() {
+    let file = "ghost/core/test/unit/frontend/services/assets-minification/minifier.test.js";
+    let skipped = format!("{file} > Minifier > minifies css");
+    let other = "ghost/core/test/unit/other.test.js > works";
+    let before = report(&[(skipped.as_str(), 0, 0, 13), (other, 5, 0, 0)], &[], &[]);
+    let after = report(&[(skipped.as_str(), 0, 0, 13), (other, 5, 0, 0)], &[file], &[(file, "Error: Hook timed out in 10000ms")]);
+    let again = report(&[(skipped.as_str(), 0, 0, 13), (other, 5, 0, 0)], &[], &[]);
+    let c = suite::judged(&before, &after, Some(&again), None);
+    assert!(listed(&c, "unproven").is_empty(), "it passed when the new code ran again, so chance made it fail once, and chance never decides: {c}");
+    assert!(listed(&c, "flaky").iter().any(|k| k == file), "{c}");
+    let twice = suite::judged(&before, &after, Some(&after), None);
+    assert_eq!(listed(&twice, "unproven"), [file], "failing every time with no old record is still unproven: {twice}");
+}

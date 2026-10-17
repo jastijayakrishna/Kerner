@@ -657,9 +657,9 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let (mut new_problems, mut unsteady, mut environmental, mut unproven) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, p) in checkable.iter().enumerate() {
         if excused.as_ref().is_some_and(|e| e[i]) { environmental.push(p.clone()); }
+        else if repeated.as_ref().is_some_and(|r| !r[i]) { unsteady.push(p.clone()); }
         else if !passed_before(p) { unproven.push(p.clone()); }
-        else if repeated.as_ref().is_none_or(|r| r[i]) { new_problems.push(p.clone()); }
-        else { unsteady.push(p.clone()); }
+        else { new_problems.push(p.clone()); }
     }
     let reported: BTreeSet<String> = new_problems.iter().map(|p| file_of(p).to_string()).collect();
     let shaky: BTreeSet<String> = unsteady.iter().chain(&environmental).map(|p| file_of(p).to_string()).collect();
