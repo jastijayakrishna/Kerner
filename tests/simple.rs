@@ -1,0 +1,63 @@
+#[test]
+fn review_2_d_kern_has_one_markdown_escaper_and_it_neutralises_markup() {
+    assert_eq!(kern::util::code("a`b<details>\n\u{1b}c", 200), "`a'b‹details>  c`");
+    assert_eq!(kern::util::code("  abcdef ", 3), "`abc…`");
+    assert_eq!(kern::util::plain("a`<b>\nc", 400), "a'‹b> c");
+    assert_eq!(kern::util::plain("abcdef", 2), "ab");
+    for file in ["receipt", "drive", "compare", "feedback"] {
+        let src = std::fs::read_to_string(format!("src/{file}.rs")).unwrap();
+        for own in ["fn code(", "fn span(", "fn plain(s: &str"] {
+            assert!(!src.contains(own), "src/{file}.rs keeps its own escaper ({own}); one escaper means one place to get it right, and drive's missed '<'");
+        }
+    }
+}
+
+#[test]
+fn review_2_d_one_list_says_which_files_are_code_in_another_language() {
+    for other in ["src/App.vue", "lib/a.py", "docs/page.mdx", "run.bash", "x.erl", "core.clj", "Main.fs", "View.m"] {
+        assert!(kern::capability::other_code(other), "{other}");
+    }
+    for not in ["src/a.ts", "README.md", "package.json", "node_modules/x/a.py"] { assert!(!kern::capability::other_code(not), "{not}"); }
+    let copies: usize = ["drive", "receipt", "capability", "rules", "check"].iter().map(|f| std::fs::read_to_string(format!("src/{f}.rs")).unwrap().matches("const OTHER_CODE").count()).sum();
+    assert_eq!(copies, 1, "the drive's list missed bash and the receipt's missed mdx, so the two parts disagreed about the same file");
+}
+
+#[test]
+fn review_1_c_a_pinned_tool_is_hashed_once_per_process_and_a_changed_one_is_still_caught() {
+    let dir = std::env::temp_dir().join(format!("kern-pin-{}", kern::util::uuid4().unwrap()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("docker");
+    std::fs::write(&file, b"the pinned docker").unwrap();
+    let pin = kern::policy::Pin { file: file.clone(), sha256: kern::util::sha256(b"the pinned docker") };
+    assert!(kern::policy::pinned(&pin).is_ok() && kern::policy::pinned(&pin).is_ok());
+    assert_eq!(kern::policy::pinned_reads(&file), 1, "a second check of the same unchanged file hashes nothing again");
+    std::fs::write(&file, b"a swapped docker binary").unwrap();
+    assert!(kern::policy::pinned(&pin).is_err(), "a binary changed after the first check is still refused");
+    assert_eq!(kern::policy::pinned_reads(&file), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn review_1_c_an_install_retried_after_running_out_of_memory_gets_only_the_time_that_is_left() {
+    let now = kern::util::now_ms();
+    assert!(kern::drive::setup_seconds(now + 60_000).is_err(), "a minute is too little to install a project");
+    assert_eq!(kern::drive::setup_seconds(now + 3_600_000).unwrap(), kern::drive::SETUP_SECS_MAX);
+    let left = kern::drive::setup_seconds(now + 600_000).unwrap();
+    assert!((590..=600).contains(&left), "a retry after a long first try gets what is left before the check's deadline, not a fresh {} s: {left}", kern::drive::SETUP_SECS_MAX);
+}
+
+#[test]
+fn review_1_c_a_check_sets_up_the_project_at_most_once() {
+    let out = std::env::temp_dir().join(format!("kern-setup-once-{}", kern::util::uuid4().unwrap()));
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("drive.json"), serde_json::json!({ "repo": out.join("no-such-repo"), "base": "1".repeat(40), "head": "2".repeat(40), "files": [], "skipped": [], "unmeasured": [] }).to_string()).unwrap();
+    let op = kern::policy::operator(&serde_json::json!({ "version": 3, "repository": "acme/shop", "deployment": "single-vm", "executors": ["external"], "image": format!("sha256:{}", "a".repeat(64)),
+        "builders": { "executor": null, "verifier": "e".repeat(64) }, "checks": [{ "id": "addition", "file": std::path::absolute("checks.json").unwrap(), "sha256": "b".repeat(64) }],
+        "registry": "registry.npmjs.org", "permissions": {} })).unwrap();
+    let until = kern::util::now_ms() + 3_600_000;
+    let first = kern::drive::setup(&out, &op, until).unwrap_err().0;
+    assert!(out.join("setup-failed.txt").is_file(), "the failure is recorded for the rest of the check");
+    let second = kern::drive::setup(&out, &op, until).unwrap_err().0;
+    assert_eq!(second, first, "the type check asked for the same failed setup again and burned up to 25 more minutes on it");
+    let _ = std::fs::remove_dir_all(&out);
+}

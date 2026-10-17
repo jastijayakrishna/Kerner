@@ -32,6 +32,11 @@ fn declaration(name: &str) -> bool { [".d.ts", ".d.mts", ".d.cts"].iter().any(|s
 pub fn is_code(name: &str) -> bool { CODE.contains(&extension(name)) && !declaration(name) }
 const TEXT_NAMES: [&str; 8] = ["AUTHORS", "CONTRIBUTORS", "MAINTAINERS", "CHANGELOG", "CHANGES", "HISTORY", "THANKS", "CREDITS"];
 pub fn text_name(name: &str) -> bool { TEXT_NAMES.contains(&name.rsplit('/').next().unwrap_or(name)) }
+const OTHER_CODE: [&str; 33] = ["vue", "svelte", "astro", "mdx", "marko", "py", "rb", "go", "java", "kt", "kts", "rs", "php", "cs", "fs", "swift", "scala", "c", "cc", "cpp",
+    "h", "hpp", "m", "mm", "dart", "ex", "exs", "lua", "pl", "sh", "bash", "erl", "clj"];
+pub fn other_code(path: &str) -> bool {
+    !path.split('/').any(|d| d == "node_modules") && path.rsplit('/').next().and_then(|n| n.rsplit_once('.')).is_some_and(|(_, e)| OTHER_CODE.contains(&e.to_ascii_lowercase().as_str()))
+}
 pub fn is_data(name: &str) -> bool { DATA.contains(&extension(name)) || declaration(name) || text_name(name) }
 fn word(s: &str) -> bool { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') }
 fn package(s: &str) -> bool {

@@ -896,9 +896,17 @@ mod inside {
         }
     }
     const TEST_USER: u32 = 1000;
+    const KERN_DIRS: [&str; 2] = [".kern-pnpm-store", ".kern-tools"];
+    fn read_only_dirs(path: &Path) {
+        let Ok(meta) = std::fs::symlink_metadata(path) else { return };
+        if !meta.is_dir() { return; }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+        for e in std::fs::read_dir(path).into_iter().flatten().flatten() { read_only_dirs(&e.path()); }
+    }
     fn clear_added(path: &Path) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for e in entries.flatten() {
+            if KERN_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) { continue; }
             let p = e.path();
             let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
             if meta.uid() == TEST_USER {
@@ -916,7 +924,7 @@ mod inside {
             let name = e.file_name().to_string_lossy().to_string();
             let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
             if meta.is_dir() {
-                if name != "node_modules" && name != ".git" { added_code(root, &p, out); }
+                if name != "node_modules" && name != ".git" && !KERN_DIRS.contains(&name.as_str()) { added_code(root, &p, out); }
                 continue;
             }
             let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
@@ -962,6 +970,7 @@ mod inside {
         let playwright = if browsers { super::installed_versions(Path::new("/workspace"), &["playwright", "playwright-core"]) } else { Vec::new() };
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         lock_down(Path::new("/workspace"));
+        for d in KERN_DIRS { read_only_dirs(&Path::new("/workspace").join(d)); }
         println!("{}", json!({ "version": 1, "installs": records, "browsers": playwright }));
         Ok(())
     }

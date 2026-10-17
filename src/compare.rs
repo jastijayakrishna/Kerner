@@ -586,14 +586,10 @@ pub fn attested(envelope: &Value, evidence: &Value) -> bool {
     let (Some(k), Ok(d)) = (crate::attest::claimed(envelope), digest(evidence)) else { return false };
     k["checks"].as_array().into_iter().flatten().any(|c| c["id"] == CHECK && c["evidence_sha256"] == d.as_str())
 }
-fn code(s: &str) -> String {
-    let flat: String = s.replace('`', "'").replace(['\r', '\n'], " ").chars().take(240).collect();
-    format!("`{flat}`")
-}
 pub fn summary(e: &Value) -> Vec<String> { lines(e, &|s: &str| s.to_string()) }
 pub fn markdown(e: &Value) -> String {
     let mut out = String::new();
-    for l in lines(e, &code) {
+    for l in lines(e, &|s: &str| code(s, 240)) {
         let item = format!("- {l}\n");
         if out.len() + item.len() > 8000 { out.push_str("- More in the verifier's comparison evidence\n"); break; }
         out.push_str(&item);

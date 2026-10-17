@@ -209,8 +209,6 @@ const BINARY: [&str; 52] = ["png", "jpg", "jpeg", "gif", "webp", "avif", "ico", 
     "wav", "ogg", "flac", "avi", "mkv", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "jar", "war", "woff", "woff2", "ttf", "otf", "eot", "glb", "gltf",
     "fbx", "blend", "wasm", "bin", "exe", "dll", "so", "dylib", "node", "db", "sqlite", "pyc", "class"];
 const LOCKFILES: [&str; 6] = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"];
-const OTHER_CODE: [&str; 30] = ["vue", "svelte", "astro", "mdx", "marko", "py", "rb", "go", "java", "kt", "kts", "rs", "php", "cs", "fs", "swift", "scala", "c", "cc", "cpp",
-    "h", "hpp", "m", "mm", "dart", "ex", "exs", "lua", "pl", "sh"];
 const LARGEST: u64 = 1 << 20;
 const MOST_FILES: usize = 2000;
 const MOST_TEXT: u64 = 128 << 20;
@@ -336,7 +334,7 @@ pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path, pr: Option<&str>
     let names = git_with(repo, &["diff", "--no-renames", "--name-only", "-z", base, head], None, 64 << 20)?;
     let paths: Vec<String> = names.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).to_string()).collect();
     let code: Vec<&String> = paths.iter().filter(|p| crate::compare::probeable(p, None)).collect();
-    let mut skipped: Vec<Value> = paths.iter().filter(|p| OTHER_CODE.contains(&extension(p).as_str()) && !p.split('/').any(|d| d == "node_modules"))
+    let mut skipped: Vec<Value> = paths.iter().filter(|p| crate::capability::other_code(p))
         .map(|p| json!({ "path": p, "why": format!("a .{} file; Kern does not run .{} code yet", extension(p), extension(p)) })).collect();
     let (mut room, mut kept) = (MOST_TEXT, BTreeSet::new());
     for p in &code {
@@ -692,10 +690,6 @@ fn package_failed(text: &str) -> bool {
     let missing_package = ["Cannot find module '", "Cannot find package '"].iter().any(|m| text.match_indices(m).any(|(i, _)| package_name(&text[i + m.len()..])));
     missing_package || MARKS.iter().any(|m| text.contains(m))
 }
-fn span(s: &str, n: usize) -> String {
-    let flat: String = s.chars().map(|c| if c == '`' { '\'' } else if c.is_control() { ' ' } else { c }).collect();
-    format!("`{}`", clip_str(flat.trim(), n))
-}
 fn windows(a: &str, b: &str, n: usize) -> (String, String) {
     let (ca, cb): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     if ca.len() <= n && cb.len() <= n { return (a.to_string(), b.to_string()); }
@@ -721,10 +715,10 @@ fn outcomes(old: Option<&str>, new: Option<&str>) -> (String, String) {
 }
 fn outcome(o: &str) -> String {
     match o.split_once(' ') {
-        Some(("r", v)) => format!("returned {}", span(v, 160)),
-        Some(("e", v)) => format!("threw {}", span(v, 160)),
+        Some(("r", v)) => format!("returned {}", code(v, 160)),
+        Some(("e", v)) => format!("threw {}", code(v, 160)),
         _ if o == "promise" => "returned a promise that had not settled".to_string(),
-        _ => span(o, 160),
+        _ => code(o, 160),
     }
 }
 fn ranges(lines: &[u64]) -> String {
@@ -743,7 +737,7 @@ pub fn difference_items(r: &Value) -> Vec<(String, bool)> {
     let mut groups: Vec<Group> = Vec::new();
     for x in r["call_differences"].as_array().into_iter().flatten() {
         let (call, now) = (x["call"].as_str().unwrap_or("").to_string(), x["new"].as_str().map(str::to_string));
-        let (input, before) = (span(x["args"].as_str().unwrap_or(""), 120), x["old"].as_str().map(str::to_string));
+        let (input, before) = (code(x["args"].as_str().unwrap_or(""), 120), x["old"].as_str().map(str::to_string));
         let g = match groups.iter().position(|g| g.call == call && g.now == now) {
             Some(i) => &mut groups[i],
             None => { groups.push(Group { call, now, inputs: Vec::new(), before: Vec::new(), calls: 0 }); groups.last_mut().expect("just pushed") }
@@ -758,17 +752,17 @@ pub fn difference_items(r: &Value) -> Vec<(String, bool)> {
         let shown: Vec<String> = g.before.iter().map(|b| outcomes(b.as_deref(), g.now.as_deref()).0).collect();
         let before = if shown.len() <= 3 { shown.join(" or ") } else { format!("{} or {} other answers", shown[..2].join(" or "), shown.len() - 2) };
         let calls = if g.calls > 1 { format!(" ({} calls)", g.calls) } else { String::new() };
-        (format!("{} with {inputs}: {before} before, {now} now{calls}", span(&g.call, 120)), true)
+        (format!("{} with {inputs}: {before} before, {now} now{calls}", code(&g.call, 120)), true)
     }).collect();
     for (kind, list) in [("New behaviour", &r["behavior"]["new"]), ("No longer happens", &r["behavior"]["gone"])] {
-        items.extend(list.as_array().into_iter().flatten().map(|b| (format!("{kind}: {}", span(b.as_str().unwrap_or(""), 200)), true)));
+        items.extend(list.as_array().into_iter().flatten().map(|b| (format!("{kind}: {}", code(b.as_str().unwrap_or(""), 200)), true)));
     }
     items.extend(r["differences"].as_array().into_iter().flatten().map(|x| {
         let (old, new) = match (x["old"].as_str(), x["new"].as_str()) {
-            (Some(a), Some(b)) => { let (wa, wb) = windows(a, b, 160); (span(&wa, 200), span(&wb, 200)) }
-            (a, b) => (a.map_or("(no such step)".to_string(), |s| span(s, 160)), b.map_or("(no such step)".to_string(), |s| span(s, 160))),
+            (Some(a), Some(b)) => { let (wa, wb) = windows(a, b, 160); (code(&wa, 200), code(&wb, 200)) }
+            (a, b) => (a.map_or("(no such step)".to_string(), |s| code(s, 160)), b.map_or("(no such step)".to_string(), |s| code(s, 160))),
         };
-        (format!("{}: {old} before, {new} now", span(x["step"].as_str().unwrap_or(""), 120)), false)
+        (format!("{}: {old} before, {new} now", code(x["step"].as_str().unwrap_or(""), 120)), false)
     }));
     items
 }
@@ -799,7 +793,7 @@ pub fn comment(d: &Value, r: &Value) -> String {
     let mut md = String::from("### Kern: what this change does when it runs\n\n");
     md += &format!("Kern ran **{}%** of the changed lines on both the old and the new code (new code: {} of {} lines, old code: {} of {}), twice each, in a sealed sandbox with the network off.\n\n",
         n(&c["percent"]), n(&c["new"]["ran"]), n(&c["new"]["total"]), n(&c["old"]["ran"]), n(&c["old"]["total"]));
-    let ending = |side: &str| -> Vec<String> { r["endings"][side].as_array().into_iter().flatten().filter_map(Value::as_str).map(|l| span(l, 300)).collect() };
+    let ending = |side: &str| -> Vec<String> { r["endings"][side].as_array().into_iter().flatten().filter_map(Value::as_str).map(|l| code(l, 300)).collect() };
     let (eo, en) = (ending("old"), ending("new"));
     if eo != en {
         let say = |e: &[String]| if e.is_empty() { "ended normally".to_string() } else { e.join("; ") };
@@ -813,8 +807,8 @@ pub fn comment(d: &Value, r: &Value) -> String {
         if items.len() > 25 { md.push_str(&format!("- ... and {} more in Kern's report\n", items.len() - 25)); }
     };
     let shaky: Vec<String> = r["unstable"]["calls"].as_array().into_iter().flatten()
-        .map(|c| format!("{} ({} call{})", span(c["call"].as_str().unwrap_or(""), 120), c["count"], if c["count"] == 1 { "" } else { "s" }))
-        .chain(r["unstable"]["steps"].as_array().into_iter().flatten().map(|s| format!("step {}", span(s.as_str().unwrap_or(""), 120)))).collect();
+        .map(|c| format!("{} ({} call{})", code(c["call"].as_str().unwrap_or(""), 120), c["count"], if c["count"] == 1 { "" } else { "s" }))
+        .chain(r["unstable"]["steps"].as_array().into_iter().flatten().map(|s| format!("step {}", code(s.as_str().unwrap_or(""), 120)))).collect();
     let sorted = &r["sorted"];
     match (lines.is_empty(), printed.is_empty()) {
         (true, true) if !shaky.is_empty() => md += "**No difference** in what Kern could compare.\n\n",
@@ -825,7 +819,7 @@ pub fn comment(d: &Value, r: &Value) -> String {
             let (mut surprises, mut described, mut folded) = (Vec::new(), Vec::new(), Vec::new());
             for (i, (line, rec)) in items.iter().enumerate() {
                 let v = &sorted[format!("D{}", i + 1)];
-                let why = v["why"].as_str().filter(|w| !w.trim().is_empty()).map(|w| span(w, 200));
+                let why = v["why"].as_str().filter(|w| !w.trim().is_empty()).map(|w| code(w, 200));
                 let (verdict, yes) = match v["says"].as_str() {
                     Some("yes") => (format!(" — the pull request: {}", why.unwrap_or_default()), true),
                     Some("unclear") => (format!(" — unclear{}", why.map(|w| format!(": {w}")).unwrap_or_default()), false),
@@ -876,25 +870,25 @@ pub fn comment(d: &Value, r: &Value) -> String {
         md += "\n";
     }
     let failed: Vec<String> = ["new", "old"].iter().flat_map(|side| r["installs"][*side].as_array().into_iter().flatten().filter(|i| i["result"].as_str().is_some_and(|x| x.starts_with("failed") || x.starts_with("out of time")))
-        .map(move |i| format!("- {} ({side} code): {}", span(i["dir"].as_str().unwrap_or("."), 120), span(i["result"].as_str().unwrap_or(""), 300)))).collect();
+        .map(move |i| format!("- {} ({side} code): {}", code(i["dir"].as_str().unwrap_or("."), 120), code(i["result"].as_str().unwrap_or(""), 300)))).collect();
     if !failed.is_empty() { md += &format!("**Dependencies that could not be installed** — code that needs them could not run:\n\n{}\n\n", failed.join("\n")); }
     let loose: Vec<String> = ["new", "old"].iter().flat_map(|side| r["installs"][*side].as_array().into_iter().flatten().filter_map(move |i| {
         let why = i["result"].as_str()?.strip_prefix("installed from package.json (")?.strip_suffix(')')?;
-        let why = if why.chars().all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '\'') { why.to_string() } else { span(why, 120) };
-        Some(format!("{} ({side} code: {why})", span(i["dir"].as_str().unwrap_or("."), 120)))
+        let why = if why.chars().all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '\'') { why.to_string() } else { code(why, 120) };
+        Some(format!("{} ({side} code: {why})", code(i["dir"].as_str().unwrap_or("."), 120)))
     })).collect();
     if !loose.is_empty() { md += &format!("**Installed without the project's lockfile**: {}. Package versions may differ from the project's, so a difference can come from them.\n\n", loose.join(", ")); }
-    let touching: Vec<String> = d["measurement"].as_array().into_iter().flatten().take(10).map(|p| span(p.as_str().unwrap_or(""), 160)).collect();
+    let touching: Vec<String> = d["measurement"].as_array().into_iter().flatten().take(10).map(|p| code(p.as_str().unwrap_or(""), 160)).collect();
     if !touching.is_empty() { md += &format!("**This change refers to Kern's own measurement** (its coverage folder, a source map or its call record), which code can use to fake what ran: {}. Read it closely.\n\n", touching.join(", ")); }
-    let stand_ins: Vec<String> = r["stubs"]["used"].as_array().into_iter().flatten().take(30).map(|s| span(s.as_str().unwrap_or(""), 100)).collect();
+    let stand_ins: Vec<String> = r["stubs"]["used"].as_array().into_iter().flatten().take(30).map(|s| code(s.as_str().unwrap_or(""), 100)).collect();
     if !stand_ins.is_empty() { md += &format!("**Packages the driver replaced with stand-ins**, because they cannot load here (the real ones did not run): {}\n\n", stand_ins.join(", ")); }
-    let skipped: Vec<String> = d["skipped"].as_array().into_iter().flatten().take(20).map(|s| format!("- {}: {}", span(s["path"].as_str().unwrap_or(""), 160), s["why"].as_str().unwrap_or(""))).collect();
+    let skipped: Vec<String> = d["skipped"].as_array().into_iter().flatten().take(20).map(|s| format!("- {}: {}", code(s["path"].as_str().unwrap_or(""), 160), s["why"].as_str().unwrap_or(""))).collect();
     if !skipped.is_empty() { md += &format!("**Changed files Kern did not measure:**\n\n{}\n\n", skipped.join("\n")); }
     let others: Vec<(String, String)> = d["unmeasured"].as_array().into_iter().flatten().map(|u| (u["why"].as_str().unwrap_or("other").to_string(), u["path"].as_str().unwrap_or("").to_string())).collect();
     if !others.is_empty() {
         let mut kinds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (k, p) in &others { kinds.entry(k.as_str()).or_default().push(p.as_str()); }
-        let parts: Vec<String> = kinds.iter().map(|(k, ps)| format!("{k} ({}): {}{}", ps.len(), ps.iter().take(5).map(|p| span(p, 100)).collect::<Vec<_>>().join(", "), if ps.len() > 5 { ", ..." } else { "" })).collect();
+        let parts: Vec<String> = kinds.iter().map(|(k, ps)| format!("{k} ({}): {}{}", ps.len(), ps.iter().take(5).map(|p| code(p, 100)).collect::<Vec<_>>().join(", "), if ps.len() > 5 { ", ..." } else { "" })).collect();
         md += &format!("**Other changed files Kern does not run** ({}): {}.\n\n", others.len(), parts.join("; "));
     }
     let mut unread: Vec<String> = Vec::new();
@@ -905,7 +899,7 @@ pub fn comment(d: &Value, r: &Value) -> String {
             let all = ranges(&lines);
             let shown: Vec<&str> = all.split(", ").take(40).collect();
             let more = all.split(", ").count().saturating_sub(40);
-            unread.push(format!("- {} ({which} code) line{} {}{}", span(f["path"].as_str().unwrap_or(""), 160), if lines.len() == 1 { "" } else { "s" }, shown.join(", "),
+            unread.push(format!("- {} ({which} code) line{} {}{}", code(f["path"].as_str().unwrap_or(""), 160), if lines.len() == 1 { "" } else { "s" }, shown.join(", "),
                 if more > 0 { format!(" and {more} more ranges") } else { String::new() }));
         }
     }
@@ -1076,9 +1070,15 @@ pub fn side_image(out: &Path, volume: &str, op: &crate::policy::Operator) -> Str
     let s = read_own(out.join("setup.json")).unwrap_or(Value::Null);
     ["old", "new"].iter().find(|side| s[**side]["volume"] == volume).and_then(|side| s[*side]["image"].as_str()).filter(|i| crate::policy::image(i)).unwrap_or(&op.image).to_string()
 }
+pub const SETUP_SECS_MAX: u64 = 1500;
+const SETUP_SECS_MIN: u64 = 120;
+pub fn setup_seconds(until: u64) -> R<u64> {
+    let seconds = within(until, SETUP_SECS_MAX);
+    ensure!(seconds >= SETUP_SECS_MIN, "Kern's time for this check ran out before it could set up the code");
+    Ok(seconds)
+}
 fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str, label: &str, until: u64) -> R<(crate::sandbox::Volume, Value)> {
-    let seconds = within(until, 1500);
-    ensure!(seconds >= 120, "Kern's time for this check ran out before it could set up the {side} code");
+    setup_seconds(until).map_err(|_| Denied(format!("Kern's time for this check ran out before it could set up the {side} code")))?;
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
     let commit = d[if side == "old" { "base" } else { "head" }].as_str().unwrap_or("");
     let root = out.join("sandbox");
@@ -1096,8 +1096,9 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     let need = browser_need(&manifests);
     let dirs = install_dirs(&paths, &code, read("package.json").as_deref(), read("pnpm-workspace.yaml").as_deref());
     let control = root.join(format!("setup-{label}"));
-    let limits = Limits { timeout_seconds: seconds + 300, ..setup_limits() };
     let attempt = |scripts: bool| -> R<(crate::sandbox::Volume, crate::sandbox::Execution)> {
+        let seconds = setup_seconds(until)?;
+        let limits = Limits { timeout_seconds: seconds + 300, ..setup_limits() };
         if control.exists() { std::fs::remove_dir_all(&control)?; }
         crate::sandbox::control_dir(&control, Some(("drive-setup.json", &json!({ "version": 1, "dirs": dirs, "timeout_seconds": seconds, "scripts": scripts, "browsers": need.is_some() }))))?;
         let volume = crate::sandbox::Volume::create()?;
@@ -1121,7 +1122,14 @@ fn install_side(out: &Path, op: &crate::policy::Operator, d: &Value, side: &str,
     Ok((volume, entry))
 }
 
+const SETUP_FAILED: &str = "setup-failed.txt";
 pub fn setup(out: &Path, op: &crate::policy::Operator, until: u64) -> R<Value> {
+    if let Ok(why) = std::fs::read_to_string(out.join(SETUP_FAILED)) { return Err(Denied(why)); }
+    let done = set_up(out, op, until);
+    if let Err(e) = &done { let _ = std::fs::write(out.join(SETUP_FAILED), &e.0); }
+    done
+}
+fn set_up(out: &Path, op: &crate::policy::Operator, until: u64) -> R<Value> {
     let d = read_own(out.join("drive.json"))?;
     if out.join("volumes.txt").exists() { clean(out)?; }
     let root = out.join("sandbox");
@@ -1454,7 +1462,7 @@ pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy:
     let d = read_own(out.join("drive.json"))?;
     if d["totals"]["new"] == 0 && d["totals"]["old"] == 0 {
         let mut md = String::from("### Kern: what this change does when it runs\n\nThis change touches no line of code Kern can run: only tests, documentation, configuration, types or files it does not measure.\n");
-        for s in d["skipped"].as_array().into_iter().flatten().take(20) { md += &format!("- {}: {}\n", span(s["path"].as_str().unwrap_or(""), 160), s["why"].as_str().unwrap_or("")); }
+        for s in d["skipped"].as_array().into_iter().flatten().take(20) { md += &format!("- {}: {}\n", code(s["path"].as_str().unwrap_or(""), 160), s["why"].as_str().unwrap_or("")); }
         std::fs::write(out.join("comment.md"), md)?;
         return Ok(json!({ "status": "NOTHING_TO_RUN", "comment": out.join("comment.md").display().to_string() }));
     }
@@ -1473,7 +1481,7 @@ pub fn auto(repo: &Path, base: &str, head: &str, out: &Path, op: &crate::policy:
     let (mut sorting, mut percent) = (Value::Null, Value::Null);
     if percents.is_empty() {
         let said = rounds.last().and_then(|r| r["agent"]["said"].as_str()).unwrap_or("");
-        std::fs::write(out.join("comment.md"), format!("### Kern: what this change does when it runs\n\nKern asked its agent for a driver, but it wrote none, so nothing ran: read this change yourself.\n\nThe agent said: {}\n", span(said, 400)))?;
+        std::fs::write(out.join("comment.md"), format!("### Kern: what this change does when it runs\n\nKern asked its agent for a driver, but it wrote none, so nothing ran: read this change yourself.\n\nThe agent said: {}\n", code(said, 400)))?;
     } else {
         let report = conclude(out, &d, None)?;
         percent = report["coverage"]["percent"].clone();

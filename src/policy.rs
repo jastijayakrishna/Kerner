@@ -342,12 +342,31 @@ pub fn pin(v: &Value, label: &str) -> R<Pin> {
     ensure!(Path::new(file).is_absolute() && is_hex64(sha), "{label}: absolute file and SHA-256 pin required");
     Ok(Pin { file: file.into(), sha256: sha.into() })
 }
+type Stamp = (u64, Option<std::time::SystemTime>, u64);
+type Hashed = std::collections::BTreeMap<PathBuf, (Stamp, String, usize)>;
+fn hashed() -> std::sync::MutexGuard<'static, Hashed> {
+    static HASHED: OnceLock<std::sync::Mutex<Hashed>> = OnceLock::new();
+    HASHED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+#[cfg(unix)]
+fn file_id(meta: &std::fs::Metadata) -> u64 { std::os::unix::fs::MetadataExt::ino(meta) }
+#[cfg(not(unix))]
+fn file_id(_: &std::fs::Metadata) -> u64 { 0 }
 pub fn pinned(p: &Pin) -> R<PathBuf> {
     let meta = std::fs::symlink_metadata(&p.file).map_err(|e| Denied(format!("{}: {e}", p.file.display())))?;
     ensure!(meta.is_file(), "Pinned path must be a regular file: {}", p.file.display());
-    ensure!(sha256(std::fs::read(&p.file)?) == p.sha256, "Pinned tool/policy changed: {}", p.file.display());
+    let stamp: Stamp = (meta.len(), meta.modified().ok(), file_id(&meta));
+    let mut seen = hashed();
+    let known = seen.get(&p.file).filter(|(s, digest, _)| *s == stamp && *digest == p.sha256).is_some();
+    if !known {
+        let digest = sha256(std::fs::read(&p.file)?);
+        let reads = seen.get(&p.file).map_or(0, |e| e.2) + 1;
+        seen.insert(p.file.clone(), (stamp, digest.clone(), reads));
+        ensure!(digest == p.sha256, "Pinned tool/policy changed: {}", p.file.display());
+    }
     Ok(std::fs::canonicalize(&p.file)?)
 }
+pub fn pinned_reads(file: &std::path::Path) -> usize { hashed().get(file).map_or(0, |e| e.2) }
 
 #[derive(Clone, Debug)]
 pub struct Control { pub role: String, pub docker: Pin, pub endpoint: String, pub git: Pin, pub runtime: Pin, pub runtime_version: String, pub host_policy: Pin, pub runtime_name: String }

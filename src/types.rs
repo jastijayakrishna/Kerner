@@ -1,4 +1,4 @@
-use crate::policy::{Limits, Operator};
+use crate::policy::Operator;
 use crate::util::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,19 +169,9 @@ pub fn spec(config: &str, seconds: u64, memory_mb: u64) -> Value {
 fn check_side(out: &Path, op: &Operator, volume: &str, config: &str, until: u64, label: &str) -> Value {
     let seconds = within(until, 240);
     if seconds < 90 { return json!({ "status": "unknown", "why": "Kern's time ran out" }); }
-    let control = out.join(format!("types-{label}"));
-    if control.exists() && std::fs::remove_dir_all(&control).is_err() { return json!({ "status": "unknown", "why": "Kern could not prepare the run" }); }
     let dir = parent(config);
-    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120,
-        memory_mb: crate::suite::test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    if crate::sandbox::control_dir(&control, Some(("drive-test.json", &spec(config, seconds, limits.memory_mb)))).is_err() { return json!({ "status": "unknown", "why": "Kern could not prepare the run" }); }
-    let input = out.join("tests-input");
-    let _ = std::fs::create_dir_all(&input);
-    let image = crate::drive::side_image(out, volume, op);
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
-        network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
-    let _ = std::fs::remove_dir_all(&control);
-    let run = match run { Ok(r) => r, Err(e) => return json!({ "status": "unknown", "why": e.0 }) };
+    let memory_mb = crate::suite::test_limits(seconds).memory_mb;
+    let run = match crate::suite::in_test_box(out, op, volume, &format!("types-{label}"), ("drive-test.json", &spec(config, seconds, memory_mb)), ("__drive_test", false, seconds)) { Ok(r) => r, Err(e) => return json!({ "status": "unknown", "why": e.0 }) };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else {
         return json!({ "status": "unknown", "why": crate::sandbox::refusal(&run.errors).map_or_else(|| "the run gave no report".to_string(), |r| format!("the sandbox refused the run: {r}")) });
     };

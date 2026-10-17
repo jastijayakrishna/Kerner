@@ -839,22 +839,27 @@ fn run_side(out: &Path, op: &Operator, volume: &str, side: (&Tests, &Env), dir: 
 fn run_for(out: &Path, op: &Operator, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     run_with(out, op, (volume, &std::collections::BTreeMap::new(), limit), side, dir, label, until)
 }
+pub fn test_limits(seconds: u64) -> Limits {
+    Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 }
+}
+pub fn in_test_box(out: &Path, op: &Operator, volume: &str, name: &str, config: (&str, &Value), (entry, root, seconds): (&str, bool, u64)) -> R<crate::sandbox::Execution> {
+    let control = out.join(name);
+    if control.exists() { std::fs::remove_dir_all(&control)?; }
+    crate::sandbox::control_dir(&control, Some(config))?;
+    let input = out.join("tests-input");
+    std::fs::create_dir_all(&input)?;
+    let image = crate::drive::side_image(out, volume, op);
+    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &test_limits(seconds),
+        entry: vec![entry.into()], network: "none", volumes: vec![], root, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
+    let _ = std::fs::remove_dir_all(&control);
+    run
+}
 fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::collections::BTreeMap<String, String>, u64), (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     let seconds = within(until, limit);
     if seconds < 60 { return Ok(Side::Late); }
     let cut = seconds < limit;
-    let control = out.join(format!("tests-{label}"));
-    if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files,
-        "early": limit >= test_seconds(), "faults": [] }))))?;
-    let input = out.join("tests-input");
-    std::fs::create_dir_all(&input)?;
-    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    let image = crate::drive::side_image(out, volume, op);
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
-        network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
-    let _ = std::fs::remove_dir_all(&control);
-    let run = match run {
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files, "early": limit >= test_seconds(), "faults": [] });
+    let run = match in_test_box(out, op, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
         Err(e) if e.0.contains("exceeded limits") => return Ok(Side::Cut(format!("the run was stopped: {}", e.0))),
@@ -950,27 +955,13 @@ const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of 
 fn prepare(out: &Path, op: &Operator, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
     let seconds = within(until, 480);
     crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
-    let control = out.join(format!("prepare-{label}"));
-    if control.exists() { std::fs::remove_dir_all(&control)?; }
     let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
-    crate::sandbox::control_dir(&control, Some(("drive-test.json", &json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {},
-        "early": false, "faults": [] }))))?;
-    let input = out.join("tests-input");
-    std::fs::create_dir_all(&input)?;
-    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    let image = crate::drive::side_image(out, volume, op);
-    let spec = |entry: &str, root: bool, control: &Path| crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control, writable: &[], limits: &limits,
-        entry: vec![entry.into()], network: "none", volumes: vec![], root, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
-    let run = spec("__drive_test", false, &control);
-    let _ = std::fs::remove_dir_all(&control);
+    let config = json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {}, "early": false, "faults": [] });
+    let run = in_test_box(out, op, volume, &format!("prepare-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds));
     let parts = crate::sandbox::parts(&run?.stdout, &crate::sandbox::TEST_PARTS)?;
     let log = String::from_utf8_lossy(&parts["errors"]).to_string();
     std::fs::write(out.join(format!("prepare-{label}.err")), &log)?;
-    let control = out.join(format!("seal-{label}"));
-    if control.exists() { std::fs::remove_dir_all(&control)?; }
-    crate::sandbox::control_dir(&control, Some(("drive-seal.json", &json!({ "version": 1 }))))?;
-    let sealed = spec("__drive_seal", true, &control);
-    let _ = std::fs::remove_dir_all(&control);
+    let sealed = in_test_box(out, op, volume, &format!("seal-{label}"), ("drive-seal.json", &json!({ "version": 1 })), ("__drive_seal", true, seconds));
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
     Ok(log)
 }
@@ -997,18 +988,8 @@ pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::pr
 fn run_faults(out: &Path, op: &Operator, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, until: u64) -> Vec<Value> {
     let seconds = within(until, 300);
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
-    let control = out.join("tests-faults");
-    if control.exists() && std::fs::remove_dir_all(&control).is_err() { return Vec::new(); }
-    let spec = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults });
-    if crate::sandbox::control_dir(&control, Some(("drive-test.json", &spec))).is_err() { return Vec::new(); }
-    let input = out.join("tests-input");
-    let _ = std::fs::create_dir_all(&input);
-    let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
-    let image = crate::drive::side_image(out, volume, op);
-    let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
-        network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });
-    let _ = std::fs::remove_dir_all(&control);
-    let Ok(run) = run else { return Vec::new() };
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults });
+    let Ok(run) = in_test_box(out, op, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return Vec::new() };
     serde_json::from_slice::<Vec<Value>>(&parts["output"]).unwrap_or_default()
 }

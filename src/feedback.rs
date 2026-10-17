@@ -10,11 +10,7 @@ pub const MARKER: &str = "<!-- kern-feedback:v1 head=";
 const RESOLVED: &str = "<!-- kern-feedback:v1:pass head=";
 pub fn rejected(n: u64) -> String { format!("after {n} rejected attempt{}", if n == 1 { "" } else { "s" }) }
 
-fn code(s: &str) -> String {
-    let flat: String = s.replace('`', "'").replace(['\r', '\n'], " ").trim().chars().take(300).collect();
-    format!("`{flat}`")
-}
-fn codes<'a>(items: impl IntoIterator<Item = &'a str>) -> String { items.into_iter().map(code).collect::<Vec<_>>().join(", ") }
+fn codes<'a>(items: impl IntoIterator<Item = &'a str>) -> String { items.into_iter().map(|s| code(s, 300)).collect::<Vec<_>>().join(", ") }
 fn shaped<'a>(r: &'a str, start: &str, end: &str) -> Option<&'a str> { r.strip_prefix(start)?.strip_suffix(end).filter(|v| !v.is_empty()) }
 fn digits(s: &str) -> Option<&str> { (!s.is_empty() && s.len() <= 12 && s.bytes().all(|b| b.is_ascii_digit())).then_some(s) }
 fn check_id(s: &str) -> bool { !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') }
@@ -41,22 +37,22 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     if let Some(rest) = r.strip_prefix("Write outside contract: ") {
         let tail = "\" to filesystem.read and filesystem.write in the task contract";
         if let Some(p) = rest.match_indices(". To allow it, add \"").map(|(i, _)| &rest[..i]).find(|p| !p.is_empty() && rest == format!("{p}. To allow it, add \"{p}{tail}")) {
-            let mut v = fix("scope", Some(p), format!("Undo the change to {}. This task may only change {grants}.", code(p)));
+            let mut v = fix("scope", Some(p), format!("Undo the change to {}. This task may only change {grants}.", code(p, 300)));
             v.allow = Some("A human can widen the task's filesystem grants.".into());
             return (true, vec![v]);
         }
     }
     if let Some(p) = shaped(r, "Protected dependency/configuration path: ", ". Agents may never change dependency, CI or secret files; make this change yourself") {
-        return (true, vec![fix("protected-path", Some(p), format!("Leave {} unchanged. Agents may not change dependency, CI or secret files, so solve the task without it.", code(p)))]);
+        return (true, vec![fix("protected-path", Some(p), format!("Leave {} unchanged. Agents may not change dependency, CI or secret files, so solve the task without it.", code(p, 300)))]);
     }
     for (start, end) in [("Binary or oversized change unsupported: ", ". Kern verifies text changes up to limits.file_bytes; make this change yourself"), ("Binary changes unsupported: ", ". Kern verifies text changes only; make this change yourself"),
                          ("Invalid UTF-8 change: ", ". Kern verifies UTF-8 text only; make this change yourself")] {
         if let Some(p) = shaped(r, start, end) {
-            return (true, vec![fix("unsupported-change", Some(p), format!("Leave {} unchanged, or keep it as UTF-8 text within the size limit. Kern checks text changes only.", code(p)))]);
+            return (true, vec![fix("unsupported-change", Some(p), format!("Leave {} unchanged, or keep it as UTF-8 text within the size limit. Kern checks text changes only.", code(p, 300)))]);
         }
     }
     if let Some(p) = shaped(r, "Unsupported changed file type: ", ". Kern can inspect JS/TS, JSON, Markdown, text, CSS and HTML; make this change yourself") {
-        return (true, vec![fix("unsupported-change", Some(p), format!("Leave {} unchanged. Kern can only check JS/TS, JSON, Markdown, text, CSS and HTML changes.", code(p)))]);
+        return (true, vec![fix("unsupported-change", Some(p), format!("Leave {} unchanged. Kern can only check JS/TS, JSON, Markdown, text, CSS and HTML changes.", code(p, 300)))]);
     }
     if let Some(rest) = r.strip_prefix("Change budget exceeded: ").and_then(|x| x.strip_suffix(" lines. Raise limits.files_changed or limits.lines_changed if this is intended"))
         && let Some((_, allows)) = rest.rsplit_once("; the contract allows ") && let Some((f, l)) = allows.split_once(" files and ") && let (Some(f), Some(l)) = (digits(f), digits(l)) {
@@ -68,12 +64,12 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
         let violations = body.split("; ").map(|item| {
             let (path, caps) = item.rsplit_once(" +[").map_or((item, ""), |(p, c)| (p, c.strip_suffix(']').unwrap_or(c)));
             Violation { rule: "capability", path: Some(path.into()), detail: Some(caps.into()), allow: allow.clone(),
-                instruction: format!("Remove the new use of {} from {}. This task may not give code new process, network, filesystem, environment or dynamic-code authority.", codes(caps.split(", ")), code(path)) }
+                instruction: format!("Remove the new use of {} from {}. This task may not give code new process, network, filesystem, environment or dynamic-code authority.", codes(caps.split(", ")), code(path, 300)) }
         }).collect();
         return (true, violations);
     }
     for (start, end) in [("Changed code cannot be parsed for capability analysis: ", ". Fix its syntax, or make this change yourself"), ("Changed code cannot be parsed for the test proof: ", ". Fix its syntax")] {
-        if let Some(p) = shaped(r, start, end) { return (true, vec![fix("syntax", Some(p), format!("Fix the syntax of {} so that it parses.", code(p)))]); }
+        if let Some(p) = shaped(r, start, end) { return (true, vec![fix("syntax", Some(p), format!("Fix the syntax of {} so that it parses.", code(p, 300)))]); }
     }
     if let Some((list, grant)) = r.strip_prefix("Tests show new runtime behavior: ").and_then(|x| x.rsplit_once(". If this is intended, allow it in the task contract (version 3): \"behaviors\": "))
         && serde_json::from_str::<Value>(grant).is_ok_and(|g| g.is_array()) {
@@ -91,54 +87,54 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     }
     if let Some((id, rest)) = r.strip_prefix("Check ").and_then(|x| x.split_once(" case ")) && check_id(id) && let Some((case, tail)) = rest.split_once(' ') && let Some(case) = digits(case) {
         let exit = tail.strip_prefix("failed (exit code ").and_then(|x| x.strip_suffix(')')).is_some_and(|c| digits(c.strip_prefix('-').unwrap_or(c)).is_some());
-        let instruction = if exit { format!("The verifier's check {} fails on your change (case {case}). Make the code pass it; its expected answers are hidden on purpose.", code(id)) }
-            else if tail == "output differs from the expected answer" { format!("Your change gives the wrong result for the verifier's check {} (case {case}). Fix the behaviour, not the check.", code(id)) }
-            else if tail.starts_with("failed: ") || tail.starts_with("left no behavior record") { format!("The verifier's check {} did not finish on your change (case {case}). Make sure the code finishes within the time and memory limits.", code(id)) }
+        let instruction = if exit { format!("The verifier's check {} fails on your change (case {case}). Make the code pass it; its expected answers are hidden on purpose.", code(id, 300)) }
+            else if tail == "output differs from the expected answer" { format!("Your change gives the wrong result for the verifier's check {} (case {case}). Fix the behaviour, not the check.", code(id, 300)) }
+            else if tail.starts_with("failed: ") || tail.starts_with("left no behavior record") { format!("The verifier's check {} did not finish on your change (case {case}). Make sure the code finishes within the time and memory limits.", code(id, 300)) }
             else { String::new() };
         if !instruction.is_empty() { return (true, vec![fix("check-failed", None, instruction)]); }
     }
     let delta_hint = |v: &mut Violation, what: &str| v.allow = Some(format!("A human can state {what} in the task contract's delta."));
     if let Some(list) = shaped(r, "New crash where the old code worked: ", ". The new code must handle every input the old code handled") {
-        let mut v = fix("never-worse", None, format!("Make these calls work again as they did on the old code: {}. The new code must handle every input the old code handled.", code(list)));
+        let mut v = fix("never-worse", None, format!("Make these calls work again as they did on the old code: {}. The new code must handle every input the old code handled.", code(list, 300)));
         delta_hint(&mut v, "this change");
         return (true, vec![v]);
     }
     if let Some(list) = shaped(r, "The new code did not answer calls the old code answered: ", ". The new code must answer every call the old code answered, in about the same time") {
-        let mut v = fix("unanswered", None, format!("Make the new code answer these calls as the old code did, in about the same time: {}. It stopped early or became much slower.", code(list)));
+        let mut v = fix("unanswered", None, format!("Make the new code answer these calls as the old code did, in about the same time: {}. It stopped early or became much slower.", code(list, 300)));
         delta_hint(&mut v, "this change");
         return (true, vec![v]);
     }
     if let Some(list) = shaped(r, "Behaviour changed outside the task's stated change: ", ". Everything the task did not state must behave exactly as before") {
-        let mut v = fix("unstated-change", None, format!("Keep these calls behaving exactly as on the old code: {}. Only the change the task states may differ.", code(list)));
+        let mut v = fix("unstated-change", None, format!("Keep these calls behaving exactly as on the old code: {}. Only the change the task states may differ.", code(list, 300)));
         delta_hint(&mut v, "this change");
         return (true, vec![v]);
     }
     if let Some(list) = shaped(r, "Removed without the task stating it: ", ". Restore it; deleting files or exports needs the task's delta to list them under removes") {
-        let mut v = fix("unstated-removal", None, format!("Restore {}: this task does not remove them.", code(list)));
+        let mut v = fix("unstated-removal", None, format!("Restore {}: this task does not remove them.", code(list, 300)));
         delta_hint(&mut v, "the removal");
         return (true, vec![v]);
     }
     if let Some(list) = shaped(r, "New code deletes files: ", ". Code may not newly delete or truncate files unless the task's delta allows delete") {
-        let mut v = fix("deletes-files", None, format!("Remove the new calls that delete or truncate files: {}.", code(list)));
+        let mut v = fix("deletes-files", None, format!("Remove the new calls that delete or truncate files: {}.", code(list, 300)));
         delta_hint(&mut v, "that the task deletes files");
         return (true, vec![v]);
     }
     if let Some(list) = shaped(r, "Access widened: ", ". A route that refused a user before must still refuse them") {
-        let mut v = fix("access-widened", None, format!("Restore the access checks, so these routes refuse as before: {}.", code(list)));
+        let mut v = fix("access-widened", None, format!("Restore the access checks, so these routes refuse as before: {}.", code(list, 300)));
         delta_hint(&mut v, "an intended access change");
         return (true, vec![v]);
     }
     if let Some(list) = shaped(r, "The task's examples do not hold: ", ". The new code must give the answers the task states") {
-        return (true, vec![fix("examples", None, format!("Make these calls give the answers the task states: {}.", code(list)))]);
+        return (true, vec![fix("examples", None, format!("Make these calls give the answers the task states: {}.", code(list, 300)))]);
     }
     if let Some(list) = shaped(r, "Access changed outside the task's stated change: ", ". Routes must answer as before") {
-        return (true, vec![fix("access-changed", None, format!("Make these routes answer as before: {}.", code(list)))]);
+        return (true, vec![fix("access-changed", None, format!("Make these routes answer as before: {}.", code(list, 300)))]);
     }
     if let Some(list) = shaped(r, "Slower than the old code: ", ". The task did not allow slower code") {
-        return (true, vec![fix("slower", None, format!("Make these functions about as fast as before: {}.", code(list)))]);
+        return (true, vec![fix("slower", None, format!("Make these functions about as fast as before: {}.", code(list, 300)))]);
     }
     if let Some(list) = shaped(r, "More paid API calls than the old code: ", ". The task did not allow more paid API calls") {
-        return (true, vec![fix("paid-calls", None, format!("Remove the extra paid API calls: {}.", code(list)))]);
+        return (true, vec![fix("paid-calls", None, format!("Remove the extra paid API calls: {}.", code(list, 300)))]);
     }
     if let Some(names) = r.strip_prefix("This task only upgrades packages the project already uses, but this change adds or removes: ").filter(|n| !n.is_empty()) {
         return (true, vec![fix("dependency", Some("package.json"), format!("Do not add or remove packages: {}. This task only moves packages the project already uses to other versions.", codes(names.split(", "))))]);
@@ -150,23 +146,23 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     let locked = "The test proof locks existing tests so they keep checking the old behaviour; ";
     for (start, end) in [("Existing test file changed: ", "put new tests in a new file and leave existing ones unchanged"), ("Existing test file deleted: ", "leave existing tests in place")] {
         if let Some(p) = shaped(r, start, &format!(". {locked}{end}")) {
-            return (true, vec![fix("test-locked", Some(p), format!("Restore {} exactly as it was. Existing tests stay unchanged; put new tests in a new file.", code(p)))]);
+            return (true, vec![fix("test-locked", Some(p), format!("Restore {} exactly as it was. Existing tests stay unchanged; put new tests in a new file.", code(p, 300)))]);
         }
     }
     if let Some(p) = shaped(r, "Test runner configuration cannot change under the test proof: ", ". It decides which tests run and how they check results; leave it unchanged") {
-        return (true, vec![fix("test-config", Some(p), format!("Leave {} unchanged: the test runner's settings decide which tests run and how they check results.", code(p)))]);
+        return (true, vec![fix("test-config", Some(p), format!("Leave {} unchanged: the test runner's settings decide which tests run and how they check results.", code(p, 300)))]);
     }
     if let Some((p, m)) = shaped(r, "A test file skips, focuses or inverts tests: ", ". Every test must run and check what it says, so remove it").and_then(|x| x.rsplit_once(" uses ")) {
-        return (true, vec![fix("test-marker", Some(p), format!("Remove {} from {}. Every test has to run, and the result has to come from the tests themselves.", code(m), code(p)))]);
+        return (true, vec![fix("test-marker", Some(p), format!("Remove {} from {}. Every test has to run, and the result has to come from the tests themselves.", code(m, 300), code(p, 300)))]);
     }
     if let Some((p, m)) = shaped(r, "Code outside the tests reaches into the test runner: ", ". Code may not change how tests run or what they check, or check whether tests are running; remove it").and_then(|x| x.rsplit_once(" uses ")) {
-        return (true, vec![fix("test-tamper", Some(p), format!("Remove {} from {}. Code may not change how tests run or what they check, or behave differently while tests run.", code(m), code(p)))]);
+        return (true, vec![fix("test-tamper", Some(p), format!("Remove {} from {}. Code may not change how tests run or what they check, or behave differently while tests run.", code(m, 300), code(p, 300)))]);
     }
     let missing = |paths: &str| (true, vec![fix("test-missing", None, format!("Add a test under {} that the test command runs, and that fails on the old code and passes with your fix.", codes(paths.split(", "))))]);
     if let Some(paths) = r.strip_prefix("A bug fix must add a test that fails before the fix and passes after it: add or change a test file under ").filter(|p| !p.is_empty()) { return missing(paths); }
     if let Some(paths) = shaped(r, "No new test ran in the test suite. A bug fix must add a test under ", " that the test command runs, and that fails before the fix and passes after it") { return missing(paths); }
     if let Some(list) = shaped(r, "None of the new tests fails on the old code, so they do not show the bug: ", ". Write a test that fails before the fix and passes after it; a test that never reaches the changed code (for example because it mocks it) proves nothing") {
-        return (true, vec![fix("test-proof", None, format!("Rewrite your new tests so at least one fails on the old code and passes with your fix: call the real code that had the bug, without mocking it. Tests that passed on the old code: {}.", code(list)))]);
+        return (true, vec![fix("test-proof", None, format!("Rewrite your new tests so at least one fails on the old code and passes with your fix: call the real code that had the bug, without mocking it. Tests that passed on the old code: {}.", code(list, 300)))]);
     }
     if shaped(r, "The new tests fail on the old code only sometimes: ", ". A test that shows the bug must fail on the old code every time and pass on the new code").is_some() {
         return (true, vec![fix("test-proof", None, "Make your new test fail on the old code every time, not only sometimes: it must not depend on timing, order or chance.".into())]);
@@ -175,25 +171,25 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
         return (true, vec![fix("test-proof", None, "Make your new test load on the old code and fail inside a test there: it may only use code that existed before your fix.".into())]);
     }
     if let Some(list) = shaped(r, "The test suite fails on the new code: ", ". Every test must pass after the change; fix the code, not the tests") {
-        return (true, vec![fix("tests-failing", None, format!("Make these tests pass by fixing the code, not the tests: {}.", code(list)))]);
+        return (true, vec![fix("tests-failing", None, format!("Make these tests pass by fixing the code, not the tests: {}.", code(list, 300)))]);
     }
     if r == "The test command failed on the new code although no test failed. Something outside the tests failed, such as a crash after the run, an unhandled error or a coverage threshold; fix it so the command succeeds" {
         return (true, vec![fix("tests-failing", None, "The test command reports failure although every test passed: fix the crash, unhandled error or threshold that fails it.".into())]);
     }
     if let Some(list) = shaped(r, "Tests did not run on the new code: ", ". Every test that ran before must still run, and every new test must run; do not skip, remove or rename tests") {
-        return (true, vec![fix("tests-not-run", None, format!("Make these tests run and pass again: {}. Do not skip, remove or rename tests, or stop them from running.", code(list)))]);
+        return (true, vec![fix("tests-not-run", None, format!("Make these tests run and pass again: {}. Do not skip, remove or rename tests, or stop them from running.", code(list, 300)))]);
     }
     if let Some(list) = shaped(r, "Existing tests fail on the new code when they run without the new tests: ", ". The code has to behave the same however the tests are run, so it must not keep state that changes its answers") {
-        return (true, vec![fix("order-dependent", None, format!("Make the code give the same answers however the tests are run: {} fail on your code when your new tests do not run first. Do not keep state between calls that changes the result.", code(list)))]);
+        return (true, vec![fix("order-dependent", None, format!("Make the code give the same answers however the tests are run: {} fail on your code when your new tests do not run first. Do not keep state between calls that changes the result.", code(list, 300)))]);
     }
     if let Some(list) = shaped(r, "Existing tests fail on the new code: ", ". Tests may be rewritten or removed, but the old tests must still pass on the new code; fix the code") {
-        return (true, vec![fix("behavior-changed", None, format!("Make these existing tests pass on your code again: {}. Rewriting or removing a test does not change what its old version checks.", code(list)))]);
+        return (true, vec![fix("behavior-changed", None, format!("Make these existing tests pass on your code again: {}. Rewriting or removing a test does not change what its old version checks.", code(list, 300)))]);
     }
     if shaped(r, "The old tests gave no usable results on the new code: ", ". Tests may be rewritten or moved, but the old tests must still load and pass on the new code").is_some() {
         return (true, vec![fix("behavior-changed", None, "Keep the old tests working on your code: they must still load and pass. Moving or renaming the code they use counts as a change of behaviour, which this task does not allow.".into())]);
     }
     if let Some(list) = shaped(r, "Your test changes stop catching bugs the old tests caught: ", ". Keep a test that catches each of them or write a better one; tests may be rewritten or removed only while every bug the old tests caught is still caught") {
-        return (true, vec![fix("tests-weakened", None, format!("Add or keep tests that catch these planted bugs: {}. Tests may be rewritten or removed only while every bug the old tests caught is still caught.", code(list)))]);
+        return (true, vec![fix("tests-weakened", None, format!("Add or keep tests that catch these planted bugs: {}. Tests may be rewritten or removed only while every bug the old tests caught is still caught.", code(list, 300)))]);
     }
     if let Some(rest) = r.strip_prefix("Kern could not check the test changes in time: ")
         && rest.ends_with(" planted bugs were checked before the time limit. Leave the existing tests unchanged, or raise limits.timeout_seconds") {
@@ -209,40 +205,40 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     }
     if let Some((p, hint)) = r.strip_prefix("Workspace output exceeds byte limits at ").and_then(|x| x.rsplit_once(". The contract allows "))
         && hint.ends_with(" in total; raise limits.file_bytes or limits.total_bytes if this is intended") {
-        return (true, vec![fix("workspace", Some(p), format!("Make {} smaller or remove it: it is over the size limit.", code(p)))]);
+        return (true, vec![fix("workspace", Some(p), format!("Make {} smaller or remove it: it is over the size limit.", code(p, 300)))]);
     }
     if let Some(p) = shaped(r, "Symlink in workspace is unsupported: ", ". Kern only accepts regular files") {
-        return (true, vec![fix("workspace", Some(p), format!("Replace the link {} with a regular file, or remove it.", code(p)))]);
+        return (true, vec![fix("workspace", Some(p), format!("Replace the link {} with a regular file, or remove it.", code(p, 300)))]);
     }
     if let Some(p) = shaped(r, "Special file in workspace is unsupported: ", ". Kern only accepts regular files") {
-        return (true, vec![fix("workspace", Some(p), format!("Remove {}: only regular files are accepted.", code(p)))]);
+        return (true, vec![fix("workspace", Some(p), format!("Remove {}: only regular files are accepted.", code(p, 300)))]);
     }
     if let Some(p) = r.strip_prefix("Nonportable path: ").filter(|p| !p.is_empty()) {
-        return (true, vec![fix("file-name", Some(p), format!("Rename {}: use file names that work on every system, without device names such as aux or con, the characters :*?\"<>|, or a trailing dot or space.", code(p)))]);
+        return (true, vec![fix("file-name", Some(p), format!("Rename {}: use file names that work on every system, without device names such as aux or con, the characters :*?\"<>|, or a trailing dot or space.", code(p, 300)))]);
     }
     if let Some(p) = r.strip_prefix("Reserved path: ").filter(|p| !p.is_empty()) {
-        return (true, vec![fix("file-name", Some(p), format!("Remove or rename {}: .git and .kern names are reserved.", code(p)))]);
+        return (true, vec![fix("file-name", Some(p), format!("Remove or rename {}: .git and .kern names are reserved.", code(p, 300)))]);
     }
     if let Some(p) = r.strip_prefix("Case-colliding filenames: ").filter(|p| !p.is_empty()) {
-        return (true, vec![fix("file-name", Some(p), format!("Rename {}: another file's path differs from it only in upper and lower case.", code(p)))]);
+        return (true, vec![fix("file-name", Some(p), format!("Rename {}: another file's path differs from it only in upper and lower case.", code(p, 300)))]);
     }
     if r == "Case-colliding tree path" || r == "File/directory collision" {
         return (true, vec![fix("file-name", None, "Rename files so that no two paths differ only in upper and lower case, and no file has the same path as a directory.".into())]);
     }
     if let Some((name, list)) = r.strip_prefix("Dependency change not approved: ").and_then(|x| x.split_once(". The task approves changes only to: ")) {
-        return (true, vec![fix("dependency", Some("package.json"), format!("Do not add or change {}: this task may only add or update {}.", code(name), codes(list.split(", "))))]);
+        return (true, vec![fix("dependency", Some("package.json"), format!("Do not add or change {}: this task may only add or update {}.", code(name, 300), codes(list.split(", "))))]);
     }
     if let Some(fields) = r.strip_prefix("package.json may only change dependency entries, but this change touches: ") {
-        return (true, vec![fix("dependency", Some("package.json"), format!("Leave {} in package.json as it was: only the entries of approved packages may change.", code(fields)))]);
+        return (true, vec![fix("dependency", Some("package.json"), format!("Leave {} in package.json as it was: only the entries of approved packages may change.", code(fields, 300)))]);
     }
     if let Some(names) = r.strip_prefix("The lockfile changes packages the task did not approve: ") {
-        return (true, vec![fix("dependency", Some("package-lock.json"), format!("Regenerate package-lock.json so that only the approved packages and what they need change; leave {} as it was.", code(names)))]);
+        return (true, vec![fix("dependency", Some("package-lock.json"), format!("Regenerate package-lock.json so that only the approved packages and what they need change; leave {} as it was.", code(names, 300)))]);
     }
     if r == "The lockfile format changed: keep lockfileVersion as it was" {
         return (true, vec![fix("dependency", Some("package-lock.json"), "Keep package-lock.json in its existing format (lockfileVersion), for example by using the project's npm version.".into())]);
     }
     if let Some(p) = r.strip_prefix("Dependency files must be valid JSON: ") {
-        return (true, vec![fix("dependency", Some(p), format!("Fix {} so it is valid JSON.", code(p)))]);
+        return (true, vec![fix("dependency", Some(p), format!("Fix {} so it is valid JSON.", code(p, 300)))]);
     }
     if let Some(n) = r.strip_prefix("The agent exited with code ") && digits(n.strip_prefix('-').unwrap_or(n)).is_some() {
         return (true, vec![fix("agent", None, format!("Your previous run ended with exit code {n}. Finish the task and exit with code 0."))]);
@@ -254,7 +250,7 @@ fn classify(r: &str, contract: Option<&Contract>) -> (bool, Vec<Violation>) {
     }
     if let Some(rest) = r.strip_prefix("The pushed change and ") && let Some((base, rest)) = rest.split_once(" both changed: ")
         && let Some(files) = rest.strip_suffix(&format!(". Merge {base} into the branch, resolve the conflicts and push again")) {
-        return (true, vec![fix("base-conflict", None, format!("Merge {} into this branch, resolve the conflicts in {} and push again.", code(base), codes(files.split(", "))))]);
+        return (true, vec![fix("base-conflict", None, format!("Merge {} into this branch, resolve the conflicts in {} and push again.", code(base, 300), codes(files.split(", "))))]);
     }
     if r.starts_with("The pull request has nothing to merge into ") { return human("nothing-to-merge", "Everything on this branch is already on the base branch. A human can close this pull request."); }
     if r.starts_with("The agent ran out of memory") || r.starts_with("The agent did not finish within") { return human("agent-limits", "The agent ran out of memory or time. A human has to raise the limit or narrow the task."); }
