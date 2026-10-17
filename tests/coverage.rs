@@ -48,6 +48,16 @@ fn cap_go_capgo_app_2789_a_pattern_the_shell_would_expand_is_never_read_as_no_te
 }
 
 #[test]
+fn cap_go_capgo_app_2789_a_file_tests_write_under_a_random_name_on_both_sides_is_not_the_change() {
+    let old = "temp_cli_test/com.cli_835b3249-acdc-4bb4-86db-a132f2dc2d91/capacitor.config.ts";
+    let new = "temp_cli_test/com.cli_692abb87-dd91-4d9d-8f3e-0b1c2d3e4f50/capacitor.config.ts";
+    assert_eq!(suite::path_shape(old), suite::path_shape(new), "the old code's tests wrote the same file under another random name, so the new code writing it is not the change");
+    assert_eq!(suite::path_shape("out/run-1792227091689.js"), suite::path_shape("out/run-1792227099999.js"), "a time stamp is random too");
+    assert_ne!(suite::path_shape("temp_cli_test/com.cli_ccr_692abb87-dd91-4d9d-8f3e-0b1c2d3e4f50/index.js"), suite::path_shape(new), "a different file keeps its own shape");
+    assert_ne!(suite::path_shape("src/evil.js"), suite::path_shape("src/total.js"), "names with no random part are compared as they are");
+}
+
+#[test]
 fn saleor_apps_2046_avatax_a_project_that_shuffles_its_tests_still_runs_in_one_fixed_order() {
     use kern::script::{Found, found};
     let run = |script: &str| match found(&json!({ "scripts": { "test": script } })) { Found::Run(i) => i.command, other => panic!("{script}: {other:?}") };

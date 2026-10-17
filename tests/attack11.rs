@@ -187,6 +187,6 @@ fn a_test_that_fails_on_every_run_of_the_new_code_is_not_said_to_pass() {
     let alone_old = report(&[(key, 0, 1, 0)], &[]);
     let c = suite::judged(&before, &after, Some(&alone_new), Some(&alone_old));
     let md = receipt::markdown(&receipt_for(&c, &[("src/session.ts", "modify")]), None);
-    assert!(!md.contains("2 that passed before still pass") && !md.contains("passed when run again"),
+    assert!(!md.contains("2 that passed before still pass") && !md.contains("by chance"),
         "the test fails on the whole run and alone on the new code, every time; it is set aside because the old code alone fails it too. The receipt counts it among the tests that 'still pass' and says it 'failed once and passed when run again', neither of which happened:\n{md}");
 }

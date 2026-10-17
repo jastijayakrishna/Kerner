@@ -69,6 +69,27 @@ fn microsoft_poml_52_a_package_json_field_that_neither_runs_nor_steers_installs_
 }
 
 #[test]
+fn revenuecat_purchases_js_649_and_gatsby_39351_no_moved_package_and_a_deleted_manifest_are_not_dependency_changes() {
+    let lock = |version: &str| format!(r#"{{"name":"purchases-js","version":"{version}","lockfileVersion":3,"packages":{{"":{{"name":"purchases-js","version":"{version}","devDependencies":{{"vitest":"3.2.0"}}}},"node_modules/vitest":{{"version":"3.2.0","resolved":"https://registry.npmjs.org/vitest/-/vitest-3.2.0.tgz","integrity":"sha512-abc"}}}}}}"#);
+    let pkg = |version: &str| format!(r#"{{"name":"purchases-js","version":"{version}","scripts":{{"test":"vitest run"}},"devDependencies":{{"vitest":"3.2.0"}}}}"#);
+    let rules = rules_for(&[("package.json", &pkg("1.17.1")), ("package-lock.json", &lock("1.17.1"))], &[("package.json", &pkg("1.18.1")), ("package-lock.json", &lock("1.18.1"))], &[]);
+    assert!(paths(&rules, "dependencies").is_empty(), "a release that bumps only the project's own version moves no package it installs: {}", rules["dependencies"]);
+    let checker = r#"{"name":"site-up-checker","scripts":{"test":"echo \"Error: no test specified\" && exit 1","start":"node index"},"dependencies":{"discord.js":"^11.1.0"}}"#;
+    let rules = rules_for(&[("package.json", VITEST), ("scripts/site-up-checker/package.json", checker)], &[], &["scripts/site-up-checker"]);
+    assert!(paths(&rules, "dependencies").is_empty(), "deleting a whole script package installs nothing new and runs nothing on install: {}", rules["dependencies"]);
+    let rules = rules_for(&[("package.json", VITEST), ("package-lock.json", &lock("1.0.0"))], &[], &["package-lock.json"]);
+    assert_eq!(paths(&rules, "dependencies"), ["package-lock.json"], "deleting the lockfile lets the next install pick new versions, so that stays: {}", rules["dependencies"]);
+}
+
+#[test]
+fn epam_ketcher_8131_a_deleted_file_in_a_tests_folder_that_defines_no_test_removes_no_test() {
+    let generator = "// const fs = require('fs');\n// const set1 = ['AhA', '@hA'];\n// fs.writeFileSync('out.txt', set1.join('\\n'));\n";
+    let real = "import { test, expect } from 'vitest';\ntest('adds', () => expect(1 + 1).toBe(2));\n";
+    let rules = rules_for(&[("package.json", VITEST), ("tests/generator.js", generator), ("tests/total.test.js", real)], &[], &["tests/generator.js", "tests/total.test.js"]);
+    assert_eq!(paths(&rules, "deleted_tests"), ["tests/total.test.js"], "generator.js is commented-out code that defines no test, so deleting it removes nothing the tests check: {}", rules["deleted_tests"]);
+}
+
+#[test]
 fn a_lifecycle_script_or_an_install_setting_in_package_json_is_a_dependency_change() {
     let after = r#"{"name":"poml","scripts":{"test":"vitest run","postinstall":"node fetch.js"},"overrides":{"tar":"7.0.0"},"packageManager":"pnpm@10.0.0","trustedDependencies":["esbuild"],
         "bin":{"poml":"cli.js"},"devDependencies":{"vitest":"3.2.0"}}"#;

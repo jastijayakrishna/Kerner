@@ -168,3 +168,20 @@ fn tryghost_ghost_28552_a_file_that_failed_once_and_passed_when_run_again_is_cha
     let twice = suite::judged(&before, &after, Some(&after), None);
     assert_eq!(listed(&twice, "unproven"), [file], "failing every time with no old record is still unproven: {twice}");
 }
+
+#[test]
+fn automattic_wp_calypso_113274_test_names_that_change_between_runs_of_the_same_code_are_chance() {
+    let file = "client/my-sites/checkout/src/test/wpcom-store-state.ts";
+    let name = |field: &str| format!("{file} > updateManagedContactDetailsShape > data.A is defined at {field}");
+    let (city, email, fax, zip) = (name("city"), name("email"), name("fax"), name("postalCode"));
+    let other = "client/other.test.ts > works";
+    let before = report(&[(city.as_str(), 1, 0, 0), (email.as_str(), 1, 0, 0), (other, 3, 0, 0)], &[], &[]);
+    let after = report(&[(zip.as_str(), 1, 0, 0), (fax.as_str(), 1, 0, 0), (other, 3, 0, 0)], &[], &[]);
+    let random_old = report(&[(fax.as_str(), 1, 0, 0), (email.as_str(), 1, 0, 0)], &[], &[]);
+    let c = suite::judged(&before, &after, Some(&after), Some(&random_old));
+    assert!(listed(&c, "gone").is_empty(), "the old code itself named this file's tests differently in two runs, so a name missing from the new run proves nothing: {c}");
+    assert!(listed(&c, "flaky").contains(&city), "{c}");
+    let steady_old = report(&[(city.as_str(), 1, 0, 0), (email.as_str(), 1, 0, 0)], &[], &[]);
+    let c = suite::judged(&before, &after, Some(&after), Some(&steady_old));
+    assert!(listed(&c, "gone").contains(&city), "names the old code repeats exactly are real tests, and one that no longer runs is gone: {c}");
+}

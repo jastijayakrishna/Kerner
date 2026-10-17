@@ -353,8 +353,9 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             else { not_checked.push(item); }
         }
     }
-    let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p) && !moved_from.contains(p)).map(|(p, _)| json!({ "path": p })).collect();
     let text = |files: &Files, p: &str| -> Option<String> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok()).map(str::to_string) };
+    let defined_tests = |p: &str| text(&old, p).and_then(|s| crate::weaken::cases(p, &s)).is_none_or(|c| !c.is_empty());
+    let deleted_tests: Vec<Value> = changes.iter().filter(|(p, op)| *op == "delete" && is_test(p) && !moved_from.contains(p) && defined_tests(p)).map(|(p, _)| json!({ "path": p })).collect();
     let now: BTreeMap<&String, BTreeMap<String, crate::weaken::Case>> = changes.iter().filter(|(p, op)| *op != "delete" && is_test(p) && is_code(p))
         .filter_map(|(p, _)| text(&new, p).and_then(|t| crate::weaken::cases(p, &t)).map(|c| (p, c))).collect();
     let mut weakened = Vec::new();
@@ -441,6 +442,9 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             if !fields.is_empty() { d["fields"] = json!(fields); }
             if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }
         }
+        if base_name(&p) == "package.json" && d["operation"] == "delete" {
+            d["harmless"] = json!(true);
+        }
         if npm_lockfile(&p) && d["operation"] != "delete" {
             match b {
                 Some(b) => {
@@ -449,7 +453,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                     if moves.len() > LOCK_MOVES_COUNT_MAX {
                         not_checked.push(json!({ "path": p, "why": format!("{} versions move in this lockfile, more than the {LOCK_MOVES_COUNT_MAX} whose release dates Kern checks", moves.len()) }));
                     }
-                    if moves.is_empty() { d["moves"] = json!([]); }
+                    if moves.is_empty() { d["harmless"] = json!(true); }
                     if !moves.is_empty() && moves.len() <= LOCK_MOVES_COUNT_MAX {
                         d["packages"] = json!(moves.iter().map(crate::deps::shown).collect::<Vec<_>>());
                         d["moves"] = json!(moves);

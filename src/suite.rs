@@ -137,6 +137,16 @@ fn renamed(r: &Report, map: &std::collections::BTreeMap<String, String>) -> Repo
 }
 
 fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
+const RANDOM_RUN_CHARS_MIN: usize = 8;
+pub fn path_shape(path: &str) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < chars.len() {
+        let end = (i..chars.len()).find(|&j| !(chars[j].is_ascii_hexdigit() || chars[j] == '-')).unwrap_or(chars.len());
+        if end - i >= RANDOM_RUN_CHARS_MIN && chars[i..end].iter().any(char::is_ascii_digit) { out.push('#'); i = end; } else { out.push(chars[i]); i += 1; }
+    }
+    out
+}
 
 fn matched(from: &[String], to: &[String]) -> Vec<bool> {
     let mut done = vec![false; from.len()];
@@ -670,6 +680,9 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let signature = |w: &str| -> String { masked(&w.replace("/workspace/", "")).chars().take(160).collect() };
     let old_errors: BTreeSet<String> = before.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k).chain(&before.problems).filter_map(|k| before.why.get(k)).map(|w| signature(w)).collect();
     let known_error = |k: &str| raw_after.why.get(k).is_some_and(|w| old_errors.contains(&signature(w)));
+    let names = |r: &Report, f: &str| -> BTreeSet<String> { r.tests.keys().filter(|k| file_of(k) == f).cloned().collect() };
+    let by_chance: BTreeSet<&str> = before.tests.keys().map(|k| file_of(k)).filter(|f| [(before, alone_old), (after, again)].into_iter()
+        .any(|(a, b)| b.is_some_and(|b| { let n = names(b, f); !n.is_empty() && names(a, f) != n }))).collect();
     let lacking = |k: &str| raw_after.why.get(k).is_some_and(|w| sandbox_error(w));
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
@@ -688,6 +701,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
         let verdict = first.max(second);
         let old_alone = alone_old.map_or(Seen::Same, |o| seen(b, count(o, k)));
         let set_aside = if verdict == Seen::Gone { old_alone == Seen::Gone } else { old_alone != Seen::Same };
+        if verdict == Seen::Gone && by_chance.contains(file_of(k)) { flaky.push(k.clone()); continue; }
         if second == Seen::Same {
             kept += u64::from(b.passed - b.passed.min(a.passed));
             if !shaky.contains(file_of(k)) { flaky.push(k.clone()); }
@@ -1391,7 +1405,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         };
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
     }
-    wrote_code.retain(|f| !old_created.contains(f));
+    let old_shapes: BTreeSet<String> = old_created.iter().map(|f: &String| path_shape(f)).collect();
+    wrote_code.retain(|f| !old_shapes.contains(&path_shape(f)));
     for n in not_run.iter_mut() {
         let dir = n["dir"].as_str().unwrap_or("").to_string();
         let Some(suite) = suites.iter().find(|s| s.dir == dir) else { continue };
