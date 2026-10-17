@@ -177,14 +177,14 @@ check broke "$base"
 decision broke blocked
 [ "$(kinds broke test-run-broke blocked)" = 1 ] || { jq .tests broke/receipt.json; fail "broke: tests that give nothing on the new code were not blocked"; }
 
-say "A check has one time limit, and a run it cuts short is reported as not run and needs a look, never a failure or a green check"
+say "A check has one time limit, and a run it cuts short is reported as not run: not verified, never a failure or a green check"
 git -C calc checkout -q -b late "$base"
 printf '%s\n' "import { test } from 'vitest';" '' "test('never ends', () => { for (;;) {} });" > calc/test/late.test.js
 git -C calc add -A && git -C calc commit -qm "A test that never ends" && git -C calc rev-parse HEAD > late.head && git -C calc checkout -q "$base"
 export KERN_CHECK_MINUTES=3
 check late "$base"
 unset KERN_CHECK_MINUTES
-decision late look
+decision late unverified
 jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("time for this check ran out"))' late/receipt.json > /dev/null || { jq .tests late/receipt.json; fail "late: the run the time limit cut short was not reported as not run"; }
 
 say "Kern runs the tests the way the project's own test script does: its config, its test files and its variables"
@@ -223,14 +223,44 @@ unset KERN_TEST_MINUTES
 decision big clear
 jq -e '.tests.status == "RAN" and .tests.kept == 3 and (.tests.runner | test("related to the change"))' big/receipt.json > /dev/null || { jq .tests big/receipt.json; fail "big: the related tests did not run in place of the whole suite"; }
 
-say "An edited test whose old version fails on the new code needs a look, and one whose old version still passes is clear"
+say "An edited test whose old version fails only because the value it expects moved is a note with both values, one whose old version expected a refusal the new code no longer makes needs a look, and one whose old version still passes is clear"
 git -C calc checkout -q -b rewrites "$base"
 sed -i 's/amount >= 100/amount > 100/' calc/src/total.js
 sed -i 's/expect(discount(100)).toBe(90)/expect(discount(100)).toBe(100)/' calc/test/total.test.js
 git -C calc commit -qam "Discount above 100, and the test says so" && git -C calc rev-parse HEAD > rewrites.head && git -C calc checkout -q "$base"
 check rewrites "$base"
-decision rewrites look
-[ "$(kinds rewrites test-rewritten look)" = 1 ] && grep -q 'discount from 100' rewrites/receipt.md || { cat rewrites/receipt.md; fail "rewrites: the rewritten expectation was not reported"; }
+decision rewrites clear
+[ "$(kinds rewrites test-value notes)" = 1 ] && grep -q 'discount from 100' rewrites/receipt.md && grep -qF 'moves from `90` to `100`' rewrites/receipt.md \
+  || { cat rewrites/receipt.md; fail "rewrites: the value the edited test expects moved, and the note does not show both values"; }
+git -C calc checkout -q -b guard "$base"
+cat >> calc/src/total.js <<'EOF'
+
+export function quantity(n) {
+  if (!Number.isInteger(n) || n < 1) throw new Error('a quantity is a whole number from 1');
+  return n;
+}
+EOF
+cat > calc/test/guard.test.js <<'EOF'
+import { test, expect } from 'vitest';
+import { quantity } from '../src/total.js';
+
+test('a zero quantity is refused', () => expect(() => quantity(0)).toThrow());
+test('a whole quantity is kept', () => expect(quantity(3)).toBe(3));
+EOF
+git -C calc add -A && git -C calc commit -qm "Quantities are whole numbers from 1" && guard_base=$(git -C calc rev-parse HEAD)
+sed -i "s/throw new Error('a quantity is a whole number from 1');/return 1;/" calc/src/total.js
+cat > calc/test/guard.test.js <<'EOF'
+import { test, expect } from 'vitest';
+import { quantity } from '../src/total.js';
+
+test('a zero quantity becomes 1', () => expect(quantity(0)).toBe(1));
+test('a whole quantity is kept', () => expect(quantity(3)).toBe(3));
+EOF
+git -C calc commit -qam "A bad quantity becomes 1 instead of an error, and the test says so" && git -C calc rev-parse HEAD > guard.head && git -C calc checkout -q "$base"
+check guard "$guard_base"
+decision guard look
+[ "$(kinds guard test-rewritten look)" = 1 ] && grep -q 'accepting what the old code refused' guard/receipt.md \
+  || { cat guard/receipt.md; fail "guard: an old test that expected a refusal the new code no longer makes was not a look"; }
 git -C calc checkout -q -b edits "$base"
 sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' calc/src/total.js
 sed -i 's/expect(discount(100)).toBe(90)/expect(discount(100)).toEqual(90)/' calc/test/total.test.js
@@ -421,12 +451,12 @@ check nx "$nx_base" nxrepo
 decision nx blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.runner | test("jest in libs/calc"))' nx/receipt.json > /dev/null || { jq .tests nx/receipt.json; fail "nx: the project's own jest config was not run"; }
 
-say "When only the new code's install fails, the receipt quotes the install and needs a look instead of blaming the tests"
+say "When only the new code's install fails, the receipt quotes the install and says it could not verify, instead of blaming the tests"
 git -C calc checkout -q -b installfail "$base"
 sed -i 's/"devDependencies":{"vitest":"3.2.4"}/"devDependencies":{"vitest":"3.2.4","@kern-e2e\/does-not-exist":"1.0.0"}/' calc/package.json
 git -C calc commit -qam "Add a package that does not exist" && git -C calc rev-parse HEAD > installfail.head && git -C calc checkout -q "$base"
 check installfail "$base"
-decision installfail look
+decision installfail unverified
 jq -e '(.tests.run_unconfirmed | length == 1) and (.tests.run_unconfirmed[0].why | test("installing its dependencies with npm failed"))' installfail/receipt.json > /dev/null || { jq .tests installfail/receipt.json; fail "installfail: a failed install on the new code was not named, or it blocked"; }
 
 say "When only some test files miss an unbuilt workspace package, Kern builds it on both sides and compares them all"
