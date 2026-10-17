@@ -65,23 +65,33 @@ pub fn shown_power(p: &Value) -> bool {
         || (any(&added, &[Reach::Secrets, Reach::Network]) && any(&after, &[Reach::Secrets, Reach::Anything]) && any(&after, &[Reach::Network, Reach::Anything]))
 }
 fn title(key: &str) -> &str { key.split_once(" > ").map_or(key, |(_, t)| t) }
-type Moved = (String, String, String);
-fn moved_values(changed: Vec<Moved>) -> Vec<Value> {
-    let mut files: Vec<(String, Vec<Moved>)> = Vec::new();
-    for m in changed {
-        let f = file_of(&m.0).to_string();
-        match files.iter_mut().find(|(x, _)| *x == f) { Some((_, v)) => v.push(m), None => files.push((f, vec![m])) }
+fn by_file<T>(list: Vec<(String, T)>) -> Vec<(String, Vec<(String, T)>)> {
+    let mut files: Vec<(String, Vec<(String, T)>)> = Vec::new();
+    for x in list {
+        let f = file_of(&x.0).to_string();
+        match files.iter_mut().find(|(n, _)| *n == f) { Some((_, v)) => v.push(x), None => files.push((f, vec![x])) }
     }
-    files.into_iter().flat_map(|(f, list)| {
+    files
+}
+fn moved_values(changed: Vec<(String, (String, String))>) -> Vec<Value> {
+    by_file(changed).into_iter().flat_map(|(f, list)| {
         if list.len() < 3 {
-            return list.iter().map(|(k, was, now)| item("test-value", format!("{}: the change edits this test, and what it expects moves from {} to {}", code(k, 200), code(was, 160), code(now, 160)))).collect::<Vec<_>>();
+            return list.iter().map(|(k, (was, now))| item("test-value", format!("{}: the change edits this test, and what it expects moves from {} to {}", code(k, 200), code(was, 160), code(now, 160)))).collect::<Vec<_>>();
         }
-        let (k, was, now) = &list[0];
+        let (k, (was, now)) = &list[0];
         vec![item("test-value", format!("{} tests in {} expect other values now, as the change edits them; for example {}: {} becomes {}", list.len(), code(&f, 160), code(title(k), 120), code(was, 160), code(now, 160)))]
     }).collect()
 }
+fn old_tests_unrun(harness: Vec<(String, String)>) -> Vec<Value> {
+    by_file(harness).into_iter().flat_map(|(f, list)| {
+        if list.len() < 3 {
+            return list.iter().map(|(k, why)| item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test against the new code ({}), so it cannot say what the change did to it", code(k, 200), plain(why, 300)))).collect::<Vec<_>>();
+        }
+        vec![item("edited-unchecked", format!("{} edited tests in {}: Kern could not run their old versions against the new code ({}), so it cannot say what the change did to them", list.len(), code(&f, 160), plain(&list[0].1, 300)))]
+    }).collect()
+}
 fn rewritten_items(tests: &Value, rules: &Value) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
-    let (mut look, mut unverified, mut unread, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut look, mut harness, mut unread, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for k in strings(&tests["rewritten"]) {
         let r = &tests["polarity"][&k];
         let (was, now) = (r["was"].as_str().unwrap_or(""), r["now"].as_str().unwrap_or(""));
@@ -89,18 +99,17 @@ fn rewritten_items(tests: &Value, rules: &Value) -> (Vec<Value>, Vec<Value>, Vec
         match r["kind"].as_str() {
             Some("opened") => look.push(item("test-rewritten", format!("The change edits this test, and its old version shows the new code accepting what the old code refused: {}{values}", code(&k, 200)))),
             Some("flipped") => look.push(item("test-rewritten", format!("The change edits this test, and its old version fails on the new code because a yes or no, a something or nothing, or the shape of the result changed: {}{values}", code(&k, 200)))),
-            Some("changed") => changed.push((k.clone(), was.to_string(), now.to_string())),
-            Some("harness") => unverified.push(item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test against the new code ({}), so it cannot say what the change did to it",
-                code(&k, 200), plain(r["why"].as_str().unwrap_or("its setup no longer fits the new code"), 300)))),
+            Some("changed") => changed.push((k.clone(), (was.to_string(), now.to_string()))),
+            Some("harness") => harness.push((k.clone(), r["why"].as_str().unwrap_or("its setup no longer fits the new code").to_string())),
             _ => unread.push(k.clone()),
         }
     }
     look.extend(per_file("test-rewritten", unread, "The change edits this test, and its old version fails on the new code", "tests whose old versions fail on the new code (the change edits them)"));
-    if let Some(words) = rules["says_no_change"].as_str().filter(|w| !w.trim().is_empty()) && let Some((k, was, now)) = changed.first() {
+    if let Some(words) = rules["says_no_change"].as_str().filter(|w| !w.trim().is_empty()) && let Some((k, (was, now))) = changed.first() {
         look.push(item("says-no-change", format!("The pull request says it does not change behaviour ({}), but the old versions of {} get other values on the new code; for example {}: {} becomes {}",
             code(words, 120), plural(changed.len(), "edited test", "edited tests"), code(k, 200), code(was, 160), code(now, 160))));
     }
-    (look, unverified, moved_values(changed))
+    (look, old_tests_unrun(harness), moved_values(changed))
 }
 
 #[derive(Default)]
@@ -474,9 +483,13 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         }
         let count = |k: &str| tests[k].as_array().map_or(0, Vec::len);
         let (edited, rewritten, unchecked) = (tests["edited"].as_u64().unwrap_or(0) as usize, count("rewritten"), count("edited_unchecked"));
-        let moved = strings(&tests["rewritten"]).iter().filter(|k| tests["polarity"][k.as_str()]["kind"] == "changed").count();
-        if rewritten > 0 && moved == rewritten { md += &format!("- ✏️ Edited tests: the change moves what {} expect, on purpose (see Notes)\n", plural(rewritten, "test", "tests")); }
-        else if rewritten > 0 { md += &format!("- ⚠️ Edited tests: the old versions of {} fail on the new code (see above)\n", plural(rewritten, "test", "tests")); }
+        let read_as = |kind: &str| strings(&tests["rewritten"]).iter().filter(|k| tests["polarity"][k.as_str()]["kind"] == kind).count();
+        let (moved, unrun) = (read_as("changed"), read_as("harness"));
+        let failing = rewritten.saturating_sub(moved + unrun);
+        let also = if moved > 0 { format!("; the change moves what {} expect, on purpose (see Notes)", plural(moved, "other test", "other tests")) } else { String::new() };
+        if failing > 0 { md += &format!("- ⚠️ Edited tests: the old versions of {} fail on the new code (see above)\n", plural(failing, "test", "tests")); }
+        else if unrun > 0 { md += &format!("- ⏭️ Edited tests: Kern could not run the old versions of {} against the new code (see Not verified){also}\n", plural(unrun, "test", "tests")); }
+        else if moved > 0 { md += &format!("- ✏️ Edited tests: the change moves what {} expect, on purpose (see Notes)\n", plural(moved, "test", "tests")); }
         else if unchecked > 0 {
             let passed = if edited > 0 { format!("; the old versions of {edited} others still pass") } else { String::new() };
             md += &format!("- ⚠️ Edited tests: Kern could not run the old versions of {} on the new code (see above){passed}\n", plural(unchecked, "edited test file", "edited test files"));

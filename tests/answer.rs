@@ -130,6 +130,21 @@ fn budibase_18627_an_old_test_that_cannot_drive_the_new_code_is_not_verified() {
 }
 
 #[test]
+fn budibase_18627_thirty_two_old_tests_of_one_file_that_cannot_drive_the_new_code_are_one_item() {
+    let file = "packages/builder/src/components/integration/APIEndpointViewer.spec.ts";
+    let keys: Vec<String> = (0..32).map(|i| format!("{file} > API Endpoint Viewer > case {i}")).collect();
+    let why = "Error: [vitest] No \"automationStore\" export is defined on the \"@/stores/builder\" mock.";
+    let mut tests = with(ran(), "rewritten", json!(keys));
+    tests["polarity"] = keys.iter().map(|k| (k.clone(), json!({ "kind": "harness", "was": "", "now": "", "why": why }))).collect::<serde_json::Map<String, Value>>().into();
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    assert_eq!((r["decision"].as_str(), kinds(&r, "unverified").len()), (Some("unverified"), 1), "one file, one item: {}", r["unverified"]);
+    let item = said(&r, "unverified");
+    assert!(item.contains("32 edited tests") && item.contains(file) && item.matches("automationStore").count() == 1, "{item}");
+    let md = receipt::markdown(&r, None);
+    assert!(md.contains("Kern could not run the old versions of 32 tests against the new code") && !md.contains("fail on the new code (see above)"), "{md}");
+}
+
+#[test]
 fn an_old_test_failure_kern_cannot_read_stays_a_look() {
     for reading in [None, Some(json!({ "kind": "unknown", "was": "", "now": "" }))] {
         let r = receipt::build(&drive_json(), &clean_rules(), &rewritten(reading.clone()), &off());
