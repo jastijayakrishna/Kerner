@@ -709,7 +709,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     for p in fresh { if known_error(&p) { same_failure.push(p); } else if lacking(&p) { unrunnable.push(p); } else { new_failing.push(p); } }
     already_failing.extend(before.problems.iter().cloned());
     if total(before) == 0 && total(raw_after) == 0 && before.problems.is_empty() && raw_after.problems.is_empty() {
-        return json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" });
+        return json!({ "status": "NOT_RUN", "why": FOUND_NONE });
     }
     if passed(before) == 0 && (total(before) > 0 || !before.problems.is_empty()) {
         let why = match before.problems.iter().find(|p| before.why.contains_key(*p)).or(before.problems.first()).filter(|_| total(before) == 0) {
@@ -1029,10 +1029,18 @@ pub fn partly_missing(r: &Report) -> Option<String> {
     let text: Vec<&String> = r.why.values().filter(|w| markers.iter().any(|m| w.contains(m))).collect();
     (!text.is_empty()).then(|| text.iter().map(|w| w.as_str()).collect::<Vec<_>>().join("\n"))
 }
+const BUILD_DIRS: [&str; 7] = ["dist", "build", "lib", "out", "es", "esm", "cjs"];
 pub fn own_build(why: &str) -> bool {
-    let dirs = ["dist", "build", "lib", "out", "es", "esm", "cjs"];
-    why.split(['\'', '"', ' ', '(', ')', ',', '`']).any(|spec| (spec.starts_with("./") || spec.starts_with("../")) && spec.split('/').any(|seg| dirs.contains(&seg)))
+    why.split(['\'', '"', ' ', '(', ')', ',', '`']).any(|spec| (spec.starts_with("./") || spec.starts_with("../")) && spec.split('/').any(|seg| BUILD_DIRS.contains(&seg)))
 }
+pub fn builds_tests(command: &[String]) -> bool {
+    let built = |a: &str| { let p = a.trim_start_matches("./"); p.contains('/') && p.split('/').next().is_some_and(|d| BUILD_DIRS.contains(&d)) };
+    command.iter().skip(1).any(|a| !a.starts_with('-') && built(a)) || command.windows(2).any(|w| w[0] == "--rootDir" && BUILD_DIRS.contains(&w[1].trim_start_matches("./").trim_end_matches('/')))
+}
+const NO_TEST_FILES: [&str; 3] = ["No test files found", "No tests found", "Could not find any test files"];
+pub fn no_test_files(why: &str) -> bool { NO_TEST_FILES.iter().any(|m| why.contains(m)) }
+const FOUND_NONE: &str = "the test runner ran but found no tests on either side";
+const NO_TESTS: &str = "the project's test script finds no test files, so no test checks this change";
 fn cannot_load(old: Option<&Side>) -> Option<String> {
     match old {
         Some(Side::Nothing(why)) => Some(why.clone()),
@@ -1127,7 +1135,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         if let Some((_, env)) = suite.old.as_mut() { load(base, &dir, env); }
     }
     let mut seconds = serde_json::Map::new();
-    let mut timed = |name: String, from: u64| { seconds.insert(name, json!((now_ms() - from) / 1000)); };
+    let mut timed = |name: String, from: u64| { seconds.insert(name, json!(secs_since(from))); };
     let at = now_ms();
     if !out.join("setup.json").exists() { crate::drive::setup(out, op, until)?; timed("setup".into(), at); }
     let s = read_json(out.join("setup.json"))?;
@@ -1139,9 +1147,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     merged.insert("problem_why".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
-    let (mut late, mut dropped) = (false, BTreeSet::new());
+    let (mut late, mut dropped, mut testless) = (false, BTreeSet::new(), Vec::new());
     let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
     let changes = crate::rules::changed(repo, base, head)?;
+    let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed).is_none();
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
@@ -1169,7 +1178,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 let at = now_ms();
                 let run = run_side(out, op, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
                 timed(phase.clone(), at);
-                old_seconds = (now_ms() - at) / 1000;
+                old_seconds = secs_since(at);
                 if !pending.is_empty() {
                     if cannot_load(Some(&run)).is_some() { tried = format!(" (even after Kern ran {} first)", pending.join(", ")); } else { built = std::mem::take(&mut pending); }
                     pending.clear();
@@ -1179,11 +1188,13 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     repairable = false;
                     let missing = missing_packages(&why);
                     let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
-                    let compiled = why.contains("No test files found");
+                    let compiled = no_test_files(&why);
                     let package = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok());
                     let pretest = package.as_ref().filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
-                    let mut before = match package.as_ref().map(crate::script::found) { Some(crate::script::Found::Run(i)) if generated || compiled => i.before, _ => Vec::new() };
-                    if own_build(&why) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
+                    let invocation = match package.as_ref().map(crate::script::found) { Some(crate::script::Found::Run(i)) => Some(i), _ => None };
+                    let from_build = compiled && invocation.as_ref().is_some_and(|i| builds_tests(&i.command));
+                    let mut before = invocation.filter(|_| generated || compiled).map(|i| i.before).unwrap_or_default();
+                    if (own_build(&why) || from_build) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
                     let steps = repair_steps(&workspace(repo, base), &missing, pretest.as_deref(), (&suite.dir, &before));
                     if !steps.is_empty() {
                         let at = now_ms();
@@ -1217,6 +1228,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         };
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+            Some(Side::Nothing(why)) if no_test_files(why) && tried.is_empty() && built.is_empty() && followed(&suite.dir) => { testless.push(suite.dir.clone()); continue; }
             Some(Side::Nothing(why) | Side::Cut(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
             Some(Side::Slow(why)) => {
                 let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
@@ -1333,6 +1345,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let runner = suite.new.0.runner;
         let named = |k: &str| in_suite(runner, &suite.dir, k);
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
+        if c["status"] != "RAN" && c["why"] == FOUND_NONE && narrowed.is_none() && followed(&suite.dir) { testless.push(suite.dir.clone()); continue; }
         if c["status"] != "RAN" {
             not_run.push(json!({ "dir": suite.dir, "why": c["why"] }));
             if let Some(a) = merged["new_failing"].as_array_mut() { a.extend(list(&c["new_failing"])); }
@@ -1406,11 +1419,14 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
     }
     let mut extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds, "dropped": dropped,
-        "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
+        "no_tests_in": testless, "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
     if !s["old"]["browser"].is_null() || !s["new"]["browser"].is_null() { extra["browser"] = json!({ "old": s["old"]["browser"], "new": s["new"]["browser"] }); }
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));
+    }
+    if ran.is_empty() && not_run.is_empty() && run_unconfirmed.is_empty() && !testless.is_empty() {
+        return Ok(with(json!({ "status": "NOT_RUN", "runner": suites[0].new.0.runner.name(), "why": NO_TESTS, "no_tests": true })));
     }
     if ran.is_empty() {
         let why = not_run.first().and_then(|n| n["why"].as_str()).or_else(|| run_unconfirmed.first().and_then(|n| n["why"].as_str())).unwrap_or("no test run gave results").to_string();

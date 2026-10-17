@@ -77,10 +77,33 @@ fn the_receipt_says_which_node_ran() {
 fn the_node_the_projects_ci_runs_comes_first_and_never_one_its_engines_forbid() {
     let ci = |text: &str| vec![text.to_string()];
     let workers = files(&[("package.json", r#"{"volta":{"node":"20.19.3"},"engines":{"node":">=20"}}"#)]);
-    assert_eq!(wanted_major(&workers, &ci("      - uses: actions/setup-node@v4\n        with:\n          node-version: 22 # need this version for `Set` methods\n")).map(|(m, _)| m), Some(22),
+    assert_eq!(wanted_major(&workers, &ci("      - uses: actions/setup-node@v4\n        with:\n          node-version: 22 # need this version for `Set` methods\n      - run: pnpm test:ci\n")).map(|(m, _)| m), Some(22),
         "cloudflare/workers-sdk pins volta 20 but tests on 22; on 20 its tests gave no results");
     let strict = files(&[("package.json", r#"{"engines":{"node":">=22"}}"#)]);
     assert_eq!(wanted_major(&strict, &ci("node-version: 20\n")).map(|(m, _)| m), Some(22), "a version engines.node forbids is never chosen");
     let old_pin = files(&[(".nvmrc", "18"), ("package.json", r#"{"engines":{"node":">=20"}}"#)]);
     assert_eq!(wanted_major(&old_pin, &[]).map(|(m, _)| m), Some(22));
+}
+
+#[test]
+fn review_1_b_an_exact_or_tilde_engines_pin_still_allows_its_own_major() {
+    let none: Vec<String> = Vec::new();
+    let pick = |list: &[(&str, &str)]| wanted_major(&files(list), &none).map(|(m, _)| m);
+    assert_eq!(pick(&[(".nvmrc", "20"), ("package.json", r#"{"engines":{"node":"20.11.1"}}"#)]), Some(20), "an exact pin allows its own major");
+    assert_eq!(pick(&[("package.json", r#"{"engines":{"node":"~20.11.0"}}"#)]), Some(20));
+    assert_eq!(pick(&[("package.json", r#"{"engines":{"node":">=18 <=20.10"}}"#)]), Some(20), "of the majors a range allows, the one nearest Node 22");
+    assert_eq!(pick(&[("package.json", r#"{"engines":{"node":">=24.21.0"}}"#)]), Some(24));
+    assert_eq!(pick(&[("package.json", r#"{"engines":{"node":"^18"}}"#)]), Some(18));
+}
+
+#[test]
+fn tanstack_cli_507_only_a_workflow_that_runs_the_tests_says_which_node_they_need() {
+    let skills = "on: pull_request\njobs:\n  check:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n      - run: npx tsx scripts/check-skills.ts\n".to_string();
+    let pr = "on: pull_request\njobs:\n  test:\n    steps:\n      - uses: tanstack/config/.github/setup@main\n      - run: pnpm build\n      - run: pnpm test:unit\n".to_string();
+    assert_eq!(wanted_major(&files(&[(".nvmrc", "24.8.0\n")]), &[skills, pr]), Some((24, ".nvmrc says 24.8.0".to_string())),
+        "a skills check sets up Node 20 and runs no test; the tests need node:sqlite, which Node 20 lacks");
+    let filed = "jobs:\n  test:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version-file: .node-version\n      - run: npm test\n".to_string();
+    assert_eq!(wanted_major(&files(&[(".node-version", "22.11.0\n"), (".nvmrc", "18")]), &[filed]).map(|(m, _)| m), Some(22), "the test workflow reads its Node from .node-version");
+    let tested = "jobs:\n  test:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - run: pnpm vitest run\n".to_string();
+    assert_eq!(wanted_major(&files(&[(".nvmrc", "20")]), &[tested]).map(|(m, _)| m), Some(22), "the Node the tests run on in CI beats a version file");
 }

@@ -533,6 +533,21 @@ cd "$W"
 check berry "$berry_base" berryrepo
 jq -e '.tests.status == "RAN" and .tests.kept == 1' berry/receipt.json > /dev/null || { jq .tests berry/receipt.json; jq . berry/setup.json 2>/dev/null | head -40; fail "berry: a yarn 4 project with type module did not install"; }
 
+say "A pnpm 12 project installs with the pnpm it pins, checked against its hash, and its tests can call pnpm"
+git init -q pnpmrepo && cd pnpmrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"pin","version":"1.0.0","private":true,"type":"module","packageManager":"pnpm@12.14.0+sha512.c18ba6d87993d3d164cb5e8948f32b2c06ee854487e06cd8d86781342fb3e5bb4634367034711e86802baa9c37bea906ce1929ad08d70884c97d801df13389a6","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { execSync } from "node:child_process";' 'import { total } from "../src/total.js";' '' \
+  'test("total", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' 'test("pnpm is there", () => expect(execSync("pnpm --version").toString().trim()).toBe("12.14.0"));' > test/total.test.js
+git add -A && git commit -qm base && pnpm_base=$(git rev-parse HEAD)
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/pnpm.head"
+cd "$W"
+check pnpm "$pnpm_base" pnpmrepo
+jq -e '.tests.status == "RAN" and .tests.kept == 2' pnpm/receipt.json > /dev/null || { jq .tests pnpm/receipt.json; jq . pnpm/setup.json 2>/dev/null | head -40; fail "pnpm: a pnpm 12 project did not install with its own pnpm, or its tests could not call pnpm"; }
+
 say "A project whose .nvmrc asks for Node 20 is installed and tested on Node 20"
 git init -q nvmrepo && cd nvmrepo
 git config user.email e2e@example.invalid && git config user.name e2e

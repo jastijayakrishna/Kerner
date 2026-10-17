@@ -76,8 +76,10 @@ What Kern checks on every pull request:
 
 1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests the way its own `test`
    script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
-   package, each changed package's own script), on the Node version the project asks for (`.nvmrc`, `.node-version`, `.tool-versions`,
-   `volta`, `engines.node` or its CI), with the network off while the tests run. A test that passed before and fails now
+   package, each changed package's own script), on the Node version the project asks for (the CI workflow that runs its tests, the
+   version file that workflow reads, `.nvmrc`, `.node-version`, `.tool-versions`, `volta` or `engines.node`), with the package manager it
+   pins (pnpm 11 and later come from npm, checked against the `packageManager` hash, and the tests and build steps can call it), with the
+   network off while the tests run. A test that passed before and fails now
    blocks only when it fails in every run of the new code that included it (the whole suite, its file alone, the whole suite again) and
    passes in every run of the old code, including a second one. A failure that shows only when the whole suite runs, that does not repeat
    in every run, that sits in a file whose other tests passed and failed by chance, or that comes from the sandbox (no network, a missing
@@ -101,9 +103,9 @@ What Kern checks on every pull request:
 2. **Whether the tests check the change at all.** When the tests pass, Kern plants a few small faults in the lines the change touched
    (`>` turned into `>=`, a condition turned around, a call left out), one at a time, and runs the tests related to each file (jest and
    vitest). The fault is put in as the file is read, so nothing on disk is edited. A fault that makes a test fail that passed without it
-   is caught. The receipt says how many were caught and names the lines where none was, and when no test notices any of them the change
-   needs a look: the tests pass, but nothing in them checks this change. A fault that only puts back the old line, logging calls, and a
-   run in which the fault never reached the code are not counted.
+   is caught. The receipt says how many were caught and names the lines where none was. When no test that runs here even loads a changed
+   file (its related tests cannot load, or there are none), that file needs a look and the Tests line has no ✅: the tests pass, but none
+   of them reaches that code. A fault that only puts back the old line, logging calls, and a run Kern could not finish are not counted.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both
@@ -220,11 +222,13 @@ Next steps:
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
   run (another runner, a failed install, no results, Kern's own environment failing), the answer needs a look and says why, never ✅. A
-  project with no test script gets a receipt that covers the rules only and says so; changed code in other languages is listed as "not
-  checked", never passed quietly.
+  project with no test script, or whose own test script finds no test files, gets a receipt that covers the rules only and says so;
+  changed code in other languages is listed as "not checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
-  runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it. Tests that still
-  cannot load cannot be checked, and the receipt says so with the first error instead of claiming anything.
+  runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it, or when the test
+  script runs files from build output (`out/`, `dist/`) that are not in the repository. Tests that still cannot load cannot be checked,
+  and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to disk, not memory, and
+  a flood of test output is cut to its start and end, so neither fills the sandbox.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so

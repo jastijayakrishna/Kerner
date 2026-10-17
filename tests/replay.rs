@@ -183,3 +183,21 @@ fn a_result_whose_runs_were_not_kept_keeps_its_stored_verdict() {
     assert_eq!(r["replayed"], 0);
     assert_eq!(r["receipt"]["decision"], "blocked", "with no runs to judge again, the stored lists are rebuilt into a receipt as they are: {r}");
 }
+
+#[test]
+fn orval_labs_orval_3772_stored_fault_runs_are_judged_again_with_todays_rules() {
+    let t = Temp::new("faults");
+    let dir = t.0.join("receipt-orval-labs__orval__3772");
+    let faults = json!([{ "path": "src/getters.ts", "line": 12, "what": "a condition turned around", "outcome": "unknown" },
+        { "path": "src/getters.ts", "line": 20, "what": "a call left out", "outcome": "unknown" }]);
+    stored(&dir, "vitest", json!({ "kept": 2, "faults": faults }), &[
+        ("old", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+        ("new", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+    ]);
+    let crashed = json!({ "finished": true, "served": false, "output": "", "errors": "Error: Failed to resolve entry for package \"@orval/core\"." });
+    std::fs::write(dir.join("faults.json"), json!([crashed, crashed]).to_string()).unwrap();
+    let r = kern::replay::rejudge(&dir).unwrap();
+    let outcomes: Vec<&str> = r["receipt"]["tests"]["faults"].as_array().unwrap().iter().map(|f| f["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["unreached", "unreached"], "the stored runs say no test loaded the changed file: {r}");
+    assert_eq!(r["receipt"]["decision"], "look", "{}", r["receipt"]["look"]);
+}

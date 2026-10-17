@@ -937,9 +937,11 @@ fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, befor
 pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool, bool), output: &[u8], errors: &[u8]) -> &'static str {
     if !finished { return "unknown"; }
     let none = |b: &[u8]| { let t = String::from_utf8_lossy(b); t.contains("No tests found") || t.contains("No test files found") };
-    let r = match read_report(runner, output) { Ok(r) => r, Err(_) if none(output) || none(errors) => return "untested", Err(_) => return "unknown" };
-    if r.tests.values().all(|c| c.ran() == 0) && r.problems.is_empty() { return "untested"; }
-    if !served { return "unknown"; }
+    let report = read_report(runner, output);
+    if report.is_err() && (none(output) || none(errors)) { return "untested"; }
+    if report.as_ref().is_ok_and(|r| r.tests.values().all(|c| c.ran() == 0) && r.problems.is_empty()) { return "untested"; }
+    if !served { return "unreached"; }
+    let Ok(r) = report else { return "unknown" };
     let known: BTreeSet<&String> = failing(before).into_iter().collect();
     let failed = failing(&r);
     if failed.iter().any(|k| !known.contains(k)) { "caught" } else if r.sum().passed > 0 { "missed" } else { "unknown" }

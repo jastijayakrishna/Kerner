@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-pub const CHECK: &str = "const{spawnSync}=require('child_process'),path=require('path'),os=require('os');const config=process.argv[1],dir=path.dirname(config);let tsc;try{tsc=require.resolve('typescript/bin/tsc',{paths:[dir]})}catch{process.stdout.write('kern-types: no typescript\\n');process.exit(0)}const heap=Math.max(1024,Math.floor(os.totalmem()/1048576*0.7));const run=(a)=>spawnSync(process.execPath,['--max-old-space-size='+heap,tsc,...a],{cwd:dir,encoding:'utf8',maxBuffer:1<<28});let o={};try{o=JSON.parse(run(['--showConfig','-p',config]).stdout).compilerOptions||{}}catch{}const a=['--noEmit','-p',config,'--pretty','false'];if(o.incremental||o.composite)a.push('--tsBuildInfoFile','/tmp/.kern-tsbuildinfo');const r=run(a);let v='';try{v=require(path.join(path.dirname(tsc),'..','package.json')).version}catch{}process.stdout.write('kern-types: typescript '+v+'\\n'+(r.stdout||'')+'\\nkern-types: exit '+r.status+' '+(r.signal||'')+'\\n')";
+pub const CHECK: &str = "const{spawnSync}=require('child_process'),path=require('path');const config=process.argv[1],dir=path.dirname(config);let tsc;try{tsc=require.resolve('typescript/bin/tsc',{paths:[dir]})}catch{process.stdout.write('kern-types: no typescript\\n');process.exit(0)}const heap=Number(process.argv[2])||1024;const run=(a)=>spawnSync(process.execPath,['--max-old-space-size='+heap,tsc,...a],{cwd:dir,encoding:'utf8',maxBuffer:1<<28});let o={};try{o=JSON.parse(run(['--showConfig','-p',config]).stdout).compilerOptions||{}}catch{}const a=['--noEmit','-p',config,'--pretty','false'];if(o.incremental||o.composite)a.push('--tsBuildInfoFile','/tmp/.kern-tsbuildinfo');const r=run(a);let v='';try{v=require(path.join(path.dirname(tsc),'..','package.json')).version}catch{}process.stdout.write('kern-types: typescript '+v+'\\n'+(r.stdout||'')+'\\nkern-types: exit '+r.status+' '+(r.signal||'')+'\\n')";
 const MAX_PROJECTS: usize = 2;
 const RESOLUTION: [&str; 12] = ["TS2307", "TS2305", "TS2724", "TS2614", "TS2694", "TS7016", "TS2792", "TS2306", "TS2688", "TS6053", "TS2503", "TS2709"];
 const LOCKS: [&str; 6] = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
@@ -160,8 +160,10 @@ pub fn judge(config: &str, old: &Value, new: &Value, enforced: bool, even: Optio
     p
 }
 
-pub fn spec(config: &str, seconds: u64) -> Value {
-    json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", CHECK, format!("/workspace/{config}")], "timeout_seconds": seconds, "cwd": parent(config), "env": {},
+const TSC_HEAP_MB_MIN: u64 = 1024;
+pub fn spec(config: &str, seconds: u64, memory_mb: u64) -> Value {
+    let heap = (memory_mb * 7 / 10).max(TSC_HEAP_MB_MIN);
+    json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", CHECK, format!("/workspace/{config}"), heap.to_string()], "timeout_seconds": seconds, "cwd": parent(config), "env": {},
         "files": {}, "early": false, "faults": [] })
 }
 fn check_side(out: &Path, op: &Operator, volume: &str, config: &str, until: u64, label: &str) -> Value {
@@ -170,11 +172,11 @@ fn check_side(out: &Path, op: &Operator, volume: &str, config: &str, until: u64,
     let control = out.join(format!("types-{label}"));
     if control.exists() && std::fs::remove_dir_all(&control).is_err() { return json!({ "status": "unknown", "why": "Kern could not prepare the run" }); }
     let dir = parent(config);
-    if crate::sandbox::control_dir(&control, Some(("drive-test.json", &spec(config, seconds)))).is_err() { return json!({ "status": "unknown", "why": "Kern could not prepare the run" }); }
-    let input = out.join("tests-input");
-    let _ = std::fs::create_dir_all(&input);
     let limits = Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120,
         memory_mb: crate::suite::test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 };
+    if crate::sandbox::control_dir(&control, Some(("drive-test.json", &spec(config, seconds, limits.memory_mb)))).is_err() { return json!({ "status": "unknown", "why": "Kern could not prepare the run" }); }
+    let input = out.join("tests-input");
+    let _ = std::fs::create_dir_all(&input);
     let image = crate::drive::side_image(out, volume, op);
     let run = crate::sandbox::execute(&crate::sandbox::Spec { image: &image, snapshot: &input, control: &control, writable: &[], limits: &limits, entry: vec!["__drive_test".into()],
         network: "none", volumes: vec![], root: false, home_mb: 0, scratch: false, workspace: Some((volume, false)) });

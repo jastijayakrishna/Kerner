@@ -120,6 +120,15 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     }
     for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
     look.extend(new_tests);
+    let mut reach: Vec<(String, bool, bool)> = Vec::new();
+    for f in tests["faults"].as_array().into_iter().flatten() {
+        let path = f["path"].as_str().unwrap_or("").to_string();
+        let (never, crashed) = (["unreached", "untested"].iter().any(|o| f["outcome"] == *o), f["outcome"] == "unreached");
+        match reach.iter_mut().find(|(p, _, _)| *p == path) { Some((_, all, any)) => { *all &= never; *any |= crashed; } None => reach.push((path, never, crashed)) }
+    }
+    for (path, _, _) in reach.iter().filter(|(p, all, any)| *all && *any && !p.is_empty()) {
+        look.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put small faults in the changed lines, and no test loaded them)", code(path, 160))));
+    }
     let gone_all = strings(&tests["gone"]);
     let deleted: std::collections::BTreeSet<&str> = rules["deleted_tests"].as_array().into_iter().flatten().filter_map(|x| x["path"].as_str()).collect();
     for p in &deleted {
@@ -341,6 +350,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             format!("- ❌ Tests: {}; {kept} still pass ({runner})", what.join(", "))
         } else if doubtful {
             format!("- ⚠️ Tests: {kept} that passed before still pass, and some failures Kern could not prove or rule out need a look ({runner})")
+        } else if look.iter().any(|x| x["kind"] == "untested-change") {
+            format!("- ⚠️ Tests: {kept} that passed before still pass, but no test that runs here reaches part of the changed code (see above) ({runner})")
         } else {
             format!("- ✅ Tests: {kept} that passed before still pass ({runner})")
         };
@@ -369,6 +380,9 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         }
         for n in tests["not_run"].as_array().into_iter().flatten() {
             md += &format!("- ⏭️ Tests in {}: Not run — {}\n", code(n["dir"].as_str().unwrap_or(""), 160), plain(n["why"].as_str().unwrap_or("")));
+        }
+        for d in tests["no_tests_in"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            md += &format!("- ⏭️ Tests in {}: none — its test script finds no test files\n", code(if d.is_empty() { "." } else { d }, 160));
         }
         let count = |k: &str| tests[k].as_array().map_or(0, Vec::len);
         let (edited, rewritten, unchecked) = (tests["edited"].as_u64().unwrap_or(0) as usize, count("rewritten"), count("edited_unchecked"));

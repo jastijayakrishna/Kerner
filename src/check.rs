@@ -113,7 +113,7 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let cleaned = !keep && (out.join("setup.json").exists() || out.join("volumes.txt").exists()) && crate::drive::clean(out).is_ok();
     let canary = match &machine { Ok(said) => said.to_string(), Err(why) => format!("failed: {why}") };
     Ok(json!({ "status": "CHECKED", "cleaned": cleaned, "canary": canary, "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
-        "look": receipt["look"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": (now_ms() - started) / 1000,
-        "phases": { "rules": (checked - started) / 1000, "behaviour": (behaved - checked) / 1000, "tests": (tested - behaved) / 1000, "types": (typed - tested) / 1000, "tests_detail": tests["seconds"] },
+        "look": receipt["look"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": secs_since(started),
+        "phases": { "rules": secs_between(started, checked), "behaviour": secs_between(checked, behaved), "tests": secs_between(behaved, tested), "types": secs_between(tested, typed), "tests_detail": tests["seconds"] },
         "receipt": out.join("receipt.md").display().to_string() }))
 }

@@ -36,6 +36,24 @@ fn suite(dir: &Path, label: &str, runner: Runner, unconfirmed: bool) -> Option<V
     let c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed);
     (c["status"] == "RAN").then_some(c)
 }
+const FAULTS_BYTES_MAX: u64 = 16 << 20;
+fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec<Value>> {
+    let mut outcomes = Vec::new();
+    for (runner, suite_dir) in suites {
+        let label = if suite_dir.is_empty() { String::new() } else { format!("-{}", suite_dir.replace('/', "_")) };
+        let path = dir.join(format!("faults{label}.json"));
+        if !path.is_file() { continue; }
+        if std::fs::metadata(&path).ok()?.len() > FAULTS_BYTES_MAX { return None; }
+        let raw: Vec<Value> = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        let new = ["new-related", "new"].iter().find_map(|r| report(&dir.join(format!("tests-{r}{label}.out")), *runner))?;
+        outcomes.extend(raw.iter().map(|x| {
+            let text = |k: &str| x[k].as_str().unwrap_or("").as_bytes().to_vec();
+            crate::proof::fault_verdict(*runner, &new, (x["finished"] == true, x["served"] == true), &text("output"), &text("errors"))
+        }));
+    }
+    let stored = stored.as_array()?;
+    (outcomes.len() == stored.len()).then(|| stored.iter().zip(outcomes).map(|(f, o)| { let mut f = f.clone(); f["outcome"] = json!(o); f }).collect())
+}
 pub fn rejudge(dir: &Path) -> R<Value> {
     let stored = read_json(dir.join("receipt.json"))?;
     let mut tests = stored["tests"].clone();
@@ -64,6 +82,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         for l in crate::suite::LISTS.iter().filter(|l| **l != "rewritten" && !(kept_runs && **l == "gone")) { tests[*l] = merged[*l].clone(); }
         tests["problem_why"] = merged["problem_why"].clone();
     }
+    if let Some(f) = faults(dir, &suites, &tests["faults"]) { tests["faults"] = json!(f); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });
     let receipt = crate::receipt::build(&d, &stored["rules"], &tests, &stored["behaviour"]);
     Ok(json!({ "replayed": judged.as_ref().map_or(0, Vec::len), "suites": labels.len(), "receipt": receipt }))

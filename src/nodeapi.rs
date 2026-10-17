@@ -116,31 +116,39 @@ pub fn supported_major(m: u64) -> u64 { NODE_MAJORS.iter().copied().find(|s| *s 
 pub fn wanted_major(read: &dyn Fn(&str) -> Option<String>, workflows: &[String]) -> Option<(u64, String)> {
     let package = read("package.json").and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
     let range = package.as_ref().and_then(|p| p["engines"]["node"].as_str()).map(str::to_string);
-    let allowed = |m: u64| range.as_deref().is_none_or(|r| satisfies(r, (m, 999, 999)) != Some(false));
+    let allowed = |m: u64| range.as_deref().is_none_or(|r| within(r, m));
     let chosen = declared(read, workflows, package.as_ref());
     match (chosen, &range) {
         (Some((m, from)), _) if allowed(m) => Some((m, from)),
         (_, Some(r)) => {
-            let m = if allowed(22) { 22 } else { NODE_MAJORS.iter().copied().find(|m| allowed(*m))? };
+            let m = NODE_MAJORS.iter().copied().filter(|m| allowed(*m)).min_by_key(|m| (m.abs_diff(22), *m))?;
             Some((m, format!("package.json's engines.node is {r}")))
         }
         (chosen, None) => chosen,
     }
 }
+fn within(range: &str, major: u64) -> bool {
+    let named = range.split(|c: char| c.is_whitespace() || c == '|' || c == ',').filter_map(|w| bound(w.trim())).filter(|v| v.0 == major);
+    [(major, 0, 0), (major, 999, 999)].into_iter().chain(named).any(|v| satisfies(range, v) != Some(false))
+}
+const TEST_COMMANDS: [&str; 20] = ["npm test", "npm run test", "yarn test", "yarn run test", "pnpm test", "pnpm run test", "pnpm -r test", "pnpm --recursive test", "bun test",
+    "bun run test", "vitest", "jest", "mocha", "node --test", "turbo test", "turbo run test", "nx test", "--target=test", "-t test", "lerna run test"];
+fn runs_tests(workflow: &str) -> bool { let w = workflow.to_ascii_lowercase(); TEST_COMMANDS.iter().any(|c| w.contains(c)) }
+fn setting<'w>(line: &'w str, key: &str) -> Option<&'w str> {
+    line.strip_prefix(key).map(|v| v.split(" #").next().unwrap_or(v).trim().trim_matches(['"', '\''])).filter(|v| !v.is_empty() && !v.contains("${{"))
+}
+fn ci_majors(workflows: &[&String]) -> Vec<u64> {
+    workflows.iter().flat_map(|w| w.lines().map(str::trim)).filter_map(|l| setting(l, "node-version:").or_else(|| setting(l, "node_version:")))
+        .flat_map(|v| v.trim_matches(['[', ']']).split(',').filter_map(spec_major).collect::<Vec<_>>()).collect()
+}
+fn newest(ci: &[u64]) -> Option<u64> { if ci.contains(&22) { Some(22) } else { ci.iter().max().copied() } }
 fn declared(read: &dyn Fn(&str) -> Option<String>, workflows: &[String], package: Option<&serde_json::Value>) -> Option<(u64, String)> {
-    let mut ci: Vec<u64> = Vec::new();
-    for w in workflows {
-        for l in w.lines().map(str::trim) {
-            let Some(value) = l.strip_prefix("node-version:").or_else(|| l.strip_prefix("node_version:")).map(|v| v.split(" #").next().unwrap_or(v).trim()) else { continue };
-            if value.contains("${{") { continue; }
-            ci.extend(value.trim_matches(['[', ']']).split(',').filter_map(spec_major));
-        }
-    }
-    if !ci.is_empty() {
-        let m = if ci.contains(&22) { 22 } else { *ci.iter().max()? };
-        return Some((supported_major(m), format!("the CI workflow sets up Node {m}")));
-    }
     let first = |t: &str| t.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string);
+    let tested: Vec<&String> = workflows.iter().filter(|w| runs_tests(w)).collect();
+    if let Some(m) = newest(&ci_majors(&tested)) { return Some((supported_major(m), format!("the CI workflow that runs the tests sets up Node {m}"))); }
+    for f in tested.iter().flat_map(|w| w.lines().map(str::trim)).filter_map(|l| setting(l, "node-version-file:")) {
+        if let Some(line) = read(f).as_deref().and_then(first) && let Some(m) = spec_major(&line) { return Some((supported_major(m), format!("{f} says {line}"))); }
+    }
     for f in [".nvmrc", ".node-version"] {
         if let Some(line) = read(f).as_deref().and_then(first) && let Some(m) = spec_major(&line) { return Some((supported_major(m), format!("{f} says {line}"))); }
     }
@@ -151,7 +159,8 @@ fn declared(read: &dyn Fn(&str) -> Option<String>, workflows: &[String], package
         }
     }
     if let Some(v) = package.and_then(|p| p["volta"]["node"].as_str()) && let Some(m) = spec_major(v) { return Some((supported_major(m), format!("package.json's volta.node is {v}"))); }
-    None
+    let all: Vec<&String> = workflows.iter().collect();
+    newest(&ci_majors(&all)).map(|m| (supported_major(m), format!("the CI workflow sets up Node {m}")))
 }
 pub fn lowest(range: &str) -> Option<Version> {
     let mut low: Option<Version> = None;

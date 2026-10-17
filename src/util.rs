@@ -175,6 +175,8 @@ pub fn parallelism() -> usize { std::env::var("KERN_VERIFY_PARALLEL").ok().and_t
 
 pub fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
 pub fn within(until: u64, seconds: u64) -> u64 { seconds.min(until.saturating_sub(now_ms()) / 1000) }
+pub fn secs_between(from_ms: u64, to_ms: u64) -> u64 { to_ms.saturating_sub(from_ms) / 1000 }
+pub fn secs_since(from_ms: u64) -> u64 { secs_between(from_ms, now_ms()) }
 pub fn iso8601(ms: u64) -> String {
     let (secs, millis) = (ms / 1000, ms % 1000);
     let (days, rem) = ((secs / 86400) as i64, secs % 86400);
