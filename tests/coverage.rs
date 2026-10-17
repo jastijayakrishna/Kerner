@@ -31,6 +31,33 @@ fn azu_ecmascript_proposals_json_20_a_test_script_that_finds_no_test_files_means
 }
 
 #[test]
+fn cap_go_capgo_app_2789_a_pattern_the_shell_would_expand_is_never_read_as_no_tests() {
+    use kern::script::{Found, found};
+    let run = |script: &str| found(&json!({ "scripts": { "test": script } }));
+    for script in ["vitest run tests/*.test.ts .github/actions/**/tests/*.test.ts", "jest src/*.spec.js", "vitest run src/[ab]*.test.ts", "vitest run test/?.test.ts"] {
+        assert_eq!(run(script), Found::Nothing, "{script}: the shell turns the pattern into file names, Kern runs no shell, and vitest or jest reads the pattern as a name filter that matches nothing");
+    }
+    for script in [r#"mocha "test/*.js""#, "mocha test/*.js", "node --test test/*.test.js", r#"vitest run "tests/a.test.ts""#, "vitest run tests/", "jest --testPathPattern=src/*"] {
+        assert!(matches!(run(script), Found::Run(_)), "{script}: mocha and node expand their own patterns, and a quoted word, a plain name or a flag reaches the runner as it is");
+    }
+    let capgo = json!({ "scripts": { "test:unit": "vitest run tests/*.unit.test.ts", "test:all": "vitest run tests/*" } });
+    assert!(!suite::follows_script(&capgo), "Kern could not follow capgo's own unit test script, so finding no tests says nothing about the project");
+    assert!(!suite::follows_script(&json!({ "name": "klaviyo", "devDependencies": { "vitest": "3.2.4" } })),
+        "saleor/apps#2046: apps/klaviyo has no test script, so Kern's own vitest run finding nothing is not the project's script finding nothing");
+    assert!(suite::follows_script(&json!({ "scripts": { "test": "mocha \"test/*.js\"" } })), "azu/ecmascript-proposals-json#20: mocha itself found no file for the project's own pattern");
+}
+
+#[test]
+fn a_test_script_kern_cannot_follow_still_counts_as_changed_when_its_words_change() {
+    let pkg = |s: &str| json!({ "scripts": { "test": s } });
+    assert!(!kern::script::same_tests(&pkg("vitest run src/**/*.test.ts"), &pkg("vitest run src/a*.test.ts")), "narrowing a pattern changes which tests run, though Kern can follow neither script");
+    assert!(!kern::script::same_tests(&pkg("ava"), &pkg("ava --match '!*slow*'")), "a runner Kern does not run still checks less after this change");
+    assert!(!kern::script::same_tests(&json!({ "scripts": { "test:unit": "vitest run tests/*.unit.test.ts" } }), &json!({ "scripts": { "test:unit": "vitest run tests/a.unit.test.ts" } })));
+    assert!(kern::script::same_tests(&pkg("vitest run"), &pkg("vitest run --reporter=verbose")), "a reporter flag does not change what the tests check");
+    assert!(kern::script::same_tests(&pkg("ava"), &json!({ "scripts": { "test": "ava" }, "version": "2.0.0" })));
+}
+
+#[test]
 fn a_package_whose_test_script_finds_no_tests_is_named_next_to_the_ones_that_ran() {
     let tests = json!({ "status": "RAN", "runner": "vitest in packages/a", "before": { "passed": 2, "failed": 0, "skipped": 0 }, "after": { "passed": 2, "failed": 0, "skipped": 0 }, "kept": 2,
         "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "no_tests_in": ["packages/docs"] });

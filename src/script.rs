@@ -21,7 +21,7 @@ const FILES: [&str; 17] = ["--config", "-c", "--require", "-r", "--import", "--l
     "--globalSetup", "--globalTeardown", "--testEnvironment", "--testRunner", "--testSequencer", "--resolver", "--env-file"];
 
 #[derive(Debug, Clone)]
-struct Word { text: String, expands: bool }
+struct Word { text: String, expands: bool, glob: bool }
 
 enum Takes { Nothing, Value, Number, Maybe }
 
@@ -42,6 +42,13 @@ pub fn found(package: &Value) -> Found {
     if packages { Found::Packages } else { Found::Nothing }
 }
 
+pub fn same_tests(a: &Value, b: &Value) -> bool {
+    let (x, y) = (found(a), found(b));
+    let words = |p: &Value| -> Vec<(String, Value)> {
+        p["scripts"].as_object().into_iter().flatten().filter(|(k, _)| NAMES.contains(&k.as_str()) || k.contains("test")).map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
+    x == y && (matches!(x, Found::Run(_)) || words(a) == words(b))
+}
 pub fn files(i: &Invocation) -> Vec<String> {
     let mut words: Vec<&str> = i.command.iter().skip(1).map(String::as_str).collect();
     words.extend(i.env.get("NODE_OPTIONS").map(|o| o.split_whitespace().collect::<Vec<_>>()).unwrap_or_default());
@@ -211,7 +218,7 @@ impl Reader<'_> {
         };
         if self.scripts[&name].is_string() { return merged(self.script(&name, &extra, depth + 1)); }
         if program == "npm" { return Found::Nothing; }
-        let mut words = vec![Word { text: name, expands: false }];
+        let mut words = vec![Word { text: name, expands: false, glob: false }];
         words.extend(extra);
         merged(self.command(&words, depth + 1))
     }
@@ -240,12 +247,12 @@ fn split(text: &str) -> Vec<Vec<Word>> {
                 redirected = true;
             }
             '\'' => {
-                let w = word.get_or_insert(Word { text: String::new(), expands: false });
+                let w = word.get_or_insert(Word { text: String::new(), expands: false, glob: false });
                 i += 1;
                 while i < chars.len() && chars[i] != '\'' { w.text.push(chars[i]); i += 1; }
             }
             '"' => {
-                let w = word.get_or_insert(Word { text: String::new(), expands: false });
+                let w = word.get_or_insert(Word { text: String::new(), expands: false, glob: false });
                 i += 1;
                 while i < chars.len() && chars[i] != '"' {
                     if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '"' | '\\' | '$' | '`') { i += 1; w.text.push(chars[i]); }
@@ -254,12 +261,13 @@ fn split(text: &str) -> Vec<Vec<Word>> {
                 }
             }
             '\\' => {
-                let w = word.get_or_insert(Word { text: String::new(), expands: false });
+                let w = word.get_or_insert(Word { text: String::new(), expands: false, glob: false });
                 if i + 1 < chars.len() { i += 1; if chars[i] != '\n' { w.text.push(chars[i]); } }
             }
             _ => {
-                let w = word.get_or_insert(Word { text: String::new(), expands: false });
+                let w = word.get_or_insert(Word { text: String::new(), expands: false, glob: false });
                 if matches!(c, '$' | '`') { w.expands = true; }
+                if matches!(c, '*' | '?' | '[') { w.glob = true; }
                 w.text.push(c);
             }
         }
@@ -362,6 +370,7 @@ fn invocation(runner: Runner, program: Option<&str>, args: &[Word], env: BTreeMa
         }
         kept.push(w.clone());
     }
+    if matches!(runner, Runner::Vitest | Runner::Jest) && kept.iter().any(|w| w.glob && !w.text.starts_with('-')) { return Found::Nothing; }
     if let Some(at) = kept.iter().position(|w| w.text == "--") {
         if kept[at + 1..].iter().any(|w| w.text.starts_with('-')) { return Found::Nothing; }
         kept.remove(at);

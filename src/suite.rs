@@ -739,6 +739,7 @@ pub fn stopped_why(ending: &str, limit: u64) -> Option<String> {
 pub fn whole(why: &str) -> String {
     why.replacen("the tests were", "the whole suite was", 1).replacen("the tests did", "the whole suite did", 1).replacen("no test file finished", "no test file of the whole suite finished", 1)
 }
+pub fn follows_script(package: &Value) -> bool { matches!(crate::script::found(package), crate::script::Found::Run(_)) }
 pub fn guessed(package: &Value) -> Option<String> {
     let script = package["scripts"]["test"].as_str()?;
     (crate::script::found(package) == crate::script::Found::Nothing).then(|| script.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect())
@@ -1131,7 +1132,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let (mut late, mut dropped, mut testless) = (false, BTreeSet::new(), Vec::new());
     let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
     let changes = crate::rules::changed(repo, base, head)?;
-    let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed).is_none();
+    let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().is_some_and(follows_script);
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {

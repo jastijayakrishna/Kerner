@@ -421,7 +421,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     }
     for (p, op) in changes.iter().filter(|(p, op)| base_name(p) == "package.json" && *op != "delete") {
         if let (Some(a), Some(b)) = (json_of(&old, p), json_of(&new, p))
-            && (crate::script::found(&a) != crate::script::found(&b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
+            && (!crate::script::same_tests(&a, &b) || ["jest", "mocha", "ava", "c8", "nyc"].iter().any(|k| a[*k] != b[*k])) {
             settings.push(json!({ "path": p, "operation": op, "why": "the test script or the test settings in package.json change" }));
         }
     }
