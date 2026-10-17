@@ -53,14 +53,7 @@ fn package_fields(a: &Value, b: &Value) -> Vec<String> {
     }
     out
 }
-fn joined(dir: &str, path: &str) -> Option<String> {
-    if path.starts_with('/') || path.contains('\\') || path.contains('*') { return None; }
-    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
-    for c in path.split('/') {
-        match c { "" | "." => {} ".." => { parts.pop()?; } c => parts.push(c) }
-    }
-    (!parts.is_empty()).then(|| parts.join("/"))
-}
+fn joined(dir: &str, path: &str) -> Option<String> { if path.contains('*') { None } else { under(dir, path).filter(|p| !p.is_empty()) } }
 fn dependency_file(p: &str) -> bool {
     let b = base_name(p).to_ascii_lowercase();
     DEPENDENCY_FILES.contains(&b.as_str()) || (b.starts_with("requirements") && b.ends_with(".txt"))

@@ -100,15 +100,13 @@ pub fn age(from: Option<&str>, to: Option<&str>, published: &dyn Fn(&str) -> Opt
     let (Some(f), Some(t)) = (from, to) else { return serde_json::json!({ "age": if from.is_none() { "new" } else { "removed" } }) };
     let (Some(a), Some(b)) = (top(f), top(t)) else { return serde_json::json!({ "age": "unknown" }) };
     if a.0 != b.0 || (a.0 == 0 && a.1 != b.1) { return serde_json::json!({ "age": "major" }); }
-    let version = format!("{}.{}.{}", b.0, b.1, b.2);
-    match published(&version) {
-        None => serde_json::json!({ "age": "unknown", "version": version }),
-        Some(at) if now.saturating_sub(at) < FRESH_DAYS * 86_400 => serde_json::json!({ "age": "fresh", "version": version, "days": now.saturating_sub(at) / 86_400 }),
-        Some(_) => serde_json::json!({ "age": "routine", "version": version }),
-    }
+    released(&format!("{}.{}.{}", b.0, b.1, b.2), published, now)
 }
 pub fn lock_age(to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
     let Some(version) = to else { return serde_json::json!({ "age": "removed" }) };
+    released(version, published, now)
+}
+fn released(version: &str, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
     match published(version) {
         None => serde_json::json!({ "age": "unknown", "version": version }),
         Some(at) if now.saturating_sub(at) < FRESH_DAYS * 86_400 => serde_json::json!({ "age": "fresh", "version": version, "days": now.saturating_sub(at) / 86_400 }),

@@ -118,3 +118,14 @@ fn a_new_error_about_a_module_or_an_export_needs_a_look_because_a_build_step_may
     assert_eq!(r["decision"], "look", "tuliren/turbo-template#29 imported PrismaClient, which prisma generate makes in the project's CI and Kern never ran: blocking it was wrong: {r}");
     assert!(r["look"][0]["what"].as_str().unwrap().contains("a build step may generate"));
 }
+
+#[test]
+fn review_1_a7_a_global_name_or_project_output_a_build_step_makes_is_never_a_block() {
+    let clean = json!({ "status": "clean", "version": "5.6.3" });
+    for (code, message) in [("TS2304", "Cannot find name 'useFetch'."), ("TS2552", "Cannot find name 'definePageMeta'. Did you mean 'defineNuxtPlugin'?"),
+        ("TS6305", "Output file '/workspace/packages/core/dist/index.d.ts' has not been built from source file '/workspace/packages/core/src/index.ts'.")] {
+        let new = side(&format!("kern-types: typescript 5.6.3\napp/pages/index.vue.ts(3,7): error {code}: {message}\nkern-types: exit 2 \n"), "");
+        let p = judge("tsconfig.json", &clean, &new, true, None);
+        assert_eq!(p["generated"], true, "{code}: Nuxt's auto-imports and project references come from files a build step makes, which Kern did not run: {p}");
+    }
+}

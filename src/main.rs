@@ -14,6 +14,8 @@ Check (one receipt on every pull request; Kern's GitHub workflow, .github/workfl
                                   verifier side (--control verifier.json): the rules, the project's tests on the old and the
                                   new code and, with an AI key, every changed line run both ways; writes receipt.json and
                                   receipt.md (KERN_CHECK_AI=0 skips the AI part; it takes kern drive's agent settings)
+  receipt render <out-dir> <head-sha>
+                                  in Kern's signing job: rebuild the answer from receipt.json's facts and write receipt.md
   receipt sign <out-dir> <owner/repo> <pr-number>
                                   in Kern's workflow: GitHub signs the receipt's seal (OIDC); writes seal.json
   receipt post <out-dir> <owner/repo> <pr-number>
@@ -201,7 +203,7 @@ fn cli() -> R<(Option<Value>, i32)> {
             (Some(kern::check::check(Path::new(&a[0]), &a[1], &a[2], Path::new(&a[3]), &operator(&read_json(&a[4])?)?, pr.as_deref(), ai_on.then_some(&ai))?), 0)
         }
         "receipt" => {
-            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected receipt sign, post, approve or verify; see kern --help".into()))?;
+            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected receipt render, sign, post, approve or verify; see kern --help".into()))?;
             let number = |s: &String| s.parse::<u64>().map_err(|_| Denied("Expected a pull request number".into()));
             match sub.as_str() {
                 "sign" => {

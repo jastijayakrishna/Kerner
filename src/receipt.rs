@@ -196,7 +196,7 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
             code(p["config"].as_str().unwrap_or(""), 160), shown.join(", "), if count > shown.len() { ", …" } else { "" });
         match p["uneven"].as_str() {
             _ if p["enforced"] != true => look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
-            _ if p["generated"] == true => look.push(item("types-new", format!("{what} (some are about modules or exports that a build step may generate, and Kern did not run it, so Kern does not block on them)"))),
+            _ if p["generated"] == true => look.push(item("types-new", format!("{what} (some are about modules, exports or names that a build step may generate, and Kern did not run it, so Kern does not block on them)"))),
             Some(why) => look.push(item("types-new", format!("{what} (Kern does not block on it: {})", plain(why, 400)))),
             None => blocked.push(item("types-broke", what)),
         }
