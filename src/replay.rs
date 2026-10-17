@@ -54,6 +54,21 @@ fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec
     let stored = stored.as_array()?;
     (outcomes.len() == stored.len()).then(|| stored.iter().zip(outcomes).map(|(f, o)| { let mut f = f.clone(); f["outcome"] = json!(o); f }).collect())
 }
+const VALUES_BYTES_MAX: u64 = 4 << 20;
+fn readings(dir: &Path, suites: &[(Runner, String)], labels: &BTreeSet<String>, wanted: &BTreeSet<String>) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for label in labels {
+        let Some((runner, _)) = suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-')) else { continue };
+        let read = |kind: &str, max: u64| -> Vec<u8> {
+            let path = dir.join(format!("tests-new-kept{label}.{kind}"));
+            if std::fs::metadata(&path).map_or(true, |m| m.len() > max) { return Vec::new(); }
+            std::fs::read(path).unwrap_or_default()
+        };
+        let found = crate::proof::failures(*runner, &read("out", REPORT_BYTES_MAX), &read("values", VALUES_BYTES_MAX));
+        out.extend(crate::suite::polarity(&found, &crate::suite::kept_back, wanted));
+    }
+    out
+}
 pub fn rejudge(dir: &Path) -> R<Value> {
     let stored = read_json(dir.join("receipt.json"))?;
     let mut tests = stored["tests"].clone();
@@ -83,6 +98,8 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         tests["problem_why"] = merged["problem_why"].clone();
     }
     if let Some(f) = faults(dir, &suites, &tests["faults"]) { tests["faults"] = json!(f); }
+    let wanted: BTreeSet<String> = tests["rewritten"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+    if !wanted.is_empty() { tests["polarity"] = Value::Object(readings(dir, &suites, &labels, &wanted)); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });
     let receipt = crate::receipt::build(&d, &stored["rules"], &tests, &stored["behaviour"]);
     Ok(json!({ "replayed": judged.as_ref().map_or(0, Vec::len), "suites": labels.len(), "receipt": receipt }))

@@ -877,7 +877,7 @@ fn sides_set_up_differently_are_named() {
 }
 
 #[test]
-fn failures_on_sides_set_up_differently_or_without_proof_need_a_look_never_a_block() {
+fn failures_on_sides_set_up_differently_or_without_proof_are_not_verified_never_a_block() {
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 2, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 1, "skipped": 0 },
@@ -885,9 +885,9 @@ fn failures_on_sides_set_up_differently_or_without_proof_need_a_look_never_a_blo
         "uneven": ["test/a.test.ts > adds"], "uneven_why": ["the old code's dependencies were installed and the new code's were installed from package.json"],
         "unproven": ["test/b.test.ts"] });
     let r = receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }));
-    let kinds: Vec<&str> = r["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
+    let kinds: Vec<&str> = r["unverified"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
     assert!(kinds.contains(&"test-uneven") && kinds.contains(&"test-unproven"), "{kinds:?}");
-    assert_eq!(r["decision"], "look", "{r}");
+    assert_eq!(r["decision"], "unverified", "{r}");
 }
 
 #[test]
@@ -1187,8 +1187,8 @@ fn h3_a_machine_whose_self_test_failed_judges_no_test() {
     let out = check::judge(&r, (&base, &head), &t.0.join("out"), &operator(), None, None, &|| Err("the self-test gave clear instead of one block".to_string())).unwrap();
     let receipt = read_json(t.0.join("out").join("receipt.json")).unwrap();
     assert_eq!((out["tests"].as_str(), out["canary"].as_str()), (Some("NOT_RUN"), Some("failed: the self-test gave clear instead of one block")), "{out}");
-    assert_eq!(receipt["decision"], "look", "{receipt}");
-    assert!(receipt["look"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("Kern's environment had a problem") && x["what"].as_str().unwrap().contains("self-test")), "{receipt}");
+    assert_eq!(receipt["decision"], "unverified", "{receipt}");
+    assert!(receipt["unverified"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("Kern's environment had a problem") && x["what"].as_str().unwrap().contains("self-test")), "{receipt}");
 }
 
 #[test]
@@ -1336,7 +1336,7 @@ fn h4_when_time_runs_short_planted_faults_go_first_then_the_type_check_and_dropp
 }
 
 #[test]
-fn a_project_with_no_test_script_is_said_plainly_and_one_kern_cannot_run_needs_a_look() {
+fn a_project_with_no_test_script_is_said_plainly_and_one_kern_cannot_run_is_not_verified() {
     let run = |package: &str| -> Value {
         let t = Temp::new();
         let (r, base) = repo(&t, &[("package.json", package), ("src/total.js", "export const total = 1;\n")]);
@@ -1349,7 +1349,7 @@ fn a_project_with_no_test_script_is_said_plainly_and_one_kern_cannot_run_needs_a
         assert_eq!((none["decision"].clone(), none["tests"]["no_tests"].clone()), (json!("clear"), json!(true)), "{package}: {none}");
     }
     let ava = run(r#"{"name":"shop","scripts":{"test":"ava"}}"#);
-    assert_eq!(ava["decision"], "look", "the project has tests Kern cannot run, so its answer cannot be a green check: {ava}");
+    assert_eq!(ava["decision"], "unverified", "the project has tests Kern cannot run, so its answer cannot be a green check: {ava}");
     assert!(ava["tests"]["why"].as_str().unwrap().contains("ava"), "{ava}");
 }
 
@@ -1359,12 +1359,12 @@ fn review_2_a5_tests_that_could_not_run_on_changed_code_never_give_a_green_check
         suite::LATE, "the tests on the old code gave no results: the output contains no mocha report (exit 1); the last lines it printed: Error: No test files found"] {
         let t = json!({ "status": "NOT_RUN", "why": why, "not_run": [] });
         let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
-        assert_eq!(r["decision"], "look", "farm 16 ended 9 such checks with a green check though no test ran ({why}): {r}");
-        assert!(r["look"].as_array().unwrap().iter().any(|x| x["kind"] == "tests-not-run"), "{r}");
+        assert_eq!(r["decision"], "unverified", "farm 16 ended 9 such checks with a green check though no test ran ({why}): {r}");
+        assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "tests-not-run"), "{r}");
     }
     let mut t = clean_tests();
     t["not_run"] = json!([{ "dir": "apps/web", "why": "Kern runs the tests of at most 5 packages per change" }]);
-    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &t, &off())["decision"], "look", "a changed package whose tests did not run");
+    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &t, &off())["decision"], "unverified", "a changed package whose tests did not run");
     let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true, "not_run": [] });
     let r = receipt::build(&drive_json(), &clean_rules(), &none, &off());
     assert_eq!(r["decision"], "clear", "a project with no tests at all would need a look on every pull request, which tells nobody anything: {r}");
@@ -1448,7 +1448,7 @@ fn a_receipt_never_shows_a_tests_check_mark_next_to_failures_it_could_not_prove(
         t[kind] = json!(["src/total.test.ts > adds"]);
         let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
         let md = receipt::markdown(&r, None);
-        assert_eq!(r["decision"], "look", "{kind}: {r}");
-        assert!(!md.contains("- ✅ Tests:"), "{kind}: a look says a test fails on the new code, so the Tests line cannot carry a check mark:\n{md}");
+        assert_eq!(r["decision"], "unverified", "{kind}: {r}");
+        assert!(!md.contains("- ✅ Tests:"), "{kind}: a test fails on the new code and Kern could not prove why, so the Tests line cannot carry a check mark:\n{md}");
     }
 }

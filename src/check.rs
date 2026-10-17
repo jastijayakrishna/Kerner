@@ -29,6 +29,34 @@ fn runnable(repo: &Path, head: &str, rules: &Value) -> bool {
     crate::git::mentions(repo, head, &needles.iter().map(String::as_str).collect::<Vec<_>>()).map_or(true, |found| found.iter().any(|f| crate::capability::is_code(f)))
 }
 
+const NO_CHANGE_TYPES: [&str; 3] = ["refactor", "perf", "style"];
+const NO_CHANGE_WORDS: [&str; 24] = ["no behavior change", "no behaviour change", "no behavioral change", "no behavioural change", "no functional change", "no functionality change",
+    "without changing behavior", "without changing behaviour", "without changing functionality", "behavior-preserving", "behaviour-preserving", "behavior preserving",
+    "behaviour preserving", "pure refactor", "purely a refactor", "refactor only", "no logic change", "does not change behavior", "does not change behaviour",
+    "doesn't change behavior", "doesn't change behaviour", "no change in behavior", "no change in behaviour", "zero behavior change"];
+const NEGATIONS: [&str; 3] = ["not ", "n't ", "never "];
+const PR_TEXT_CHARS_MAX: usize = 65_536;
+const SAYS_CHARS_MAX: usize = 120;
+fn clipped(s: &str) -> String { s.trim().chars().take(SAYS_CHARS_MAX).collect() }
+pub fn says_no_change(pr: &str) -> Option<String> {
+    let text: String = pr.chars().take(PR_TEXT_CHARS_MAX).collect();
+    let title = text.lines().next().unwrap_or("").trim_start_matches('#').trim();
+    let kind = title.split([':', '(', '!']).next().unwrap_or("").trim().to_ascii_lowercase();
+    if NO_CHANGE_TYPES.contains(&kind.as_str()) && title.get(kind.len()..).is_some_and(|r| r.starts_with([':', '('])) { return Some(clipped(title)); }
+    let lower = text.to_ascii_lowercase();
+    for word in NO_CHANGE_WORDS {
+        for (at, _) in lower.match_indices(word) {
+            let mut start = at.saturating_sub(12);
+            while !lower.is_char_boundary(start) { start -= 1; }
+            if NEGATIONS.iter().any(|n| lower[start..at].contains(n)) { continue; }
+            let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+            let line_end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+            return Some(clipped(text[line_start..line_end].trim_start_matches('#')));
+        }
+    }
+    None
+}
+
 pub fn clock(repo: &Path, head: &str) -> u64 {
     let wall = now_ms() / 1000;
     let commit = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).filter(|c| *c > 0);
@@ -82,7 +110,8 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     };
     let published = |name: &str, version: &str| -> Option<u64> { meta(name).and_then(|m| m["time"][version].as_str().and_then(crate::deps::rfc3339)) };
     let ours = own_packages(repo, head);
-    let rules = crate::deps::aged(rules, now, &published, &|name: &str| ours.contains(name));
+    let mut rules = crate::deps::aged(rules, now, &published, &|name: &str| ours.contains(name));
+    if let Some(words) = pr.and_then(says_no_change) { rules["says_no_change"] = json!(words); }
     let run = runnable(repo, head, &rules);
     let machine = if run { self_test() } else { Ok("not needed: nothing to run".to_string()) };
     let trusted = machine.is_ok();
@@ -113,7 +142,7 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let cleaned = !keep && (out.join("setup.json").exists() || out.join("volumes.txt").exists()) && crate::drive::clean(out).is_ok();
     let canary = match &machine { Ok(said) => said.to_string(), Err(why) => format!("failed: {why}") };
     Ok(json!({ "status": "CHECKED", "cleaned": cleaned, "canary": canary, "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
-        "look": receipt["look"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": secs_since(started),
+        "look": receipt["look"].as_array().map_or(0, Vec::len), "unverified": receipt["unverified"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": secs_since(started),
         "phases": { "rules": secs_between(started, checked), "behaviour": secs_between(checked, behaved), "tests": secs_between(behaved, tested), "types": secs_between(tested, typed), "tests_detail": tests["seconds"] },
         "receipt": out.join("receipt.md").display().to_string() }))
 }

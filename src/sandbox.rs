@@ -51,7 +51,8 @@ pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
 }
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
-pub const TEST_PARTS: [&str; 5] = ["output", "errors", "behavior", "created", "ending"];
+pub const TEST_PARTS: [&str; 6] = ["output", "errors", "behavior", "created", "ending", "values"];
+pub const VALUES_BYTES_MAX: usize = 1 << 20;
 pub fn test_dir(cwd: &str) -> R<String> {
     if cwd.is_empty() { return Ok("/workspace".into()); }
     ensure!(cwd.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', '\0'])), "A test run starts in a folder inside the tree");
@@ -1179,7 +1180,7 @@ mod inside {
                 results.push(json!({ "finished": finished, "served": Path::new("/tmp/.kern-fault-served").exists(), "output": String::from_utf8_lossy(&output),
                     "errors": String::from_utf8_lossy(&some_of("/tmp/.kern-fault-err", 16 << 10, true)) }));
             }
-            for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"faults".to_vec())] { part(name, &body)?; }
+            for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"faults".to_vec()), ("values", Vec::new())] { part(name, &body)?; }
             std::io::Write::flush(&mut std::io::stdout())?;
             return Ok(());
         }
@@ -1196,11 +1197,11 @@ mod inside {
         let epoch = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let mut ending;
         loop {
-            let _ = std::fs::remove_file("/tmp/.kern-progress");
+            for f in ["/tmp/.kern-progress", "/tmp/.kern-values"] { let _ = std::fs::remove_file(f); }
             let (begun, mut look) = (epoch(), Duration::from_secs(5));
             let mut child = Command::new(&command[0]).args(&command[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
                 .env("NODE_OPTIONS", format!("--require=/kern/monitor.cjs{options}")).env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_REPORT", "/tmp/.kern-report.json")
-                .env("KERN_PROGRESS", "/tmp/.kern-progress")
+                .env("KERN_PROGRESS", "/tmp/.kern-progress").env("KERN_VALUES", "/tmp/.kern-values")
                 .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
             let readers = [capture(child.stdout.take(), "/tmp/.kern-test-out", OUT_HEAD_BYTES_MAX, OUT_TAIL_BYTES_MAX),
                 capture(child.stderr.take(), "/tmp/.kern-test-err", ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX)];
@@ -1235,6 +1236,7 @@ mod inside {
         added_code(Path::new("/workspace"), Path::new("/workspace"), &mut created);
         part("created", created.join("\n").as_bytes())?;
         part("ending", ending.as_bytes())?;
+        part("values", &some_of("/tmp/.kern-values", super::VALUES_BYTES_MAX, false))?;
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())
     }

@@ -583,7 +583,7 @@ pub fn read_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
         r => r,
     }
 }
-fn json_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
+fn found_report(runner: Runner, out: &[u8]) -> Result<(Value, Report), String> {
     let out = &*well_formed(out);
     let (mut found, mut at, mut attempts) = (Vec::new(), 0usize, 0u32);
     while at < out.len() {
@@ -592,7 +592,7 @@ fn json_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
             if attempts > 10_000 { return Err("the output holds too many lines that look like JSON".into()); }
             let mut values = serde_json::Deserializer::from_slice(&out[at..]).into_iter::<Value>();
             if let Some(Ok(v)) = values.next() {
-                if let Some(r) = if runner == Runner::Mocha { mocha(&v) } else { jest(&v) } { found.push(r); }
+                if let Some(r) = if runner == Runner::Mocha { mocha(&v) } else { jest(&v) } { found.push((v, r)); }
                 at += values.byte_offset();
                 continue;
             }
@@ -605,14 +605,47 @@ fn json_report(runner: Runner, out: &[u8]) -> Result<Report, String> {
         _ => Err(format!("the output contains more than one {} report; tests must not print test reports", runner.name())),
     }
 }
+fn json_report(runner: Runner, out: &[u8]) -> Result<Report, String> { found_report(runner, out).map(|(_, r)| r) }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Failure { pub message: String, pub expected: Option<String>, pub actual: Option<String> }
+const FAILURE_CHARS_MAX: usize = 4000;
+const VALUES_COUNT_MAX: usize = 10_000;
+fn capped(s: &str) -> String { s.chars().take(FAILURE_CHARS_MAX).collect() }
+fn as_text(v: &Value) -> Option<String> { match v { Value::Null => None, Value::String(s) => Some(capped(s)), other => Some(capped(&other.to_string())) } }
+pub fn failures(runner: Runner, report: &[u8], values: &[u8]) -> BTreeMap<String, Failure> {
+    let mut out = BTreeMap::new();
+    if let Ok((v, _)) = found_report(runner, report) {
+        for t in v["failures"].as_array().into_iter().flatten().filter(|_| runner == Runner::Mocha) {
+            let Some(key) = mocha_key(t) else { continue };
+            out.insert(key, Failure { message: t["err"]["message"].as_str().map(capped).unwrap_or_default(), expected: as_text(&t["err"]["expected"]), actual: as_text(&t["err"]["actual"]) });
+        }
+        for file in v["testResults"].as_array().into_iter().flatten().filter(|_| runner != Runner::Mocha) {
+            let name = rel(file["name"].as_str().unwrap_or(""));
+            for a in file["assertionResults"].as_array().into_iter().flatten() {
+                let Some((key, Status::Failed)) = jest_key(&name, a) else { continue };
+                out.insert(key, Failure { message: a["failureMessages"][0].as_str().map(capped).unwrap_or_default(), ..Failure::default() });
+            }
+        }
+    }
+    for line in String::from_utf8_lossy(values).lines().take(VALUES_COUNT_MAX) {
+        let Ok(x) = serde_json::from_str::<Value>(line) else { continue };
+        let (Some(file), Some(name)) = (x["file"].as_str(), x["name"].as_str()) else { continue };
+        let mut path: Vec<&str> = x["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        path.push(name);
+        let f = out.entry(format!("{} > {}", rel(file), path.join(" > "))).or_default();
+        if f.message.is_empty() { f.message = x["message"].as_str().map(capped).unwrap_or_default(); }
+        f.expected = as_text(&x["expected"]).or(f.expected.take());
+        f.actual = as_text(&x["actual"]).or(f.actual.take());
+    }
+    out
+}
+fn mocha_key(t: &Value) -> Option<String> {
+    let title = t.get("fullTitle")?.as_str()?;
+    Some(match t.get("file").and_then(Value::as_str) { Some(f) => format!("{} > {title}", rel(f)), None => title.to_string() })
+}
 fn mocha(v: &Value) -> Option<Report> {
     v.get("stats")?.as_object()?;
-    let keys = |field: &str| -> Option<Vec<String>> {
-        v.get(field)?.as_array()?.iter().map(|t| {
-            let title = t.get("fullTitle")?.as_str()?;
-            Some(match t.get("file").and_then(Value::as_str) { Some(f) => format!("{} > {title}", rel(f)), None => title.to_string() })
-        }).collect()
-    };
+    let keys = |field: &str| -> Option<Vec<String>> { v.get(field)?.as_array()?.iter().map(mocha_key).collect() };
     let (tests, passes, failures, pending) = (keys("tests")?, keys("passes")?, keys("failures")?, keys("pending")?);
     let known: BTreeSet<&String> = tests.iter().collect();
     let mut r = Report::default();
@@ -634,6 +667,12 @@ fn mocha(v: &Value) -> Option<Report> {
 fn hook(key: &str) -> String {
     match key.find("\" hook").and_then(|i| key[i..].find(" for \"").map(|j| i + j)) { Some(cut) => key[..cut].to_string(), None => key.to_string() }
 }
+fn jest_key(name: &str, a: &Value) -> Option<(String, Status)> {
+    let mut path: Vec<&str> = a.get("ancestorTitles")?.as_array()?.iter().map(Value::as_str).collect::<Option<_>>()?;
+    path.push(a.get("title")?.as_str()?);
+    let status = match a.get("status")?.as_str()? { "passed" => Status::Passed, "pending" | "skipped" | "todo" | "disabled" => Status::Skipped, _ => Status::Failed };
+    Some((format!("{name} > {}", path.join(" > ")), status))
+}
 fn jest(v: &Value) -> Option<Report> {
     v.get("numTotalTests")?.as_u64()?;
     let mut r = Report::default();
@@ -641,11 +680,8 @@ fn jest(v: &Value) -> Option<Report> {
         let name = rel(file.get("name")?.as_str()?);
         let mut failed = false;
         for a in file.get("assertionResults")?.as_array()? {
-            let mut path: Vec<&str> = a.get("ancestorTitles")?.as_array()?.iter().map(Value::as_str).collect::<Option<_>>()?;
-            path.push(a.get("title")?.as_str()?);
-            let status = match a.get("status")?.as_str()? { "passed" => Status::Passed, "pending" | "skipped" | "todo" | "disabled" => Status::Skipped, _ => Status::Failed };
+            let (key, status) = jest_key(&name, a)?;
             failed |= status == Status::Failed;
-            let key = format!("{name} > {}", path.join(" > "));
             if status == Status::Failed && let Some(m) = a.get("failureMessages").and_then(Value::as_array).and_then(|m| m.first()).and_then(Value::as_str) { r.why.entry(key.clone()).or_insert_with(|| first_lines(m)); }
             r.add(key, status);
         }

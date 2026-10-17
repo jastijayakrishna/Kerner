@@ -38,6 +38,26 @@ pub fn other_code(path: &str) -> bool {
     !path.split('/').any(|d| d == "node_modules") && path.rsplit('/').next().and_then(|n| n.rsplit_once('.')).is_some_and(|(_, e)| OTHER_CODE.contains(&e.to_ascii_lowercase().as_str()))
 }
 pub fn is_data(name: &str) -> bool { DATA.contains(&extension(name)) || declaration(name) || text_name(name) }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reach { Anything, Secrets, Network, Other }
+const RUNS_MODULES: [&str; 8] = ["child_process", "cluster", "worker_threads", "vm", "wasi", "inspector", "repl", "module"];
+const RUNS_PACKAGES: [&str; 9] = ["execa", "cross-spawn", "shelljs", "zx", "node-pty", "vm2", "isolated-vm", "ssh2", "ssh2-sftp-client"];
+const RUNS_PROCESS: [&str; 9] = ["binding", "_linkedBinding", "dlopen", "getBuiltinModule", "mainModule", "computed", "dynamic", "setuid", "setgid"];
+const NETWORK_MODULES: [&str; 7] = ["net", "tls", "dgram", "dns", "http", "https", "http2"];
+pub fn reach(capability: &str) -> Reach {
+    match capability.split_once(':').unwrap_or((capability, "")) {
+        ("code" | "timer" | "url" | "escape" | "module" | "require" | "import", _) | ("global", "computed" | "dynamic") => Reach::Anything,
+        ("node", m) if RUNS_MODULES.contains(&m) => Reach::Anything,
+        ("package", p) if RUNS_PACKAGES.contains(&p) => Reach::Anything,
+        ("process", p) if RUNS_PROCESS.contains(&p) => Reach::Anything,
+        ("bun", "spawn" | "spawnSync" | "$") | ("deno", "run" | "Command") => Reach::Anything,
+        ("env", _) | ("package", "dotenv") | ("process", "env") => Reach::Secrets,
+        ("node", m) if NETWORK_MODULES.contains(&m) => Reach::Network,
+        ("global", g) if NETWORK.contains(&g) || g == "sendBeacon" => Reach::Network,
+        ("package" | "bun" | "deno", _) => Reach::Network,
+        _ => Reach::Other,
+    }
+}
 fn word(s: &str) -> bool { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') }
 fn package(s: &str) -> bool {
     let name_ok = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
@@ -440,6 +460,15 @@ pub fn source_types(name: &str) -> Option<Vec<SourceType>> {
         "js" => vec![st, st.with_module(false), st.with_commonjs(true), st.with_jsx(true), st.with_module(false).with_jsx(true)],
         "jsx" => vec![st, st.with_module(false)],
         _ => vec![st],
+    })
+}
+pub fn same_program(name: &str, a: &str, b: &str) -> bool {
+    use oxc_span::ContentEq;
+    source_types(name).into_iter().flatten().any(|st| {
+        let (one, two) = (Allocator::default(), Allocator::default());
+        let (x, y) = (Parser::new(&one, a, st).parse(), Parser::new(&two, b, st).parse());
+        let clean = |p: &oxc_parser::ParserReturn| !p.fatal_error && p.diagnostics.is_empty();
+        clean(&x) && clean(&y) && x.program.content_eq(&y.program)
     })
 }
 pub fn footprint(name: &str, source: &str) -> R<BTreeSet<String>> {

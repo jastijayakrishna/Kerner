@@ -199,5 +199,38 @@ fn orval_labs_orval_3772_stored_fault_runs_are_judged_again_with_todays_rules() 
     let r = kern::replay::rejudge(&dir).unwrap();
     let outcomes: Vec<&str> = r["receipt"]["tests"]["faults"].as_array().unwrap().iter().map(|f| f["outcome"].as_str().unwrap()).collect();
     assert_eq!(outcomes, ["unreached", "unreached"], "the stored runs say no test loaded the changed file: {r}");
-    assert_eq!(r["receipt"]["decision"], "look", "{}", r["receipt"]["look"]);
+    assert_eq!(r["receipt"]["decision"], "unverified", "no test reached the change, which Kern says plainly: {}", r["receipt"]["unverified"]);
+}
+
+#[test]
+fn calcom_28622_a_stored_old_test_failure_is_read_again_with_its_values() {
+    let t = Temp::new("polarity");
+    let dir = t.0.join("receipt-calcom__cal.diy__28622");
+    let key = "packages/lib/ssrfProtection.test.ts > validateUrlForSSRFSync > blocks https://127.0.0.1/logo.png";
+    let (kept, old) = ("packages/lib/ssrfProtection.kern-kept.test.ts", "packages/lib/ssrfProtection.test.ts");
+    let failed = json!({ "numTotalTests": 1, "testResults": [{ "name": format!("/workspace/{kept}"), "assertionResults": [{ "ancestorTitles": ["validateUrlForSSRFSync"],
+        "title": "blocks https://127.0.0.1/logo.png", "status": "failed", "failureMessages": ["AssertionError: expected { isValid: false, …(1) } to deeply equal { isValid: false, …(1) }\n    at /workspace/x:1:1"] }] }] }).to_string();
+    let passed = json!({ "numTotalTests": 1, "testResults": [{ "name": format!("/workspace/{old}"), "assertionResults": [{ "ancestorTitles": ["validateUrlForSSRFSync"],
+        "title": "blocks https://127.0.0.1/logo.png", "status": "passed", "failureMessages": [] }] }] }).to_string();
+    stored(&dir, "vitest", json!({ "rewritten": [key], "kept": 1 }), &[("old", passed.clone()), ("new", passed), ("new-kept", failed)]);
+    let r = kern::replay::rejudge(&dir).unwrap();
+    assert_eq!((r["receipt"]["decision"].as_str(), r["receipt"]["tests"]["polarity"][key]["kind"].as_str()), (Some("look"), Some("unknown")),
+        "vitest cut both objects short, so the stored run alone cannot show what moved: {r}");
+    let values = json!({ "file": format!("/workspace/{kept}"), "names": ["validateUrlForSSRFSync"], "name": "blocks https://127.0.0.1/logo.png", "message": "expected { isValid: false, …(1) } to deeply equal { isValid: false, …(1) }",
+        "expected": "Object {\n  \"error\": \"Private IP address\",\n  \"isValid\": false,\n}", "actual": "Object {\n  \"error\": \"Blocked hostname\",\n  \"isValid\": false,\n}" });
+    std::fs::write(dir.join("tests-new-kept.values"), format!("{values}\n")).unwrap();
+    let r = kern::replay::rejudge(&dir).unwrap();
+    assert_eq!((r["receipt"]["decision"].as_str(), r["receipt"]["tests"]["polarity"][key]["kind"].as_str()), (Some("clear"), Some("changed")), "{r}");
+    let note = r["receipt"]["notes"][0]["what"].as_str().unwrap();
+    assert!(note.contains("Private IP address") && note.contains("Blocked hostname"), "{note}");
+}
+
+#[test]
+fn kerns_kept_copy_of_an_old_test_file_maps_back_to_the_file_it_came_from() {
+    assert_eq!(kern::suite::kept_back("packages/lib/ssrfProtection.kern-kept.test.ts").as_deref(), Some("packages/lib/ssrfProtection.test.ts"));
+    assert_eq!(kern::suite::kept_back("a.kern-kept3.spec.js").as_deref(), Some("a.spec.js"));
+    for name in ["packages/lib/ssrfProtection.test.ts", "kern-kept.test.ts", "a.kern-keptx.test.ts"] { assert_eq!(kern::suite::kept_back(name), None, "{name}"); }
+    for (path, n) in [("packages/lib/ssrfProtection.test.ts", 0), ("src/a.spec.js", 4)] {
+        assert_eq!(kern::suite::kept_back(&kern::suite::kept_name(path, n).unwrap()).as_deref(), Some(path), "kept_back undoes kept_name");
+    }
 }

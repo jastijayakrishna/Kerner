@@ -83,7 +83,7 @@ fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a
     assert_eq!(loose["decision"], "look");
     assert!(loose["look"].as_array().into_iter().flatten().any(|x| x["kind"] == "types-new"));
     let uneven = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &broken, true, Some("the project has no lockfile".into()))])), &off);
-    assert_eq!(uneven["decision"], "look", "{uneven}");
+    assert_eq!(uneven["decision"], "unverified", "two sides set up differently cannot be compared fairly, so Kern says it could not verify: {uneven}");
 
     let dirty = json!({ "status": "errors", "errors": 7, "list": [] });
     let not = judge("tsconfig.json", &dirty, &broken, true, None);
@@ -107,7 +107,7 @@ fn the_type_check_asks_the_sandbox_only_for_what_a_test_run_may_have() {
 }
 
 #[test]
-fn a_new_error_about_a_module_or_an_export_needs_a_look_because_a_build_step_may_generate_it() {
+fn a_new_error_about_a_module_or_an_export_is_not_verified_because_a_build_step_may_generate_it() {
     let clean = json!({ "status": "clean", "version": "5.6.3" });
     let generated = side("kern-types: typescript 5.6.3\napps/web/jest.integration.setup.ts(1,10): error TS2305: Module '\"@repo/database\"' has no exported member 'PrismaClient'.\nkern-types: exit 2 \n", "");
     let p = judge("apps/web/tsconfig.json", &clean, &generated, true, None);
@@ -115,8 +115,8 @@ fn a_new_error_about_a_module_or_an_export_needs_a_look_because_a_build_step_may
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let r = receipt::build(&d, &rules, &json!({ "status": "NOT_RUN", "why": "x", "types": { "status": "CHECKED", "projects": [p] } }), &json!({ "status": "OFF", "why": "no AI key" }));
-    assert_eq!(r["decision"], "look", "tuliren/turbo-template#29 imported PrismaClient, which prisma generate makes in the project's CI and Kern never ran: blocking it was wrong: {r}");
-    assert!(r["look"][0]["what"].as_str().unwrap().contains("a build step may generate"));
+    assert_eq!(r["decision"], "unverified", "tuliren/turbo-template#29 imported PrismaClient, which prisma generate makes in the project's CI and Kern never ran: blocking it was wrong: {r}");
+    assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("a build step may generate")), "{r}");
 }
 
 #[test]

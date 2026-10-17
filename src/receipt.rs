@@ -53,99 +53,165 @@ fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
     (described, surprises)
 }
 
-pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
-    let (mut blocked, mut look, mut new_tests) = (Vec::new(), Vec::new(), Vec::new());
-    let changed = rules["changed"].as_array().cloned().unwrap_or_default();
-    let tests_deleted = match rules["deleted_tests"].as_array() {
-        Some(d) => !d.is_empty(),
-        None => changed.iter().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path)),
-    };
-    let passing_lost = tests_deleted && tests["gone"].as_array().is_some_and(|g| !g.is_empty());
-    let added = |p: &str| !passing_lost && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
-    blocked.extend(per_file("test-broke", strings(&tests["broke"]), "A test that passed before now fails", "tests that passed before now fail"));
-    for x in tests["run_broke"].as_array().into_iter().flatten() {
-        let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
-        blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or(""), 400))));
+const OUTPUT_FOLDERS: [&str; 12] = ["dist", "out", ".nuxt", ".next", ".svelte-kit", ".output", "coverage", ".turbo", ".vite", ".cache", ".parcel-cache", "storybook-static"];
+fn generated(path: &str) -> bool { path.split('/').any(|s| OUTPUT_FOLDERS.contains(&s)) }
+pub fn shown_power(p: &Value) -> bool {
+    use crate::capability::{Reach, reach};
+    if !crate::suite::is_test_path(p["path"].as_str().unwrap_or("")) { return true; }
+    let (added, has) = (strings(&p["added"]), strings(&p["has"]));
+    let after: Vec<String> = added.iter().chain(&has).cloned().collect();
+    let any = |caps: &[String], want: &[Reach]| caps.iter().any(|c| want.contains(&reach(c)));
+    any(&added, &[Reach::Anything])
+        || (any(&added, &[Reach::Secrets, Reach::Network]) && any(&after, &[Reach::Secrets, Reach::Anything]) && any(&after, &[Reach::Network, Reach::Anything]))
+}
+fn title(key: &str) -> &str { key.split_once(" > ").map_or(key, |(_, t)| t) }
+type Moved = (String, String, String);
+fn moved_values(changed: Vec<Moved>) -> Vec<Value> {
+    let mut files: Vec<(String, Vec<Moved>)> = Vec::new();
+    for m in changed {
+        let f = file_of(&m.0).to_string();
+        match files.iter_mut().find(|(x, _)| *x == f) { Some((_, v)) => v.push(m), None => files.push((f, vec![m])) }
     }
-    let mut cannot_run: Vec<Value> = Vec::new();
-    let lacking = |t: &str| tests["problem_why"][t].as_str().is_some_and(crate::suite::sandbox_error);
-    let mut new_file = |t: &str, new_tests: &mut Vec<Value>| {
-        let why = tests["problem_why"][t].as_str().map(|w| format!(": {}", plain(w, 400))).unwrap_or_default();
-        if lacking(t) { cannot_run.push(json!({ "what": format!("{}: a test file this change adds needs something Kern's sandbox does not have{why}", code(t, 200)) })); }
-        else { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(t, 200)))); }
-    };
-    for t in strings(&tests["new_problems"]) {
-        if added(file_of(&t)) { new_file(&t, &mut new_tests); }
-        else {
-            let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w, 400))).unwrap_or_default();
-            blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200))));
+    files.into_iter().flat_map(|(f, list)| {
+        if list.len() < 3 {
+            return list.iter().map(|(k, was, now)| item("test-value", format!("{}: the change edits this test, and what it expects moves from {} to {}", code(k, 200), code(was, 160), code(now, 160)))).collect::<Vec<_>>();
+        }
+        let (k, was, now) = &list[0];
+        vec![item("test-value", format!("{} tests in {} expect other values now, as the change edits them; for example {}: {} becomes {}", list.len(), code(&f, 160), code(title(k), 120), code(was, 160), code(now, 160)))]
+    }).collect()
+}
+fn rewritten_items(tests: &Value, rules: &Value) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
+    let (mut look, mut unverified, mut unread, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for k in strings(&tests["rewritten"]) {
+        let r = &tests["polarity"][&k];
+        let (was, now) = (r["was"].as_str().unwrap_or(""), r["now"].as_str().unwrap_or(""));
+        let values = if was.is_empty() && now.is_empty() { String::new() } else { format!(" (it expected {}, and the new code gives {})", code(was, 160), code(now, 160)) };
+        match r["kind"].as_str() {
+            Some("opened") => look.push(item("test-rewritten", format!("The change edits this test, and its old version shows the new code accepting what the old code refused: {}{values}", code(&k, 200)))),
+            Some("flipped") => look.push(item("test-rewritten", format!("The change edits this test, and its old version fails on the new code because a yes or no, a something or nothing, or the shape of the result changed: {}{values}", code(&k, 200)))),
+            Some("changed") => changed.push((k.clone(), was.to_string(), now.to_string())),
+            Some("harness") => unverified.push(item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test against the new code ({}), so it cannot say what the change did to it",
+                code(&k, 200), plain(r["why"].as_str().unwrap_or("its setup no longer fits the new code"), 300)))),
+            _ => unread.push(k.clone()),
         }
     }
+    look.extend(per_file("test-rewritten", unread, "The change edits this test, and its old version fails on the new code", "tests whose old versions fail on the new code (the change edits them)"));
+    if let Some(words) = rules["says_no_change"].as_str().filter(|w| !w.trim().is_empty()) && let Some((k, was, now)) = changed.first() {
+        look.push(item("says-no-change", format!("The pull request says it does not change behaviour ({}), but the old versions of {} get other values on the new code; for example {}: {} becomes {}",
+            code(words, 120), plural(changed.len(), "edited test", "edited tests"), code(k, 200), code(was, 160), code(now, 160))));
+    }
+    (look, unverified, moved_values(changed))
+}
+
+#[derive(Default)]
+struct Found { blocked: Vec<Value>, look: Vec<Value>, unverified: Vec<Value>, notes: Vec<Value>, cannot_run: Vec<Value> }
+fn removed_tests(rules: &Value) -> bool {
+    match rules["deleted_tests"].as_array() {
+        Some(d) => !d.is_empty(),
+        None => rules["changed"].as_array().into_iter().flatten().any(|c| c["operation"] == "delete" && c["path"].as_str().is_some_and(crate::suite::is_test_path)),
+    }
+}
+fn deleted_files(rules: &Value) -> std::collections::BTreeSet<String> {
+    rules["deleted_tests"].as_array().into_iter().flatten().filter_map(|x| x["path"].as_str().map(str::to_string)).collect()
+}
+fn new_test_file(t: &str, tests: &Value, new_tests: &mut Vec<Value>, cannot_run: &mut Vec<Value>) {
+    let why = tests["problem_why"][t].as_str().map(|w| format!(": {}", plain(w, 400))).unwrap_or_default();
+    if tests["problem_why"][t].as_str().is_some_and(crate::suite::sandbox_error) { cannot_run.push(json!({ "what": format!("{}: a test file this change adds needs something Kern's sandbox does not have{why}", code(t, 200)) })); }
+    else { new_tests.push(item("new-test-fails", format!("A test file this change adds does not run here: {}{why}", code(t, 200)))); }
+}
+fn test_file_items(f: &mut Found, rules: &Value, tests: &Value) -> (Vec<Value>, Vec<String>) {
+    let changed = rules["changed"].as_array().cloned().unwrap_or_default();
+    let tests_deleted = removed_tests(rules);
+    let passing_lost = tests_deleted && tests["gone"].as_array().is_some_and(|g| !g.is_empty());
+    let added = |p: &str| !passing_lost && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
+    let mut new_tests = Vec::new();
+    f.blocked.extend(per_file("test-broke", strings(&tests["broke"]), "A test that passed before now fails", "tests that passed before now fail"));
+    for x in tests["run_broke"].as_array().into_iter().flatten() {
+        let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
+        f.blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or(""), 400))));
+    }
+    for t in strings(&tests["new_problems"]) {
+        if added(file_of(&t)) { new_test_file(&t, tests, &mut new_tests, &mut f.cannot_run); continue; }
+        let why = tests["problem_why"][&t].as_str().map(|w| format!(": {}", plain(w, 400))).unwrap_or_default();
+        f.blocked.push(item("test-file", format!("A test file no longer runs, or a hook now fails: {}{why}", code(&t, 200))));
+    }
     let (unproven_added, unproven): (Vec<String>, Vec<String>) = strings(&tests["unproven"]).into_iter().partition(|t| added(file_of(t)));
-    for t in unproven_added { new_file(&t, &mut new_tests); }
+    for t in unproven_added { new_test_file(&t, tests, &mut new_tests, &mut f.cannot_run); }
     let mut needs: Vec<(String, usize)> = Vec::new();
     for t in strings(&tests["unrunnable"]) {
-        match needs.iter_mut().find(|(f, _)| f == file_of(&t)) { Some((_, n)) => *n += 1, None => needs.push((file_of(&t).to_string(), 1)) }
+        match needs.iter_mut().find(|(n, _)| n == file_of(&t)) { Some((_, n)) => *n += 1, None => needs.push((file_of(&t).to_string(), 1)) }
     }
-    cannot_run.extend(needs.iter().map(|(f, n)| json!({ "what": format!("{}: {} this change adds need{} something Kern's sandbox does not have (the network, a program or a native module), so Kern could not run {}",
-        code(f, 160), plural(*n, "test", "tests"), if *n == 1 { "s" } else { "" }, if *n == 1 { "it" } else { "them" }) })));
+    f.cannot_run.extend(needs.iter().map(|(p, n)| json!({ "what": format!("{}: {} this change adds need{} something Kern's sandbox does not have (the network, a program or a native module), so Kern could not run {}",
+        code(p, 160), plural(*n, "test", "tests"), if *n == 1 { "s" } else { "" }, if *n == 1 { "it" } else { "them" }) })));
     for x in rules["tricks"].as_array().into_iter().flatten() {
         let path = x["path"].as_str().unwrap_or("");
         let reach = x["why"].as_str().is_some_and(|w| w.starts_with("Code outside the tests"));
         let added_file = x["operation"] == "add" && !tests_deleted;
         if added_file && reach { new_tests.push(item("new-runner-reach", format!("{}: a file this change adds, outside the test folders, uses the test runner; if it is a test, Kern does not run it", code(path, 160)))); }
-        else if reach { look.push(item("runner-reach", format!("{}: code outside the test folders uses the test runner; that is fine in test support code and a way to fake results in shipped code ({})", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
+        else if reach { f.look.push(item("runner-reach", format!("{}: code outside the test folders uses the test runner; that is fine in test support code and a way to fake results in shipped code ({})", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
         else if added_file { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
-        else { blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
+        else { f.blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
     }
+    (new_tests, unproven)
+}
+fn behaviour_looks(f: &mut Found, behaviour: &Value) -> (bool, Vec<String>, Vec<String>, bool) {
     let summary = !behaviour["report"].is_object() && behaviour["not_mentioned"].is_array();
     let (described, surprises) = if summary { (strings(&behaviour["described"]), strings(&behaviour["not_mentioned"])) } else { behaviour_items(&behaviour["report"]) };
     let sorted = behaviour["report"]["sorted"].is_object() || behaviour["sorted"] == true;
-    for s in &surprises { look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
-    for s in &described { look.push(item("described", format!("The pull request says it changes this, which only a person can confirm: {s}"))); }
-    for p in rules["powers"].as_array().into_iter().flatten() {
+    for s in &surprises { f.look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
+    for s in &described { f.look.push(item("described", format!("The pull request says it changes this, which only a person can confirm: {s}"))); }
+    (summary, described, surprises, sorted)
+}
+fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Value>) {
+    for p in rules["powers"].as_array().into_iter().flatten().filter(|p| shown_power(p)) {
         let caps: Vec<String> = strings(&p["added"]).iter().map(|c| code(c, 80)).collect();
-        look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
+        f.look.push(item("power", format!("{} can now do something it could not before: {}", code(p["path"].as_str().unwrap_or(""), 160), caps.join(", "))));
     }
-    look.extend(per_file("test-rewritten", strings(&tests["rewritten"]), "The change edits this test, and its old version fails on the new code", "tests whose old versions fail on the new code (the change edits them)"));
+    let (look, unverified, notes) = rewritten_items(tests, rules);
+    f.look.extend(look);
+    f.unverified.extend(unverified);
+    f.notes.extend(notes);
     for x in tests["edited_unchecked"].as_array().into_iter().flatten() {
-        look.push(item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test file on the new code, so it cannot tell whether the change rewrote what the test expects ({})",
+        f.unverified.push(item("edited-unchecked", format!("{}: Kern could not run the old version of this edited test file on the new code, so it cannot tell whether the change rewrote what the test expects ({})",
             code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400))));
     }
-    for p in strings(&tests["test_data"]) { look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160)))); }
-    look.extend(new_tests);
+    for p in strings(&tests["test_data"]).into_iter().filter(|p| !crate::check::documentation(p)) {
+        f.look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160))));
+    }
+    f.look.extend(new_tests);
     let mut reach: Vec<(String, bool, bool)> = Vec::new();
-    for f in tests["faults"].as_array().into_iter().flatten() {
-        let path = f["path"].as_str().unwrap_or("").to_string();
-        let (never, crashed) = (["unreached", "untested"].iter().any(|o| f["outcome"] == *o), f["outcome"] == "unreached");
+    for x in tests["faults"].as_array().into_iter().flatten() {
+        let path = x["path"].as_str().unwrap_or("").to_string();
+        let (never, crashed) = (["unreached", "untested"].iter().any(|o| x["outcome"] == *o), x["outcome"] == "unreached");
         match reach.iter_mut().find(|(p, _, _)| *p == path) { Some((_, all, any)) => { *all &= never; *any |= crashed; } None => reach.push((path, never, crashed)) }
     }
     for (path, _, _) in reach.iter().filter(|(p, all, any)| *all && *any && !p.is_empty()) {
-        look.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put small faults in the changed lines, and no test loaded them)", code(path, 160))));
+        f.unverified.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put small faults in the changed lines, and no test loaded them), so the tests say nothing about it", code(path, 160))));
     }
+}
+fn rule_items(f: &mut Found, d: &Value, rules: &Value, tests: &Value) {
     let gone_all = strings(&tests["gone"]);
-    let deleted: std::collections::BTreeSet<&str> = rules["deleted_tests"].as_array().into_iter().flatten().filter_map(|x| x["path"].as_str()).collect();
-    for p in &deleted {
-        let n = gone_all.iter().filter(|g| file_of(g) == *p).count();
+    for p in &deleted_files(rules) {
+        let n = gone_all.iter().filter(|g| file_of(g) == p.as_str()).count();
         let lost = if n == 0 { String::new() } else { format!(" ({} that ran before no longer run{})", plural(n, "test", "tests"), if n == 1 { "s" } else { "" }) };
-        look.push(item("test-deleted", format!("{}: a test file this change deletes{lost}", code(p, 160))));
+        f.look.push(item("test-deleted", format!("{}: a test file this change deletes{lost}", code(p, 160))));
     }
     for x in rules["inline_csp"].as_array().into_iter().flatten() {
         let what = match x["kind"].as_str().unwrap_or("") { "style" => "an inline <style>", "style-attr" => "inline style attributes", "script" => "an inline <script>", _ => "inline event handlers (such as onclick)" };
-        look.push(item("inline-blocked", format!("{} adds {what}, but {} sends a Content-Security-Policy ({}) that does not allow it, so browsers will refuse it",
+        f.look.push(item("inline-blocked", format!("{} adds {what}, but {} sends a Content-Security-Policy ({}) that does not allow it, so browsers will refuse it",
             code(x["path"].as_str().unwrap_or(""), 160), code(x["policy_path"].as_str().unwrap_or(""), 160), code(x["policy"].as_str().unwrap_or(""), 200))));
     }
     for x in rules["public_api"].as_array().into_iter().flatten() {
         let names = strings(&x["removed"]);
         let shown: Vec<String> = names.iter().take(SHOWN).map(|n| code(n, 80)).collect();
         let more = if names.len() > SHOWN { format!(" and {} more", names.len() - SHOWN) } else { String::new() };
-        look.push(item("public-api", format!("{} no longer exports {}{more} ({}), so code that imports {} breaks",
+        f.look.push(item("public-api", format!("{} no longer exports {}{more} ({}), so code that imports {} breaks",
             code(x["package"].as_str().unwrap_or(""), 120), shown.join(", "), code(x["entry"].as_str().unwrap_or(""), 160), if names.len() == 1 { "it" } else { "them" })));
     }
     for x in rules["node_versions"].as_array().into_iter().flatten() {
         let features: Vec<String> = x["features"].as_array().into_iter().flatten().take(SHOWN)
-            .map(|f| format!("{} (Node {})", code(f["name"].as_str().unwrap_or(""), 80), plain(f["since"].as_str().unwrap_or(""), 400))).collect();
-        look.push(item("node-version", format!("{} now uses {}, but its package says it runs on Node {} (engines.node), where that is missing or needs a flag",
+            .map(|n| format!("{} (Node {})", code(n["name"].as_str().unwrap_or(""), 80), plain(n["since"].as_str().unwrap_or(""), 400))).collect();
+        f.look.push(item("node-version", format!("{} now uses {}, but its package says it runs on Node {} (engines.node), where that is missing or needs a flag",
             code(x["path"].as_str().unwrap_or(""), 160), features.join(", "), code(x["supports"].as_str().unwrap_or(""), 80))));
     }
     let gone: std::collections::BTreeSet<String> = gone_all.iter().map(|g| tidy(g)).collect();
@@ -159,35 +225,22 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let removed = x["removed"].as_u64().unwrap_or(0);
         let covered = strings(&x["missing"]).iter().all(|m| gone.contains(&tidy(&format!("{path} > {m}"))));
         if removed > 0 && !covered {
-            look.push(item("tests-removed", format!("{}: the change removes {removed} test{} from this existing test file, so {} no longer check{} anything: {}",
+            f.look.push(item("tests-removed", format!("{}: the change removes {removed} test{} from this existing test file, so {} no longer check{} anything: {}",
                 code(path, 160), if removed == 1 { "" } else { "s" }, if removed == 1 { "it" } else { "they" }, if removed == 1 { "s" } else { "" }, listed("missing"))));
         }
-        if !strings(&x["emptied"]).is_empty() { look.push(item("tests-emptied", format!("{}: tests that checked something now check nothing: {}", code(path, 160), listed("emptied")))); }
+        if !strings(&x["emptied"]).is_empty() { f.look.push(item("tests-emptied", format!("{}: tests that checked something now check nothing: {}", code(path, 160), listed("emptied")))); }
         if !strings(&x["loosened"]).is_empty() {
-            look.push(item("tests-loosened", format!("{}: checks were loosened to ones that pass for almost any value (such as toBeDefined or toBeTruthy) in: {}", code(path, 160), listed("loosened"))));
+            f.look.push(item("tests-loosened", format!("{}: checks were loosened to ones that pass for almost any value (such as toBeDefined or toBeTruthy) in: {}", code(path, 160), listed("loosened"))));
         }
     }
     for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
-        look.push(item("submodule", format!("{}: a submodule this change points at other code", code(x["path"].as_str().unwrap_or(""), 160))));
+        f.look.push(item("submodule", format!("{}: a submodule this change points at other code", code(x["path"].as_str().unwrap_or(""), 160))));
     }
     for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["code"] == "js" || x["path"].as_str().is_some_and(crate::capability::is_code)) {
-        look.push(item("not-checked-code", format!("{}: Kern could not read this changed code, so its rules were not applied ({})", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400))));
+        f.unverified.push(item("not-checked-code", format!("{}: Kern could not read this changed code, so its rules were not applied ({})", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400))));
     }
-    look.extend(per_file("new-test-fails", strings(&tests["new_failing"]), "A test this change adds fails on the new code", "tests this change adds fail on the new code"));
-    let wrote = strings(&tests["wrote_code"]);
-    if !wrote.is_empty() {
-        let shown: Vec<String> = wrote.iter().take(SHOWN).map(|p| code(p, 160)).collect();
-        let more = if wrote.len() > SHOWN { format!(" and {} more", wrote.len() - SHOWN) } else { String::new() };
-        look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
-    }
-    look.extend(per_file("test-gone", gone_all.iter().filter(|g| !deleted.contains(file_of(g))).cloned().collect(), "A test that ran before no longer runs", "tests that ran before no longer run"));
-    for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { look.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or(""), 400))); }
-    let reasons = strings(&tests["uneven_why"]);
-    let because = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.iter().map(|r| plain(r, 400)).collect::<Vec<_>>().join("; ")) };
-    look.extend(per_file("test-uneven", strings(&tests["uneven"]), &format!("This fails on the new code, but Kern did not set up both sides the same way{because}, so it does not block on it"),
-        &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it does not block on them")));
-    look.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it does not block on it",
-        "test files fail on the new code, and Kern has no record of them passing on the old code, so it does not block on them"));
+}
+fn type_items(f: &mut Found, tests: &Value) {
     for p in tests["types"]["projects"].as_array().into_iter().flatten().filter(|p| p["result"] == "new-errors") {
         let shown: Vec<String> = p["added"].as_array().into_iter().flatten().take(3)
             .map(|d| code(&format!("{}:{} {} {}", d["file"].as_str().unwrap_or(""), d["line"], d["code"].as_str().unwrap_or(""), d["message"].as_str().unwrap_or("")), 200)).collect();
@@ -195,34 +248,54 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
         let what = format!("The change brings {} to {}, which type-checked with none on the old code: {}{}", plural(count, "new TypeScript error", "new TypeScript errors"),
             code(p["config"].as_str().unwrap_or(""), 160), shown.join(", "), if count > shown.len() { ", …" } else { "" });
         match p["uneven"].as_str() {
-            _ if p["enforced"] != true => look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
-            _ if p["generated"] == true => look.push(item("types-new", format!("{what} (some are about modules, exports or names that a build step may generate, and Kern did not run it, so Kern does not block on them)"))),
-            Some(why) => look.push(item("types-new", format!("{what} (Kern does not block on it: {})", plain(why, 400)))),
-            None => blocked.push(item("types-broke", what)),
+            _ if p["generated"] == true && p["enforced"] == true => f.unverified.push(item("types-new", format!("{what} (some are about modules, exports or names that a build step may generate, and Kern did not run it, so it cannot say whether the change caused them)"))),
+            _ if p["enforced"] != true => f.look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
+            Some(why) => f.unverified.push(item("types-new", format!("{what} (Kern cannot compare the two sides fairly: {})", plain(why, 400)))),
+            None => f.blocked.push(item("types-broke", what)),
         }
     }
-    look.extend(per_file("test-sandbox", strings(&tests["sandbox"]), "This fails on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke it",
+}
+fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>) {
+    f.look.extend(per_file("new-test-fails", strings(&tests["new_failing"]), "A test this change adds fails on the new code", "tests this change adds fail on the new code"));
+    let wrote: Vec<String> = strings(&tests["wrote_code"]).into_iter().filter(|p| !generated(p)).collect();
+    if !wrote.is_empty() {
+        let shown: Vec<String> = wrote.iter().take(SHOWN).map(|p| code(p, 160)).collect();
+        let more = if wrote.len() > SHOWN { format!(" and {} more", wrote.len() - SHOWN) } else { String::new() };
+        f.look.push(item("wrote-code", format!("Tests on the new code wrote code into the project while they ran: {}{more}", shown.join(", "))));
+    }
+    let (deleted, rewritten) = (deleted_files(rules), strings(&tests["rewritten"]).into_iter().collect::<std::collections::BTreeSet<String>>());
+    let gone: Vec<String> = strings(&tests["gone"]).into_iter().filter(|g| !deleted.contains(file_of(g)) && !rewritten.contains(g)).collect();
+    f.look.extend(per_file("test-gone", gone, "A test that ran before no longer runs", "tests that ran before no longer run"));
+    for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { f.unverified.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or(""), 400))); }
+    let reasons = strings(&tests["uneven_why"]);
+    let because = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.iter().map(|r| plain(r, 400)).collect::<Vec<_>>().join("; ")) };
+    f.unverified.extend(per_file("test-uneven", strings(&tests["uneven"]), &format!("This fails on the new code, but Kern did not set up both sides the same way{because}, so it cannot say whether the change broke it"),
+        &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it cannot say whether the change broke them")));
+    f.unverified.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it cannot say whether the change broke it",
+        "test files fail on the new code, and Kern has no record of them passing on the old code, so it cannot say whether the change broke them"));
+    type_items(f, tests);
+    f.unverified.extend(per_file("test-sandbox", strings(&tests["sandbox"]), "This fails on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke it",
         "tests fail on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke them"));
-    look.extend(per_file("test-unsteady", strings(&tests["unsteady"]), "This failed on the new code, but not in every run of it, or tests in the same file passed and failed by chance during this check, so Kern does not block on it",
-        "tests failed on the new code, but not in every run of it, or tests in the same files passed and failed by chance during this check, so Kern does not block on them"));
-    look.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests",
-        "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests"));
-    look.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));
-    look.extend(per_file("test-skipped", strings(&tests["newly_skipped"]), "A test that passed before is now skipped", "tests that passed before are now skipped"));
+    f.unverified.extend(per_file("test-unsteady", strings(&tests["unsteady"]), "This failed on the new code, but not in every run of it, or tests in the same file passed and failed by chance during this check, so Kern cannot say whether the change broke it",
+        "tests failed on the new code, but not in every run of it, or tests in the same files passed and failed by chance during this check, so Kern cannot say whether the change broke them"));
+    f.unverified.extend(per_file("test-together", strings(&tests["together"]), "This fails when the whole suite runs, but not when its file runs alone, so it may depend on other tests and Kern cannot say whether the change broke it",
+        "tests fail when the whole suite runs, but not when their file runs alone, so they may depend on other tests and Kern cannot say whether the change broke them"));
+    f.unverified.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));
+    f.look.extend(per_file("test-skipped", strings(&tests["newly_skipped"]), "A test that passed before is now skipped", "tests that passed before are now skipped"));
+}
+fn steering_items(f: &mut Found, rules: &Value) {
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
     for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run and how their results are read"), ("protected", "protected", "is a CI, secret or configuration file")] {
-        for x in rules[key].as_array().into_iter().flatten() { look.push(item(kind, format!("{} {says}", path_of(x)))); }
+        for x in rules[key].as_array().into_iter().flatten() { f.look.push(item(kind, format!("{} {says}", path_of(x)))); }
     }
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
-    let all_moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
-    for m in all_moves.iter().filter(|m| m["age"] == "fresh") {
+    for m in deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).filter(|m| m["age"] == "fresh") {
         let days = m["days"].as_u64().unwrap_or(0);
-        look.push(item("fresh-release", format!("{} came out {} before this change; brand-new releases are where hijacked packages show up, so check it or wait until it is {} days old",
+        f.look.push(item("fresh-release", format!("{} came out {} before this change; brand-new releases are where hijacked packages show up, so check it or wait until it is {} days old",
             code(&format!("{}@{}", m["name"].as_str().unwrap_or(""), m["version"].as_str().unwrap_or("")), 120),
             if days == 0 { "less than a day".to_string() } else if days == 1 { "1 day".to_string() } else { format!("{days} days") }, crate::deps::FRESH_DAYS)));
     }
-    let routine = routine_deps(rules);
-    if !deps.is_empty() && !routine {
+    if !deps.is_empty() && !routine_deps(rules) {
         let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
         let fields: std::collections::BTreeSet<String> = deps.iter().flat_map(|d| strings(&d["fields"])).collect();
         let only_fields = moved.is_empty() && !fields.is_empty() && deps.iter().all(|d| d["path"].as_str().is_some_and(|p| p.rsplit('/').next() == Some("package.json")));
@@ -232,34 +305,48 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
             if moved.len() > SHOWN { what += &format!(" and {} more", moved.len() - SHOWN); }
         }
         if !fields.is_empty() {
-            let shown: Vec<String> = fields.iter().take(SHOWN).map(|f| code(f, 80)).collect();
+            let shown: Vec<String> = fields.iter().take(SHOWN).map(|n| code(n, 80)).collect();
             what += &format!("{}{}", if only_fields { " " } else { "; package.json also changes " }, shown.join(", "));
             if fields.len() > SHOWN { what += &format!(" and {} more", fields.len() - SHOWN); }
         }
-        look.push(item("dependencies", format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))));
+        f.look.push(item("dependencies", format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))));
     }
-    for x in rules["lockfile"].as_array().into_iter().flatten() { look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""), 400)))); }
-    for x in rules["agent_notes"].as_array().into_iter().flatten() { look.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
+    for x in rules["lockfile"].as_array().into_iter().flatten() { f.look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""), 400)))); }
+    for x in rules["agent_notes"].as_array().into_iter().flatten() { f.look.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
+}
+fn not_run_items(f: &mut Found, tests: &Value) {
     let unchecked = |why: &str| -> String {
         if why.starts_with("Kern could not run the tests") { format!("Kern's environment had a problem, so it could not check the tests: {}", plain(why, 400)) }
         else { format!("Kern could not run the tests here, so it cannot say this change kept them passing: {}", plain(why, 400)) }
     };
-    if tests["status"] == "NOT_RUN" && tests["no_tests"] != true { look.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
+    if tests["status"] == "NOT_RUN" && tests["no_tests"] != true { f.unverified.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
     if tests["status"] == "RAN" {
         for n in tests["not_run"].as_array().into_iter().flatten() {
-            look.push(item("tests-not-run", format!("{}: {}", code(n["dir"].as_str().filter(|d| !d.is_empty()).unwrap_or("."), 160), unchecked(n["why"].as_str().unwrap_or("no reason was given")))));
+            f.unverified.push(item("tests-not-run", format!("{}: {}", code(n["dir"].as_str().filter(|d| !d.is_empty()).unwrap_or("."), 160), unchecked(n["why"].as_str().unwrap_or("no reason was given")))));
         }
     }
-    let decision = if !blocked.is_empty() { "blocked" } else if !look.is_empty() { "look" } else { "clear" };
+}
+
+pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
+    let mut f = Found::default();
+    let (new_tests, unproven) = test_file_items(&mut f, rules, tests);
+    let (summary, described, surprises, sorted) = behaviour_looks(&mut f, behaviour);
+    change_items(&mut f, rules, tests, new_tests);
+    rule_items(&mut f, d, rules, tests);
+    run_items(&mut f, rules, tests, unproven);
+    steering_items(&mut f, rules);
+    not_run_items(&mut f, tests);
+    let decision = if !f.blocked.is_empty() { "blocked" } else if !f.look.is_empty() { "look" } else if !f.unverified.is_empty() { "unverified" } else { "clear" };
     let report = &behaviour["report"];
     let lines = if summary { behaviour["lines"].clone() } else { json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
         "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) }) };
     let percent = if summary { behaviour["percent"].clone() } else { report["coverage"]["percent"].clone() };
-    let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400)) }))
-        .chain(d["skipped"].as_array().into_iter().flatten().map(|x| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400)) })))
+    let said = |x: &Value| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400)) });
+    let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(said).chain(d["skipped"].as_array().into_iter().flatten().map(said))
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
-            .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).chain(cannot_run).collect();
-    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"], "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": blocked, "look": look, "tests": tests,
+            .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).chain(f.cannot_run).collect();
+    json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"],
+        "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": f.blocked, "look": f.look, "unverified": f.unverified, "notes": f.notes, "tests": tests,
         "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": percent, "lines": lines, "described": described, "not_mentioned": surprises, "sorted": sorted },
         "rules": rules, "not_checked": not_checked, "drive": { "skipped": d["skipped"], "unmeasured": d["unmeasured"] } })
 }
@@ -298,6 +385,8 @@ fn list(md: &mut String, items: &[Value]) {
 pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let blocked = r["blocked"].as_array().cloned().unwrap_or_default();
     let look = r["look"].as_array().cloned().unwrap_or_default();
+    let unverified = r["unverified"].as_array().cloned().unwrap_or_default();
+    let notes = r["notes"].as_array().cloned().unwrap_or_default();
     let tests = &r["tests"];
     let behaviour = &r["behaviour"];
     let tests_ran = tests["status"] == "RAN";
@@ -308,6 +397,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     md += &match r["decision"].as_str() {
         Some("blocked") => format!("### ❌ Kern: Blocked — {}\n\n", plural(blocked.len(), "problem to fix", "problems to fix")),
         Some("look") => format!("### ⚠️ Kern: {} a look\n\n", plural(look.len(), "thing needs", "things need")),
+        Some("unverified") => "### ⏭️ Kern: Not verified\n\nKern found nothing that needs a look, but it could not check all of this change (see below).\n\n".to_string(),
         _ if tests_ran && tests["not_run"].as_array().is_some_and(|n| !n.is_empty()) => "### ✅ Kern: Nothing unexpected in what it ran\n\nSome packages' tests did not run (see below).\n\n".to_string(),
         _ if tests_ran || nothing => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
         _ if behaviour_ran => "### ✅ Kern: Nothing unexpected in what it ran\n\nThe project's tests did not run (see below).\n\n".to_string(),
@@ -323,22 +413,33 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         list(&mut md, &look);
         md += "\n";
     }
+    if !unverified.is_empty() {
+        md += if r["decision"] == "unverified" { "**Not verified.** Kern could not check these, so it cannot say they are safe. If that is acceptable, a maintainer comments `/kern approve`.\n\n" }
+            else { "**Not verified.** Kern could not check these either:\n\n" };
+        list(&mut md, &unverified);
+        md += "\n";
+    }
+    if !notes.is_empty() {
+        md += "**Notes.** Changes the pull request makes on purpose, with the values before and after, so a person can scan them:\n\n";
+        list(&mut md, &notes);
+        md += "\n";
+    }
     md += "**What Kern checked**\n\n";
     if tests_ran {
         let kept = tests["kept"].as_u64().unwrap_or(0) as usize;
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"), 400);
         let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
-        let doubtful = look.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven", "test-sandbox"].iter().any(|k| x["kind"] == *k));
+        let doubtful = unverified.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven", "test-sandbox"].iter().any(|k| x["kind"] == *k));
         let mut line = if broke > 0 || files > 0 {
             let mut what = Vec::new();
             if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }
             if files > 0 { what.push(format!("{files} test {} no longer {}", if files == 1 { "file" } else { "files" }, if files == 1 { "loads" } else { "load" })); }
             format!("- ❌ Tests: {}; {kept} still pass ({runner})", what.join(", "))
         } else if doubtful {
-            format!("- ⚠️ Tests: {kept} that passed before still pass, and some failures Kern could not prove or rule out need a look ({runner})")
-        } else if look.iter().any(|x| x["kind"] == "untested-change") {
-            format!("- ⚠️ Tests: {kept} that passed before still pass, but no test that runs here reaches part of the changed code (see above) ({runner})")
+            format!("- ⚠️ Tests: {kept} that passed before still pass, but Kern could not prove or rule out some failures (see Not verified above) ({runner})")
+        } else if unverified.iter().any(|x| x["kind"] == "untested-change") {
+            format!("- ⚠️ Tests: {kept} that passed before still pass, but no test that runs here reaches part of the changed code (see Not verified above) ({runner})")
         } else {
             format!("- ✅ Tests: {kept} that passed before still pass ({runner})")
         };
@@ -373,7 +474,9 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         }
         let count = |k: &str| tests[k].as_array().map_or(0, Vec::len);
         let (edited, rewritten, unchecked) = (tests["edited"].as_u64().unwrap_or(0) as usize, count("rewritten"), count("edited_unchecked"));
-        if rewritten > 0 { md += &format!("- ⚠️ Edited tests: the old versions of {} fail on the new code (see above)\n", plural(rewritten, "test", "tests")); }
+        let moved = strings(&tests["rewritten"]).iter().filter(|k| tests["polarity"][k.as_str()]["kind"] == "changed").count();
+        if rewritten > 0 && moved == rewritten { md += &format!("- ✏️ Edited tests: the change moves what {} expect, on purpose (see Notes)\n", plural(rewritten, "test", "tests")); }
+        else if rewritten > 0 { md += &format!("- ⚠️ Edited tests: the old versions of {} fail on the new code (see above)\n", plural(rewritten, "test", "tests")); }
         else if unchecked > 0 {
             let passed = if edited > 0 { format!("; the old versions of {edited} others still pass") } else { String::new() };
             md += &format!("- ⚠️ Edited tests: Kern could not run the old versions of {} on the new code (see above){passed}\n", plural(unchecked, "edited test file", "edited test files"));
@@ -412,11 +515,16 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         md += &format!("- ✅ Dependencies: {}{} (each removed, from this repository, or updated within the same major version to a release out for at least {} days)\n",
             moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "), if moved.len() > SHOWN { format!(" and {} more", moved.len() - SHOWN) } else { String::new() }, crate::deps::FRESH_DAYS);
     }
-    let powers = r["rules"]["powers"].as_array().map_or(0, Vec::len);
+    let all_powers: Vec<&Value> = r["rules"]["powers"].as_array().into_iter().flatten().collect();
+    let powers = all_powers.iter().filter(|p| shown_power(p)).count();
+    let quiet: Vec<String> = all_powers.iter().filter(|p| !shown_power(p)).take(SHOWN).map(|p| code(p["path"].as_str().unwrap_or(""), 160)).collect();
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(crate::capability::other_code));
     let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"].is_string());
     let skipped_code = r["drive_skipped"].as_bool() == Some(true);
-    if powers == 0 && !unread { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secret environment variables\n"; }
+    if powers == 0 && !unread && quiet.is_empty() { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secret environment variables\n"; }
+    if powers == 0 && !unread && !quiet.is_empty() {
+        md += &format!("- ✅ No new powers outside the tests: tests gained some, but none can both read a secret and send it out, or start other programs ({})\n", quiet.join(", "));
+    }
     let none = |k: &str| tests[k].as_array().is_none_or(Vec::is_empty);
     if (tests_ran || nothing) && !unread && !blocked.iter().any(|x| x["kind"] == "test-file") && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
         && r["rules"]["weakened"].as_array().is_none_or(Vec::is_empty) && none("gone") && none("newly_skipped") {
@@ -557,6 +665,7 @@ fn description(r: &Value) -> String {
     match r["decision"].as_str() {
         Some("blocked") => format!("Blocked: {}", r["blocked"][0]["what"].as_str().unwrap_or("a problem to fix").replace('`', "")),
         Some("look") => format!("{} — approve with /kern approve", plural(n("look"), "thing needs a look", "things need a look")),
+        Some("unverified") => format!("Not verified: Kern could not check {} — approve with /kern approve", plural(n("unverified"), "thing", "things")),
         _ if r["tests"]["status"] == "RAN" && r["tests"]["not_run"].as_array().is_some_and(|n| !n.is_empty()) => "Nothing unexpected in what ran; some packages' tests did not run".to_string(),
         _ if r["tests"]["status"] == "RAN" || r["tests"]["status"] == "NOTHING_TO_RUN" => "Nothing unexpected".to_string(),
         _ => "Nothing unexpected in the rules; the tests did not run".to_string(),
@@ -589,7 +698,7 @@ pub fn post(api: &Api, out: &Path, repository: &str, number: u64) -> R<Value> {
             },
         },
     };
-    let state = if r["decision"] == "clear" { "success" } else { "failure" };
+    let state = match r["decision"].as_str() { Some("clear") => "success", Some("unverified") => "error", _ => "failure" };
     status(api, repository, &head, state, &description(&r), url.as_deref())?;
     Ok(json!({ "status": posted, "state": state, "decision": r["decision"] }))
 }
@@ -614,9 +723,10 @@ pub fn approve(api: &Api, repository: &str, number: u64, login: &str, check: &dy
     if seal["head"] != head.as_str() { say("Kern: the receipt is for an older commit. Wait for Kern to check the newest one, then approve.")?; return Ok(json!({ "status": "STALE" })); }
     match seal["decision"].as_str() {
         Some("blocked") => { say("Kern: blocked items need a fix; an approval cannot clear them.")?; Ok(json!({ "status": "BLOCKED" })) }
-        Some("look") => {
+        Some(decision @ ("look" | "unverified")) => {
             status(api, repository, &head, "success", &format!("Approved by @{login}"), c["html_url"].as_str())?;
-            let note = format!("\n\n**Approved by @{login}** on {}: every item above was looked at.\n", iso8601(now_ms()));
+            let what = if decision == "look" { "every item above was looked at" } else { "Kern could not check every item above, and a maintainer accepts that" };
+            let note = format!("\n\n**Approved by @{login}** on {}: {what}.\n", iso8601(now_ms()));
             let updated = match body.rfind(SEAL_MARK) { Some(at) => format!("{}{note}
 {}", body[..at].trim_end(), &body[at..]), None => format!("{body}{note}") };
             api.patch(&format!("/repos/{repository}/issues/comments/{}", c["id"]), &json!({ "body": updated }))?;

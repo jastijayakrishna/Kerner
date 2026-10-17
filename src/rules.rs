@@ -314,7 +314,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                 None => not_checked.push(if p == real { json!({ "path": real, "why": e.0 }) } else { json!({ "path": real, "why": e.0, "code": "js" }) }),
             },
         }
-        if test || *op == "delete" { continue; }
+        if *op == "delete" { continue; }
         let before = match source(&old, p) { Some(s) if readable(&s) => crate::capability::env_names(p, &s), Some(_) => None, None => Some(BTreeSet::new()) };
         let fresh: Vec<String> = match (before, after) {
             (Some(_), Some(None)) => vec!["env:*".to_string()],
@@ -327,6 +327,16 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             Some(x) => { if let Some(a) = x["added"].as_array_mut() { a.extend(fresh.into_iter().map(Value::from)); } }
             None => powers.push(json!({ "path": real, "added": fresh })),
         }
+    }
+    for x in powers.iter_mut().filter(|x| x["path"].as_str().is_some_and(is_test)) {
+        let path = x["path"].as_str().unwrap_or("").to_string();
+        let Some(text) = source(&new, &path) else { continue };
+        let mut has: BTreeSet<String> = crate::capability::footprint(&path, &text).map(|caps| caps.into_iter().filter(|c| risky(c) && c != "process:env").collect()).unwrap_or_default();
+        match crate::capability::env_names(&path, &text) {
+            Some(names) => has.extend(names.into_iter().filter(|n| crate::capability::secret_name(n)).map(|n| format!("env:{n}"))),
+            None => { has.insert("env:*".to_string()); }
+        }
+        x["has"] = json!(has);
     }
     let package = new.get("package.json").and_then(|e| e.bytes.clone());
     let mut tests = match crate::suite::plan(package.as_deref()) {
@@ -470,7 +480,10 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let mut listed = BTreeSet::new();
     not_checked.retain(|x| listed.insert(x["path"].as_str().unwrap_or("").to_string()));
     let text_now = |p: &str| new.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok());
-    let protected: Vec<Value> = protected.into_iter().filter(|x| { let p = x["path"].as_str().unwrap_or(""); !quiet(p, text_now(p)) }).collect();
+    let unchanged = |x: &Value| x["path"].as_str().is_some_and(|p| (p.ends_with(".json") && json_of(&old, p).is_some_and(|a| json_of(&new, p).is_some_and(|b| a == b)))
+        || (is_code(p) && text(&old, p).zip(text(&new, p)).is_some_and(|(a, b)| crate::capability::same_program(p, &a, &b))));
+    let protected: Vec<Value> = protected.into_iter().filter(|x| { let p = x["path"].as_str().unwrap_or(""); !quiet(p, text_now(p)) && !unchanged(x) }).collect();
+    settings.retain(|x| !unchanged(x));
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))

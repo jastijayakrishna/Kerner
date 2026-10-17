@@ -60,8 +60,13 @@ Kern posts one comment, the receipt, and edits it on every push. It sets one sta
 | Answer | What it means | What you do |
 |---|---|---|
 | ✅ **Nothing unexpected** | Every test that passed before still passes, and nothing below was found | Merge as usual |
+| ⏭️ **Not verified** | Kern found nothing that needs a look, but it could not check part of the change: the tests could not run here, no test reaches the changed code, or a test failed in a way Kern could not prove or rule out. The receipt names each part and why | Decide whether that is acceptable. If it is, someone who can merge comments `/kern approve`. The status is an error, never green |
 | ⚠️ **Needs a look** | Something changed that the pull request may not mean | Look. If each item is meant, someone who can merge comments `/kern approve` |
 | ❌ **Blocked** | Something that worked before is broken, or the tests were made to pass instead of the code | Fix it. An approval cannot clear a block |
+
+A look always names what Kern found: code that runs, access that is granted, tests that check less, or something hidden. What Kern
+could not check is never a look; it is listed under **Not verified**. A change the pull request makes on purpose to a value an
+existing test expects is listed under **Notes**, with the value before and after, so a person can scan it in seconds.
 
 For example, from a real run on the demo repository:
 
@@ -84,11 +89,11 @@ What Kern checks on every pull request:
    blocks only when it fails in every run of the new code that included it (the whole suite, its file alone, the whole suite again) and
    passes in every run of the old code, including a second one. A failure that shows only when the whole suite runs, that does not repeat
    in every run, that sits in a file whose other tests passed and failed by chance, or that comes from the sandbox (no network, a missing
-   program or native module, a crashed process) needs a look; one that never repeats is called flaky. A test that stops running,
-   or is newly skipped, needs a look, checked the same way. Tests that already failed before the change are set aside, and so is a new
-   test that fails here with the same error as they do (the sandbox lacks something, not the change). A block needs proof from both
-   sides: a test file with no record of passing on the old code, or a failure on sides Kern could not set up the same way (installs,
-   Linux parts, a build step), needs a look instead. A project setting that stops
+   program or native module, a crashed process) is not verified: Kern says it cannot prove or rule out that the change broke it. One
+   that never repeats is called flaky and set aside. A test that stops running, or is newly skipped, needs a look, checked the same way.
+   Tests that already failed before the change are set aside, and so is a new test that fails here with the same error as they do (the
+   sandbox lacks something, not the change). A block needs proof from both sides: a test file with no record of passing on the old
+   code, or a failure on sides Kern could not set up the same way (installs, Linux parts, a build step), is not verified instead. A project setting that stops
    at the first failure or shuffles the order is turned off, so both sides run the whole suite in the same order. The old code's tests
    run first: when they cannot load because a package of the same repository was never built, or because the steps the test script
    names before its runner (`npm run build &&`, a `pre` script) did not run, Kern runs that build script or those steps as the test user
@@ -96,27 +101,35 @@ What Kern checks on every pull request:
    at once instead of running the new code too. A suite on course to take more than twice its time limit is stopped after a few minutes,
    and a suite too big for the limit is checked with the tests related to the change. When the change
    edits, or moves and edits, an existing test file, its snapshot, or a data file or helper the test names, Kern also runs the old
-   test, with its old data, on the new code (jest, vitest and mocha): a test whose old version now fails needs a look, because the
-   change rewrote what it expected. So does an edited test file whose old version Kern cannot run there (node's test runner, for
-   one), and an edited data file, helper or mock that no old test names. A test file the change only adds tests to needs no such run:
+   test, with its old data, on the new code (jest, vitest and mocha), and reads how the old version fails, with the values the old
+   test expected and the new code gave. When the old test expected the code to refuse something (to throw, to return an error status,
+   not to call something) and the new code accepts it, or a yes or no, a something or nothing, or the shape of the result changed, it
+   needs a look. When only a value moved (a string or a number, everything else the same), it is listed under Notes with both values,
+   unless the pull request says it changes no behaviour, which makes it a look. A failure Kern cannot read stays a look. When the old
+   test cannot even drive the new code (a mock lacks something the new code needs, a function it calls is gone), or Kern cannot run an
+   edited test file's old version there (node's test runner, for one), the change is not verified. An edited data file, helper or
+   mock that no old test names needs a look. A test file the change only adds tests to needs no such run:
    its old tests are still in it, unchanged, and ran on the new code. A new test that fails only for want of something the sandbox does
    not have (the network, a program or a native module) is listed as not checked.
 2. **Whether the tests check the change at all.** When the tests pass, Kern plants a few small faults in the lines the change touched
    (`>` turned into `>=`, a condition turned around, a call left out), one at a time, and runs the tests related to each file (jest and
    vitest). The fault is put in as the file is read, so nothing on disk is edited. A fault that makes a test fail that passed without it
    is caught. The receipt says how many were caught and names the lines where none was. When no test that runs here even loads a changed
-   file (its related tests cannot load, or there are none), that file needs a look and the Tests line has no ✅: the tests pass, but none
-   of them reaches that code. A fault that only puts back the old line, logging calls, and a run Kern could not finish are not counted.
+   file (its related tests cannot load, or there are none), that file is not verified, said plainly, and the Tests line has no ✅: the
+   tests pass, but none of them reaches that code. A fault that only puts back the old line, logging calls, and a run Kern could not finish are not counted.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both
-   sides got the same dependencies), and need a look otherwise. This works even when the tests cannot run.
+   sides got the same dependencies), and need a look when its scripts do not run `tsc`. When they are about something a build step may
+   generate, or the two sides got different dependencies, they are not verified. This works even when the tests cannot run.
 4. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
-5. **New powers.** Changed code that newly starts programs, reaches the network or runs `eval`, tests included, and changed code outside
-   the tests that newly reads secret environment variables (a name whose last word is a credential, such as `API_KEY` or `DB_PASSWORD`;
-   never one a framework builds into the page, such as `NEXT_PUBLIC_` or `VITE_`), needs a look. A power counts only when the code uses
+5. **New powers.** Changed code outside the tests that newly starts programs, reaches the network, runs `eval` or reads secret
+   environment variables (a name whose last word is a credential, such as `API_KEY` or `DB_PASSWORD`; never one a framework builds into
+   the page, such as `NEXT_PUBLIC_` or `VITE_`) needs a look. Tests run in the project's own CI, often next to its secrets, so a test
+   needs a look when it newly starts programs or runs `eval`, or when it can both read a secret (or the whole environment) and reach the
+   network, and one of those is new; a test that only calls `fetch`, or only sets `NODE_ENV`, does not. A power counts only when the code uses
    it: swapping `fetch` for a mock in a test, reading a class's name or checking that a value is a function is not one. Ordinary
    imports, such as a UI library, a project's own modules or a build tool's `virtual:` module, are not powers.
 6. **Files that steer everything else.** Files that run code or grant access: CI and container files, `CODEOWNERS`, renovate's config,
@@ -222,7 +235,8 @@ Next steps:
 - Kern does not prove that code is correct or well meant. A person still decides whether a change is good.
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
-  run (another runner, a failed install, no results, Kern's own environment failing), the answer needs a look and says why, never ✅. A
+  run (another runner, a failed install, no results, Kern's own environment failing), the answer is not verified and says why, never ✅;
+  the rules that need no test run still apply, so a look they find is still a look. A
   project with no test script, whose own test script finds no test files, or whose test script only prints a message, gets a receipt that covers the rules only and says so;
   changed code in other languages is listed as "not checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
@@ -237,7 +251,7 @@ Next steps:
   pull request after reading that summary.
 - Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
   could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code.
-- A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run and need a look, never passed or failed.
+- A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, and the answer is not verified, never passed or failed.
   Kern's own limits (time, memory, disk space, open files, a killed process, a broken report) never block.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).

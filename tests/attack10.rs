@@ -176,7 +176,7 @@ fn a_receipt_whose_tests_did_not_run_does_not_open_with_an_unqualified_pass() {
     let tests = json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json, at the root or in a package this change touches (Kern runs vitest, jest, mocha and node --test)" });
     let behaviour = json!({ "status": "RAN", "report": { "coverage": { "percent": 100, "new": { "ran": 4, "total": 4 }, "old": { "ran": 4, "total": 4 } } } });
     let r = receipt::build(&drive_json(), &rules_for(&[("src/total.js", "modify")]), &tests, &behaviour);
-    assert_eq!(r["decision"], "look", "the project's own tests did not run, so the answer is never a green check: {r}");
+    assert_eq!(r["decision"], "unverified", "the project's own tests did not run, so the answer is never a green check: {r}");
     let md = receipt::markdown(&r, None);
     assert!(!md.contains("### ✅ Kern: Nothing unexpected\n"),
         "the project's tests never ran (an ava project with an AI key), yet the receipt opens with the bare answer that README defines as 'every test that passed before still passes', while the Kern status for the same receipt says the tests did not run:\n{md}");

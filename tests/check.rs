@@ -62,12 +62,13 @@ fn a_seal_owns_only_its_tree_as_root_without_network_and_two_rights() {
 #[test]
 fn a_test_run_report_is_read_by_length() {
     let mut out = Vec::new();
-    for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("created", b"src/total.mjs"), ("ending", b"exit 1")] {
+    for (name, body) in [("output", &b"{\"stats\":{}}\n"[..]), ("errors", b""), ("behavior", b"exec:id\n"), ("created", b"src/total.mjs"), ("ending", b"exit 1"), ("values", b"{\"name\":\"adds\"}\n")] {
         out.extend(format!("{}{name} {}\n", sandbox::DRIVE_MARK, body.len()).as_bytes());
         out.extend(body);
     }
     let parts = sandbox::parts(&out, &sandbox::TEST_PARTS).unwrap();
     assert_eq!(parts["ending"], b"exit 1");
+    assert_eq!(parts["values"], b"{\"name\":\"adds\"}\n");
     assert_eq!(parts["behavior"], b"exec:id\n");
     assert_eq!(parts["created"], b"src/total.mjs");
     let mut forged = out.clone();
@@ -110,7 +111,7 @@ fn a_runner_that_found_no_tests_on_either_side_did_not_test_anything() {
     assert_eq!(c["status"], "NOT_RUN", "zero tests passing before and after is not a pass: {c}");
     assert!(c["why"].as_str().unwrap().contains("found no tests"), "{c}");
     let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
-    assert_eq!(r["decision"], "look", "{r}");
+    assert_eq!(r["decision"], "unverified", "Kern tested nothing, so it says it could not verify the change, not that it needs a look: {r}");
     assert!(receipt::markdown(&r, None).contains("found no tests"), "{r}");
 }
 
@@ -607,7 +608,7 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None);
     assert!(md.contains("✅ Tests: 12 that passed before still pass (vitest)") && !md.contains("now fail"), "{md}");
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
-    assert!(md.contains("needs a look") && md.contains("no test runner Kern can read") && md.contains("Not run"), "a receipt whose tests could not run asks for a look and says why:\n{md}");
+    assert!(md.contains("### ⏭️ Kern: Not verified") && md.contains("no test runner Kern can read") && md.contains("Not run"), "a receipt whose tests could not run says it is not verified, and why:\n{md}");
     let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &none, &off()), None);
     assert!(md.contains("in the rules it checked") && md.contains("no test script"), "a project with no tests gets a receipt that covers the rules only and says so:\n{md}");
@@ -735,6 +736,37 @@ fn approval_needs_write_access_a_signed_receipt_and_never_unblocks() {
     let (r, log) = run("maintain", "look", true);
     assert_eq!(r["status"], "APPROVED", "{r}");
     assert!(success(&log), "{log:?}");
+}
+
+#[test]
+fn a_receipt_kern_could_not_verify_is_never_green_and_a_maintainer_can_accept_it() {
+    let dir = receipt_dir(json!({ "status": "NOT_RUN", "why": "the test runner ran but found no tests on either side" }));
+    let (url, seen) = stub_github(|m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[]".into()),
+        ("POST", _) => (201, r#"{"id":5}"#.into()),
+        _ => (404, "{}".into()),
+    });
+    let out = receipt::post(&kern::github::Api::new(&url, "t").unwrap(), &dir.0, "acme/shop", 7).unwrap();
+    assert_eq!((out["state"].as_str(), out["decision"].as_str()), (Some("error"), Some("unverified")), "{out}");
+    let log = seen.lock().unwrap().clone();
+    let status = log.iter().find(|(m, p, _)| m == "POST" && p.contains("/statuses/")).expect("a status on the head");
+    assert!(status.2.contains("\"state\":\"error\"") && status.2.contains("Not verified") && !status.2.contains("success"), "{}", status.2);
+    let seal = json!({ "v": 1, "repository": "acme/shop", "pull": 7, "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "decision": "unverified", "receipt_sha256": "ab" });
+    let comments = json!([{ "id": 9, "user": { "login": "github-actions[bot]" }, "body": format!("<!-- kern-receipt -->\n### Kern\n{}", receipt::seal_line(&seal, "TOKEN")) }]).to_string();
+    let (url, seen) = stub_github(move |m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/repos/acme/shop/collaborators/maria/permission") => (200, r#"{"permission":"write"}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, comments.clone()),
+        ("POST", _) | ("PATCH", _) => (201, "{}".into()),
+        _ => (404, "{}".into()),
+    });
+    let check = |_seal: &Value, token: &str| -> R<()> { if token == "TOKEN" { Ok(()) } else { Err(Denied("signature".into())) } };
+    let r = receipt::approve(&kern::github::Api::new(&url, "t").unwrap(), "acme/shop", 7, "maria", &check).unwrap();
+    assert_eq!(r["status"], "APPROVED", "{r}");
+    let log = seen.lock().unwrap().clone();
+    assert!(log.iter().any(|(m, p, b)| m == "POST" && p.contains("/statuses/") && b.contains("\"state\":\"success\"")), "{log:?}");
+    assert!(log.iter().any(|(m, _, b)| m == "PATCH" && b.contains("could not check")), "the approval says what was accepted: {log:?}");
 }
 
 fn oidc_keys() -> Value { serde_json::from_str(include_str!("fixtures/oidc/jwks.json")).unwrap() }

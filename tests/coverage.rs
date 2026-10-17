@@ -266,8 +266,8 @@ fn tryghost_ghost_28552_changed_code_no_test_here_reaches_never_gets_a_check_mar
     let file = "ghost/core/core/shared/one-at-a-time.ts";
     let fault = |line: u64, outcome: &str| json!({ "path": file, "line": line, "what": "a condition turned around", "outcome": outcome });
     let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unreached"), fault(31, "untested"), fault(40, "unreached")])), &off());
-    assert_eq!(r["decision"], "look", "8 tests passed, but none of them loads the code this change edits: {r}");
-    assert!(r["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change" && x["what"].as_str().unwrap().contains(file)), "{}", r["look"]);
+    assert_eq!(r["decision"], "unverified", "8 tests passed, but none of them loads the code this change edits, so Kern says it could not verify it: {r}");
+    assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change" && x["what"].as_str().unwrap().contains(file)), "{}", r["unverified"]);
     let md = receipt::markdown(&r, None);
     assert!(!md.contains("✅ Tests") && md.contains("⚠️ Tests"), "{md}");
     for reached in ["caught", "missed"] {

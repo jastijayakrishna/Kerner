@@ -405,6 +405,22 @@ pub fn kept_name(path: &str, n: u32) -> Option<String> {
     let tag = if n == 0 { "kern-kept".to_string() } else { format!("kern-kept{n}") };
     Some(if dir.is_empty() { format!("{stem}.{tag}.{rest}") } else { format!("{dir}/{stem}.{tag}.{rest}") })
 }
+pub fn kept_back(path: &str) -> Option<String> {
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let (stem, rest) = name.split_once('.')?;
+    let rest = rest.strip_prefix("kern-kept")?.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix('.')?;
+    Some(if dir.is_empty() { format!("{stem}.{rest}") } else { format!("{dir}/{stem}.{rest}") })
+}
+pub fn polarity(found: &std::collections::BTreeMap<String, proof::Failure>, back: &dyn Fn(&str) -> Option<String>, wanted: &BTreeSet<String>) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for (k, f) in found {
+        let file = file_of(k);
+        let Some(key) = back(file).map(|o| format!("{o}{}", &k[file.len()..])).filter(|key| wanted.contains(key)) else { continue };
+        let r = crate::polarity::read(&f.message, f.expected.as_deref(), f.actual.as_deref());
+        out.insert(key, json!({ "kind": r.kind.name(), "was": r.was, "now": r.now, "why": proof::first_lines(&f.message) }));
+    }
+    out
+}
 fn snapshot_of(path: &str) -> String { path.rsplit_once('/').map_or_else(|| format!("__snapshots__/{path}.snap"), |(d, n)| format!("{d}/__snapshots__/{n}.snap")) }
 fn snapshot_owner(path: &str) -> Option<String> {
     let (dir, file) = path.strip_suffix(".snap")?.rsplit_once('/')?;
@@ -890,6 +906,7 @@ fn run_with(out: &Path, op: &Operator, (volume, files, limit): (&str, &std::coll
     };
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
+    if !parts["values"].is_empty() { std::fs::write(out.join(format!("tests-{label}.values")), &parts["values"])?; }
     if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", limit / 60)) }); }
     if let Some(why) = stopped_why(&String::from_utf8_lossy(&parts["ending"]), limit) { return Ok(if cut { Side::Late } else { Side::Slow(why) }); }
     if parts["ending"] == b"exit -1" { return Ok(Side::Cut("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
@@ -1167,6 +1184,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     merged.insert("uneven_why".into(), json!([]));
     merged.insert("faults".into(), json!([]));
     merged.insert("problem_why".into(), json!({}));
+    merged.insert("polarity".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
     let (mut late, mut dropped) = (false, BTreeSet::new());
@@ -1391,7 +1409,13 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         edited_unchecked.extend(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })));
         test_data.extend(keep.data.iter().map(|p| json!(p)));
-        if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(outcome.rewritten.iter().filter(|k| !failing.contains(k.as_str())).map(|k| json!(named(k)))); }
+        let wanted: BTreeSet<String> = outcome.rewritten.iter().filter(|k| !failing.contains(k.as_str())).cloned().collect();
+        if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(wanted.iter().map(|k| json!(named(k)))); }
+        if !wanted.is_empty() {
+            let kept = |kind: &str| std::fs::read(out.join(format!("tests-new-kept{label}.{kind}"))).unwrap_or_default();
+            let readings = polarity(&proof::failures(runner, &kept("out"), &kept("values")), &|f| keep.back.get(f).cloned(), &wanted);
+            if let Some(p) = merged.get_mut("polarity").and_then(Value::as_object_mut) { for (k, v) in readings { p.insert(named(&k), v); } }
+        }
         if let Some(u) = &uneven_why && ["broke", "new_problems"].iter().any(|l| c[*l].as_array().is_some_and(|a| !a.is_empty())) && let Some(a) = merged["uneven_why"].as_array_mut() {
             a.push(json!(u));
         }

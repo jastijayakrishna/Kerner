@@ -363,3 +363,45 @@ fn constructive_io_blocks_35_the_dependencies_line_says_what_made_each_move_rout
     let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests(), &off()), None);
     assert!(md.contains("✅ Dependencies") && md.contains("from this repository"), "a package of this repository is neither removed nor a release out for a week:\n{md}");
 }
+
+#[test]
+fn a_json_file_that_is_only_reformatted_changes_nothing_that_steers_the_project() {
+    let compact = r#"{"extends":["config:base"],"schedule":["before 6am"]}"#;
+    let pretty = "{\n  \"extends\": [\"config:base\"],\n  \"schedule\": [\"before 6am\"]\n}\n";
+    let rules = rules_for(&[("package.json", VITEST), ("renovate.json", compact)], &[("renovate.json", pretty)], &[]);
+    assert!(paths(&rules, "protected").is_empty(), "prettier reformatting renovate's config does nothing: {}", rules["protected"]);
+    let rules = rules_for(&[("package.json", VITEST), ("renovate.json", compact)], &[("renovate.json", r#"{"extends":["config:base"],"automerge":true}"#)], &[]);
+    assert_eq!(paths(&rules, "protected"), ["renovate.json"], "turning on automerge is a real change: {}", rules["protected"]);
+}
+
+#[test]
+fn a_runner_config_that_only_gains_a_comment_or_new_formatting_changes_nothing_the_tests_check() {
+    let config = "import { defineConfig } from 'vitest/config';\nexport default defineConfig({ test: { include: ['test/**/*.test.ts'] } });\n";
+    let commented = "import { defineConfig } from \"vitest/config\";\n\n// Unit tests only; e2e runs in its own job.\nexport default defineConfig({\n  test: {\n    include: [\"test/**/*.test.ts\"],\n  },\n});\n";
+    let rules = rules_for(&[("package.json", VITEST), ("vitest.config.ts", config)], &[("vitest.config.ts", commented)], &[]);
+    assert!(paths(&rules, "settings").is_empty(), "a comment and new quotes do not change which tests run: {}", rules["settings"]);
+    let narrowed = config.replace("test/**/*.test.ts", "test/unit/**/*.test.ts");
+    let rules = rules_for(&[("package.json", VITEST), ("vitest.config.ts", config)], &[("vitest.config.ts", &narrowed)], &[]);
+    assert_eq!(paths(&rules, "settings"), ["vitest.config.ts"], "narrowing what runs is a real change: {}", rules["settings"]);
+}
+
+fn power_of<'v>(rules: &'v Value, path: &str) -> Option<&'v Value> { rules["powers"].as_array().unwrap().iter().find(|p| p["path"] == path) }
+fn listed_caps(v: &Value, key: &str) -> Vec<String> { v[key].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::to_string)).collect() }
+
+#[test]
+fn tests_run_next_to_ci_secrets_so_one_that_reads_a_secret_and_reaches_the_network_is_a_look_and_one_that_only_fetches_is_quiet() {
+    let quiet = "import { test } from 'vitest';\ntest('x', async () => { await fetch('http://localhost:1/trace'); });\n";
+    let plain = "import { test } from 'vitest';\ntest('x', () => {});\n";
+    let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", plain)], &[("test/trace.test.ts", quiet)], &[]);
+    let p = power_of(&rules, "test/trace.test.ts").expect("the test gained fetch");
+    assert_eq!((listed_caps(p, "added"), listed_caps(p, "has")), (vec!["global:fetch".to_string()], vec!["global:fetch".to_string()]), "{p}");
+    assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())).is_empty(), "bassa01/google-cloud-mcp#61: a test that calls fetch and reads no secret cannot leak one");
+    let leaks = "import { test } from 'vitest';\ntest('x', async () => { await fetch('http://localhost:1/trace', { headers: { key: process.env.OPENAI_API_KEY } }); });\n";
+    let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", quiet)], &[("test/trace.test.ts", leaks)], &[]);
+    let p = power_of(&rules, "test/trace.test.ts").expect("the test now reads a secret");
+    assert!(listed_caps(p, "added").contains(&"env:OPENAI_API_KEY".to_string()) && listed_caps(p, "has").contains(&"global:fetch".to_string()), "{p}");
+    assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())), ["power"], "a test that reads a secret and can send it out runs in CI next to that secret");
+    let settings = "import { test } from 'vitest';\ntest('x', async () => { process.env.NODE_ENV = 'test'; await fetch('http://localhost:1/trace'); });\n";
+    let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", plain)], &[("test/trace.test.ts", settings)], &[]);
+    assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())).is_empty(), "NODE_ENV is a setting, not a secret: {}", rules["powers"]);
+}
