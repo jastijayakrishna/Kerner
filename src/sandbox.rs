@@ -891,11 +891,12 @@ mod inside {
     }
     const TEST_USER: u32 = 1000;
     const KERN_DIRS: [&str; 2] = [".kern-pnpm-store", ".kern-tools"];
-    fn read_only_dirs(path: &Path) {
+    pub fn read_only_tree(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
-        if !meta.is_dir() { return; }
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
-        for e in std::fs::read_dir(path).into_iter().flatten().flatten() { read_only_dirs(&e.path()); }
+        if !meta.is_dir() && !meta.is_file() { return; }
+        let wanted = if meta.is_dir() || meta.mode() & 0o111 != 0 { 0o755 } else { 0o644 };
+        if meta.mode() & 0o7777 != wanted { let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted)); }
+        if meta.is_dir() { for e in std::fs::read_dir(path).into_iter().flatten().flatten() { read_only_tree(&e.path()); } }
     }
     fn clear_added(path: &Path) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
@@ -964,7 +965,7 @@ mod inside {
         let playwright = if browsers { super::installed_versions(Path::new("/workspace"), &["playwright", "playwright-core"]) } else { Vec::new() };
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         lock_down(Path::new("/workspace"));
-        for d in KERN_DIRS { read_only_dirs(&Path::new("/workspace").join(d)); }
+        for d in KERN_DIRS { read_only_tree(&Path::new("/workspace").join(d)); }
         println!("{}", json!({ "version": 1, "installs": records, "browsers": playwright }));
         Ok(())
     }
@@ -1251,3 +1252,5 @@ mod inside {
     pub fn drive_seal() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
 }
 pub use inside::{drive, drive_seal, drive_setup, drive_test, exec, mutate, runner, setup};
+#[cfg(unix)]
+pub use inside::read_only_tree;

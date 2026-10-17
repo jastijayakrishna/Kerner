@@ -123,6 +123,26 @@ fn webpack_22695_and_vercel_workflow_3052_temporary_files_live_on_disk_outside_t
     assert!(args.iter().any(|a| a.starts_with("/tmp:rw,noexec,nosuid,nodev,size=67108864")) && !args.iter().any(|a| a.ends_with("target=/tmp")), "other runs keep a small /tmp in memory: {args:?}");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pnpm_12_project_calls_pnpm_in_its_tests_through_files_kern_copied_as_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Temp::new();
+    let home = t.0.join("corepack-home/v1/pnpm/12.14.0");
+    std::fs::create_dir_all(&home).unwrap();
+    for (name, mode) in [("pnpm-native", 0o700), ("package.json", 0o600), ("pn", 0o555), ("README.md", 0o444)] {
+        std::fs::write(home.join(name), b"x").unwrap();
+        std::fs::set_permissions(home.join(name), std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    kern::sandbox::read_only_tree(&t.0);
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    for (name, want) in [("pnpm-native", 0o755), ("package.json", 0o644), ("pn", 0o755), ("README.md", 0o644)] {
+        assert_eq!(mode(&home.join(name)), want, "{name}: the tests run as another user than the root that copied Kern's tools, so each file must be readable and, if it was a program, runnable");
+    }
+    assert_eq!(mode(&home), 0o755);
+}
+
 #[test]
 fn the_package_manager_the_project_installs_with_is_on_the_path_when_its_tests_run() {
     let shim = kern::sandbox::shim(&["/usr/local/bin/node".to_string(), "/workspace/.kern-tools/corepack/node_modules/corepack/dist/corepack.js".to_string(), "pnpm".to_string()]);
