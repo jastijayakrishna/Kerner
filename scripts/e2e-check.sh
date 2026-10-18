@@ -579,7 +579,7 @@ for runner in vitest jest; do
   grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
 done
 
-say "A change that brings TypeScript errors to a project that type-checked clean is blocked, even when its tests still pass"
+say "TypeScript errors without fresh confirmation are not verified, even when the tests still pass"
 git init -q typesrepo && cd typesrepo
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p src test

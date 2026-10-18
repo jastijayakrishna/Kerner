@@ -592,5 +592,1222 @@
       "path": "target/counterexample-validation/source-preflight.json",
       "sha256": "32ccafda8838335fdd3fd320daa9309458ae7daf1d909febe964ab1ca0be59d9"
     }
-  ]
+  ],
+  "synthetic_linux_verification": {
+    "scope": "Supplied fixture inputs; no model invocation or real-PR detection result",
+    "source_run": 39138448690,
+    "source_commit": "bfe9091b25539c09b6ac6a6660492e4388e28d2c",
+    "workflow_conclusion": "cancelled during existing end-to-end checks; these fixture results completed earlier",
+    "rows": [
+      {
+        "runtime": "runc",
+        "fixture": "result-1",
+        "kind": "planted regression",
+        "arms": [
+          {
+            "arm": "baseline",
+            "seconds": 9.564004742,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          },
+          {
+            "arm": "hunter",
+            "seconds": 11.108279687,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": true,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Failed",
+                  "Failed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": null
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "runtime": "runc",
+        "fixture": "result-2",
+        "kind": "equivalent edit",
+        "arms": [
+          {
+            "arm": "baseline",
+            "seconds": 6.558707074,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          },
+          {
+            "arm": "hunter",
+            "seconds": 8.131626887,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "runtime": "runsc",
+        "fixture": "result-1",
+        "kind": "planted regression",
+        "arms": [
+          {
+            "arm": "hunter",
+            "seconds": 17.421573624,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": true,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Failed",
+                  "Failed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": null
+              }
+            ]
+          },
+          {
+            "arm": "baseline",
+            "seconds": 13.798713038999999,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "runtime": "runsc",
+        "fixture": "result-2",
+        "kind": "equivalent edit",
+        "arms": [
+          {
+            "arm": "hunter",
+            "seconds": 9.597619802,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          },
+          {
+            "arm": "baseline",
+            "seconds": 10.182197242,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "artifact_sha256": {
+      "runc": "581b9b7e2597ac72dd8393cb458bbda53091d8ec683282194ab6133236f62bb0",
+      "runsc": "862b96147083e823cc168b0156a336ebfd5d300565772212656b4dc3744c7952"
+    }
+  },
+  "final_local_verification": {
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_INCREMENTAL": "0",
+      "KERN_CONTAINER_CLI": "kern-validation-no-container"
+    },
+    "rust": {
+      "command": "cargo test --locked --offline --no-fail-fast",
+      "exit_code": 0,
+      "groups": 40,
+      "passed": 620,
+      "failed": 0,
+      "ignored": 1
+    },
+    "clippy": {
+      "command": "cargo clippy --locked --offline --all-targets -- -D warnings",
+      "exit_code": 0
+    },
+    "python": {
+      "command": "python -m unittest discover -s experiments/counterexample -p 'test_*.py' -q",
+      "exit_code": 0,
+      "passed": 18,
+      "scope": "Includes later failure-measurement regressions; not a live inference retry",
+      "source_scope": "Later operator-client failure/cost diagnostic follow-up; verified locally, with no additional provider call",
+      "working_tree_source_sha256": {
+        "experiments\\counterexample\\hunter.py": "f4b8e960de1a40f802b7b373d68e03320906e23b78997c43e8869cdc5844bf05",
+        "experiments\\counterexample\\test_hunter.py": "fc42a12e80c7f3635a61dc49f0b35e817009dcc4a89ea819a4da5fa12f705f1c"
+      }
+    },
+    "high_exit_regression": {
+      "before_cargo_exit_code": 101,
+      "after_rebuilt_test_binary_exit_code": 0,
+      "covered_exit_codes": [
+        128,
+        255
+      ]
+    },
+    "raw_log_sha256": {
+      "final-rust.log": "94c1aef397a6e9c264ef59baa6846468982e2439c0e849d61346c6819538bc9e",
+      "final-clippy.log": "87c08e9d58e5b1cd749a42e4651c154ba1a7710da521014e37387a09a128523e",
+      "signal-before.log": "e7ac40b50e307020998f6629fce2a25ac84d639afa01e357219e7d8d0f996c3f",
+      "signal-after.log": "6e98b913365e5ada24f0f307c63e400901ddb9c57110c0d9b452241ff1ca5c64",
+      "final-rust-v3.log": "4277db82546bc739e2d6780398618e962f0d97eff0ea067518632a08680ce1c5",
+      "final-clippy-v3.log": "efaa063d8e0d70ff5d6df75a1052409adf07e5553db177b3d301571535c67847",
+      "export-depth-before.log": "0dd9e4c8184bebc0b67edc032d0a1a3c7b903023a30530de4789bfc7a712c850",
+      "export-depth-after.log": "91bd6c70e8d6a0cfbe80c59cb10a6ae8665b60b979a5f9c3d2ac32d33c9ba203",
+      "setup-conflict-before.log": "7a721eb211cc896e0eb941b28f3d0ff4577d08bbfaff17763dee6603c160a32b",
+      "setup-conflict-after.log": "dd970dd643571b1bcebbb7ad427e73f85af66e0a25850c83117ba4d19fe97d25",
+      "client-metrics-before.log": "8c8c018bbbb2ab3780d197cced4922f1309526a903cceb9e5b24efb7257e35ae",
+      "client-metrics-after.log": "4243e8c49fafdaf06a48df8c8ba5390eec87f043e774b1aed71b6f9b9c9f1830",
+      "client-metrics-final.log": "bc0e766a34bd3cba959361cb761cb245f2847c216f1129516273f5b205c9c280"
+    },
+    "additional_regressions": {
+      "export_depth_before": 101,
+      "affected_tests_after": {
+        "passed": 84,
+        "exit_code": 0
+      },
+      "setup_summary_conflict_before": 101,
+      "receipt_tests_after": {
+        "passed": 27,
+        "exit_code": 0
+      },
+      "client_measurement_before": 1,
+      "client_measurement_after": 0
+    },
+    "rust_source_commit": "74df39645784c59acd28dbf2a8b68d8891912c09",
+    "shell_syntax": {
+      "command": "C:\\Program Files\\Git\\bin\\bash.exe -n scripts/e2e-check.sh",
+      "exit_code": 0,
+      "scope": "Progress-message-only follow-up; no script command executed"
+    }
+  },
+  "final_linux_verification": {
+    "source_commit": "74df39645784c59acd28dbf2a8b68d8891912c09",
+    "run_id": 39141556731,
+    "rust": {
+      "command": "cargo test --locked --no-fail-fast",
+      "exit_code": 0,
+      "passed": 625,
+      "failed": 0,
+      "ignored": 1
+    },
+    "clippy": {
+      "command": "cargo clippy --locked --all-targets -- -D warnings",
+      "exit_code": 0
+    },
+    "python_at_ci_revision": {
+      "passed": 16,
+      "exit_code": 0
+    },
+    "musl_release_build_exit_code": 0,
+    "e2e_commands": {
+      "runc": "E2E_RUNTIME=runc KERN_BIN=$PWD/bin/kern sh scripts/e2e-check.sh",
+      "runsc": "E2E_RUNTIME=runsc KERN_BIN=$PWD/bin/kern sh scripts/e2e-check.sh"
+    },
+    "e2e_exit_codes": {
+      "runc": 0,
+      "runsc": 0
+    },
+    "qualification_exit_code": 2,
+    "qualification_why": "Zero eligible paired real-PR trials",
+    "structural_fixtures": [
+      {
+        "runtime": "runc",
+        "fixture": 1,
+        "kind": "planted regression",
+        "arms": [
+          {
+            "arm": "hunter",
+            "seconds": 11.019880965999999,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": true,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Failed",
+                  "Failed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": null
+              }
+            ]
+          },
+          {
+            "arm": "baseline",
+            "seconds": 9.501422254,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "runtime": "runc",
+        "fixture": 2,
+        "kind": "equivalent edit",
+        "arms": [
+          {
+            "arm": "hunter",
+            "seconds": 7.9792820639999995,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          },
+          {
+            "arm": "baseline",
+            "seconds": 6.473021694,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "runtime": "runsc",
+        "fixture": 1,
+        "kind": "planted regression",
+        "arms": [
+          {
+            "arm": "baseline",
+            "seconds": 13.401281888,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          },
+          {
+            "arm": "hunter",
+            "seconds": 15.016587303,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": true,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Failed",
+                  "Failed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": null
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "runtime": "runsc",
+        "fixture": 2,
+        "kind": "equivalent edit",
+        "arms": [
+          {
+            "arm": "baseline",
+            "seconds": 9.426562372,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          },
+          {
+            "arm": "hunter",
+            "seconds": 11.090864966,
+            "within_budget": true,
+            "errors": [],
+            "judgments": [
+              {
+                "case": 0,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              },
+              {
+                "case": 1,
+                "confirmed": false,
+                "contract": "deny-parent",
+                "input": "../../secret",
+                "new": [
+                  "Passed",
+                  "Passed"
+                ],
+                "old": [
+                  "Passed",
+                  "Passed"
+                ],
+                "uneven": false,
+                "why": "unsteady"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "artifact_sha256": {
+      "final-structural-runc": "4c34046b0c822a76e78919a6e64794e51b05b1740f06f7f00ad328d31c1955cc",
+      "final-structural-runsc": "8687356bac0444eb23c52d26d57893f86e7f37512941721c848d9f339fa2e858",
+      "final-validation-report": "ef4b77cc5e5d4bc641df9d7450c4805785aa361a1e7a58c08f8243b7a728dc7f"
+    },
+    "all_pr_report": {
+      "version": 1,
+      "cohort_sha256": "8ae145ea31b3dadaed5ae8f71c169c6e51f7322f7fc1e18861b610acdb75d11e",
+      "summary": {
+        "selected_prs": 6,
+        "repositories": 6,
+        "invalid_artifacts": [],
+        "baseline": {
+          "denominator": 6,
+          "run_prs": 0,
+          "unsupported_prs": 6,
+          "confirmed_candidates": 0,
+          "adjudicated_prs": 0,
+          "median_seconds": null,
+          "p90_seconds": null,
+          "cost_known_prs": 6
+        },
+        "hunter": {
+          "denominator": 6,
+          "run_prs": 0,
+          "unsupported_prs": 6,
+          "confirmed_candidates": 0,
+          "adjudicated_prs": 0,
+          "median_seconds": null,
+          "p90_seconds": null,
+          "cost_known_prs": 0
+        },
+        "by_split": {
+          "development": {
+            "baseline": {
+              "denominator": 2,
+              "run_prs": 0,
+              "unsupported_prs": 2
+            },
+            "hunter": {
+              "denominator": 2,
+              "run_prs": 0,
+              "unsupported_prs": 2
+            }
+          },
+          "holdout": {
+            "baseline": {
+              "denominator": 4,
+              "run_prs": 0,
+              "unsupported_prs": 4
+            },
+            "hunter": {
+              "denominator": 4,
+              "run_prs": 0,
+              "unsupported_prs": 4
+            }
+          }
+        },
+        "paired_prs": 0,
+        "eligible_paired_prs": 0
+      },
+      "rows": [
+        {
+          "key": "muchu-dev/michinavi#46",
+          "split": "development",
+          "arm": "baseline",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": 0,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "muchu-dev/michinavi#46",
+          "split": "development",
+          "arm": "hunter",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": null,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "oxyhq/oxy#490",
+          "split": "development",
+          "arm": "baseline",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": 0,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "oxyhq/oxy#490",
+          "split": "development",
+          "arm": "hunter",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": null,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "troyrhodes02/sightline#88",
+          "split": "holdout",
+          "arm": "baseline",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": 0,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "troyrhodes02/sightline#88",
+          "split": "holdout",
+          "arm": "hunter",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": null,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "abhishek21lift-oss/619-erp-frontend#28",
+          "split": "holdout",
+          "arm": "baseline",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": 0,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "abhishek21lift-oss/619-erp-frontend#28",
+          "split": "holdout",
+          "arm": "hunter",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": null,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "dasch-swiss/dsp-app#3384",
+          "split": "holdout",
+          "arm": "baseline",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": 0,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "dasch-swiss/dsp-app#3384",
+          "split": "holdout",
+          "arm": "hunter",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": null,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "ronancodes/smart-cart#431",
+          "split": "holdout",
+          "arm": "baseline",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": 0,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        },
+        {
+          "key": "ronancodes/smart-cart#431",
+          "split": "holdout",
+          "arm": "hunter",
+          "status": "not_run",
+          "confirmed_candidates": 0,
+          "confirmed_violations": null,
+          "wrong_blocks": null,
+          "review_items": null,
+          "core_review_items": null,
+          "probe_review_items": null,
+          "review_minutes": null,
+          "unsupported_probes": null,
+          "unsupported_pr": true,
+          "seconds": null,
+          "fetch_seconds": null,
+          "model_seconds": null,
+          "end_to_end_seconds": null,
+          "model_cost_usd": null,
+          "infrastructure_cost_usd": null,
+          "errors": [
+            "No independently approved contract pack and frozen hunter response"
+          ]
+        }
+      ],
+      "paired": [],
+      "claim": "No superiority claim is supported until both arms and independent adjudication are complete."
+    }
+  },
+  "development_calibration": {
+    "scope": "Additional development-only operational calibration, not a replacement holdout or accepted paired trial",
+    "cohort": {
+      "version": 1,
+      "parent_cohort_sha256": "c675348049ce3c40d3309a17cb8ed0cdddd13cc479dae2cd80ad01c1c2e5f2fb",
+      "scope": "Additional development feasibility calibration; not a holdout result and not a replacement for the six-PR pilot",
+      "selection": "Development repository library; key selected by fixed development-contract-feasibility-v1 hash order; target selected by changed paths only before viewing patches",
+      "rows": [
+        {
+          "repo": "andyshinn/meshcore-ts",
+          "number": 15,
+          "base_sha": "2f419322af285801637c4c40244ae5141fc5f19b",
+          "head_sha": "2be2596acdc8bf55f225eda2a5eb0c79967d95e7",
+          "merge_base": "2f419322af285801637c4c40244ae5141fc5f19b",
+          "key": "andyshinn/meshcore-ts#15",
+          "split": "development"
+        }
+      ]
+    },
+    "frozen_contract": {
+      "version": 1,
+      "repository": "andyshinn/meshcore-ts",
+      "number": 15,
+      "base": "2f419322af285801637c4c40244ae5141fc5f19b",
+      "head": "2be2596acdc8bf55f225eda2a5eb0c79967d95e7",
+      "approved_by": "Base-only operator review of the documented wire/API contract before head source; intent adjudication remains required",
+      "contracts": [
+        {
+          "id": "repeat-frequency-wire",
+          "kind": "api",
+          "source": "src/features/misc.ts",
+          "source_sha256": "deeff4fff06a0e6fea46e1e6fe85d8276225259b3ca952cbdccf8e6138a90dbe",
+          "input_domain": {
+            "type": "json",
+            "description": "JSON containing ranges and tail. The trusted harness accepts at most eight ordered inclusive uint32 kHz ranges (lower<=upper) and up to seven trailing bytes; malformed inputs are unsupported. Decode the documented 0x1a + N*[lower uint32 LE,upper uint32 LE] layout into the same kHz values; ignore trailing partial bytes."
+          },
+          "command": [
+            "/workspace/node_modules/.bin/tsx",
+            "--eval",
+            "import {Buffer} from 'node:buffer';import {decodeAllowedRepeatFreq} from './src/features/misc.ts';const input=JSON.parse(process.argv[1]);const uint=n=>Number.isInteger(n)&&n>=0&&n<=4294967295;if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).sort().join(',')!=='ranges,tail'||!Array.isArray(input.ranges)||input.ranges.length>8||!input.ranges.every(r=>Array.isArray(r)&&r.length===2&&r.every(uint)&&r[0]<=r[1])||!Array.isArray(input.tail)||input.tail.length>7||!input.tail.every(n=>Number.isInteger(n)&&n>=0&&n<=255))process.exit(78);const frame=Buffer.alloc(1+8*input.ranges.length+input.tail.length);frame[0]=0x1a;input.ranges.forEach((r,i)=>{frame.writeUInt32LE(r[0],1+i*8);frame.writeUInt32LE(r[1],5+i*8)});Buffer.from(input.tail).copy(frame,1+8*input.ranges.length);const actual=decodeAllowedRepeatFreq(frame);const ok=Array.isArray(actual)&&actual.length===input.ranges.length&&actual.every((r,i)=>r!=null&&r.lowerKhz===input.ranges[i][0]&&r.upperKhz===input.ranges[i][1]);process.stdout.write(JSON.stringify(ok));"
+          ],
+          "oracle": {
+            "mode": "json-equal",
+            "expected": true
+          },
+          "baseline_inputs": [
+            {
+              "ranges": [],
+              "tail": []
+            },
+            {
+              "ranges": [
+                [
+                  0,
+                  0
+                ]
+              ],
+              "tail": [
+                255
+              ]
+            },
+            {
+              "ranges": [
+                [
+                  433000,
+                  433000
+                ],
+                [
+                  869495,
+                  918000
+                ]
+              ],
+              "tail": []
+            },
+            {
+              "ranges": [
+                [
+                  0,
+                  4294967295
+                ]
+              ],
+              "tail": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "freeze": {
+      "pack_sha256": "f415cb2df9fcffc63be03563ff906a5434d0682cbc119d49e7998496c9c44341",
+      "base_source_sha256": "deeff4fff06a0e6fea46e1e6fe85d8276225259b3ca952cbdccf8e6138a90dbe",
+      "head_implementation_read": false,
+      "source_url": "https://raw.githubusercontent.com/andyshinn/meshcore-ts/2f419322af285801637c4c40244ae5141fc5f19b/src/features/misc.ts",
+      "scope": "Documented pre-change decoder wire contract, not an inferred new assertion"
+    },
+    "prompt_bytes": 15408,
+    "adapter_status": {
+      "status": "unsupported",
+      "error_type": "ConfigurationError",
+      "why": "The CLI used an unexpected model, extra turn or error path; stop this configuration",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 22.452999999994063
+    },
+    "cli_invocations": 1,
+    "accepted_responses": 0,
+    "provider_request_count": null,
+    "billed_cost_usd": null,
+    "sanitized_transcript_audit": {
+      "scope": "Sanitized metadata from transcripts matching this invocation temp-directory prefix and time window; no credentials or unrelated transcripts read",
+      "matching_directories": 1,
+      "rows": [
+        {
+          "models": [
+            "claude-sonnet-4-6"
+          ],
+          "assistant_messages": 1,
+          "user_messages": 1,
+          "contract_in_user_messages": true,
+          "tool_names": [],
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 682,
+            "cache_creation_input_tokens": 5786,
+            "cache_read_input_tokens": 0
+          },
+          "sidechain": false
+        },
+        {
+          "models": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "assistant_messages": 1,
+          "user_messages": 0,
+          "contract_in_user_messages": false,
+          "tool_names": [],
+          "usage": {
+            "input_tokens": 2216,
+            "output_tokens": 181,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "sidechain": true
+        },
+        {
+          "models": [
+            "claude-opus-4-5-20251101"
+          ],
+          "assistant_messages": 1,
+          "user_messages": 0,
+          "contract_in_user_messages": false,
+          "tool_names": [],
+          "usage": {
+            "input_tokens": 2403,
+            "output_tokens": 606,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "sidechain": true
+        }
+      ],
+      "trial_valid": false,
+      "why": "CLI output failed the frozen configuration checks; do not accept its generated response"
+    },
+    "oracle_review": {
+      "status": "needs independent decision",
+      "why": "The head explicitly introduces zero-bound sentinels. The base comment alone does not establish that zero is a valid range that must remain valid. No historical mismatch is labeled a confirmed product violation."
+    },
+    "project_execution": "Not run; client configuration invalid and oracle domain disputed"
+  }
 }

@@ -1,7 +1,9 @@
 import hashlib
 import json
+import math
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import shutil
@@ -20,7 +22,9 @@ CLI_SHA256 = CONFIGURATION["cli_sha256"]
 
 
 class ConfigurationError(ValueError):
-    pass
+    def __init__(self, message, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def request_body(pack, bundle):
@@ -72,6 +76,21 @@ def decode(pack, body, response):
         "input_tokens": count("input_tokens"), "output_tokens": count("output_tokens"), "cost_usd": None, "proposals": groups}
 
 
+def client_measurements(value):
+    models = value.get("modelUsage", {})
+    names = sorted(models)[:16] if isinstance(models, dict) else []
+    names = [n if re.fullmatch(r"claude-(sonnet|haiku|opus)-[0-9-]{1,40}", n) else "<unrecognized-model>" for n in names]
+    usage = value.get("usage", {})
+    counts = {k: usage[k] for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        if isinstance(usage, dict) and type(usage.get(k)) is int and usage[k] >= 0}
+    cost = value.get("total_cost_usd")
+    cost = cost if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 else None
+    turns = value.get("num_turns")
+    return {"models": names, "num_turns": turns if type(turns) is int and turns >= 0 else None,
+        "is_error": value.get("is_error") if type(value.get("is_error")) is bool else None,
+        "usage": counts, "estimated_cost_usd": cost}
+
+
 def cli_infer(body):
     script = pathlib.Path(os.environ.get("APPDATA", "")) / "npm/node_modules/@anthropic-ai/claude-code/cli.js"
     if not script.is_file() or hashlib.sha256(script.read_bytes()).hexdigest() != CLI_SHA256:
@@ -86,16 +105,23 @@ def cli_infer(body):
         env["GIT_CEILING_DIRECTORIES"] = cwd
         result = subprocess.run(command, input=body["messages"][0]["content"], text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             cwd=cwd, env=env, timeout=CALL_SECS_MAX)
-    if result.returncode != 0 or len(result.stdout.encode()) > RESPONSE_BYTES_MAX:
-        raise ValueError("The isolated CLI failed or exceeded its output budget")
-    value = json.loads(result.stdout)
-    if value.get("is_error") is not False or value.get("num_turns") != 1 or set(value.get("modelUsage", {})) != {MODEL}:
-        raise ConfigurationError("The CLI used an unexpected model, extra turn or error path; stop this configuration")
-    cost = value.get("total_cost_usd")
-    if isinstance(cost, (int, float)) and cost > .5:
-        raise ConfigurationError("The CLI exceeded its per-call cost ceiling; stop this configuration")
-    return {"model": MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": value["result"]}], "usage": value.get("usage", {}),
-        "cli_sha256": CLI_SHA256, "client": "claude-code-2.0.55", "estimated_cost_usd": value.get("total_cost_usd")}
+    if len(result.stdout.encode()) > RESPONSE_BYTES_MAX:
+        raise ConfigurationError("The isolated CLI exceeded its output budget")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise ConfigurationError("The CLI returned malformed result JSON") from None
+    if not isinstance(value, dict):
+        raise ConfigurationError("The CLI returned no result object")
+    diagnostics = client_measurements(value)
+    models = value.get("modelUsage")
+    if result.returncode != 0 or value.get("is_error") is not False or type(value.get("num_turns")) is not int or value["num_turns"] != 1 or not isinstance(models, dict) or set(models) != {MODEL} or not isinstance(value.get("result"), str):
+        raise ConfigurationError("The CLI used an unexpected model, extra turn or error path; stop this configuration", diagnostics)
+    cost = diagnostics["estimated_cost_usd"]
+    if value.get("total_cost_usd") is not None and (cost is None or cost > .5):
+        raise ConfigurationError("The CLI returned invalid cost evidence or exceeded its estimated cost ceiling; stop this configuration", diagnostics)
+    return {"model": MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": value["result"]}], "usage": diagnostics["usage"],
+        "cli_sha256": CLI_SHA256, "client": "claude-code-2.0.55", "estimated_cost_usd": cost}
 
 
 def run(cohort, bundles, packs, output, backend="cli"):
@@ -124,7 +150,6 @@ def run(cohort, bundles, packs, output, backend="cli"):
             if time.monotonic() - start > CALL_SECS_MAX:
                 raise ValueError("The model call exceeded its budget; response is retained but does not count")
             proposal = decode(pack, body, response)
-            proposal["cost_usd"] = response.get("estimated_cost_usd")
             proposal["model"] = f"{MODEL}/claude-code-2.0.55/{CLI_SHA256[:12]}"
             write(case / "proposals.json", proposal)
             status = {"status": "proposed", "model": MODEL, "usage": response.get("usage"), "cost_usd": None}
@@ -132,7 +157,11 @@ def run(cohort, bundles, packs, output, backend="cli"):
             if isinstance(error, ConfigurationError):
                 stopped = True
             status = {"status": "unsupported", "error_type": type(error).__name__, "why": str(error)[:400]}
-        status["usage"] = response.get("usage") if isinstance(response, dict) else None
+            if isinstance(error, ConfigurationError) and error.diagnostics is not None:
+                status["client_diagnostics"] = error.diagnostics
+                write(case / "client-diagnostics.json", error.diagnostics)
+        status["usage"] = response.get("usage") if isinstance(response, dict) else status.get("client_diagnostics", {}).get("usage")
+        status["estimated_cost_usd"] = response.get("estimated_cost_usd") if isinstance(response, dict) else status.get("client_diagnostics", {}).get("estimated_cost_usd")
         status["cost_usd"] = None
         status["backend"] = backend
         status["seconds"] = time.monotonic() - start

@@ -34,6 +34,8 @@ The hunter chooses inputs; trusted contracts and Kern decide whether observation
 
 The separate contract authoring step costs effort and limits coverage. That is an observable product limitation. Automatically inferring normative requirements is deferred. Type failures without fresh confirmation are demoted, not given a fabricated confirmation bit. Production twin-runtime redesign, remediation, hosted services and general correctness claims are outside this milestone.
 
+The first CLI calibration failed its single-model boundary; its outputs are excluded. Caller flags and a client-source pin do not establish the absence of auxiliary inference. The frozen configuration is retained as failed evidence, not relaxed to accept the observed extra models. The documented decoder calibration also exposed disputed input validity around zero-valued sentinels. Resolve the oracle's authority/domain before treating a difference as a bug.
+
 ## Verification and stopping
 
 Run regression tests before repairs, then full Rust tests and clippy with four build jobs. Compile the experimental worker and verify negative proposal/oracle cases. Run sandbox integration in Linux CI in both modes required by repository policy. Keep the cohort, protocol, contracts, proposals, raw observations and evaluation separately hashed. Stop expansion on a confirmed wrong block, an oracle change after holdout exposure, leakage, missing isolation, or a budget overrun; retain failed rows and artifacts.

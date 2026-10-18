@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from hunter import CALL_SECS_MAX, MODEL, cli_infer, decode, request_body
+from hunter import CALL_SECS_MAX, MODEL, ConfigurationError, cli_infer, decode, request_body, run
 
 
 class HunterTests(unittest.TestCase):
@@ -78,6 +78,38 @@ class HunterTests(unittest.TestCase):
                         cli_infer(self.body)
                     self.assertEqual(call.call_count, 1)
                     self.assertEqual(call.call_args.kwargs["timeout"], CALL_SECS_MAX)
+
+    def test_rejected_client_response_keeps_measurements_without_response_text(self):
+        with tempfile.TemporaryDirectory() as root:
+            script = pathlib.Path(root) / "npm/node_modules/@anthropic-ai/claude-code/cli.js"
+            script.parent.mkdir(parents=True)
+            script.write_text("inert fixture; never executed")
+            reply = {"is_error": False, "num_turns": 1, "modelUsage": {MODEL: {}, "claude-haiku-4-5-20251001": {}},
+                "result": "DO_NOT_RETAIN_RESPONSE_TEXT", "total_cost_usd": .03, "usage": {"input_tokens": 10, "output_tokens": 5}}
+            with patch("hunter.os.environ", {"APPDATA": root}), patch("hunter.CLI_SHA256", hashlib.sha256(script.read_bytes()).hexdigest()), patch("hunter.shutil.which", return_value="trusted-node"):
+                with patch("hunter.subprocess.run", return_value=subprocess.CompletedProcess([], 0, json.dumps(reply))):
+                    with self.assertRaises(ConfigurationError) as raised:
+                        cli_infer(self.body)
+            metadata = raised.exception.diagnostics
+            self.assertEqual(metadata["usage"], reply["usage"])
+            self.assertEqual(metadata["estimated_cost_usd"], .03)
+            self.assertIn("claude-haiku-4-5-20251001", metadata["models"])
+            self.assertNotIn("DO_NOT_RETAIN_RESPONSE_TEXT", json.dumps(metadata))
+
+    def test_client_estimate_never_becomes_a_claim_about_billed_cost(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            for folder, value in (("packs", self.pack), ("bundles", self.bundle)):
+                (root / folder).mkdir()
+                (root / folder / "example__project__1.json").write_text(json.dumps(value))
+            cohort = root / "cohort.json"
+            cohort.write_text(json.dumps({"rows": [{"repo": "example/project", "number": 1}]}))
+            response = dict(self.response, estimated_cost_usd=.03)
+            with patch("hunter.cli_infer", return_value=response):
+                run(cohort, root / "bundles", root / "packs", root / "output")
+            case = root / "output/example__project__1"
+            self.assertIsNone(json.loads((case / "proposals.json").read_text())["cost_usd"])
+            self.assertEqual(json.loads((case / "provider-response.json").read_text())["estimated_cost_usd"], .03)
 
 
 if __name__ == "__main__":
