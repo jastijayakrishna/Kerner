@@ -128,11 +128,12 @@ What Kern checks on every pull request:
    with why (another test runner, no related tests it could pick, only comments, formatting, logging or TypeScript types changed, or its
    limit of 23 faults in 20 files per check). When no test that runs here even loads a changed file (its related tests cannot load, or
    there are none), that file is not verified, said plainly. A small fault that only puts back the old line, logging calls, and a run Kern
-   could not finish are not counted. Then Kern watches what the changed code gives the tests this change does not touch: it rewrites each
-   changed file so that its exported functions note every input and answer, runs those tests (up to 40 files) on the old code twice and on
-   the new code once, sets aside any input whose answer differs between the two old runs, and lists each input whose answer changed on the
-   new code as a note, with both answers. These notes do not change the answer yet; Kern measures what they predict on real pull requests
-   first. They come after the planted faults, and when time runs short they are dropped first.
+   could not finish are not counted, and when a related test file fails as a whole, a fault it alone might have loaded is not checked
+   rather than missed. Then Kern watches what the changed code gives the tests this change does not touch: it rewrites each changed file so
+   that its exported functions note every input and answer, runs those tests (up to 40 files) on the old code twice and on the new code
+   once, sets aside any input whose answer differs between the two old runs, and lists each input whose answer changed on the new code as a
+   note, with both answers. These notes do not change the answer yet; Kern measures what they predict on real pull requests first. They
+   come after the planted faults, and when time runs short they are dropped first.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both
@@ -258,7 +259,8 @@ Next steps:
   changed code in other languages is listed as "not checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
   runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it, or when the test
-  script runs files from build output (`out/`, `dist/`) that are not in the repository. Tests that still cannot load cannot be checked,
+  script runs files from build output (`out/`, `dist/`) that are not in the repository; when the runner names a missing workspace package
+  only after another is built, Kern builds it on a further pass, up to three passes. Tests that still cannot load cannot be checked,
   and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to a fresh folder on disk outside the project,
   as on the project's own CI, and a flood of test output is cut to its start and end, so neither fills the sandbox.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
