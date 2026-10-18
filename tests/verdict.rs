@@ -59,6 +59,41 @@ fn finance_tracker_36_a_test_file_whose_jest_worker_crashed_never_blocks() {
 }
 
 #[test]
+fn condo_6842_a_test_file_the_machine_killed_on_the_old_code_is_kerns_limit_not_already_failing() {
+    let file = "apps/condo/domains/user/integration/passport/utils/config.spec.js";
+    let other = "apps/condo/domains/ticket/schema/Ticket.test.js > creates";
+    let killed = "A jest worker process (pid=150) was terminated by another process: signal=SIGTERM, exitCode=null. Operating system logs may contain more information on why this occurred.";
+    let old = report(&[(other, 1, 0, 0)], &[file], &[(file, killed)]);
+    let new = report(&[(other, 1, 0, 0)], &[file], &[(file, killed)]);
+    let c = suite::verdict(&old, &new, Some(&new), None, Some(&old), false, false);
+    assert_eq!(listed(&c, "old_sandbox"), [file], "3,946 tests in this file never ran because Kern's machine killed the worker; that is Kern's limit: {c}");
+    assert!(listed(&c, "already_failing").is_empty(), "a file the machine killed was not failing before the change: {c}");
+    let mut tests = c.clone();
+    tests["runner"] = serde_json::json!("jest");
+    let r = kern::receipt::build(&serde_json::json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] }),
+        &serde_json::json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] }), &tests, &serde_json::json!({ "status": "OFF", "why": "no AI key" }));
+    assert_eq!(r["decision"], "unverified", "{r}");
+    assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "test-old-sandbox" && x["what"].as_str().unwrap().contains("config.spec.js")), "{r}");
+    let md = kern::receipt::markdown(&r, None);
+    assert!(!md.contains("✅ Tests") && !md.contains("already failing before this change"), "{md}");
+}
+
+#[test]
+fn condo_6842_test_workers_and_their_heaps_fit_the_sandboxs_memory() {
+    use kern::policy::Runner;
+    let jest: Vec<String> = ["/workspace/node_modules/.bin/jest", "--ci"].map(String::from).to_vec();
+    assert_eq!(suite::worker_flags(Runner::Jest, &jest, 12288), ["--maxWorkers=3"], "a 12 GB box runs 3 workers");
+    assert_eq!(suite::worker_flags(Runner::Vitest, &jest, 4096), ["--maxWorkers=1"], "a 4 GB box runs one");
+    assert_eq!(suite::worker_flags(Runner::Mocha, &jest, 12288), Vec::<String>::new(), "mocha and node run one process");
+    for own in ["--runInBand", "-i", "--maxWorkers=7", "-w=2", "--no-file-parallelism", "--pool=forks", "--poolOptions.threads.maxThreads=2"] {
+        let c: Vec<String> = [jest[0].as_str(), own].map(String::from).to_vec();
+        assert_eq!(suite::worker_flags(Runner::Jest, &c, 12288), Vec::<String>::new(), "the project's own choice stands: {own}");
+    }
+    assert_eq!(suite::worker_heap_mb(12288, 3), 3072, "3 workers and the parent share 12 GB");
+    assert_eq!(suite::worker_heap_mb(4096, 1), 2048);
+}
+
+#[test]
 fn a_failure_with_the_error_old_tests_already_fail_with_here_is_the_sandbox() {
     let (seed, cart) = ("test/db.test.js > seeds", "test/cart.test.js > adds");
     let refused = "Error: connect ECONNREFUSED 127.0.0.1:5432";

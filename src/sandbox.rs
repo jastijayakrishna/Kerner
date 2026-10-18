@@ -229,7 +229,7 @@ pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> 
         [name, name.split('.').next().unwrap_or("")].iter().any(|n| errors.contains(&format!("Unknown option `--{n}`")))
     };
     let progress = errors.contains("/kern/vitest-progress.mjs") || errors.contains("/kern/jest-progress.cjs");
-    let shorter: Vec<String> = command.iter().filter(|a| !(["--no-cache", "--bail=0", "--sequence.shuffle=false"].contains(&a.as_str()) && unknown(a))
+    let shorter: Vec<String> = command.iter().filter(|a| !((["--no-cache", "--bail=0", "--sequence.shuffle=false"].contains(&a.as_str()) || a.starts_with("--maxWorkers=")) && unknown(a))
         && !(progress && PROGRESS_ARGS.contains(&a.as_str()))).cloned().collect();
     (shorter.len() < command.len()).then_some(shorter)
 }

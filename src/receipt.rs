@@ -405,6 +405,8 @@ fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>)
     f.unverified.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it cannot say whether the change broke it",
         "test files fail on the new code, and Kern has no record of them passing on the old code, so it cannot say whether the change broke them"));
     type_items(f, tests);
+    f.unverified.extend(per_file("test-old-sandbox", strings(&tests["old_sandbox"]), "This test file could not run on the old code because of Kern's machine (a killed worker, or out of memory), so its tests were never compared",
+        "test files could not run on the old code because of Kern's machine (killed workers, or out of memory), so their tests were never compared"));
     f.unverified.extend(per_file("test-sandbox", strings(&tests["sandbox"]), "This fails on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke it",
         "tests fail on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke them"));
     f.unverified.extend(per_file("test-unsteady", strings(&tests["unsteady"]), "This failed on the new code, but not in every run of it, or tests in the same file passed and failed by chance during this check, so Kern cannot say whether the change broke it",
@@ -568,7 +570,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"), 400);
         let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
-        let doubtful = unverified.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven", "test-sandbox"].iter().any(|k| x["kind"] == *k));
+        let doubtful = unverified.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven", "test-sandbox", "test-old-sandbox"].iter().any(|k| x["kind"] == *k));
         let mut line = if broke > 0 || files > 0 {
             let mut what = Vec::new();
             if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }

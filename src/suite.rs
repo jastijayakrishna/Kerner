@@ -20,7 +20,30 @@ pub fn test_command(tests: &Tests) -> Vec<String> {
         Runner::Node => { if let Some(at) = c.iter().position(|a| a == crate::sandbox::NODE_REPORTER) { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
         Runner::Jest => c.extend(std::iter::once("--bail=false").chain(crate::sandbox::PROGRESS_ARGS[1..].iter().copied()).map(str::to_string)),
     }
+    let flags = worker_flags(tests.runner, &c, box_memory_mb());
+    c.extend(flags);
     c
+}
+const WORKER_MB: u64 = 4096;
+const WORKERS_COUNT_MAX: u64 = 3;
+const OWN_WORKER_FLAGS: [&str; 8] = ["--runInBand", "-i", "--maxWorkers", "-w", "--no-file-parallelism", "--pool", "--poolOptions", "--maxThreads"];
+fn workers(memory_mb: u64) -> u64 { (memory_mb / WORKER_MB).clamp(1, WORKERS_COUNT_MAX) }
+pub fn worker_heap_mb(memory_mb: u64, workers: u64) -> u64 { memory_mb / (workers + 1) }
+pub fn worker_flags(runner: Runner, command: &[String], memory_mb: u64) -> Vec<String> {
+    let own = |a: &str| OWN_WORKER_FLAGS.iter().any(|o| a == *o || a.starts_with(&format!("{o}=")) || (o.len() > 2 && a.starts_with(&format!("{o}."))));
+    if !matches!(runner, Runner::Jest | Runner::Vitest) || command.iter().any(|a| own(a)) { return Vec::new(); }
+    vec![format!("--maxWorkers={}", workers(memory_mb))]
+}
+fn box_memory_mb() -> u64 { test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()) }
+pub fn sized_env(runner: Runner, env: &Env) -> Env {
+    let mut out = env.clone();
+    if matches!(runner, Runner::Jest | Runner::Vitest) {
+        let memory = box_memory_mb();
+        let heap = format!("--max-old-space-size={}", worker_heap_mb(memory, workers(memory)));
+        let options = out.get("NODE_OPTIONS").map_or(heap.clone(), |o| format!("{o} {heap}"));
+        out.insert("NODE_OPTIONS".to_string(), options);
+    }
+    out
 }
 
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
@@ -354,8 +377,8 @@ pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole:
     c["unsteady"] = json!(unsteady);
     c
 }
-pub const LISTS: [&str; 18] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
-    "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable"];
+pub const LISTS: [&str; 19] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
+    "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable", "old_sandbox"];
 pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
 pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String) {
     for l in LISTS {
@@ -744,7 +767,8 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     }
     flaky.extend(unsteady);
     for p in fresh { if known_error(&p) { same_failure.push(p); } else if lacking(&p) { unrunnable.push(p); } else { new_failing.push(p); } }
-    already_failing.extend(before.problems.iter().cloned());
+    let (old_sandbox, failing_before): (Vec<String>, Vec<String>) = before.problems.iter().cloned().partition(|p| before.why.get(p).is_some_and(|w| sandbox_error(w)));
+    already_failing.extend(failing_before);
     if total(before) == 0 && total(raw_after) == 0 && before.problems.is_empty() && raw_after.problems.is_empty() {
         return json!({ "status": "NOT_RUN", "why": FOUND_NONE });
     }
@@ -760,7 +784,7 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let problem_why: serde_json::Map<String, Value> = new_problems.iter().chain(&unproven).filter_map(|p| again.unwrap_or(after).why.get(p).or_else(|| after.why.get(p)).map(|w| (p.clone(), json!(w)))).collect();
     json!({ "status": "RAN", "before": sum(before), "after": sum(raw_after), "kept": kept, "broke": broke, "flaky": flaky, "gone": gone,
         "newly_skipped": newly_skipped, "added": added, "new_failing": new_failing, "already_failing": already_failing, "new_problems": new_problems, "problem_why": problem_why,
-        "environmental": environmental, "same_failure": same_failure, "unproven": unproven, "unrunnable": unrunnable })
+        "environmental": environmental, "same_failure": same_failure, "unproven": unproven, "unrunnable": unrunnable, "old_sandbox": old_sandbox })
 }
 
 fn lasting(s: u64) -> String { if s < 120 { format!("{s} seconds") } else { format!("{} minutes", s / 60) } }
@@ -896,7 +920,7 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     let seconds = within(until, limit);
     if seconds < 60 { return Ok(Side::Late); }
     let cut = seconds < limit;
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": files, "early": limit >= test_seconds(), "faults": [], "serve": {} });
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early": limit >= test_seconds(), "faults": [], "serve": {} });
     let run = match in_test_box(out, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
@@ -1137,7 +1161,7 @@ const SERVE_BYTES_MAX: usize = 2 << 20;
 pub fn bystanders_fit(left_secs: u64) -> bool { left_secs >= BYSTANDER_SECS_MIN + TYPES_SECS_RESERVE }
 fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, serve: &serde_json::Map<String, Value>, label: &str, seconds: u64) -> Option<String> {
     let command: Vec<String> = test_command(tests).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
-    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": [], "serve": serve });
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": {}, "early": false, "faults": [], "serve": serve });
     let run = in_test_box(out, volume, &format!("trace-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)).ok()?;
     let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).ok()?;
     parts["ending"].starts_with(b"exit").then(|| String::from_utf8_lossy(&parts["trace"]).to_string())
@@ -1177,7 +1201,7 @@ fn bystanders(out: &Path, (old_volume, new_volume): (&str, &str), suite: &Suite,
 }
 fn run_faults(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, seconds: u64) -> Vec<Value> {
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": faults, "serve": {} });
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": {}, "early": false, "faults": faults, "serve": {} });
     let Ok(run) = in_test_box(out, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return Vec::new() };
     serde_json::from_slice::<Vec<Value>>(&parts["output"]).unwrap_or_default()
