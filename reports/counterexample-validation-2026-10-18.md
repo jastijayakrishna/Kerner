@@ -2,7 +2,7 @@
 
 Date: 2026-10-18. Maturity: Validate. Branch: `codex/counterexample-validation`. Starting commit: `479030dd39e464e0c8eb9cbb58b10c9ce3b802f5`.
 
-**The trust repairs have reproducible evidence. The AI architecture has not been validated. No live baseline-versus-hunter comparison, model invocation, production release, commit or push has occurred. The current six-PR configuration fails its feasibility preflight and must not be presented as evidence of AI detection value.**
+**The trust repairs have reproducible evidence. The AI architecture has not been validated. The experiment was committed and pushed to its isolated branch; Linux verification is running. No live baseline-versus-hunter comparison, model invocation or production release has occurred. The current six-PR configuration fails its feasibility preflight and must not be presented as evidence of AI detection value.**
 
 ## What was implemented
 
@@ -85,7 +85,9 @@ Offline preflight found:
 
 This is a failed **configuration-feasibility gate**, not six measured model failures and not a rejection of counterexample hunting in general. A model choosing null input for an already-covered build would not test the thesis. The adapter rejects such a no-op before spending inference budget. CI rejects a comparison with zero eligible paired PRs after uploading its report.
 
-All six PRs and both arms remain in the preflight report. There are zero live paired trials. Confirmed violations, wrong-block rates, review minutes, end-to-end latency and billed dollars are unmeasured. Zero observed candidates is not a measured zero-percent detection rate.
+All six PRs and both arms remain in the preflight report. There are zero live paired trials. Confirmed violations, wrong-block rates, review minutes, end-to-end latency and billed dollars are unmeasured. Zero observed candidates is not a measured zero-percent detection rate. The actual CLI adapter entry point was also executed through preflight and retained six unsupported statuses; no request reached inference. Exit zero here means that failure statuses were recorded, not that validation succeeded.
+
+The scorer reports core and probe review-item counts separately and combines them only when both are available. It does not mistake new probe findings for the complete review burden. Review minutes remain unknown. A compact, durable evidence snapshot is in `reports/counterexample-validation-evidence-2026-10-18.json`; the larger raw artifacts remain under ignored `target/` with their hashes recorded in that snapshot.
 
 Raw evidence: `target/counterexample-validation/source-preflight.json`, `hunter-preflight.json`, and `pilot-preflight.json`.
 
@@ -107,12 +109,16 @@ Final local Rust commands used `CARGO_BUILD_JOBS=4`, `CARGO_INCREMENTAL=0`, and 
 | `cargo test --locked --offline --test verdict webpack_22695_parameterized_suites_do_not_repeat_file_scans_for_every_assertion` before/after indexing | Exit 101 at 30.01 seconds / exit 0 at 2.79 seconds |
 | `cargo test --locked --offline --no-fail-fast` on the final Rust source | Exit 0; 619 passed, zero failed, one ignored |
 | `cargo clippy --locked --offline --all-targets -- -D warnings` | Exit 0 |
-| `python -m unittest discover -s experiments/counterexample -p 'test_*.py' -q` | Exit 0; 15 passed |
+| `python -m unittest discover -s experiments/counterexample -p 'test_*.py' -q` | Exit 0; 16 passed after the review-burden regression was added |
+| Linux CI `cargo test --locked --no-fail-fast` at `bfe9091` | Exit 0; 624 passed, zero failed, one ignored |
+| Linux CI `cargo clippy --locked --all-targets -- -D warnings` at `bfe9091` | Exit 0 |
+| Linux CI musl release build of `kern` and `counterexample` at `bfe9091` | Exit 0 |
 | `git -c core.whitespace=cr-at-eol diff --check` | Exit 0 |
 | Experimental workflow YAML parse | Exit 0; four jobs parsed; Actions execution not verified |
 | Original/pre-index full replay | Interrupted; both child processes exited -1; partial outputs retained |
 | Indexed full replay | Failed the 300-second process deadline; child completion exit code unavailable; not a passed gate |
-| Linux/gVisor/runc execution and live inference | Not run |
+| Linux/gVisor/runc execution | Running; no success claim yet |
+| Live inference | Not run; all six requests rejected before inference |
 
 Container-dependent local tests can return early when containers are unavailable. The Rust pass count must not be interpreted as proof that Linux sandbox integration ran. CI remains required by repository policy.
 
@@ -122,7 +128,7 @@ Receipts add explicit setup-comparability evidence. Older incomplete receipts ca
 
 Receipt validation checks required shapes; it is not a complete typed model of every optional fact and does not prove the truth of worker observations. API analysis remains a limited static ESM surface analysis, not a general runtime or signature-compatibility verifier. Type confirmation remains unfinished. Normative adjudication and measured human review burden remain absent.
 
-No production dependency was added, and no hosted service, required-check rollout, production twin-runtime redesign or remediation feature was introduced. The existing `one` and `main` references were not modified. Changes are local and uncommitted: deleting a branch alone would not discard uncommitted working-tree changes. Unrelated pre-existing untracked work was preserved.
+No production dependency was added, and no hosted service, required-check rollout, production twin-runtime redesign or remediation feature was introduced. The existing `one` and `main` references were not modified. The work is isolated on `codex/counterexample-validation`; unrelated pre-existing untracked work was preserved. No merge or production release occurred.
 
 ## Decision and next evidence
 

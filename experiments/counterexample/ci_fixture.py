@@ -51,6 +51,7 @@ def main():
     root.mkdir()
     base, broken, equivalent = prepare(root / "source")
     for number, head in enumerate((broken, equivalent), 1):
+        print(f"Starting structural fixture {number}: {'regression' if number == 1 else 'equivalent edit'}", flush=True)
         artifacts(root, base, head, number)
         subprocess.run([str(worker), str(root / f"pack-{number}.json"), str(root / f"proposal-{number}.json"), str(operator), str(control), str(root / "source"), str(root / f"result-{number}")], check=True, timeout=3600)
         report = json.loads((root / f"result-{number}" / "result.json").read_text())
@@ -60,6 +61,7 @@ def main():
             actual = sum(j["confirmed"] for j in arms[name]["judgments"])
             if actual != count or not arms[name]["within_budget"] or arms[name]["errors"]:
                 raise SystemExit(f"Synthetic fixture {number}/{name}: expected {count}, got {actual}; inspect raw artifacts")
+        print(f"Structural fixture {number} passed", flush=True)
     print("Synthetic structural fixtures passed; these do not establish real-PR or AI performance.")
 
 

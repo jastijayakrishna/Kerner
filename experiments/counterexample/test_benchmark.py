@@ -67,6 +67,18 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             freeze(self.root / "duplicates.json", self.root / "bad.json", self.root / "bad-labels.json")
 
+    def test_review_burden_includes_shared_core_findings_and_unknown_is_not_zero(self):
+        write(self.results / "first" / "result.json", {"repository": "example/first", "number": 1, "base": "1" * 40, "head": "2" * 40,
+            "core": {"blocked": [], "look": [{}, {}], "unverified": [{}]}, "results": [{"arm": "hunter", "seconds": 2,
+                "judgments": [{"confirmed": True, "old": ["Passed", "Passed"], "new": ["Failed", "Failed"]}]}]})
+        result = score(self.cohort, self.results)
+        measured = next(r for r in result["rows"] if r["key"] == "example/first#1" and r["arm"] == "hunter")
+        self.assertEqual(measured["core_review_items"], 3)
+        self.assertEqual(measured["probe_review_items"], 1)
+        self.assertEqual(measured["review_items"], 4)
+        self.assertIsNone(measured["review_minutes"])
+        self.assertTrue(all(r["review_items"] is None for r in result["rows"] if r["status"] == "not_run"))
+
     def test_an_over_budget_confirmation_is_invalid_evidence(self):
         write(self.results / "over" / "result.json", {"repository": "example/first", "number": 1, "base": "1" * 40, "head": "2" * 40,
             "results": [{"arm": "hunter", "seconds": 1801, "judgments": [{"confirmed": True}]}]})

@@ -1,0 +1,596 @@
+{
+  "version": 1,
+  "scope": "Local repair audit and offline pilot feasibility; no live PR comparison or AI inference",
+  "starting_commit": "479030dd39e464e0c8eb9cbb58b10c9ce3b802f5",
+  "cohort_sha256": "c675348049ce3c40d3309a17cb8ed0cdddd13cc479dae2cd80ad01c1c2e5f2fb",
+  "pilot_sha256": "8ae145ea31b3dadaed5ae8f71c169c6e51f7322f7fc1e18861b610acdb75d11e",
+  "repair_replay": {
+    "starting_commit": "479030dd39e464e0c8eb9cbb58b10c9ce3b802f5",
+    "stored_checks": 4606,
+    "baseline_results": 3202,
+    "repaired_results": 3202,
+    "paired_results": 3202,
+    "uncompleted_checks": 1404,
+    "unique_commit_pairs": 600,
+    "transitions": [
+      {
+        "before": "blocked",
+        "after": "blocked",
+        "count": 15
+      },
+      {
+        "before": "blocked",
+        "after": "look",
+        "count": 1
+      },
+      {
+        "before": "clear",
+        "after": "clear",
+        "count": 1566
+      },
+      {
+        "before": "clear",
+        "after": "unverified",
+        "count": 85
+      },
+      {
+        "before": "look",
+        "after": "look",
+        "count": 944
+      },
+      {
+        "before": "unverified",
+        "after": "unverified",
+        "count": 591
+      }
+    ],
+    "new_blocked": [],
+    "new_clear": [],
+    "limits": [
+      "Stored checks are repeated measurements, not independent PRs.",
+      "Replays rejudge saved runtime evidence; they do not rerun project code or recompute static rules.",
+      "These are repair-audit results, not a live AI comparison, adjudicated bug counts, or proof of future correctness."
+    ]
+  },
+  "indexing_equivalence": {
+    "starting_commit": "479030dd39e464e0c8eb9cbb58b10c9ce3b802f5",
+    "stored_checks": 4606,
+    "baseline_results": 3202,
+    "repaired_results": 4019,
+    "paired_results": 3169,
+    "uncompleted_checks": 1437,
+    "unique_commit_pairs": 600,
+    "transitions": [
+      {
+        "before": "blocked",
+        "after": "blocked",
+        "count": 15
+      },
+      {
+        "before": "clear",
+        "after": "clear",
+        "count": 1538
+      },
+      {
+        "before": "look",
+        "after": "look",
+        "count": 942
+      },
+      {
+        "before": "unverified",
+        "after": "unverified",
+        "count": 674
+      }
+    ],
+    "new_blocked": [],
+    "new_clear": [],
+    "limits": [
+      "Stored checks are repeated measurements, not independent PRs.",
+      "Replays rejudge saved runtime evidence; they do not rerun project code or recompute static rules.",
+      "These are repair-audit results, not a live AI comparison, adjudicated bug counts, or proof of future correctness."
+    ]
+  },
+  "performance": {
+    "measured_local": "2026-10-18T16:07:54+05:30",
+    "selected_checks": 4606,
+    "completed_checks_per_binary": 3202,
+    "baseline": {
+      "pid": 6808,
+      "started_local": "2026-10-18T15:51:29+05:30",
+      "cpu_seconds": 2500.8125,
+      "working_set_bytes": 370413568
+    },
+    "repaired": {
+      "pid": 39808,
+      "started_local": "2026-10-18T15:51:43+05:30",
+      "cpu_seconds": 2492.359375,
+      "working_set_bytes": 358834176
+    },
+    "terminated_after_measurement": true,
+    "process_exit_codes": [
+      -1,
+      -1
+    ],
+    "scope": "Two replay helpers owned by this task; no Docker or user service stopped"
+  },
+  "indexed_deadline": {
+    "exit_code": null,
+    "timed_out": true,
+    "seconds": 300.235,
+    "budget_seconds": 300
+  },
+  "source_preflight": {
+    "scope": "Public source fetching only; no provider calls or project execution",
+    "rows": [
+      {
+        "key": "muchu-dev/michinavi#46",
+        "status": "bundle-ready",
+        "bytes": 113146,
+        "seconds": 1.562
+      },
+      {
+        "key": "oxyhq/oxy#490",
+        "status": "bundle-ready",
+        "bytes": 409639,
+        "seconds": 4.594
+      },
+      {
+        "key": "troyrhodes02/sightline#88",
+        "status": "bundle-ready",
+        "bytes": 62584,
+        "seconds": 2.016
+      },
+      {
+        "key": "abhishek21lift-oss/619-erp-frontend#28",
+        "status": "unsupported",
+        "why": "Snapshots exceed 512 KiB; unsupported",
+        "seconds": 4.015
+      },
+      {
+        "key": "dasch-swiss/dsp-app#3384",
+        "status": "bundle-ready",
+        "bytes": 31658,
+        "seconds": 1.922
+      },
+      {
+        "key": "ronancodes/smart-cart#431",
+        "status": "bundle-ready",
+        "bytes": 197658,
+        "seconds": 18.86
+      }
+    ]
+  },
+  "hunter_preflight": [
+    {
+      "case": "abhishek21lift-oss__619-erp-frontend__28",
+      "status": "unsupported",
+      "error_type": "FileNotFoundError",
+      "why": "[WinError 2] The system cannot find the file specified: 'target\\\\counterexample-validation\\\\bundles\\\\abhishek21lift-oss__619-erp-frontend__28.json'",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 0.01600000000325963
+    },
+    {
+      "case": "dasch-swiss__dsp-app__3384",
+      "status": "unsupported",
+      "error_type": "ValueError",
+      "why": "No additional approved input space; invoking the hunter would not test its value",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 0.03199999999196734
+    },
+    {
+      "case": "muchu-dev__michinavi__46",
+      "status": "unsupported",
+      "error_type": "ValueError",
+      "why": "The complete prompt exceeds 64 KiB; do not silently truncate",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 0.014999999999417923
+    },
+    {
+      "case": "OxyHQ__oxy__490",
+      "status": "unsupported",
+      "error_type": "FileNotFoundError",
+      "why": "[WinError 2] The system cannot find the file specified: 'experiments\\\\counterexample\\\\packs\\\\OxyHQ__oxy__490.json'",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 0.0
+    },
+    {
+      "case": "RonanCodes__smart-cart__431",
+      "status": "unsupported",
+      "error_type": "ValueError",
+      "why": "The complete prompt exceeds 64 KiB; do not silently truncate",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 0.125
+    },
+    {
+      "case": "troyrhodes02__sightline__88",
+      "status": "unsupported",
+      "error_type": "ValueError",
+      "why": "The complete prompt exceeds 64 KiB; do not silently truncate",
+      "usage": null,
+      "cost_usd": null,
+      "backend": "cli",
+      "seconds": 0.04700000000593718
+    }
+  ],
+  "all_pr_denominator": {
+    "version": 1,
+    "cohort_sha256": "8ae145ea31b3dadaed5ae8f71c169c6e51f7322f7fc1e18861b610acdb75d11e",
+    "summary": {
+      "selected_prs": 6,
+      "repositories": 6,
+      "invalid_artifacts": [],
+      "baseline": {
+        "denominator": 6,
+        "run_prs": 0,
+        "unsupported_prs": 6,
+        "confirmed_candidates": 0,
+        "adjudicated_prs": 0,
+        "median_seconds": null,
+        "p90_seconds": null,
+        "cost_known_prs": 6
+      },
+      "hunter": {
+        "denominator": 6,
+        "run_prs": 0,
+        "unsupported_prs": 6,
+        "confirmed_candidates": 0,
+        "adjudicated_prs": 0,
+        "median_seconds": null,
+        "p90_seconds": null,
+        "cost_known_prs": 0
+      },
+      "by_split": {
+        "development": {
+          "baseline": {
+            "denominator": 2,
+            "run_prs": 0,
+            "unsupported_prs": 2
+          },
+          "hunter": {
+            "denominator": 2,
+            "run_prs": 0,
+            "unsupported_prs": 2
+          }
+        },
+        "holdout": {
+          "baseline": {
+            "denominator": 4,
+            "run_prs": 0,
+            "unsupported_prs": 4
+          },
+          "hunter": {
+            "denominator": 4,
+            "run_prs": 0,
+            "unsupported_prs": 4
+          }
+        }
+      },
+      "paired_prs": 0,
+      "eligible_paired_prs": 0
+    },
+    "rows": [
+      {
+        "key": "muchu-dev/michinavi#46",
+        "split": "development",
+        "arm": "baseline",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": 0,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "muchu-dev/michinavi#46",
+        "split": "development",
+        "arm": "hunter",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": null,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "oxyhq/oxy#490",
+        "split": "development",
+        "arm": "baseline",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": 0,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "oxyhq/oxy#490",
+        "split": "development",
+        "arm": "hunter",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": null,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "troyrhodes02/sightline#88",
+        "split": "holdout",
+        "arm": "baseline",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": 0,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "troyrhodes02/sightline#88",
+        "split": "holdout",
+        "arm": "hunter",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": null,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "abhishek21lift-oss/619-erp-frontend#28",
+        "split": "holdout",
+        "arm": "baseline",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": 0,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "abhishek21lift-oss/619-erp-frontend#28",
+        "split": "holdout",
+        "arm": "hunter",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": null,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "dasch-swiss/dsp-app#3384",
+        "split": "holdout",
+        "arm": "baseline",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": 0,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "dasch-swiss/dsp-app#3384",
+        "split": "holdout",
+        "arm": "hunter",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": null,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "ronancodes/smart-cart#431",
+        "split": "holdout",
+        "arm": "baseline",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": 0,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      },
+      {
+        "key": "ronancodes/smart-cart#431",
+        "split": "holdout",
+        "arm": "hunter",
+        "status": "not_run",
+        "confirmed_candidates": 0,
+        "confirmed_violations": null,
+        "wrong_blocks": null,
+        "review_items": null,
+        "core_review_items": null,
+        "probe_review_items": null,
+        "review_minutes": null,
+        "unsupported_probes": null,
+        "unsupported_pr": true,
+        "seconds": null,
+        "fetch_seconds": null,
+        "model_seconds": null,
+        "end_to_end_seconds": null,
+        "model_cost_usd": null,
+        "infrastructure_cost_usd": null,
+        "errors": [
+          "No execution artifact"
+        ]
+      }
+    ],
+    "paired": [],
+    "claim": "No superiority claim is supported until both arms and independent adjudication are complete."
+  },
+  "raw_artifacts": [
+    {
+      "path": "target/counterexample-validation/replay-comparison-complete-denominator.json",
+      "sha256": "e64bf6d0d86cfed92548de031169eb3e2901849015c20279d8d5ff941aebea8f"
+    },
+    {
+      "path": "target/counterexample-validation/indexed-equivalence.json",
+      "sha256": "24c69bb1a3d393375a4f31d5d355ad948e9a5b60da47982c7df9d986539636db"
+    },
+    {
+      "path": "target/counterexample-validation/replay-performance.json",
+      "sha256": "335b41ff744b704063e28b256d1230102652a8a32a9ba71a38eabaa3feef7a59"
+    },
+    {
+      "path": "target/counterexample-validation/replay-indexed-timing.json",
+      "sha256": "2fbb425b3ffbcfdabac14d10cdef99533c0e931cfbe2aa30da134ad326e0e141"
+    },
+    {
+      "path": "target/counterexample-validation/source-preflight.json",
+      "sha256": "32ccafda8838335fdd3fd320daa9309458ae7daf1d909febe964ab1ca0be59d9"
+    }
+  ]
+}

@@ -149,6 +149,8 @@ def score(cohort, results, adjudications=None):
     measured = []
     for row in rows:
         record = records.get(row["key"], {})
+        core = record.get("core", {})
+        core_review_items = sum(len(core[k]) for k in ("blocked", "look", "unverified")) if all(isinstance(core.get(k), list) for k in ("blocked", "look", "unverified")) else None
         for arm in ("baseline", "hunter"):
             result = next((r for r in record.get("results", []) if r.get("arm") == arm), None)
             review = reviews.get(row["key"], {}).get(arm, {})
@@ -160,7 +162,8 @@ def score(cohort, results, adjudications=None):
             measured.append({"key": row["key"], "split": row["split"], "arm": arm,
                 "status": "measured" if result else "not_run", "confirmed_candidates": len(confirmed),
                 "confirmed_violations": review.get("confirmed_violations"), "wrong_blocks": review.get("wrong_blocks"),
-                "review_items": len(confirmed) if result else None, "review_minutes": review.get("minutes"),
+                "review_items": core_review_items + len(confirmed) if result and core_review_items is not None else None,
+                "core_review_items": core_review_items if result else None, "probe_review_items": len(confirmed) if result else None, "review_minutes": review.get("minutes"),
                 "unsupported_probes": missing if result else None, "unsupported_pr": result is None or not judgments or missing == len(judgments) or over_budget,
                 "seconds": result.get("seconds") if result else None,
                 "fetch_seconds": record.get("fetch_seconds"), "model_seconds": record.get("model_seconds"), "end_to_end_seconds": record.get("end_to_end_seconds"),
