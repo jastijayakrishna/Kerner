@@ -137,6 +137,8 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let tested = now_ms();
     if run && trusted && std::env::var("KERN_TYPES").as_deref() != Ok("0") { tests["types"] = crate::types::run(out, op, until); }
     let typed = now_ms();
+    if run && trusted && std::env::var("KERN_BUILD").as_deref() != Ok("0") { tests["builds"] = crate::build::run(out, op, until); }
+    let built = now_ms();
     let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|_| behaviour["status"] == "RAN");
     let receipt = crate::receipt::build(&d, &rules, &tests, &behaviour);
     crate::receipt::write(out, &receipt, comment.as_deref())?;
@@ -145,6 +147,6 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let canary = match &machine { Ok(said) => said.to_string(), Err(why) => format!("failed: {why}") };
     Ok(json!({ "status": "CHECKED", "cleaned": cleaned, "canary": canary, "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
         "look": receipt["look"].as_array().map_or(0, Vec::len), "unverified": receipt["unverified"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": secs_since(started),
-        "phases": { "rules": secs_between(started, checked), "behaviour": secs_between(checked, behaved), "tests": secs_between(behaved, tested), "types": secs_between(tested, typed), "tests_detail": tests["seconds"] },
+        "phases": { "rules": secs_between(started, checked), "behaviour": secs_between(checked, behaved), "tests": secs_between(behaved, tested), "types": secs_between(tested, typed), "build": secs_between(typed, built), "tests_detail": tests["seconds"] },
         "receipt": out.join("receipt.md").display().to_string() }))
 }

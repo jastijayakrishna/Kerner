@@ -506,6 +506,32 @@ decision layers blocked
 jq -e '.tests.status == "RAN" and .tests.before.passed == 2 and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build")) and (.tests.runner | test("packages/fmt build"))' layers/receipt.json > /dev/null \
   || { jq .tests layers/receipt.json; fail "layers: a second unbuilt package the runner named only after the first was built was never built"; }
 
+say "A change that breaks the project's own build while its tests still pass needs a look that quotes the build's error, as planyr#1262 needed; a build that still works gets its check mark"
+git init -q buildrepo && cd buildrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"buildcheck","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node --test","build":"node build.mjs"}}' > package.json
+printf '%s\n' "import { readdirSync } from 'node:fs';" "for (const f of readdirSync(new URL('./src/', import.meta.url))) await import(new URL('./src/' + f, import.meta.url));" "console.log('built');" > build.mjs
+printf '%s\n' "export const add = (a, b) => a + b;" > src/index.js
+printf '%s\n' "import { test } from 'node:test';" "import assert from 'node:assert';" "import { add } from '../src/index.js';" '' "test('adds', () => assert.equal(add(2, 3), 5));" > test/index.test.js
+git add -A && git commit -qm base && build_base=$(git rev-parse HEAD)
+git checkout -q -b broken
+printf '%s\n' "import { subtract } from './index.js';" "export const report = (a, b) => subtract(a, b);" > src/report.js
+git add -A && git commit -qm "Add a report" && git rev-parse HEAD > "$W/buildbroken.head"
+git checkout -q -b fine "$build_base"
+printf '%s\n' "export const add = (a, b) => b + a;" > src/index.js
+git commit -qam "Swap the operands" && git rev-parse HEAD > "$W/buildfine.head"
+git checkout -q "$build_base"
+cd "$W"
+check buildbroken "$build_base" buildrepo
+decision buildbroken look
+jq -e '.tests.status == "RAN" and .tests.builds.builds[0].result == "broke" and ([.look[].kind] | index("build-broke") != null)' buildbroken/receipt.json > /dev/null \
+  || { jq '.tests.builds, .look' buildbroken/receipt.json; fail "buildbroken: a build the change broke was not named"; }
+grep -q "subtract" buildbroken/receipt.md || { cat buildbroken/receipt.md; fail "buildbroken: the receipt does not quote the build's error"; }
+check buildfine "$build_base" buildrepo
+decision buildfine clear
+grep -q '✅ Build: `npm run build` works on the old and the new code' buildfine/receipt.md || { cat buildfine/receipt.md; fail "buildfine: a build that still works has no check mark"; }
+
 say "Kern undoes each changed function and plants small faults in the changed lines: a same-behaviour rewrite the tests guard counts as checked, and a change no test checks becomes a task for the agent, with vitest and with jest"
 for runner in vitest jest; do
   git init -q "faults-$runner-repo" && cd "faults-$runner-repo"

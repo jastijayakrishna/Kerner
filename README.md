@@ -139,33 +139,39 @@ What Kern checks on every pull request:
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both
    sides got the same dependencies), and need a look when its scripts do not run `tsc`. When they are about something a build step may
    generate, or the two sides got different dependencies, they are not verified. This works even when the tests cannot run.
-4. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
+4. **Whether the project still builds.** When the change touches code under a `package.json` whose `build` script exists on the old
+   code too, Kern runs `npm run build` there on the old and the new code, in the sandbox, with the network off (the folder nearest the
+   changed code, at most two). A build that worked on the old code and fails on the new code twice, the same way, needs a look that
+   quotes its error; when the two sides got different dependencies, it is not verified. A build that already fails on the old code,
+   needs the network or more memory, or fails only once is not compared, and the receipt says why. This works even when the tests
+   cannot run.
+5. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.
-5. **New powers.** Changed code outside the tests that newly starts programs, reaches the network, runs `eval` or reads secret
+6. **New powers.** Changed code outside the tests that newly starts programs, reaches the network, runs `eval` or reads secret
    environment variables (a name whose last word is a credential, such as `API_KEY` or `DB_PASSWORD`; never one a framework builds into
    the page, such as `NEXT_PUBLIC_` or `VITE_`) needs a look. Tests run in the project's own CI, often next to its secrets, so a test
    needs a look when it newly starts programs or runs `eval`, or when it can both read a secret (or the whole environment) and reach the
    network, and one of those is new; a test that only calls `fetch`, or only sets `NODE_ENV`, does not. A power counts only when the code uses
    it: swapping `fetch` for a mock in a test, reading a class's name or checking that a value is a function is not one. Ordinary
    imports, such as a UI library, a project's own modules or a build tool's `virtual:` module, are not powers.
-6. **Files that steer everything else.** Files that run code or grant access: CI and container files, `CODEOWNERS`, renovate's config,
+7. **Files that steer everything else.** Files that run code or grant access: CI and container files, `CODEOWNERS`, renovate's config,
    `.npmrc` and the like, and `.env` files that hold a secret or a setting that runs code (pictures, `FUNDING.yml`, notes such as
    Markdown files and `.env.example` templates, and `.env` files of plain settings aside). The settings of the test runner Kern runs
    (the test script in `package.json` included; a babel or vite config that runner never reads is not one), and the files that
    instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look too.
-7. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
+8. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
    that has been on npm for a week needs no look; a release less than a week old is named, because that is where hijacked packages
    show up. A package of this repository (`workspace:`, `file:` or a workspace's name) is the project's own, and a package moved to
    another section keeps its version. A new package, a major update, a `package.json` change that runs code on install or decides what
    gets installed (install scripts, `overrides`, `packageManager` and the like), and a lockfile entry that downloads a package from
    somewhere other than its own registry tarball need a look.
-8. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
+9. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
    run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
    the package says it supports (`engines.node`, checked against Node's own documentation); and HTML that adds inline styles or scripts
    that a Content-Security-Policy in the same change forbids.
-9. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
+10. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
    every changed line run; Kern runs it on the old and the new code and lists what behaves differently. It needs an AI key, so the
    workflow does not run it until it has a job of its own that holds the key and never runs the pull request's code.
 

@@ -386,6 +386,31 @@ fn type_items(f: &mut Found, tests: &Value) {
         }
     }
 }
+fn build_at(b: &Value) -> String { match b["dir"].as_str() { None | Some("") | Some(".") => String::new(), Some(d) => format!(" in {}", code(d, 160)) } }
+fn build_items(f: &mut Found, tests: &Value) {
+    for b in tests["builds"]["builds"].as_array().into_iter().flatten().filter(|b| b["result"] == "broke") {
+        let errors: Vec<String> = b["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).take(3).map(|e| code(e, 300)).collect();
+        let what = format!("`npm run build`{} worked on the old code and fails on the new code, the same way twice: {}", build_at(b), errors.join(", "));
+        match b["uneven"].as_str() {
+            Some(why) => f.unverified.push(item("build-uneven", format!("{what} (Kern did not set up both sides the same way: {}, so it cannot say the change caused it)", plain(why, 400)))),
+            None => f.look.push(item("build-broke", what)),
+        }
+    }
+}
+fn build_lines(tests: &Value) -> String {
+    let b = &tests["builds"];
+    let mut md = String::new();
+    if b["status"] == "NOT_RUN" { md += &format!("- ⏭️ Build: not checked — {}\n", plain(b["why"].as_str().unwrap_or("Kern could not build the project"), 400)); }
+    for x in b["builds"].as_array().into_iter().flatten() {
+        let at = build_at(x);
+        md += &match x["result"].as_str() {
+            Some("same") => format!("- ✅ Build: `npm run build`{at} works on the old and the new code\n"),
+            Some("broke") => format!("- ⚠️ Build: `npm run build`{at} fails on the new code (see above)\n"),
+            _ => format!("- ⏭️ Build: `npm run build`{at} not compared — {}\n", plain(x["why"].as_str().unwrap_or("Kern could not build it"), 400)),
+        };
+    }
+    md
+}
 fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>) {
     f.look.extend(per_file("new-test-fails", strings(&tests["new_failing"]), "A test this change adds fails on the new code", "tests this change adds fail on the new code"));
     let wrote: Vec<String> = strings(&tests["wrote_code"]).into_iter().filter(|p| !generated(p)).collect();
@@ -405,6 +430,7 @@ fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>)
     f.unverified.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it cannot say whether the change broke it",
         "test files fail on the new code, and Kern has no record of them passing on the old code, so it cannot say whether the change broke them"));
     type_items(f, tests);
+    build_items(f, tests);
     f.unverified.extend(per_file("test-old-sandbox", strings(&tests["old_sandbox"]), "This test file could not run on the old code because of Kern's machine (a killed worker, or out of memory), so its tests were never compared",
         "test files could not run on the old code because of Kern's machine (killed workers, or out of memory), so their tests were never compared"));
     f.unverified.extend(per_file("test-sandbox", strings(&tests["sandbox"]), "This fails on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke it",
@@ -676,6 +702,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             _ => md += &format!("- ⏭️ Types: {config} not compared — {}\n", plain(p["why"].as_str().unwrap_or("Kern could not run tsc on it"), 400)),
         }
     }
+    md += &build_lines(tests);
     if routine_deps(&r["rules"]) {
         let moved: Vec<String> = r["rules"]["dependencies"].as_array().into_iter().flatten().flat_map(|d| strings(&d["packages"])).collect();
         md += &format!("- ✅ Dependencies: {}{} (each removed, from this repository, or updated within the same major version to a release out for at least {} days)\n",
