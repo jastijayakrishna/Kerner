@@ -334,6 +334,23 @@ fn lightdash_12942_the_job_that_runs_the_code_accepts_every_investigation_this_s
 }
 
 #[test]
+fn agent_845_the_oracle_reads_only_tests_that_import_the_changed_file() {
+    let t = Temp::new();
+    let guest = "export function bearerToken(header: string): string { return header.replace('Bearer ', ''); }\n";
+    let server = "export function bearerToken(req: { headers: Record<string, string> }): string | null { return req.headers.authorization ?? null; }\n";
+    let guest_test = "import { bearerToken } from '../src/auth';\n\nit('strips the scheme', () => {\n  expect(bearerToken('Bearer abc')).toBe('abc');\n});\n";
+    let server_test = "import { bearerToken } from '../src/auth';\n\nit('reads the authorization header of the request', () => {\n  expect(bearerToken({ headers: { authorization: 'x' } })).toBe('x');\n});\n";
+    let files = |g: &str| vec![("packages/guest/src/auth.ts", g.to_string()), ("packages/guest/test/auth.test.ts", guest_test.to_string()), ("packages/server/src/auth.ts", server.to_string()), ("packages/server/test/auth.test.ts", server_test.to_string())];
+    let (old, new) = (files(guest), files(&guest.replace("'Bearer '", "/^Bearer /i")));
+    let r = repo(&t, &old.iter().map(|(p, s)| (*p, s.as_str())).collect::<Vec<_>>(), &new.iter().map(|(p, s)| (*p, s.as_str())).collect::<Vec<_>>());
+    let model = both(&json!({ "obligations": [] }), &json!({ "experiments": [] }));
+    run(&r, &t.out("out"), Some(&model));
+    let oracle = model.prompt("oracle").user;
+    assert!(oracle.contains("packages/guest/test/auth.test.ts") && oracle.contains("strips the scheme"), "{oracle}");
+    assert!(!oracle.contains("packages/server/test/auth.test.ts") && !oracle.contains("authorization header"), "a test of another package's function with the same name only misleads the Oracle:\n{oracle}");
+}
+
+#[test]
 fn lightdash_12942_a_typed_function_no_test_calls_with_plain_values_gets_its_shapes_from_its_old_signature() {
     let t = Temp::new();
     let old = "export function formatPrice(cents: number, currency?: 'USD' | 'EUR'): string { return (cents / 100).toFixed(2) + (currency ?? ''); }\n";
