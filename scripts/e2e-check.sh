@@ -482,6 +482,30 @@ decision partial blocked
 jq -e '.tests.status == "RAN" and .tests.before.passed == 2 and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build"))' partial/receipt.json > /dev/null \
   || { jq .tests partial/receipt.json; fail "partial: a test file that missed an unbuilt package, while another passed, was set aside instead of built for"; }
 
+say "When a test needs two unbuilt workspace packages and the runner names only the first, Kern builds the second on the next pass, as lightdash/lightdash#12942 needed"
+git init -q layersrepo && cd layersrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/lib/src packages/fmt/src packages/app/test
+printf '%s\n' '{"name":"layers","private":true,"type":"module","workspaces":["packages/*"],"scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+for pkg in lib fmt; do
+  printf '{"name":"@p/%s","version":"1.0.0","type":"module","main":"dist/index.js","scripts":{"build":"node build.mjs"}}\n' "$pkg" > "packages/$pkg/package.json"
+  printf '%s\n' "import { mkdirSync, copyFileSync } from 'node:fs';" "mkdirSync(new URL('./dist/', import.meta.url), { recursive: true });" "copyFileSync(new URL('./src/index.js', import.meta.url), new URL('./dist/index.js', import.meta.url));" > "packages/$pkg/build.mjs"
+done
+printf '%s\n' "export const add = (a, b) => a + b;" > packages/lib/src/index.js
+printf '%s\n' "export const fmt = (n) => 'n=' + n;" > packages/fmt/src/index.js
+printf '%s\n' '{"name":"@p/app","version":"1.0.0","type":"module","dependencies":{"@p/lib":"1.0.0","@p/fmt":"1.0.0"}}' > packages/app/package.json
+printf '%s\n' "import { test, expect } from 'vitest';" "import { add } from '@p/lib';" "import { fmt } from '@p/fmt';" '' "test('adds', () => expect(fmt(add(2, 3))).toBe('n=5'));" > packages/app/test/add.test.js
+printf '%s\n' "import { test, expect } from 'vitest';" '' "test('stands alone', () => expect(1 + 1).toBe(2));" > packages/app/test/alone.test.js
+printf 'dist/\n' > .gitignore
+git add -A && git commit -qm base && layers_base=$(git rev-parse HEAD)
+printf '%s\n' "export const add = (a, b) => a + b + 1;" > packages/lib/src/index.js
+git commit -qam "Add one more" && git rev-parse HEAD > "$W/layers.head"
+cd "$W"
+check layers "$layers_base" layersrepo
+decision layers blocked
+jq -e '.tests.status == "RAN" and .tests.before.passed == 2 and (.tests.broke | length == 1) and (.tests.runner | test("packages/lib build")) and (.tests.runner | test("packages/fmt build"))' layers/receipt.json > /dev/null \
+  || { jq .tests layers/receipt.json; fail "layers: a second unbuilt package the runner named only after the first was built was never built"; }
+
 say "Kern undoes each changed function and plants small faults in the changed lines: a same-behaviour rewrite the tests guard counts as checked, and a change no test checks becomes a task for the agent, with vitest and with jest"
 for runner in vitest jest; do
   git init -q "faults-$runner-repo" && cd "faults-$runner-repo"

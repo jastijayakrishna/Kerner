@@ -943,6 +943,7 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
 
 struct Suite { dir: String, old: Option<(Tests, Env)>, new: (Tests, Env) }
 
+const REPAIR_ROUNDS_COUNT_MAX: usize = 3;
 pub const SINGLE_FILES: &str = "Kern runs single test files only with jest, vitest and mocha";
 pub fn missing_packages(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -1355,30 +1356,34 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
-                let (mut tests, mut phase, mut repairable, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), true, true, Vec::new());
+                let (mut tests, mut phase, mut repairs_left, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), REPAIR_ROUNDS_COUNT_MAX, true, Vec::new());
+                let mut attempted: BTreeSet<String> = BTreeSet::new();
                 let run = loop {
                 let at = now_ms();
                 let run = run_side(out, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
                 timed(phase.clone(), at);
                 old_seconds = secs_since(at);
                 if !pending.is_empty() {
-                    if cannot_load(Some(&run)).is_some() { tried = format!(" (even after Kern ran {} first)", pending.join(", ")); } else { built = std::mem::take(&mut pending); }
+                    if cannot_load(Some(&run)).is_some() { tried = format!(" (even after Kern ran {} first)", pending.join(", ")); } else { built.append(&mut pending); }
                     pending.clear();
                 }
                 let partial = match &run { Side::Ran(r, _) => partly_missing(r), _ => None };
-                if repairable && let Some(why) = cannot_load(Some(&run)).or(partial) {
-                    repairable = false;
+                if repairs_left > 0 && let Some(why) = cannot_load(Some(&run)).or(partial) {
+                    let first = repairs_left == REPAIR_ROUNDS_COUNT_MAX;
+                    repairs_left -= 1;
                     let (old_packages, new_packages) = (workspace(repo, base), workspace(repo, head));
                     let mut missing = missing_packages(&why);
                     missing.extend(owners(&old_packages, &missing_files(&why)));
+                    missing.retain(|m| attempted.insert(m.clone()));
                     let generated = ["Cannot find module '.", "Failed to load url .", "Failed to resolve import \".", "Cannot find module \"."].iter().any(|m| why.contains(m));
                     let compiled = no_test_files(&why);
                     let package = manifest(base, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok());
                     let pretest = package.as_ref().filter(|v| generated && v["scripts"]["pretest"].is_string()).map(|_| suite.dir.clone());
                     let invocation = match package.as_ref().map(crate::script::found) { Some(crate::script::Found::Run(i)) => Some(i), _ => None };
                     let from_build = compiled && invocation.as_ref().is_some_and(|i| builds_tests(&i.command));
-                    let mut before = invocation.filter(|_| generated || compiled).map(|i| i.before).unwrap_or_default();
-                    if (own_build(&why) || from_build) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
+                    let mut before = invocation.filter(|_| first && (generated || compiled)).map(|i| i.before).unwrap_or_default();
+                    if first && (own_build(&why) || from_build) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
+                    let pretest = pretest.filter(|_| first);
                     let steps = repair_steps(&old_packages, &missing, pretest.as_deref(), (&suite.dir, &before));
                     if !steps.is_empty() {
                         let at = now_ms();
