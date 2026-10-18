@@ -86,6 +86,20 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
 }
 
 #[test]
+fn meshcore_ts_15_one_function_breaking_one_requirement_is_one_item_however_many_inputs_show_it() {
+    let shapeless = |id: &str, arg: &str| { let mut x = tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified")); x["id"] = json!(id); x["args"] = json!([arg]); x["shapes"] = json!([]); x };
+    let unlinked = |id: &str| { let mut x = tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], Value::Null); x["id"] = json!(id); x };
+    let r = receipt(ran(vec![shapeless("e1", "a"), shapeless("e2", "b"), shapeless("e3", "c"), unlinked("e4"), unlinked("e5")], json!([])));
+    let of = |level: &str, kind: &str| -> Vec<String> { r[level].as_array().unwrap().iter().filter(|x| x["kind"] == kind).map(|x| x["what"].as_str().unwrap().to_string()).collect() };
+    let looks = of("look", "probe-concern");
+    assert_eq!(looks.len(), 1, "five looks for one decoder and one requirement teach people to skim: {looks:?}");
+    assert!(looks[0].contains("removeComments(\"a\")") && looks[0].contains("2 more inputs show the same"), "{}", looks[0]);
+    let notes = of("notes", "probe-difference");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("1 more input shows the same"), "{}", notes[0]);
+}
+
+#[test]
 fn lightdash_12942_an_answer_that_keeps_every_old_value_and_only_adds_fields_breaks_no_same_requirement() {
     let line = |side: &str, o: &str, v: Option<&str>| { let mut r = json!({ "p": "e1", "o": o }); if let Some(v) = v { r["v"] = json!(v); } let _ = side; format!("{}\n{}\n", json!({ "k": "src/sql.ts#removeComments" }), r) };
     let judged = |old: (&str, Option<&str>), new: (&str, Option<&str>)| {

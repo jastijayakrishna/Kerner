@@ -443,18 +443,32 @@ fn probe_missing(x: &Value, m: crate::probe::Missing) -> String {
     if m.rerun { why.push("Kern could not run it a second time on each side to confirm".to_string()); }
     why.join(", and ")
 }
+type ProbeGroup<'a> = (String, crate::probe::Verdict, Vec<&'a Value>);
+fn probe_groups(tests: &Value) -> Vec<ProbeGroup<'_>> {
+    use crate::probe::Verdict;
+    let mut groups: Vec<ProbeGroup> = Vec::new();
+    for x in tests["probes"]["experiments"].as_array().into_iter().flatten().filter(|_| tests["probes"]["status"] == "RAN") {
+        let v = crate::probe::verdict(&crate::probe::evidence(x));
+        if matches!(v, Verdict::Same | Verdict::Unchecked(_)) { continue; }
+        let key = format!("{}#{}#{}", x["path"].as_str().unwrap_or(""), x["export"].as_str().unwrap_or(""), x["obligation"]["id"].as_str().unwrap_or(""));
+        match groups.iter_mut().find(|(k, w, _)| *k == key && *w == v) { Some((_, _, xs)) => xs.push(x), None => groups.push((key, v, vec![x])) }
+    }
+    groups
+}
 fn probe_items(f: &mut Found, tests: &Value) {
     use crate::probe::Verdict;
-    for x in tests["probes"]["experiments"].as_array().into_iter().flatten().filter(|_| tests["probes"]["status"] == "RAN") {
+    for (_, v, xs) in probe_groups(tests) {
+        let x = xs[0];
+        let more = match xs.len() - 1 { 0 => String::new(), 1 => " (1 more input shows the same)".to_string(), n => format!(" ({n} more inputs show the same)") };
         let (function, call, answers) = (probe_function(x), probe_call(x), probe_answers(x));
-        match crate::probe::verdict(&crate::probe::evidence(x)) {
-            Verdict::Blocked => f.blocked.push(item("probe-regression", format!("{function} broke a requirement the old code met: for {call}, {answers}, the same in a second run on each side. The requirement: {}",
+        match v {
+            Verdict::Blocked => f.blocked.push(item("probe-regression", format!("{function} broke a requirement the old code met: for {call}, {answers}, the same in a second run on each side{more}. The requirement: {}",
                 probe_requirement(x)))),
-            Verdict::Look(m) => f.look.push(item("probe-concern", format!("{function} may break a requirement: for {call}, {answers}. The requirement: {}. Kern does not block it because {}",
+            Verdict::Look(m) => f.look.push(item("probe-concern", format!("{function} may break a requirement: for {call}, {answers}{more}. The requirement: {}. Kern does not block it because {}",
                 probe_requirement(x), probe_missing(x, m)))),
-            Verdict::Uneven => f.unverified.push(item("probe-uneven", format!("{function} may break a requirement: for {call}, {answers}. The requirement: {}. Kern did not set up both sides the same way ({}), so it cannot say the change caused it",
+            Verdict::Uneven => f.unverified.push(item("probe-uneven", format!("{function} may break a requirement: for {call}, {answers}{more}. The requirement: {}. Kern did not set up both sides the same way ({}), so it cannot say the change caused it",
                 probe_requirement(x), plain(x["uneven"].as_str().unwrap_or(""), 400)))),
-            Verdict::Note => f.notes.push(item("probe-difference", format!("{function} answers differently on the new code: for {call}, {answers}; nothing Kern can verify says which answer is right"))),
+            Verdict::Note => f.notes.push(item("probe-difference", format!("{function} answers differently on the new code: for {call}, {answers}{more}; nothing Kern can verify says which answer is right"))),
             Verdict::Same | Verdict::Unchecked(_) => {}
         }
     }
