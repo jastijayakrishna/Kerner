@@ -62,6 +62,9 @@ fn execution_failures_and_unreadable_outputs_are_missing_evidence() {
         assert_eq!(v::observed(&build, ending, b"", b""), Missing);
     }
     assert_eq!(v::observed(&build, "exit 1", b"", b"compiler error"), Failed);
+    for code in 128..=255 {
+        assert_eq!(v::observed(&build, &format!("exit {code}"), b"", b""), Missing, "Signal-style or ambiguous high exit codes are not build regressions");
+    }
     assert_eq!(v::observed(&build, "exit 0", &vec![b'x'; (64 << 10) + 1], b""), Missing);
 }
 

@@ -76,7 +76,7 @@ pub fn proposals(p: &Value, v: &Value) -> R<()> {
 pub fn observed(oracle: &Value, ending: &str, output: &[u8], errors: &[u8]) -> Observed {
     if output.len() > PROBE_OUTPUT_BYTES_MAX || errors.len() > PROBE_OUTPUT_BYTES_MAX { return Observed::Missing; }
     let code = ending.strip_prefix("exit ").and_then(|s| s.parse::<u8>().ok());
-    if code.is_none_or(|c| ending != format!("exit {c}") || [134,137,139,143].contains(&c)) || crate::suite::sandbox_error(&String::from_utf8_lossy(errors)) { return Observed::Missing; }
+    if code.is_none_or(|c| ending != format!("exit {c}") || c >= 128) || crate::suite::sandbox_error(&String::from_utf8_lossy(errors)) { return Observed::Missing; }
     match oracle["mode"].as_str() {
         Some("exit-zero") => if ending == "exit 0" { Observed::Passed } else { Observed::Failed },
         Some("json-equal") if ending == "exit 0" => match serde_json::from_slice::<Value>(output) {
