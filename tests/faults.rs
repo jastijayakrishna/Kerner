@@ -371,6 +371,23 @@ fn a_changed_file_kern_put_no_fault_in_is_named_with_why() {
 }
 
 #[test]
+fn lightdash_12942_a_fault_only_a_broken_test_file_could_have_loaded_is_not_said_to_be_missed_by_a_passing_one() {
+    use kern::policy::Runner::Jest;
+    use kern::proof::{fault_verdict, read_report};
+    let passing = json!({ "name": "/workspace/src/scheduler/SchedulerTask.test.ts", "status": "passed", "assertionResults": [{ "ancestorTitles": ["SchedulerTask"], "title": "runs", "status": "passed", "failureMessages": [] }] });
+    let broken = json!({ "name": "/workspace/src/services/ProjectService/ProjectService.test.ts", "status": "failed", "message": "Cannot find module '@lightdash/warehouses' from 'src/services/ProjectService/ProjectService.test.ts'", "assertionResults": [] });
+    let all_failing = json!({ "name": "/workspace/src/services/CsvService/CsvService.test.ts", "status": "failed", "assertionResults": [{ "ancestorTitles": ["CsvService"], "title": "exports", "status": "failed", "failureMessages": ["TS2307: Cannot find module '@lightdash/warehouses'"] }] });
+    let report = |files: Vec<serde_json::Value>| json!({ "numTotalTests": 2, "testResults": files }).to_string().into_bytes();
+    let control = read_report(Jest, &report(vec![passing.clone(), broken.clone(), all_failing.clone()])).unwrap();
+    let served = (true, true);
+    assert_eq!(fault_verdict(Jest, &control, served, &report(vec![passing.clone(), broken.clone()]), b""), "unknown",
+        "SchedulerTask.ts imports ProjectService only as a type, so only the test file that cannot load could have loaded the change; a passing test is not proof it ran the code");
+    assert_eq!(fault_verdict(Jest, &control, served, &report(vec![passing.clone(), all_failing.clone()]), b""), "unknown", "a file none of whose tests pass is as good as broken");
+    let clean = read_report(Jest, &report(vec![passing.clone()])).unwrap();
+    assert_eq!(fault_verdict(Jest, &clean, served, &report(vec![passing.clone()]), b""), "missed", "with every related file working, a passing test did load the change");
+}
+
+#[test]
 fn a_fault_counts_as_caught_only_when_a_test_that_passed_without_it_fails() {
     use kern::policy::Runner::Jest;
     use kern::proof::{fault_verdict, read_report};
