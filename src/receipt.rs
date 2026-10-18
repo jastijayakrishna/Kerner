@@ -411,6 +411,95 @@ fn build_lines(tests: &Value) -> String {
     }
     md
 }
+fn probe_function(x: &Value) -> String {
+    let path = code(x["path"].as_str().unwrap_or(""), 160);
+    match x["export"].as_str().unwrap_or("") { "default" => format!("The default export of {path}"), name => format!("{} in {path}", code(name, 120)) }
+}
+fn probe_call(x: &Value) -> String {
+    let name = match x["export"].as_str().unwrap_or("") { "default" => stem(x["path"].as_str().unwrap_or("")), name => name };
+    let args: Vec<String> = x["args"].as_array().into_iter().flatten().map(Value::to_string).collect();
+    code(&format!("{name}({})", args.join(", ")), 300)
+}
+fn probe_answers(x: &Value) -> String {
+    let answer = |k: &str| { let a = x["answers"][k].as_str().unwrap_or(""); a.split_once(' ').unwrap_or((a, "")) };
+    let ((was_verb, was), (now_verb, now)) = (answer("old"), answer("new"));
+    match (was_verb == now_verb).then(|| window(was, now)) {
+        Some(Some((was, now))) => format!("the old code {was_verb} {} and the new code {now_verb} {}", code(&was, 160), code(&now, 160)),
+        Some(None) => format!("the old and the new code both {was_verb} a long value that differs only past the start Kern keeps"),
+        None => format!("the old code {was_verb} {} and the new code {now_verb} {}", code(was, 160), code(now, 160)),
+    }
+}
+fn probe_requirement(x: &Value) -> String {
+    let o = &x["obligation"];
+    let statement = o["statement"].as_str().unwrap_or("").trim().trim_end_matches('.');
+    format!("{} ({}: {})", plain(statement, 300), code(o["source"]["path"].as_str().unwrap_or(""), 160), code(o["source"]["quote"].as_str().unwrap_or(""), 300))
+}
+fn probe_missing(x: &Value, m: crate::probe::Missing) -> String {
+    let o = &x["obligation"];
+    let mut why = Vec::new();
+    if m.contested { why.push(format!("the change edits the quoted text in {}", code(o["source"]["path"].as_str().unwrap_or(""), 160))); }
+    if m.authorized { why.push(format!("the pull request says it changes this: {}", code(o["authorized_by"].as_str().unwrap_or(""), 200))); }
+    if m.shape { why.push("no existing test or caller passes inputs of this shape".to_string()); }
+    if m.rerun { why.push("Kern could not run it a second time on each side to confirm".to_string()); }
+    why.join(", and ")
+}
+fn probe_items(f: &mut Found, tests: &Value) {
+    use crate::probe::Verdict;
+    for x in tests["probes"]["experiments"].as_array().into_iter().flatten().filter(|_| tests["probes"]["status"] == "RAN") {
+        let (function, call, answers) = (probe_function(x), probe_call(x), probe_answers(x));
+        match crate::probe::verdict(&crate::probe::evidence(x)) {
+            Verdict::Blocked => f.blocked.push(item("probe-regression", format!("{function} broke a requirement the old code met: for {call}, {answers}, the same in a second run on each side. The requirement: {}",
+                probe_requirement(x)))),
+            Verdict::Look(m) => f.look.push(item("probe-concern", format!("{function} may break a requirement: for {call}, {answers}. The requirement: {}. Kern does not block it because {}",
+                probe_requirement(x), probe_missing(x, m)))),
+            Verdict::Uneven => f.unverified.push(item("probe-uneven", format!("{function} may break a requirement: for {call}, {answers}. The requirement: {}. Kern did not set up both sides the same way ({}), so it cannot say the change caused it",
+                probe_requirement(x), plain(x["uneven"].as_str().unwrap_or(""), 400)))),
+            Verdict::Note => f.notes.push(item("probe-difference", format!("{function} answers differently on the new code: for {call}, {answers}; nothing Kern can verify says which answer is right"))),
+            Verdict::Same | Verdict::Unchecked(_) => {}
+        }
+    }
+}
+fn by_reason(list: &Value) -> Vec<(String, String)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for x in list.as_array().into_iter().flatten() {
+        let (path, why) = (code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400));
+        match groups.iter_mut().find(|(w, _)| *w == why) { Some((_, paths)) => paths.push(path), None => groups.push((why, vec![path])) }
+    }
+    groups.into_iter().map(|(why, paths)| {
+        let more = if paths.len() > SHOWN { format!(" and {} more", paths.len() - SHOWN) } else { String::new() };
+        (why, format!("{}{more}", paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ")))
+    }).collect()
+}
+fn probe_summary(p: &Value) -> String {
+    use crate::probe::{Unchecked, Verdict};
+    let tried: Vec<&Value> = p["experiments"].as_array().into_iter().flatten().collect();
+    let verdicts: Vec<Verdict> = tried.iter().map(|x| crate::probe::verdict(&crate::probe::evidence(x))).collect();
+    let functions: std::collections::BTreeSet<(&str, &str)> = tried.iter().map(|x| (x["path"].as_str().unwrap_or(""), x["export"].as_str().unwrap_or(""))).collect();
+    let (inputs, of) = (plural(tried.len(), "input", "inputs"), plural(functions.len(), "function", "functions"));
+    let found = verdicts.iter().filter(|v| v.differs()).count();
+    let unchecked: Vec<Unchecked> = verdicts.iter().filter_map(|v| match v { Verdict::Unchecked(u) => Some(*u), _ => None }).collect();
+    let thrown = tried.iter().zip(&verdicts).filter(|(x, v)| **v == Verdict::Same && x["answers"]["old"].as_str().is_some_and(crate::trace::failed)).count();
+    let same = format!("{inputs} the AI step chose, for {of}, got the same answers on the old and the new code{}", if thrown > 0 { format!(" ({thrown} of them an error on both)") } else { String::new() });
+    let mut md = if found > 0 { format!("- ⚠️ Probes: {found} of {inputs} the AI step chose, for {of}, got another answer on the new code (see above)\n") }
+        else if !unchecked.is_empty() { String::new() }
+        else if p["not_run"].as_array().is_none_or(Vec::is_empty) { format!("- ✅ Probes: {same}\n") }
+        else { format!("- ⏭️ Probes: {same}, but Kern could not try them all (see below)\n") };
+    let reasons = [(Unchecked::Unreached, "never reached the real function (the run gave no record, the test file did not load, or a mock or another file answered)"), (Unchecked::Unanswered, "gave no answer on one side"),
+        (Unchecked::Sandbox, "needed something the sandbox does not have"), (Unchecked::Chance, "answered differently between two runs of the same code, so Kern sets them aside")];
+    let said: Vec<String> = reasons.iter().filter_map(|(k, what)| { let n = unchecked.iter().filter(|u| *u == k).count(); (n > 0).then(|| format!("{n} {what}")) }).collect();
+    if !said.is_empty() { md += &format!("- ⏭️ Probes: {} of {inputs} not compared — {}\n", unchecked.len(), said.join("; ")); }
+    md
+}
+fn probe_lines(tests: &Value) -> String {
+    let p = &tests["probes"];
+    let mut md = match p["status"].as_str() {
+        Some("NOT_RUN") => format!("- ⏭️ Probes: not checked — {}\n", plain(p["why"].as_str().unwrap_or("Kern could not try the AI step's inputs"), 400)),
+        Some("RAN") => probe_summary(p),
+        _ => return String::new(),
+    };
+    for (why, paths) in by_reason(&p["not_run"]) { md += &format!("- ⏭️ Probes: not tried on {paths} — {why}\n"); }
+    md
+}
 fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>) {
     f.look.extend(per_file("new-test-fails", strings(&tests["new_failing"]), "A test this change adds fails on the new code", "tests this change adds fail on the new code"));
     let wrote: Vec<String> = strings(&tests["wrote_code"]).into_iter().filter(|p| !generated(p)).collect();
@@ -431,6 +520,7 @@ fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>)
         "test files fail on the new code, and Kern has no record of them passing on the old code, so it cannot say whether the change broke them"));
     type_items(f, tests);
     build_items(f, tests);
+    probe_items(f, tests);
     f.unverified.extend(per_file("test-old-sandbox", strings(&tests["old_sandbox"]), "This test file could not run on the old code because of Kern's machine (a killed worker, or out of memory), so its tests were never compared",
         "test files could not run on the old code because of Kern's machine (killed workers, or out of memory), so their tests were never compared"));
     f.unverified.extend(per_file("test-sandbox", strings(&tests["sandbox"]), "This fails on the new code with an error from the sandbox, not the test (no network, a missing program or native module, or a crashed process), so Kern cannot tell whether the change broke it",
@@ -632,15 +722,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
             md += &format!("- {} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
                 if missed.is_empty() { String::new() } else { format!("; not caught: {}", missed.join(", ")) });
         }
-        let mut no_fault: Vec<(String, Vec<String>)> = Vec::new();
-        for x in tests["faults_missing"].as_array().into_iter().flatten() {
-            let (path, why) = (code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400));
-            match no_fault.iter_mut().find(|(w, _)| *w == why) { Some((_, paths)) => paths.push(path), None => no_fault.push((why, vec![path])) }
-        }
-        for (why, paths) in &no_fault {
-            let more = if paths.len() > SHOWN { format!(" and {} more", paths.len() - SHOWN) } else { String::new() };
-            md += &format!("- ⏭️ No fault planted in {}{more}: {why}\n", paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", "));
-        }
+        for (why, paths) in by_reason(&tests["faults_missing"]) { md += &format!("- ⏭️ No fault planted in {paths}: {why}\n"); }
         let seen = &tests["bystanders"];
         if seen["status"] == "RAN" {
             let (n, m) = (seen["compared"].as_u64().unwrap_or(0), seen["changed"].as_u64().unwrap_or(0));
@@ -703,6 +785,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         }
     }
     md += &build_lines(tests);
+    md += &probe_lines(tests);
     if routine_deps(&r["rules"]) {
         let moved: Vec<String> = r["rules"]["dependencies"].as_array().into_iter().flatten().flat_map(|d| strings(&d["packages"])).collect();
         md += &format!("- ✅ Dependencies: {}{} (each removed, from this repository, or updated within the same major version to a release out for at least {} days)\n",

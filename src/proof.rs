@@ -40,7 +40,7 @@ pub fn command(tests: &Tests) -> Vec<String> {
     c
 }
 
-fn unwrap<'b, 'a>(e: &'b Expression<'a>) -> &'b Expression<'a> {
+pub fn unwrap<'b, 'a>(e: &'b Expression<'a>) -> &'b Expression<'a> {
     match e {
         Expression::ParenthesizedExpression(x) => unwrap(&x.expression),
         Expression::TSAsExpression(x) => unwrap(&x.expression),
@@ -1101,7 +1101,7 @@ fn declared_units(d: &Declaration, out: &mut Vec<(String, usize, usize)>) {
         _ => {}
     }
 }
-fn units(path: &str, source: &str) -> Option<BTreeMap<String, (usize, usize)>> {
+pub fn units(path: &str, source: &str) -> Option<BTreeMap<String, (usize, usize)>> {
     parsed(path, source, |program, _| {
         let mut found = Vec::new();
         for s in &program.body {
@@ -1349,14 +1349,14 @@ impl<'a> Visit<'a> for Imports {
         walk::walk_call_expression(self, it);
     }
 }
-fn parsed<T>(path: &str, source: &str, f: impl Fn(&Program, &str) -> T) -> Option<T> {
+pub fn parsed<T>(path: &str, source: &str, f: impl Fn(&Program, &str) -> T) -> Option<T> {
     crate::capability::source_types(path)?.into_iter().find_map(|st| {
         let allocator = Allocator::default();
         let p = Parser::new(&allocator, source, st).parse();
         (!p.fatal_error && p.diagnostics.is_empty()).then(|| f(&p.program, source))
     })
 }
-fn resolve(from: &str, spec: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+pub fn resolve(from: &str, spec: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
     if !(spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../")) { return None; }
     let mut parts: Vec<&str> = from.split('/').collect();
     parts.pop();

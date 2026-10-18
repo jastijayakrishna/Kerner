@@ -532,6 +532,62 @@ check buildfine "$build_base" buildrepo
 decision buildfine clear
 grep -q '✅ Build: `npm run build` works on the old and the new code' buildfine/receipt.md || { cat buildfine/receipt.md; fail "buildfine: a build that still works has no check mark"; }
 
+say "Inputs the AI step proposed run through the project's own runner on the old and the new code: one that breaks a verified requirement is blocked with the input and both answers, as lightdash/lightdash#12942 needed, and inputs whose answers stay the same get their check mark"
+git init -q proberepo && cd proberepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"probe","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+cat > src/sql.js <<'EOF'
+export function removeComments(sql) {
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    if (sql.startsWith('$$', i)) { const end = sql.indexOf('$$', i + 2); const stop = end < 0 ? sql.length : end + 2; out += sql.slice(i, stop); i = stop; continue; }
+    if (sql[i] === "'") { const end = sql.indexOf("'", i + 1); const stop = end < 0 ? sql.length : end + 1; out += sql.slice(i, stop); i = stop; continue; }
+    if (sql.startsWith('--', i) || sql.startsWith('//', i)) { const end = sql.indexOf('\n', i); i = end < 0 ? sql.length : end; continue; }
+    out += sql[i++];
+  }
+  return out;
+}
+EOF
+cat > test/sql.test.js <<'EOF'
+import { test, expect } from 'vitest';
+import { removeComments } from '../src/sql.js';
+
+test('keeps -- inside quoted strings', () => expect(removeComments("SELECT '--x' AS a -- note")).toBe("SELECT '--x' AS a "));
+EOF
+git add -A && git commit -qm base && probe_base=$(git rev-parse HEAD)
+git checkout -q -b lost
+grep -vF "if (sql.startsWith('\$\$', i))" src/sql.js > src/sql.next && mv src/sql.next src/sql.js
+git commit -qam "One kind of quote is enough" && git rev-parse HEAD > "$W/probelost.head"
+git checkout -q -b kept "$probe_base"
+sed -i 's/out += sql\[i++\];/out = out + sql[i++];/' src/sql.js
+git commit -qam "Spell out the append" && git rev-parse HEAD > "$W/probekept.head"
+git checkout -q "$probe_base"
+cd "$W"
+[ "$(git -C proberepo diff --stat "$probe_base" "$(cat probelost.head)" | tail -1 | grep -c '1 deletion')" = 1 ] && [ "$(git -C proberepo diff --stat "$probe_base" "$(cat probekept.head)" | tail -1 | grep -c '1 insertion(+), 1 deletion')" = 1 ] \
+  || fail "proberepo: each change should edit exactly one line of src/sql.js"
+investigation() {
+  jq -n --arg base "$probe_base" --arg head "$(cat "$W/$1.head")" --arg quote "test('keeps -- inside quoted strings'" \
+    '{ version: 1, base: $base, head: $head, status: "INVESTIGATED", why: "", model: "fixture", usage: { input_tokens: 0, output_tokens: 0 },
+       targets: [{ path: "src/sql.js", export: "removeComments", shapes: [["string"]] }],
+       obligations: [{ id: "o1", statement: "Removing comments keeps the text inside quoted strings unchanged.", check: "same",
+         targets: [{ path: "src/sql.js", export: "removeComments" }], source: { path: "test/sql.test.js", quote: $quote, kind: "test" }, authority: "verified", why: "", authorized_by: "" }],
+       experiments: [{ id: "e1", obligation: "o1", path: "src/sql.js", export: "removeComments", args: ["SELECT $$https://example.com/a//b$$ AS address"], why: "a dollar-quoted string that holds //" },
+         { id: "e2", obligation: "o1", path: "src/sql.js", export: "removeComments", args: ["SELECT 1 -- note"], why: "a plain comment" }], dropped: [] }' > "$W/$1.investigation.json"
+}
+for c in probelost probekept; do
+  investigation "$c"
+  export KERN_INVESTIGATION="$W/$c.investigation.json"
+  check "$c" "$probe_base" proberepo
+  unset KERN_INVESTIGATION
+done
+[ "$(jq -r .decision probelost.json)" = blocked ] && [ "$(kinds probelost probe-regression blocked)" = 1 ] && grep -qF 'removeComments("SELECT $$https://example.com/a//b$$ AS address")' probelost/receipt.md \
+  && grep -qF '"SELECT $$https://example.com/a//b$$ AS address"' probelost/receipt.md && grep -qF '"SELECT $$https:"' probelost/receipt.md \
+  || { cat probelost/receipt.md; jq .tests.probes probelost/receipt.json; cat probelost/trace-probe-*.err 2>/dev/null | tail -n 40; fail "probelost: the input that truncates a dollar-quoted string was not blocked with the input and both answers"; }
+[ "$(jq -r .decision probekept.json)" = clear ] && grep -q '✅ Probes: 2 inputs the AI step chose, for 1 function, got the same answers on the old and the new code$' probekept/receipt.md \
+  || { cat probekept/receipt.md; jq .tests.probes probekept/receipt.json; cat probekept/trace-probe-*.err 2>/dev/null | tail -n 40; fail "probekept: inputs whose answers stay the same have no check mark"; }
+
 say "Kern undoes each changed function and plants small faults in the changed lines: a same-behaviour rewrite the tests guard counts as checked, and a change no test checks becomes a task for the agent, with vitest and with jest"
 for runner in vitest jest; do
   git init -q "faults-$runner-repo" && cd "faults-$runner-repo"

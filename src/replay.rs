@@ -40,7 +40,7 @@ const FAULTS_BYTES_MAX: u64 = 16 << 20;
 fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec<Value>> {
     let mut outcomes = Vec::new();
     for (runner, suite_dir) in suites {
-        let label = if suite_dir.is_empty() { String::new() } else { format!("-{}", suite_dir.replace('/', "_")) };
+        let label = crate::suite::label(suite_dir);
         let path = dir.join(format!("faults{label}.json"));
         if !path.is_file() { continue; }
         if std::fs::metadata(&path).ok()?.len() > FAULTS_BYTES_MAX { return None; }
@@ -117,6 +117,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     let wanted: BTreeSet<String> = tests["rewritten"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
     if !wanted.is_empty() { tests["polarity"] = Value::Object(readings(dir, &suites, &labels, &wanted)); }
     if tests["builds"]["status"] == "CHECKED" { tests["builds"] = crate::build::rejudge(dir, &tests["builds"], setup.as_ref()); }
+    if tests["probes"]["status"] == "RAN" { tests["probes"] = crate::probe::replayed(dir, &tests["probes"], setup.as_ref()); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });
     let receipt = crate::receipt::build(&d, &stored["rules"], &tests, &stored["behaviour"]);
     Ok(json!({ "replayed": judged.as_ref().map_or(0, Vec::len), "suites": labels.len(), "receipt": receipt }))

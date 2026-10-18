@@ -122,4 +122,16 @@ function exported(file, value) {
   }
   return value;
 }
-module.exports = { fn: wrap, value: wrap, class: methods, exports: exported };
+async function probe(id, mod, name, args) {
+  let o;
+  try {
+    const self = name === 'default' ? undefined : mod;
+    const f = name === 'default' ? (typeof mod === 'function' ? mod : mod.default) : mod[name];
+    const result = Reflect.apply(f, self, args);
+    if (Object.prototype.toString.call(result) === '[object Promise]') {
+      try { o = 'resolves ' + shown(await result); } catch (e) { o = 'rejects ' + text(e); }
+    } else o = 'returns ' + shown(result);
+  } catch (e) { o = 'throws ' + text(e); }
+  try { record({ p: String(id), o }); } catch {}
+}
+module.exports = { fn: wrap, value: wrap, class: methods, exports: exported, probe };

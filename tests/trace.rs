@@ -8,9 +8,9 @@ fn every_exported_function_of_an_es_module_is_wrapped_after_it_is_defined() {
     let out = instrument("packages/backend/src/queryBuilder.ts", source).expect("an ES module with exported functions is instrumented");
     assert!(out.starts_with(&source[..source.find("export const").unwrap()]), "nothing before the first wrapped binding changes:\n{out}");
     assert!(out.contains("export let fmt = (s: string) => s.trim(), other = 1;"), "a const that is wrapped later becomes let:\n{out}");
-    for (name, how) in [("total", "fn"), ("fmt", "value"), ("other", "value"), ("load", "fn"), ("Repo", "class"), ("main", "fn")] {
-        assert!(out.contains(&format!("{name} = __kern_trace.{how}(\"packages/backend/src/queryBuilder.ts\", \"{name}\", {name});")) || (how == "class" && out.contains(&format!("__kern_trace.class(\"packages/backend/src/queryBuilder.ts\", \"{name}\", {name});"))),
-            "{name} is wrapped as {how}:\n{out}");
+    for (name, label, how) in [("total", "total", "fn"), ("fmt", "fmt", "value"), ("other", "other", "value"), ("load", "load", "fn"), ("Repo", "Repo", "class"), ("main", "default", "fn")] {
+        assert!(out.contains(&format!("{name} = __kern_trace.{how}(\"packages/backend/src/queryBuilder.ts\", \"{label}\", {name});")) || (how == "class" && out.contains(&format!("__kern_trace.class(\"packages/backend/src/queryBuilder.ts\", \"{label}\", {name});"))),
+            "{name} is wrapped as {how} under the name importers use, {label}:\n{out}");
     }
     assert!(!out.contains("\"inner\""), "a function the module does not export is left alone:\n{out}");
     assert!(out.contains("import * as __kern_trace_module from \"/kern/trace.cjs\";"), "{out}");

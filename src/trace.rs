@@ -57,8 +57,8 @@ fn exported(program: &Program) -> Vec<(String, String)> {
                 }
             }
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
-                ExportDefaultDeclarationKind::FunctionDeclaration(f) => { if let Some(id) = &f.id { out.push((id.name.to_string(), id.name.to_string())); } }
-                ExportDefaultDeclarationKind::ClassDeclaration(c) => { if let Some(id) = &c.id { out.push((id.name.to_string(), id.name.to_string())); } }
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => { if let Some(id) = &f.id { out.push((id.name.to_string(), "default".to_string())); } }
+                ExportDefaultDeclarationKind::ClassDeclaration(c) => { if let Some(id) = &c.id { out.push((id.name.to_string(), "default".to_string())); } }
                 ExportDefaultDeclarationKind::Identifier(id) => out.push((id.name.to_string(), "default".to_string())),
                 _ => {}
             },
@@ -113,7 +113,7 @@ fn calls(text: &str) -> Calls {
     }
     out
 }
-fn failed(o: &str) -> bool { o.starts_with("throws ") || o.starts_with("rejects ") }
+pub fn failed(o: &str) -> bool { o.starts_with("throws ") || o.starts_with("rejects ") }
 fn empty(o: &str) -> bool { o.split_once(' ').is_some_and(|(verb, v)| (verb == "returns" || verb == "resolves") && EMPTY.contains(&v)) }
 fn kind(was: &std::collections::BTreeSet<String>, now: &std::collections::BTreeSet<String>) -> (u8, &'static str) {
     let (was_fails, now_fails) = (was.iter().any(|o| failed(o)), now.iter().any(|o| failed(o)));
@@ -146,6 +146,64 @@ pub fn merged(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value
     let sum = |k: &str| a[k].as_u64().unwrap_or(0) + b[k].as_u64().unwrap_or(0);
     let differences: Vec<serde_json::Value> = a["differences"].as_array().into_iter().flatten().chain(b["differences"].as_array().into_iter().flatten()).take(DIFFERENCES_COUNT_MAX).cloned().collect();
     serde_json::json!({ "status": "RAN", "compared": sum("compared"), "unstable": sum("unstable"), "changed": sum("changed"), "tests": sum("tests"), "differences": differences })
+}
+
+fn function_value(e: &Expression) -> bool { matches!(crate::proof::unwrap(e), Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)) }
+fn local_functions(program: &Program) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for s in &program.body {
+        let declaration = match s { Statement::ExportDeclaration(e) => Some(&e.declaration), _ => s.as_declaration() };
+        match declaration {
+            Some(Declaration::FunctionDeclaration(f)) if !f.declare && f.body.is_some() => { if let Some(id) = &f.id { out.insert(id.name.to_string()); } }
+            Some(Declaration::VariableDeclaration(v)) if !v.declare => {
+                for d in &v.declarations {
+                    if let (BindingPattern::BindingIdentifier(id), Some(init)) = (&d.id, &d.init) && function_value(init) { out.insert(id.name.to_string()); }
+                }
+            }
+            _ => {}
+        }
+        if let Statement::ExportDefaultDeclaration(e) = s && let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &e.declaration && f.body.is_some() && let Some(id) = &f.id {
+            out.insert(id.name.to_string());
+        }
+    }
+    out
+}
+fn commonjs_functions(program: &Program) -> std::collections::BTreeSet<String> {
+    let local = local_functions(program);
+    let callable = |e: &Expression| function_value(e) || matches!(crate::proof::unwrap(e), Expression::Identifier(id) if local.contains(id.name.as_str()));
+    let module = |e: &Expression| matches!(e, Expression::Identifier(i) if i.name == "module");
+    let (mut out, mut whole) = (std::collections::BTreeSet::new(), false);
+    for s in &program.body {
+        let Statement::ExpressionStatement(es) = s else { continue };
+        let Expression::AssignmentExpression(a) = &es.expression else { continue };
+        let AssignmentTarget::StaticMemberExpression(m) = &a.left else { continue };
+        if m.property.name == "exports" && module(&m.object) {
+            match crate::proof::unwrap(&a.right) {
+                Expression::ObjectExpression(o) => {
+                    for p in &o.properties {
+                        if let ObjectPropertyKind::ObjectProperty(p) = p && p.kind == PropertyKind::Init && (p.method || callable(&p.value)) && let Some(k) = p.key.static_name() { out.insert(k.to_string()); }
+                    }
+                }
+                e => whole |= callable(e),
+            }
+        } else if (matches!(&m.object, Expression::Identifier(i) if i.name == "exports") || matches!(&m.object, Expression::StaticMemberExpression(x) if x.property.name == "exports" && module(&x.object)))
+            && callable(&a.right) {
+            out.insert(m.property.name.to_string());
+        }
+    }
+    if whole { std::collections::BTreeSet::from(["default".to_string()]) } else { out }
+}
+pub fn callable(path: &str, source: &str) -> Option<std::collections::BTreeSet<String>> {
+    if !crate::capability::is_code(path) { return None; }
+    crate::capability::source_types(path)?.into_iter().find_map(|st| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, st).parse();
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() { return None; }
+        let program = &parsed.program;
+        if !program.body.iter().any(Statement::is_module_declaration) { return Some(commonjs_functions(program)); }
+        let local = local_functions(program);
+        Some(exported(program).into_iter().filter(|(l, _)| local.contains(l)).map(|(_, name)| name).collect())
+    })
 }
 
 pub fn instrument(path: &str, source: &str) -> Option<String> {

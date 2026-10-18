@@ -94,9 +94,13 @@ fn self_test(op: &Operator) -> Result<&'static str, String> {
     Ok("passed")
 }
 pub fn check(repo: &Path, base: &str, head: &str, out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>) -> R<Value> {
-    judge(repo, (base, head), out, op, pr, ai, &|| self_test(op).map(str::to_string))
+    let investigation = std::env::var_os("KERN_INVESTIGATION").filter(|f| !f.is_empty()).map(std::path::PathBuf::from);
+    judged(repo, (base, head), out, op, (pr, ai), &|| self_test(op).map(str::to_string), investigation.as_deref())
 }
 pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator, pr: Option<&str>, ai: Option<&Ai>, self_test: &dyn Fn() -> Result<String, String>) -> R<Value> {
+    judged(repo, (base, head), out, op, (pr, ai), self_test, None)
+}
+fn judged(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator, (pr, ai): (Option<&str>, Option<&Ai>), self_test: &dyn Fn() -> Result<String, String>, investigation: Option<&Path>) -> R<Value> {
     let started = now_ms();
     let until = started + minutes() * 60_000;
     crate::drive::prepare(repo, base, head, out, pr)?;
@@ -139,6 +143,8 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let typed = now_ms();
     if run && trusted && std::env::var("KERN_BUILD").as_deref() != Ok("0") { tests["builds"] = crate::build::run(out, op, until); }
     let built = now_ms();
+    if run && trusted && std::env::var("KERN_PROBES").as_deref() != Ok("0") { tests["probes"] = crate::probe::run(out, investigation, until); }
+    let probed = now_ms();
     let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|_| behaviour["status"] == "RAN");
     let receipt = crate::receipt::build(&d, &rules, &tests, &behaviour);
     crate::receipt::write(out, &receipt, comment.as_deref())?;
@@ -147,6 +153,6 @@ pub fn judge(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator,
     let canary = match &machine { Ok(said) => said.to_string(), Err(why) => format!("failed: {why}") };
     Ok(json!({ "status": "CHECKED", "cleaned": cleaned, "canary": canary, "decision": receipt["decision"], "blocked": receipt["blocked"].as_array().map_or(0, Vec::len),
         "look": receipt["look"].as_array().map_or(0, Vec::len), "unverified": receipt["unverified"].as_array().map_or(0, Vec::len), "tests": tests["status"], "behaviour": behaviour["status"], "seconds": secs_since(started),
-        "phases": { "rules": secs_between(started, checked), "behaviour": secs_between(checked, behaved), "tests": secs_between(behaved, tested), "types": secs_between(tested, typed), "build": secs_between(typed, built), "tests_detail": tests["seconds"] },
+        "phases": { "rules": secs_between(started, checked), "behaviour": secs_between(checked, behaved), "tests": secs_between(behaved, tested), "types": secs_between(tested, typed), "build": secs_between(typed, built), "probes": secs_between(built, probed), "tests_detail": tests["seconds"] },
         "receipt": out.join("receipt.md").display().to_string() }))
 }

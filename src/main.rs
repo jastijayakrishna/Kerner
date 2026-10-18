@@ -14,6 +14,11 @@ Check (one receipt on every pull request; Kern's GitHub workflow, .github/workfl
                                   verifier side (--control verifier.json): the rules, the project's tests on the old and the
                                   new code and, with an AI key, every changed line run both ways; writes receipt.json and
                                   receipt.md (KERN_CHECK_AI=0 skips the AI part; it takes kern drive's agent settings)
+  investigate <repo> <base> <head> <pr.md> <out-dir>
+                                  in Kern's investigate job, which holds ANTHROPIC_API_KEY (KERN_MODEL or claude-opus-5-5): the
+                                  model states what the changed functions must keep doing from sources older than the change, and
+                                  proposes inputs; Kern checks every answer and writes investigation.json. It reads the code only
+                                  through git, runs none of it, and reuses oracle.answer.json and hunter.answer.json in out-dir
   receipt render <out-dir> <head-sha>
                                   in Kern's signing job: rebuild the answer from receipt.json's facts and write receipt.md
   receipt sign <out-dir> <owner/repo> <pr-number>
@@ -201,6 +206,14 @@ fn cli() -> R<(Option<Value>, i32)> {
             let ai_on = wanted.as_deref() != Some("0") && (wanted.as_deref() == Some("1") || ["KERN_DRIVE_AGENT", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())));
             let ai = kern::check::Ai { agent: &agent, rounds };
             (Some(kern::check::check(Path::new(&a[0]), &a[1], &a[2], Path::new(&a[3]), &operator(&read_json(&a[4])?)?, pr.as_deref(), ai_on.then_some(&ai))?), 0)
+        }
+        "investigate" => {
+            count(a, 5)?;
+            let pr = kern::investigate::read_pr(Path::new(&a[3]))?;
+            let (key, model) = (kern::github::env("ANTHROPIC_API_KEY"), kern::investigate::model());
+            let call = |p: &kern::investigate::Prompt| kern::investigate::call(key.as_deref().unwrap_or_default(), &kern::investigate::request(&model, p));
+            let ask: Option<kern::investigate::Ask> = if key.is_some() { Some(&call) } else { None };
+            (Some(kern::investigate::investigate(Path::new(&a[0]), (&a[1], &a[2]), &pr, Path::new(&a[4]), ask)?), 0)
         }
         "receipt" => {
             let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected receipt render, sign, post, approve or verify; see kern --help".into()))?;

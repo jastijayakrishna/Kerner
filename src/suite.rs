@@ -425,12 +425,13 @@ pub const NODE_FILES: &str = "node's test runner does not say which file each te
 const DATA_FOLDERS: [&str; 10] = ["fixtures", "__fixtures__", "__testfixtures__", "mocks", "__mocks__", "testdata", "test-data", "test_data", "golden", "goldens"];
 const SHARED: [&str; 5] = ["spec", "specs", "e2e", "cypress", "playwright"];
 const EXTENSIONS: [&str; 9] = ["js", "ts", "mjs", "cjs", "jsx", "tsx", "mts", "cts", "json"];
-pub fn kept_name(path: &str, n: u32) -> Option<String> {
+pub fn tagged(path: &str, tag: &str, n: u32) -> Option<String> {
     let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
     let (stem, rest) = name.split_once('.').filter(|(s, _)| !s.is_empty())?;
-    let tag = if n == 0 { "kern-kept".to_string() } else { format!("kern-kept{n}") };
+    let tag = if n == 0 { tag.to_string() } else { format!("{tag}{n}") };
     Some(if dir.is_empty() { format!("{stem}.{tag}.{rest}") } else { format!("{dir}/{stem}.{tag}.{rest}") })
 }
+pub fn kept_name(path: &str, n: u32) -> Option<String> { tagged(path, "kern-kept", n) }
 pub fn kept_back(path: &str) -> Option<String> {
     let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
     let (stem, rest) = name.split_once('.')?;
@@ -965,7 +966,22 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
     out.into_iter().collect()
 }
 
-struct Suite { dir: String, old: Option<(Tests, Env)>, new: (Tests, Env) }
+pub struct Suite { pub dir: String, pub old: Option<(Tests, Env)>, pub new: (Tests, Env) }
+const SUITES_COUNT_MAX: usize = 16;
+fn side_json((tests, env): &(Tests, Env)) -> Value { json!({ "runner": tests.runner.name(), "command": tests.command, "env": env }) }
+fn side_of(v: &Value) -> Option<(Tests, Env)> {
+    let command = v["command"].as_array()?.iter().map(|a| a.as_str().map(str::to_string)).collect::<Option<Vec<_>>>()?;
+    let env = v["env"].as_object()?.iter().map(|(k, x)| Some((k.clone(), x.as_str()?.to_string()))).collect::<Option<Env>>()?;
+    Some((Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(v["runner"].as_str()?)?, command, edits: Edits::Checked }, env))
+}
+impl Suite {
+    pub fn json(&self) -> Value { json!({ "dir": self.dir, "old": self.old.as_ref().map(side_json), "new": side_json(&self.new) }) }
+}
+pub fn ran_suites(out: &Path) -> Option<Vec<Suite>> {
+    let v = read_json(out.join("suites.json")).ok()?;
+    v.as_array()?.iter().take(SUITES_COUNT_MAX).map(|s| Some(Suite { dir: s["dir"].as_str()?.to_string(), old: if s["old"].is_null() { None } else { Some(side_of(&s["old"])?) }, new: side_of(&s["new"])? })).collect()
+}
+pub fn label(dir: &str) -> String { if dir.is_empty() { String::new() } else { format!("-{}", dir.replace('/', "_")) } }
 
 const REPAIR_ROUNDS_COUNT_MAX: usize = 3;
 pub const SINGLE_FILES: &str = "Kern runs single test files only with jest, vitest and mocha";
@@ -1162,14 +1178,16 @@ pub const BYSTANDER_SECS_MAX: u64 = 480;
 const BYSTANDER_FILES_COUNT_MAX: usize = 40;
 const SERVE_BYTES_MAX: usize = 2 << 20;
 pub fn bystanders_fit(left_secs: u64) -> bool { left_secs >= BYSTANDER_SECS_MIN + TYPES_SECS_RESERVE }
-fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, serve: &serde_json::Map<String, Value>, label: &str, seconds: u64) -> Option<String> {
+pub type Texts = serde_json::Map<String, Value>;
+pub fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, (files, serve): (&Texts, &Texts), label: &str, seconds: u64) -> Option<String> {
     let command: Vec<String> = test_command(tests).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
-    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": {}, "early": false, "faults": [], "serve": serve });
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early": false, "faults": [], "serve": serve });
     let run = in_test_box(out, volume, &format!("trace-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)).ok()?;
     let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).ok()?;
+    let _ = std::fs::write(out.join(format!("trace-{label}.err")), &parts["errors"]);
     parts["ending"].starts_with(b"exit").then(|| String::from_utf8_lossy(&parts["trace"]).to_string())
 }
-fn watched(files: &[(String, String, String)], old_side: bool) -> serde_json::Map<String, Value> {
+pub fn watched(files: &[(String, String, String)], old_side: bool) -> Texts {
     let mut out = serde_json::Map::new();
     let mut bytes = 0usize;
     for (path, old, new) in files {
@@ -1193,7 +1211,7 @@ fn bystanders(out: &Path, (old_volume, new_volume): (&str, &str), suite: &Suite,
     let each = (seconds / 3).max(60);
     let mut traces = Vec::new();
     for (side, volume, tests, serve) in [("old", old_volume, (&old_t, old_env), &old_serve), ("old-again", old_volume, (&old_t, old_env), &old_serve), ("new", new_volume, (&new_t, &suite.new.1), &new_serve)] {
-        let Some(trace) = traced_run(out, volume, tests, &suite.dir, serve, &format!("{side}{label}"), each) else { return none(format!("the {side} run of the untouched tests did not finish")) };
+        let Some(trace) = traced_run(out, volume, tests, &suite.dir, (&Texts::new(), serve), &format!("{side}{label}"), each) else { return none(format!("the {side} run of the untouched tests did not finish")) };
         let _ = std::fs::write(out.join(format!("trace-{side}{label}.jsonl")), &trace);
         traces.push(trace);
     }
@@ -1355,7 +1373,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     merged.insert("polarity".into(), json!({}));
     let (mut sums, mut kept) = ([0u64; 6], 0u64);
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
-    let (mut late, mut dropped) = (false, BTreeSet::new());
+    let (mut late, mut dropped, mut tested) = (false, BTreeSet::new(), Vec::new());
     let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
     let changes = crate::rules::changed(repo, base, head)?;
     let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().is_some_and(follows_script);
@@ -1373,7 +1391,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the new code, where {why} (it worked on the old code)") }));
             continue;
         }
-    let label = if suite.dir.is_empty() { String::new() } else { format!("-{}", suite.dir.replace('/', "_")) };
+        let label = label(&suite.dir);
         let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
@@ -1632,7 +1650,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             None => only,
         };
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
+        tested.push(suite.json());
     }
+    let _ = std::fs::write(out.join("suites.json"), serde_json::to_vec(&tested).unwrap_or_default());
     let old_shapes: BTreeSet<String> = old_created.iter().map(|f: &String| path_shape(f)).collect();
     wrote_code.retain(|f| !old_shapes.contains(&path_shape(f)));
     for n in not_run.iter_mut() {

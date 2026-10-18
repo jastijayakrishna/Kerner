@@ -4,10 +4,10 @@ on:
   workflow_call:
     secrets:
       ANTHROPIC_API_KEY:
-        description: Not used by this version. The job that runs the pull request's code holds no keys, so the AI step waits for a job of its own
+        description: Optional. Turns on the AI investigation, which runs in a job of its own that never runs the pull request's code; the job that runs it still holds no keys
         required: false
       CLAUDE_CODE_OAUTH_TOKEN:
-        description: Not used by this version, for the same reason
+        description: Not used by this version
         required: false
 
 permissions: {}
@@ -22,9 +22,16 @@ jobs:
       id-token: write
     outputs:
       kern: ${{ steps.which.outputs.sha }}
+      ai: ${{ steps.ai.outputs.on }}
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      - name: Whether the AI step can run
+        id: ai
+        env:
+          KEYED: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: echo "on=$KEYED" >> "$GITHUB_OUTPUT"
+
       - name: Mark the pull request as being checked
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -85,12 +92,98 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  investigate:
+    name: Kern investigates
+    needs: [plan, build]
+    if: needs.plan.outputs.ai == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Kern, built where no pull request code ran
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: kern-trusted-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trusted
+
+      - name: Check it is the Kern the build job made
+        env:
+          WANT: ${{ needs.build.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          K="$RUNNER_TEMP/trusted/kern"
+          [ "$(sha256sum "$K" | cut -d' ' -f1)" = "$WANT" ] || { echo "::error::The Kern binary is not the one the build job made"; exit 1; }
+          chmod +x "$K"
+
+      - name: Check out the pull request, to read and never to run
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: repo
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: The commit it branched from
+        id: base
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=$(curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" | jq -r '.merge_base_commit.sha // empty') || base=""
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { echo "::warning::Kern could not find the commit this change branched from, so it does not investigate"; exit 0; }
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -C repo -c "http.$GITHUB_SERVER_URL/.extraheader=$auth" fetch --quiet --no-tags --depth=1 origin "$base"
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
+      - name: The AI's answers for this exact change, if Kern asked before
+        id: asked
+        if: steps.base.outputs.sha != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/investigation
+          key: kern-investigation-v1-${{ needs.plan.outputs.kern }}-${{ steps.base.outputs.sha }}-${{ github.event.pull_request.head.sha }}
+
+      - name: Investigate, reading the code and never running it
+        id: investigate
+        if: steps.base.outputs.sha != ''
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BASE: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          O="$RUNNER_TEMP/investigation" && mkdir -p "$O"
+          jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/pr.md"
+          "$RUNNER_TEMP/trusted/kern" investigate "$GITHUB_WORKSPACE/repo" "$BASE" "$HEAD_SHA" "$RUNNER_TEMP/pr.md" "$O" | tee "$RUNNER_TEMP/investigate.json"
+          if [ -f "$O/oracle.answer.json" ] && [ -f "$O/hunter.answer.json" ]; then echo "answered=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Keep the AI's answers, so a rerun of this change asks nothing new
+        if: steps.asked.outputs.cache-hit != 'true' && steps.investigate.outputs.answered == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/investigation
+          key: kern-investigation-v1-${{ needs.plan.outputs.kern }}-${{ steps.base.outputs.sha }}-${{ github.event.pull_request.head.sha }}
+
+      - name: Hand the investigation to the job that runs the tests
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: kern-investigation-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/investigation/investigation.json
+          if-no-files-found: ignore
+          retention-days: 1
+
   run:
     needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     permissions:
       contents: read
+      actions: read
     concurrency:
       group: kern-run-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -234,11 +327,30 @@ jobs:
           KERN_KEEP: ${{ runner.environment == 'github-hosted' && '1' || '0' }}
           BASE: ${{ steps.base.outputs.sha }}
           KERN_CHECK_AI: "0"
+          AI: ${{ needs.plan.outputs.ai }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INVESTIGATION: kern-investigation-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           W="$RUNNER_TEMP/kern"
           jq -r '"# " + .pull_request.title + "\n\n" + (.pull_request.body // "")' "$GITHUB_EVENT_PATH" > "$W/pr.md"
+          fetch() {
+            local api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" auth="Authorization: Bearer $GITHUB_TOKEN" state url
+            for _ in $(seq 1 90); do
+              state=$(curl -fsS -H "$auth" "$api/jobs?per_page=100" | jq -r '[.jobs[] | select(.name | endswith("Kern investigates"))][0].status // empty') || state=""
+              url=$(curl -fsS -H "$auth" "$api/artifacts?name=$INVESTIGATION" | jq -r '.artifacts[0].archive_download_url // empty') || url=""
+              if [ -n "$url" ] && curl -fsSL -H "$auth" -o "$W/investigation.zip" "$url" && unzip -p "$W/investigation.zip" investigation.json > "$W/investigation.part"; then
+                mv "$W/investigation.part" "$KERN_INVESTIGATION"; return 0
+              fi
+              if [ "$state" = completed ]; then
+                printf '{"version":1,"status":"FAILED","why":"the AI step ended without an investigation"}\n' > "$W/investigation.part" && mv "$W/investigation.part" "$KERN_INVESTIGATION"; return 0
+              fi
+              sleep 10
+            done
+          }
+          if [ "$AI" = true ]; then export KERN_INVESTIGATION="$W/investigation.json"; fetch & fi
           "$KERN_BIN" --control "$W/verifier.json" check "$GITHUB_WORKSPACE/repo" "$BASE" "$HEAD_SHA" "$W/out" "$W/operator.json" "$W/pr.md" | tee "$W/check.json"
+          kill %1 2> /dev/null || true
           cat "$W/out/receipt.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Hand the results to the job that signs

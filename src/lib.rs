@@ -35,3 +35,6 @@ pub mod build;
 pub mod replay;
 pub mod polarity;
 pub mod trace;
+pub mod calls;
+pub mod probe;
+pub mod investigate;

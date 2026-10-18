@@ -49,8 +49,10 @@ One optional setting:
   code-owner review. `kern receipt verify` accepts only receipts signed by Kern's own workflow at `main`, a release tag, or `one`
   while Kern One is built there.
 
-Kern's workflow uses no AI key. The job that runs the pull request's code holds no keys at all, so an AI step that reads the pull
-request waits for a job of its own; a key you set is not passed to it. Your code never leaves GitHub's runners.
+Kern needs no AI key. With an `ANTHROPIC_API_KEY` secret it also investigates each pull request with Claude (item 10 below), in a job
+of its own that reads the code and never runs it; the job that runs the pull request's code still holds no keys. That job sends
+Anthropic the changed functions' old and new code, the old tests, documentation and callers that mention them, and the pull request's
+title and body. Without the key, your code never leaves GitHub's runners. Pull requests from forks get no secrets, so no AI step.
 
 See it on real pull requests: [kern-check-demo](https://github.com/jastijayakrishna/kern-check-demo/pulls?q=is%3Apr).
 
@@ -171,16 +173,28 @@ What Kern checks on every pull request:
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node
    the package says it supports (`engines.node`, checked against Node's own documentation); and HTML that adds inline styles or scripts
    that a Content-Security-Policy in the same change forbids.
-10. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
-   every changed line run; Kern runs it on the old and the new code and lists what behaves differently. It needs an AI key, so the
-   workflow does not run it until it has a job of its own that holds the key and never runs the pull request's code.
+10. **Requirements the change may break, found by AI and proven by running the code.** With an AI key, Kern asks Claude two questions
+   in the job that holds the key. First, from what existed before the change (old tests, documentation and comments, never the new
+   code), what must stay true about each changed exported function, each with a word-for-word quote of its source. Second, which
+   realistic inputs could break those requirements. Kern checks each quote itself: it must be in a file that existed before the change
+   and be about the function (inside a test that calls it, next to a line of the documentation that names it, or in its own comment).
+   Then it calls the function with each input through the project's own test runner (vitest or jest), on the old and the new code with
+   the network off, and runs both again when an answer differs. An answer that changed is a note. It blocks only when the quote checks
+   out and the change leaves it in place, existing tests or callers pass inputs of the same kind, both old runs agree, both new runs
+   agree, and both sides were set up the same way. When the pull request says it changes that behaviour, or a piece of that evidence is
+   missing, it is a look that says which. The receipt gives the call, both answers and the quote, and a rerun of the same change reuses
+   the AI's answers.
+11. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
+   every changed line run; Kern runs it on the old and the new code and lists what behaves differently.
 
 Where the code runs: Kern's workflow has two jobs. The job that installs and tests the pull request's code holds no keys at all (its
 token can only read the repository) and runs on GitHub's throwaway machine, deleted when the job ends. There the code runs in locked
 containers (read-only system, no privileges, an unprivileged user, memory and process limits, the network off while tests run), and
 packages install with their own install scripts, the way CI installs them; when a script fails, Kern installs again without scripts.
 A second job never runs the pull request's code: it builds Kern itself from source with no cache, renders the receipt from the first
-job's results, signs it and posts it. On a machine that is kept between jobs, the code runs in gVisor instead.
+job's results, signs it and posts it. With an AI key, a third job holds the key: it runs that same Kern build, checked by its hash,
+reads the pull request's files and asks Claude, and never runs the pull request's code; the job that runs the code reads its answer
+only as data. On a machine that is kept between jobs, the code runs in gVisor instead.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
 so an edited comment cannot change what `kern receipt verify owner/repo 12` reports, and `/kern approve` only counts signed receipts.
@@ -258,6 +272,8 @@ Next steps:
 
 - Kern does not prove that code is correct or well meant. A person still decides whether a change is good.
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
+- The AI step can miss a regression, and it can cite a requirement Kern cannot confirm. Kern never blocks on the AI's word: a block
+  needs the quote confirmed and the break repeated on both runs, and a difference without a confirmed requirement is only a note.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
   run (another runner, a failed install, no results, Kern's own environment failing), the answer is not verified and says why, never ✅;
   the rules that need no test run still apply, so a look they find is still a look. A
