@@ -281,6 +281,17 @@ fn tryghost_ghost_28552_changed_code_no_test_here_reaches_never_gets_a_check_mar
 }
 
 #[test]
+fn webdriverio_15574_a_fault_run_where_kern_s_own_reporter_did_not_load_is_kern_s_limit_not_unreached_code() {
+    let before = kern::proof::Report::default();
+    let errors = "Error: Cannot find module '/kern/vitest-progress.mjs'\n    at loadCustomReporterModule (file:///workspace/node_modules/vitest/dist/chunks/cli-api.js:7713:26)\n  [cause]: Error: Failed to load url /kern/vitest-progress.mjs (resolved id: /kern/vitest-progress.mjs). Does the file exist?";
+    assert_eq!(kern::proof::fault_verdict(kern::policy::Runner::Vitest, &before, (true, false), b"", errors.as_bytes()), "unknown",
+        "vite looked for Kern's reporter under the project's root, so no test ran at all; that is Kern's limit, never proof that no test reaches the code");
+    let command: Vec<String> = ["/workspace/node_modules/.bin/vitest", "related", "--run", "src/getHTML.ts", "--outputFile=/tmp/.kern-report.json", "--reporter=/kern/vitest-progress.mjs"].map(String::from).to_vec();
+    let shorter = kern::sandbox::retried_command(&command, errors).expect("the run is tried again without Kern's reporter");
+    assert!(!shorter.iter().any(|a| a.contains("/kern/")) && shorter.len() == command.len() - 1, "{shorter:?}");
+}
+
+#[test]
 fn a_planted_fault_that_no_test_loaded_is_unreached() {
     let before = kern::proof::Report::default();
     let crashed = b"Error: Failed to resolve entry for package \"@orval/core\". The package may have incorrect main/module/exports specified in its package.json.";

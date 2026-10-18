@@ -983,6 +983,7 @@ pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool,
     let report = read_report(runner, output);
     if report.is_err() && (none(output) || none(errors)) { return "untested"; }
     if report.as_ref().is_ok_and(|r| r.tests.values().all(|c| c.ran() == 0) && r.problems.is_empty()) { return "untested"; }
+    if report.is_err() && crate::sandbox::kern_failed(&String::from_utf8_lossy(errors)) { return "unknown"; }
     if !served { return "unreached"; }
     let Ok(r) = report else { return "unknown" };
     let known: BTreeSet<&String> = failing(before).into_iter().collect();
