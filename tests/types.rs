@@ -65,7 +65,7 @@ fn kern_blocks_on_types_only_where_the_projects_own_scripts_run_tsc() {
 }
 
 #[test]
-fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a_look_otherwise() {
+fn errors_on_a_project_that_was_clean_need_confirmation_when_the_project_runs_tsc_and_a_look_otherwise() {
     let clean = json!({ "status": "clean", "version": "5.6.3" });
     let broken = side("kern-types: typescript 5.6.3\nsrc/total.ts(4,3): error TS2322: Type 'string' is not assignable to type 'number'.\nkern-types: exit 2 \n", "");
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
@@ -75,8 +75,8 @@ fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a
 
     let enforced_run = judge("tsconfig.json", &clean, &broken, true, None);
     let r = receipt::build(&d, &rules, &tests(json!([enforced_run])), &off);
-    assert_eq!(r["decision"], "blocked", "{r}");
-    assert!(r["blocked"][0]["what"].as_str().unwrap().contains("src/total.ts:4 TS2322"), "{r}");
+    assert_eq!(r["decision"], "unverified", "{r}");
+    assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("src/total.ts:4 TS2322")), "{r}");
     assert!(receipt::markdown(&r, None).contains("1 new TypeScript error in `tsconfig.json`, which had none on the old code"));
 
     let loose = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &broken, false, None)])), &off);

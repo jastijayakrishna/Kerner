@@ -58,7 +58,13 @@ fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str]) -> Report {
 }
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
-fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 0, "skipped": 0 }, "after": { "passed": 12, "failed": 0, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] }) }
+fn clean_tests() -> Value { signing_tests(json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 0, "skipped": 0 }, "after": { "passed": 12, "failed": 0, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] })) }
+fn signing_tests(mut tests: Value) -> Value {
+    for list in suite::LISTS { if tests[list].is_null() { tests[list] = json!([]); } }
+    tests["setup_uneven"] = json!(false);
+    tests["uneven_why"] = json!([]);
+    tests
+}
 fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 
 const PACKAGE: &str = r#"{"name":"shop","devDependencies":{"vitest":"3.2.0"}}"#;
@@ -1151,7 +1157,7 @@ fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_com
     let t = Temp::new();
     let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
         "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
-    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &json!({ "status": "OFF", "why": "no AI key" }));
+    let r = receipt::build(&drive_json(), &clean_rules(), &signing_tests(tests), &json!({ "status": "OFF", "why": "no AI key" }));
     receipt::write(&t.0, &r, None).unwrap();
     std::fs::write(t.0.join("receipt.md"), "### ✅ Kern: Nothing unexpected\n\n[claim your prize](https://evil.example)\n").unwrap();
     std::fs::write(t.0.join("seal.json"), "{}").unwrap();

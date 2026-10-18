@@ -83,7 +83,7 @@ fn env_keys(text: &str) -> Option<Vec<String>> {
 fn quiet(p: &str, text: Option<&str>) -> bool {
     let lower = p.to_ascii_lowercase();
     let base = base_name(&lower);
-    if lower.split('/').any(|d| d == ".github") && (GITHUB_NOTES.contains(&base) || base.rsplit_once('.').is_some_and(|(_, e)| IMAGES.contains(&e))) { return true; }
+    if lower.strip_prefix(".github/").is_some_and(|p| (!p.contains('/') && GITHUB_NOTES.contains(&p)) || (!p.starts_with("workflows/") && p.rsplit_once('.').is_some_and(|(_, e)| IMAGES.contains(&e)))) { return true; }
     let harmless = |k: &String| !crate::capability::secret_name(k) && !RUNS_CODE_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
     (base == ".env" || base.starts_with(".env.")) && text.and_then(env_keys).is_some_and(|keys| keys.iter().all(harmless))
 }
@@ -408,7 +408,7 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let shown = |commit: &str, p: &str| -> Option<String> { crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().and_then(|b| String::from_utf8(b).ok()) };
     let mut public_api = Vec::new();
     let mut packages_touched = BTreeSet::new();
-    for (p, _) in changes.iter().filter(|(p, _)| is_code(p)) {
+    for (p, _) in changes.iter().filter(|(p, _)| is_code(p) || base_name(p) == "package.json") {
         let parts: Vec<&str> = p.split('/').collect();
         if let Some(d) = (0..parts.len()).rev().map(|n| parts[..n].join("/")).find(|d| manifests.contains(&if d.is_empty() { "package.json".to_string() } else { format!("{d}/package.json") })) {
             packages_touched.insert(d);
@@ -416,16 +416,23 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     }
     for dir in packages_touched.iter().take(10) {
         let manifest = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
-        let (Some(before), Some(_)) = (json_of(&old, &manifest), json_of(&new, &manifest)) else { continue };
+        let Some(before) = json_of(&old, &manifest) else { continue };
+        let after = json_of(&new, &manifest).unwrap_or(Value::Null);
         let Some(name) = before["name"].as_str().filter(|_| before["private"] != json!(true)) else { continue };
         let joined = |e: &str| if dir.is_empty() { e.to_string() } else { format!("{dir}/{e}") };
         let read_old = |f: &str| shown(base, f);
         let read_new = |f: &str| shown(head, f);
+        let removed_contracts: Vec<String> = crate::surface::contracts(&before).difference(&crate::surface::contracts(&after)).cloned().collect();
+        if !removed_contracts.is_empty() { public_api.push(json!({ "package": name, "entry": manifest, "removed": removed_contracts })); }
         let mut seen = BTreeSet::new();
         for entry in crate::surface::entries(&before).iter().map(|e| joined(e)).filter(|e| is_code(e)) {
             let Some(was) = crate::surface::surface(&read_old, &entry) else { continue };
             if !seen.insert(was.clone()) { continue; }
-            let Some(now) = crate::surface::surface(&read_new, &entry) else { continue };
+            let now = match crate::surface::surface(&read_new, &entry) {
+                Some(now) => now,
+                None if !new.contains_key(&entry) => BTreeSet::new(),
+                None => { not_checked.push(json!({ "path": entry, "why": "Kern could not read this public API surface" })); continue; }
+            };
             let removed: Vec<&String> = was.difference(&now).collect();
             if !removed.is_empty() { public_api.push(json!({ "package": name, "entry": entry, "removed": removed })); }
         }

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "repository": "troyrhodes02/sightline",
+  "number": 88,
+  "base": "0a83be60f97a3dc9a105aca8f8688ab2393c566c",
+  "head": "3ebdd90ebffa888515ae1ac0fd1028fea3d30357",
+  "approved_by": "independent base-only build-contract review, 2026-10-18; head source not inspected",
+  "contracts": [
+    {
+      "id": "existing-build",
+      "kind": "build",
+      "source": "package.json",
+      "source_sha256": "b2880a33f75f2ba5c640e38058c0b57cc2fafc73a51f8f56a2256b4dc604e009",
+      "input_domain": {
+        "type": "null",
+        "description": "No input. Execute the exact pre-change build script. A failure is confirmed only if both fresh old runs pass; PR intent requires evaluation."
+      },
+      "command": [
+        "/bin/sh",
+        "-c",
+        "prisma generate && next build"
+      ],
+      "oracle": {
+        "mode": "exit-zero",
+        "expected": null
+      },
+      "baseline_inputs": [
+        null
+      ]
+    }
+  ]
+}

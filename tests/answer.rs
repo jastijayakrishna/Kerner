@@ -1,6 +1,50 @@
 use kern::receipt;
 use serde_json::{Value, json};
 
+#[test]
+fn counterexample_validation_missing_or_unknown_evidence_cannot_be_signed_clear() {
+    let r = receipt::build(&drive_json(), &clean_rules(), &ran(), &off());
+    for field in ["tests", "rules", "behaviour", "drive"] {
+        let mut broken = r.clone();
+        broken[field] = json!({});
+        assert!(receipt::rebuild(&broken).is_err(), "accepted missing {field}: {broken}");
+    }
+    let mut broken = r;
+    broken["tests"]["status"] = json!("UNKNOWN");
+    assert!(receipt::rebuild(&broken).is_err());
+    let mut good = receipt::build(&drive_json(), &clean_rules(), &ran(), &off());
+    good["tests"]["setup_uneven"] = json!(false);
+    good["tests"]["uneven_why"] = json!([]);
+    for list in kern::suite::LISTS { if good["tests"][list].is_null() { good["tests"][list] = json!([]); } }
+    assert!(receipt::rebuild(&good).is_ok());
+    for list in kern::suite::LISTS {
+        let mut broken = good.clone();
+        broken["tests"].as_object_mut().unwrap().remove(list);
+        assert!(receipt::rebuild(&broken).is_err(), "accepted absent {list}");
+        broken["tests"][list] = json!([17]);
+        assert!(receipt::rebuild(&broken).is_err(), "accepted malformed {list}");
+    }
+}
+
+#[test]
+fn counterexample_validation_passing_tests_with_uneven_setup_are_not_verified() {
+    let mut tests = ran();
+    tests["setup_uneven"] = json!(true);
+    tests["uneven_why"] = json!(["Kern used different fallback images"]);
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    assert_eq!(r["decision"], "unverified", "{r}");
+    let md = receipt::markdown(&r, None);
+    assert!(!md.contains("✅ Tests") && md.contains("different fallback images"), "{md}");
+}
+
+#[test]
+fn counterexample_validation_type_errors_without_confirmation_cannot_block() {
+    let mut tests = ran();
+    tests["types"] = json!({"status":"CHECKED","projects":[{"config":"tsconfig.json","result":"new-errors","enforced":true,"count":1,"added":[]}]});
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    assert_eq!(r["decision"], "unverified", "{r}");
+}
+
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
 fn ran() -> Value {

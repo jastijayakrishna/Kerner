@@ -382,7 +382,7 @@ fn type_items(f: &mut Found, tests: &Value) {
             _ if p["generated"] == true && p["enforced"] == true => f.unverified.push(item("types-new", format!("{what} (some are about modules, exports or names that a build step may generate, and Kern did not run it, so it cannot say whether the change caused them)"))),
             _ if p["enforced"] != true => f.look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
             Some(why) => f.unverified.push(item("types-new", format!("{what} (Kern cannot compare the two sides fairly: {})", plain(why, 400)))),
-            None => f.blocked.push(item("types-broke", what)),
+            None => f.unverified.push(item("types-new", format!("{what} (Kern did not repeat the type check on fresh old and new trees, so this is not a confirmed regression)"))),
         }
     }
 }
@@ -400,6 +400,9 @@ fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>)
     for x in tests["run_unconfirmed"].as_array().into_iter().flatten() { f.unverified.push(item("test-unconfirmed", plain(x["why"].as_str().unwrap_or(""), 400))); }
     let reasons = strings(&tests["uneven_why"]);
     let because = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.iter().map(|r| plain(r, 400)).collect::<Vec<_>>().join("; ")) };
+    if tests["setup_uneven"] == true {
+        f.unverified.push(item("test-setup", format!("Kern did not set up both sides the same way{because}, so passing results do not verify this change")));
+    }
     f.unverified.extend(per_file("test-uneven", strings(&tests["uneven"]), &format!("This fails on the new code, but Kern did not set up both sides the same way{because}, so it cannot say whether the change broke it"),
         &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it cannot say whether the change broke them")));
     f.unverified.extend(per_file("test-unproven", unproven, "This test file fails on the new code, and Kern has no record of it passing on the old code, so it cannot say whether the change broke it",
@@ -448,6 +451,9 @@ fn steering_items(f: &mut Found, rules: &Value) {
     for x in rules["agent_notes"].as_array().into_iter().flatten() { f.look.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
 }
 fn not_run_items(f: &mut Found, tests: &Value) {
+    if !matches!(tests["status"].as_str(), Some("RAN" | "NOT_RUN" | "NOTHING_TO_RUN" | "BROKE")) {
+        f.unverified.push(item("tests-not-run", "Kern is missing a recognized test result".into()));
+    }
     let unchecked = |why: &str| -> String {
         if why.starts_with("Kern could not run the tests") { format!("Kern's environment had a problem, so it could not check the tests: {}", plain(why, 400)) }
         else { format!("Kern could not run the tests here, so it cannot say this change kept them passing: {}", plain(why, 400)) }
@@ -493,10 +499,33 @@ pub fn rebuild(r: &Value) -> R<Value> {
     ensure!(matches!(r["sandbox"].as_str(), Some("throwaway" | "gvisor")), "The receipt names no sandbox Kern knows");
     ensure!(r["kern"] == env!("CARGO_PKG_VERSION"), "The receipt was made by another version of Kern");
     ensure!(r["tests"].is_object() && r["rules"].is_object() && r["behaviour"].is_object(), "The receipt is missing the facts its answer comes from");
+    evidence(r)?;
     let d = json!({ "base": r["base"], "head": r["head"], "skipped": r["drive"]["skipped"], "unmeasured": r["drive"]["unmeasured"] });
     let mut out = build(&d, &r["rules"], &r["tests"], &r["behaviour"]);
     out["sandbox"] = r["sandbox"].clone();
     Ok(out)
+}
+fn evidence(r: &Value) -> R<()> {
+    ensure!(matches!(r["tests"]["status"].as_str(), Some("RAN" | "NOT_RUN" | "NOTHING_TO_RUN" | "BROKE")), "The receipt has no recognized test result");
+    ensure!(r["behaviour"]["status"].as_str().is_some_and(|s| ["RAN", "OFF", "NOT_RUN", "NOTHING_TO_RUN", "NO_DRIVER", "FAILED"].contains(&s)), "The receipt has no recognized behaviour result");
+    for key in ["skipped", "unmeasured"] { ensure!(r["drive"][key].is_array(), "The receipt is missing drive.{key}"); }
+    for key in ["changed", "powers", "tricks", "settings", "protected", "dependencies", "agent_notes", "not_checked"] {
+        ensure!(r["rules"][key].is_array(), "The receipt is missing rules.{key}");
+    }
+    if r["tests"]["status"] == "RAN" {
+        ensure!(r["tests"]["runner"].is_string() && r["tests"]["kept"].is_u64(), "The receipt is missing the test runner or counts");
+        ensure!(r["tests"]["setup_uneven"].is_boolean() && r["tests"]["uneven_why"].as_array().is_some_and(|a| a.iter().all(Value::is_string)), "The receipt is missing setup comparability evidence");
+        for side in ["before", "after"] { for count in ["passed", "failed", "skipped"] {
+            ensure!(r["tests"][side][count].is_u64(), "The receipt is missing tests.{side}.{count}");
+        } }
+        for list in crate::suite::LISTS {
+            ensure!(r["tests"][list].as_array().is_some_and(|a| a.iter().all(Value::is_string)), "The receipt is missing or has invalid tests.{list}");
+        }
+    }
+    for section in ["tests", "rules"] { for (key, value) in r[section].as_object().into_iter().flatten() {
+        if crate::suite::LISTS.contains(&key.as_str()) { ensure!(value.is_array(), "The receipt has invalid {section}.{key}"); }
+    } }
+    Ok(())
 }
 const KERN_TAGS: [&str; 6] = ["<details>", "</details>", "<summary>", "</summary>", "<sub>", "</sub>"];
 fn kern_html_only(text: &str) -> String {
@@ -570,7 +599,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let broke = tests["broke"].as_array().map_or(0, Vec::len);
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"), 400);
         let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
-        let doubtful = unverified.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven", "test-sandbox", "test-old-sandbox"].iter().any(|k| x["kind"] == *k));
+        let doubtful = unverified.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-setup", "test-unproven", "test-sandbox", "test-old-sandbox"].iter().any(|k| x["kind"] == *k));
         let mut line = if broke > 0 || files > 0 {
             let mut what = Vec::new();
             if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }
@@ -884,7 +913,7 @@ pub fn approve(api: &Api, repository: &str, number: u64, login: &str, check: &dy
     let Some(c) = kern_comment(api, repository, number)? else { say("Kern: there is no receipt to approve yet.")?; return Ok(json!({ "status": "NO_RECEIPT" })) };
     let body = c["body"].as_str().unwrap_or("").to_string();
     let Some((seal, token)) = read_seal_line(&body) else { say("Kern: this receipt carries no signature, so it cannot be approved.")?; return Ok(json!({ "status": "UNVERIFIED" })) };
-    if check(&seal, &token).is_err() || seal["repository"] != repository || seal["pull"] != number {
+    if check(&seal, &token).is_err() || !comment_matches(&seal, &body) || seal["repository"] != repository || seal["pull"] != number {
         say("Kern: this receipt's signature does not check out, so it is not approved.")?;
         return Ok(json!({ "status": "UNVERIFIED" }));
     }

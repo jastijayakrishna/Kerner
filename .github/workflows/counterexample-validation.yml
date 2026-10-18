@@ -1,0 +1,150 @@
+name: Counterexample validation (experimental)
+on:
+  push:
+    branches: [codex/counterexample-validation]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: counterexample-validation-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      cases: ${{ steps.plan.outputs.cases }}
+    env:
+      CARGO_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: validation-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'src/**', 'examples/counterexample.rs') }}
+      - name: Verify
+        run: |
+          cargo test --locked --no-fail-fast
+          cargo clippy --locked --all-targets -- -D warnings
+          python3 -m unittest discover -s experiments/counterexample -p 'test_*.py' -v
+      - name: Static worker and Kern
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          CC_x86_64_unknown_linux_musl=musl-gcc cargo build --locked --release --target x86_64-unknown-linux-musl --bin kern --example counterexample
+          mkdir bin
+          cp target/x86_64-unknown-linux-musl/release/kern bin/kern
+          cp target/x86_64-unknown-linux-musl/release/examples/counterexample bin/counterexample
+      - id: plan
+        run: |
+          python3 -c 'import json,os; r=json.load(open("experiments/counterexample/pilot.json"))["rows"]; assert len(r)==6; open(os.environ["GITHUB_OUTPUT"],"a").write("cases="+json.dumps(r,separators=(",",":"))+"\n")'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: validation-binaries
+          path: bin
+  sandbox:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [runsc, runc]
+    env:
+      REPO: kern/validation-fixture
+      CI: 'true'
+      KERN_CHECK_MINUTES: '10'
+      KERN_CHECK_AI: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: validation-binaries
+          path: bin
+      - name: Sandbox setup and existing end to end checks
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          chmod +x bin/kern bin/counterexample
+          sh experiments/counterexample/ci.sh "$RUNNER_TEMP/validation" "$RUNTIME" "$PWD/bin/counterexample"
+          python3 experiments/counterexample/ci_fixture.py "$RUNNER_TEMP/fixture" "$PWD/bin/counterexample" "$RUNNER_TEMP/validation/operator.json" "$RUNNER_TEMP/validation/control.json"
+          E2E_RUNTIME="$RUNTIME" KERN_BIN="$PWD/bin/kern" sh scripts/e2e-check.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: structural-${{ matrix.runtime }}
+          path: ${{ runner.temp }}/fixture
+  pilot:
+    needs: [build, sandbox]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        pr: ${{ fromJSON(needs.build.outputs.cases) }}
+    env:
+      REPO: ${{ matrix.pr.repo }}
+      NUMBER: ${{ matrix.pr.number }}
+      BASE: ${{ matrix.pr.merge_base || matrix.pr.base_sha }}
+      HEAD: ${{ matrix.pr.head_sha }}
+      KERN_CHECK_MINUTES: '10'
+      KERN_CHECK_AI: '0'
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: validation-binaries
+          path: bin
+      - name: Frozen comparison or explicit unsupported result
+        run: |
+          set -eu
+          key="${REPO/\//__}__$NUMBER"
+          pack="$PWD/experiments/counterexample/packs/$key.json"
+          proposals="$PWD/experiments/counterexample/proposals/$key.json"
+          if [ ! -f "$pack" ] || [ ! -f "$proposals" ]; then
+            mkdir -p result
+            jq -n --arg repo "$REPO" --argjson n "$NUMBER" --arg base "$BASE" --arg head "$HEAD" '{repository:$repo,number:$n,base:$base,head:$head,results:[],unsupported:"No independently approved contract pack and frozen hunter response"}' > result/result.json
+            exit 0
+          fi
+          chmod +x bin/counterexample
+          sh experiments/counterexample/ci.sh "$RUNNER_TEMP/validation" runc "$PWD/bin/counterexample"
+          git init -q "$RUNNER_TEMP/source"
+          git -C "$RUNNER_TEMP/source" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "https://github.com/$REPO.git" "$BASE" "$HEAD"
+          bin/counterexample "$pack" "$proposals" "$RUNNER_TEMP/validation/operator.json" "$RUNNER_TEMP/validation/control.json" "$RUNNER_TEMP/source" "$PWD/result"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: validation-${{ strategy.job-index }}
+          path: result
+          if-no-files-found: warn
+  score:
+    if: always() && needs.build.result == 'success'
+    needs: [build, pilot]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: validation-[0-9]*
+          path: results
+      - run: python3 experiments/counterexample/benchmark.py score experiments/counterexample/pilot.json results report.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: validation-report
+          path: report.json
+      - name: Reject an empty comparison
+        run: |
+          python3 -c 'import json,sys; d=json.load(open("report.json")); n=d["summary"]["eligible_paired_prs"]; print("Eligible paired PRs:",n); print("No architecture-success claim follows from CI passing."); sys.exit(0 if n else 2)'

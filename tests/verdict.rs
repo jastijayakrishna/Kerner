@@ -3,6 +3,30 @@ use kern::suite::{self, Evidence, Observed, Unproven};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[test]
+fn webpack_22695_parameterized_suites_do_not_repeat_file_scans_for_every_assertion() {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let tests = (0..50_000).map(|i| (format!("src/large.test.js > parameter {i}"), Count { passed: 1, failed: 0, skipped: 0 })).collect();
+        let r = Report { tests, problems: Vec::new(), why: BTreeMap::new() };
+        let c = suite::verdict(&r, &r, Some(&r), Some(&r), Some(&r), false, false);
+        let _ = send.send(c);
+    });
+    let c = receive.recv_timeout(std::time::Duration::from_secs(30)).expect("a parameterized suite must not rescan the whole suite once per assertion");
+    assert_eq!(c["kept"], 50_000);
+    assert!(listed(&c, "broke").is_empty() && listed(&c, "flaky").is_empty());
+}
+
+#[test]
+fn counterexample_validation_uneven_setup_survives_even_when_every_test_passes() {
+    let clean = report(&[("a.test.js > passes", 1, 0, 0)], &[], &[]);
+    let c = suite::verdict(&clean, &clean, None, None, None, false, true);
+    assert_eq!(c["setup_uneven"], true, "{c}");
+    let mut merged = serde_json::Map::new();
+    suite::fold(&mut merged, &c, &str::to_string);
+    assert_eq!(merged["setup_uneven"], true);
+}
+
 fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str], why: &[(&str, &str)]) -> Report {
     let mut t = BTreeMap::new();
     for (k, passed, failed, skipped) in tests { t.insert(k.to_string(), Count { passed: *passed, failed: *failed, skipped: *skipped }); }

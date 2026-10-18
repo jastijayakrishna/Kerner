@@ -34,3 +34,4 @@ pub mod types;
 pub mod replay;
 pub mod polarity;
 pub mod trace;
+pub mod validation;

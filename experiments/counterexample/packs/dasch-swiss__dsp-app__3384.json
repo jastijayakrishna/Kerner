@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "repository": "dasch-swiss/dsp-app",
+  "number": 3384,
+  "base": "4aa33c948b315ec9504080d6e43a330783005a87",
+  "head": "225ca0ce6e22e7acaacb45b917103fb19ab3039b",
+  "approved_by": "independent base-only build-contract review, 2026-10-18; head source not inspected",
+  "contracts": [
+    {
+      "id": "existing-build",
+      "kind": "build",
+      "source": "package.json",
+      "source_sha256": "b59b3256f5189103d672ca1396acd012af6064daa10cacb47e63a638daab2334",
+      "input_domain": {
+        "type": "null",
+        "description": "No input. Execute the exact pre-change build script. A failure is confirmed only if both fresh old runs pass; PR intent requires evaluation."
+      },
+      "command": [
+        "/bin/sh",
+        "-c",
+        "nx run dsp-app:build"
+      ],
+      "oracle": {
+        "mode": "exit-zero",
+        "expected": null
+      },
+      "baseline_inputs": [
+        null
+      ]
+    }
+  ]
+}

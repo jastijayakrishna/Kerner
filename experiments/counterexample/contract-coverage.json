@@ -1,0 +1,41 @@
+{
+  "scope": "base-only contract authoring, not execution or model results",
+  "rows": [
+    {
+      "key": "muchu-dev/michinavi#46",
+      "build": "base script frozen; execution pending",
+      "api": "not yet independently contracted",
+      "security": "not yet independently contracted"
+    },
+    {
+      "key": "oxyhq/oxy#490",
+      "build": "unsupported: no root build script; Bun workspace",
+      "api": "not yet independently contracted",
+      "security": "not yet independently contracted"
+    },
+    {
+      "key": "troyrhodes02/sightline#88",
+      "build": "base script frozen; execution pending",
+      "api": "not yet independently contracted",
+      "security": "not yet independently contracted"
+    },
+    {
+      "key": "abhishek21lift-oss/619-erp-frontend#28",
+      "build": "base script frozen; execution pending",
+      "api": "not yet independently contracted",
+      "security": "not yet independently contracted"
+    },
+    {
+      "key": "dasch-swiss/dsp-app#3384",
+      "build": "base script frozen; execution pending",
+      "api": "not yet independently contracted",
+      "security": "not yet independently contracted"
+    },
+    {
+      "key": "ronancodes/smart-cart#431",
+      "build": "base script frozen; execution pending",
+      "api": "not yet independently contracted",
+      "security": "not yet independently contracted"
+    }
+  ]
+}

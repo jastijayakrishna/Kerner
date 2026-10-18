@@ -164,6 +164,11 @@ fn renamed(r: &Report, map: &std::collections::BTreeMap<String, String>) -> Repo
 }
 
 fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
+fn names_by_file(r: &Report) -> std::collections::BTreeMap<&str, BTreeSet<&str>> {
+    let mut names: std::collections::BTreeMap<&str, BTreeSet<&str>> = Default::default();
+    for k in r.tests.keys() { names.entry(file_of(k)).or_default().insert(k.as_str()); }
+    names
+}
 const RANDOM_RUN_CHARS_MIN: usize = 8;
 pub fn path_shape(path: &str) -> String {
     let chars: Vec<char> = path.chars().collect();
@@ -331,6 +336,7 @@ fn problem_evidence(p: &str, old: &Report, new: &Report, again: [Option<&Report>
         uneven: false }
 }
 fn prove(mut c: Value, old: &Report, new: &Report, (again, old_again): ([Option<&Report>; 2], Option<&Report>), uneven: bool) -> Value {
+    c["setup_uneven"] = json!(uneven);
     if c["status"] != "RAN" { return c; }
     let (settled_new, settled_again, settled_old_again) = (settled(old, new), again.map(|g| g.map(|r| settled(old, r))), old_again.map(|r| settled(old, r)));
     let shaky: BTreeSet<String> = listed(&c, "flaky").iter().chain(&listed(&c, "unsteady")).map(|k| file_of(k).to_string()).collect();
@@ -381,6 +387,7 @@ pub const LISTS: [&str; 19] = ["broke", "flaky", "gone", "newly_skipped", "added
     "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable", "old_sandbox"];
 pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
 pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String) {
+    if c["setup_uneven"] == true { merged.insert("setup_uneven".into(), json!(true)); }
     for l in LISTS {
         let items: Vec<Value> = c[l].as_array().into_iter().flatten().filter_map(Value::as_str).map(|k| json!(named(k))).collect();
         if let Some(a) = merged.get_mut(l).and_then(Value::as_array_mut) { a.extend(items); }
@@ -726,9 +733,10 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let signature = |w: &str| -> String { masked(&w.replace("/workspace/", "")).chars().take(160).collect() };
     let old_errors: BTreeSet<String> = before.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k).chain(&before.problems).filter_map(|k| before.why.get(k)).map(|w| signature(w)).collect();
     let known_error = |k: &str| raw_after.why.get(k).is_some_and(|w| old_errors.contains(&signature(w)));
-    let names = |r: &Report, f: &str| -> BTreeSet<String> { r.tests.keys().filter(|k| file_of(k) == f).cloned().collect() };
-    let by_chance: BTreeSet<&str> = before.tests.keys().map(|k| file_of(k)).filter(|f| [(before, alone_old), (after, again)].into_iter()
-        .any(|(a, b)| b.is_some_and(|b| { let n = names(b, f); !n.is_empty() && names(a, f) != n }))).collect();
+    let (old_names, new_names) = (names_by_file(before), names_by_file(after));
+    let (old_again_names, new_again_names) = (alone_old.map(names_by_file), again.map(names_by_file));
+    let by_chance: BTreeSet<&str> = old_names.keys().copied().filter(|f| [(&old_names, old_again_names.as_ref()), (&new_names, new_again_names.as_ref())].into_iter()
+        .any(|(a, b)| b.and_then(|b| b.get(f)).is_some_and(|n| !n.is_empty() && a.get(f) != Some(n)))).collect();
     let lacking = |k: &str| raw_after.why.get(k).is_some_and(|w| sandbox_error(w));
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));
@@ -1348,6 +1356,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let mut merged = serde_json::Map::new();
     for l in LISTS { merged.insert(l.into(), json!([])); }
     merged.insert("uneven_why".into(), json!([]));
+    merged.insert("setup_uneven".into(), json!(false));
     merged.insert("faults".into(), json!([]));
     merged.insert("faults_missing".into(), json!([]));
     merged.insert("bystanders".into(), json!({}));
@@ -1378,7 +1387,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds, mut whole_why) = (None, 0u64, String::new());
-        let mut uneven_why = setup_differs(&s, &suite.dir);
+        let mut uneven_why = setup_differs(&s, &suite.dir).or_else(|| unlocked(&s, &suite.dir));
         let (mut built, mut tried, mut old_tests) = (Vec::new(), String::new(), None);
         let old_run = match &suite.old {
             None => None,
@@ -1588,7 +1597,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let readings = polarity(&proof::failures(runner, &kept("out"), &kept("values")), &|f| keep.back.get(f).cloned(), &wanted);
             if let Some(p) = merged.get_mut("polarity").and_then(Value::as_object_mut) { for (k, v) in readings { p.insert(named(&k), v); } }
         }
-        if let Some(u) = &uneven_why && c["uneven"].as_array().is_some_and(|a| !a.is_empty()) && let Some(a) = merged["uneven_why"].as_array_mut() {
+        if let Some(u) = &uneven_why && let Some(a) = merged["uneven_why"].as_array_mut() {
             a.push(json!(u));
         }
         fold(&mut merged, &c, &named);

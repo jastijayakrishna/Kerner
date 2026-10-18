@@ -136,9 +136,9 @@ What Kern checks on every pull request:
    come after the planted faults, and when time runs short they are dropped first.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
-   cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both
-   sides got the same dependencies), and need a look when its scripts do not run `tsc`. When they are about something a build step may
-   generate, or the two sides got different dependencies, they are not verified. This works even when the tests cannot run.
+   cannot make anything look new. New errors are not verified when the project's own scripts run `tsc`: Kern has not confirmed them
+   on fresh old and new trees. They need a look when its scripts do not run `tsc`. Errors about something a build step may generate,
+   or results from different dependency setups, are also not verified. This works even when the tests cannot run.
 4. **Test tricks.** An existing test file that newly skips, focuses or inverts tests (`.only`, `.skip`, `.skipIf`, `.fails`, `this.skip()`, under any
    name or chain), or code that reaches into the test runner,
    blocks. In a test file the change adds, it needs a look, since it cannot hide a test that passed before.

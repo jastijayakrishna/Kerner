@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "backend": "cli",
+  "model": "claude-sonnet-4-6",
+  "cli_version": "2.0.55",
+  "cli_sha256": "97641f09bea7d318ce5172d536581bb1da49c99b132d90f71007a3bb0b942f57",
+  "instructions_sha256": "04dc296ebc160a7f72a0afbeb8b5c45e6393f743faefa97ee85de1d9d77722b3",
+  "prompt_bytes_max": 65536,
+  "response_bytes_max": 1048576,
+  "output_tokens_max": 2048,
+  "call_seconds_max": 120,
+  "calls_count_max": 6,
+  "turns_count_max": 1,
+  "thinking_tokens_max": 0,
+  "cli_spend_limit_usd": 0.5,
+  "cost_basis": "CLI-reported estimate; actual billing unmeasured",
+  "tools": [],
+  "settings_sources": [],
+  "claude_md_disabled": true,
+  "mcp_servers": {},
+  "fallback": false,
+  "retries": 0
+}

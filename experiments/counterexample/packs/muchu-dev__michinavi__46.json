@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "repository": "muchu-dev/michinavi",
+  "number": 46,
+  "base": "7fd60404de08c3386a8a8939496b3409735a7c42",
+  "head": "738ceee44964a6072aeef0beb55f2e738142a012",
+  "approved_by": "independent base-only build-contract review, 2026-10-18; head source not inspected",
+  "contracts": [
+    {
+      "id": "existing-build",
+      "kind": "build",
+      "source": "package.json",
+      "source_sha256": "44c10ca8c0a2535405579ca054e5107169cc4120aa5a6daf33e76e1515d3d258",
+      "input_domain": {
+        "type": "null",
+        "description": "No input. Execute the exact pre-change build script. A failure is confirmed only if both fresh old runs pass; PR intent requires evaluation."
+      },
+      "command": [
+        "/bin/sh",
+        "-c",
+        "pnpm --filter @michinavi/frontend build"
+      ],
+      "oracle": {
+        "mode": "exit-zero",
+        "expected": null
+      },
+      "baseline_inputs": [
+        null
+      ]
+    }
+  ]
+}

@@ -598,9 +598,10 @@ git commit -qam "Shorter names" && git rev-parse HEAD > "$W/types-fine.head"
 git checkout -q "$types_base"
 cd "$W"
 check types-broke "$types_base" typesrepo
-decision types-broke blocked
-[ "$(kinds types-broke types-broke blocked)" = 1 ] && grep -q 'src/total.ts:4 TS2322' types-broke/receipt.md \
-  || { cat types-broke/receipt.md; jq .tests.types types-broke/receipt.json; fail "types-broke: a new TypeScript error in a project that type-checked clean was not blocked"; }
+decision types-broke unverified
+[ "$(kinds types-broke types-new unverified)" = 1 ] && grep -q 'src/total.ts:4 TS2322' types-broke/receipt.md \
+  && grep -q 'did not repeat the type check' types-broke/receipt.md \
+  || { cat types-broke/receipt.md; jq .tests.types types-broke/receipt.json; fail "types-broke: a type error without fresh confirmation was treated as proven"; }
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 0)' types-broke/receipt.json > /dev/null || { jq .tests types-broke/receipt.json; fail "types-broke: the tests should still pass"; }
 check types-fine "$types_base" typesrepo
 decision types-fine clear

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "parent_cohort_sha256": "c675348049ce3c40d3309a17cb8ed0cdddd13cc479dae2cd80ad01c1c2e5f2fb",
+  "selection": "pilot-v1 repository hash; two development and four holdout; one key-hashed PR per repository",
+  "rows": [
+    {
+      "repo": "muchu-dev/michinavi",
+      "number": 46,
+      "base_sha": "7fd60404de08c3386a8a8939496b3409735a7c42",
+      "head_sha": "738ceee44964a6072aeef0beb55f2e738142a012",
+      "merge_base": "7fd60404de08c3386a8a8939496b3409735a7c42",
+      "key": "muchu-dev/michinavi#46",
+      "split": "development"
+    },
+    {
+      "repo": "OxyHQ/oxy",
+      "number": 490,
+      "base_sha": "7bec739ccf17ad4e771fd562914a6997227ddd44",
+      "head_sha": "f4440dbbb78be93acebf1c34a1cacfda3d499c6b",
+      "merge_base": "7bec739ccf17ad4e771fd562914a6997227ddd44",
+      "key": "oxyhq/oxy#490",
+      "split": "development"
+    },
+    {
+      "repo": "troyrhodes02/sightline",
+      "number": 88,
+      "base_sha": "0a83be60f97a3dc9a105aca8f8688ab2393c566c",
+      "head_sha": "3ebdd90ebffa888515ae1ac0fd1028fea3d30357",
+      "merge_base": "0a83be60f97a3dc9a105aca8f8688ab2393c566c",
+      "key": "troyrhodes02/sightline#88",
+      "split": "holdout"
+    },
+    {
+      "repo": "abhishek21lift-oss/619-erp-frontend",
+      "number": 28,
+      "base_sha": "b802939f8d4de19f1986ddf1e67e9947d7577383",
+      "head_sha": "1010dbf9eb4ab629322867dbac867b8323125a65",
+      "merge_base": "b802939f8d4de19f1986ddf1e67e9947d7577383",
+      "key": "abhishek21lift-oss/619-erp-frontend#28",
+      "split": "holdout"
+    },
+    {
+      "repo": "dasch-swiss/dsp-app",
+      "number": 3384,
+      "base_sha": "4aa33c948b315ec9504080d6e43a330783005a87",
+      "head_sha": "225ca0ce6e22e7acaacb45b917103fb19ab3039b",
+      "merge_base": "4aa33c948b315ec9504080d6e43a330783005a87",
+      "key": "dasch-swiss/dsp-app#3384",
+      "split": "holdout"
+    },
+    {
+      "repo": "RonanCodes/smart-cart",
+      "number": 431,
+      "base_sha": "838eec06f211847cfb223ced1101cb689417adb0",
+      "head_sha": "12bd9215bd9992d123d7872e44250babaf347986",
+      "merge_base": "832145ce5aac94cdb21015a0887c3dca7c529ccc",
+      "key": "ronancodes/smart-cart#431",
+      "split": "holdout"
+    }
+  ]
+}

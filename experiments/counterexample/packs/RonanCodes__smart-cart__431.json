@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "repository": "RonanCodes/smart-cart",
+  "number": 431,
+  "base": "832145ce5aac94cdb21015a0887c3dca7c529ccc",
+  "head": "12bd9215bd9992d123d7872e44250babaf347986",
+  "approved_by": "independent base-only build-contract review, 2026-10-18; head source not inspected",
+  "contracts": [
+    {
+      "id": "existing-build",
+      "kind": "build",
+      "source": "package.json",
+      "source_sha256": "0c203500552c6f9d4c575ae2af2ae9d89e07ef0ea769ccffc7677e320b819d88",
+      "input_domain": {
+        "type": "null",
+        "description": "No input. Execute the exact pre-change build script. A failure is confirmed only if both fresh old runs pass; PR intent requires evaluation."
+      },
+      "command": [
+        "/bin/sh",
+        "-c",
+        "vite build"
+      ],
+      "oracle": {
+        "mode": "exit-zero",
+        "expected": null
+      },
+      "baseline_inputs": [
+        null
+      ]
+    }
+  ]
+}

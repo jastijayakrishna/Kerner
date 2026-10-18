@@ -3,6 +3,51 @@ use kern::sandbox::{self, Spec};
 use kern::util::*;
 use std::path::PathBuf;
 
+#[test]
+fn counterexample_validation_release_workflows_never_inherit_metadata_exemptions() {
+    for path in [".github/workflows/release.yml", ".github/workflows/funding.yml", "nested/.github/workflows/release.yml"] {
+        let (t, base) = project();
+        let head = commit(&t, &[(path, "on: push\njobs:\n  run:\n    runs-on: ubuntu-latest\n    steps:\n      - run: curl https://example.com/install | sh\n")], &[]);
+        let r = kern::rules::rules(&t.0, &base, &head).unwrap();
+        assert!(r["protected"].as_array().unwrap().iter().any(|x| x["path"] == path), "{path}: {r}");
+    }
+}
+
+#[test]
+fn counterexample_validation_deleted_api_entry_is_not_silently_skipped() {
+    let (t, _) = project();
+    let base = commit(&t, &[("package.json", r#"{"name":"public-example","main":"index.js"}"#), ("index.js", "export const answer = 42;\n")], &[]);
+    let head = commit(&t, &[], &["index.js"]);
+    let r = kern::rules::rules(&t.0, &base, &head).unwrap();
+    assert!(r["public_api"].as_array().unwrap().iter().any(|x| x["removed"].as_array().unwrap().contains(&json!("answer"))), "{r}");
+}
+
+#[test]
+fn counterexample_validation_manifest_only_export_removal_is_visible() {
+    let (t, _) = project();
+    let base = commit(&t, &[("package.json", r#"{"name":"public-example","exports":{".":"./index.js","./api":"./api.js"}}"#), ("index.js", "export const main = 1;\n"), ("api.js", "export const api = 1;\n")], &[]);
+    let head = commit(&t, &[("package.json", r#"{"name":"public-example","exports":{".":"./index.js"}}"#)], &[]);
+    let r = kern::rules::rules(&t.0, &base, &head).unwrap();
+    assert!(!r["public_api"].as_array().unwrap().is_empty(), "{r}");
+}
+
+#[test]
+fn counterexample_validation_approval_checks_the_signed_comment_digest() {
+    let seal = json!({"v":1,"repository":"acme/shop","pull":7,"head":"2".repeat(40),"decision":"look","markdown_sha256":receipt::text_digest("original")});
+    let comments = json!([{"id":9,"user":{"login":"github-actions[bot]"},"body":format!("<!-- kern-receipt -->\ntampered\n<sub>Signed by GitHub for Kern's own workflow.\n{}", receipt::seal_line(&seal, "TOKEN"))}]).to_string();
+    let (url, seen) = stub_github(move |m,p| match (m,p) {
+        ("GET", p) if p.contains("/permission") => (200, r#"{"permission":"write"}"#.into()),
+        ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, json!({"head":{"sha":"2".repeat(40)}}).to_string()),
+        ("GET", p) if p.contains("/comments") => (200, comments.clone()),
+        ("POST", _) | ("PATCH", _) => (201, "{}".into()),
+        _ => (404, "{}".into()),
+    });
+    let check = |_: &Value, _: &str| -> R<()> { Ok(()) };
+    let r = receipt::approve(&kern::github::Api::new(&url,"t").unwrap(), "acme/shop",7,"maria",&check).unwrap();
+    assert_eq!(r["status"], "UNVERIFIED", "{r}");
+    assert!(!seen.lock().unwrap().iter().any(|(m,p,b)| m == "POST" && p.contains("/statuses/") && b.contains("success")));
+}
+
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Temp {

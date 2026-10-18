@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "repository": "abhishek21lift-oss/619-erp-frontend",
+  "number": 28,
+  "base": "b802939f8d4de19f1986ddf1e67e9947d7577383",
+  "head": "1010dbf9eb4ab629322867dbac867b8323125a65",
+  "approved_by": "independent base-only build-contract review, 2026-10-18; head source not inspected",
+  "contracts": [
+    {
+      "id": "existing-build",
+      "kind": "build",
+      "source": "package.json",
+      "source_sha256": "9cb507f4c80502170148de3754bba0e8a90b9188d8351d66330a8b70daa54e60",
+      "input_domain": {
+        "type": "null",
+        "description": "No input. Execute the exact pre-change build script. A failure is confirmed only if both fresh old runs pass; PR intent requires evaluation."
+      },
+      "command": [
+        "/bin/sh",
+        "-c",
+        "next build --webpack"
+      ],
+      "oracle": {
+        "mode": "exit-zero",
+        "expected": null
+      },
+      "baseline_inputs": [
+        null
+      ]
+    }
+  ]
+}

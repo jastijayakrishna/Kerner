@@ -90,7 +90,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         let (runner, suite_dir) = suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-'))?.clone();
         let unconfirmed = tests["unconfirmed"].as_array().into_iter().flatten().filter_map(Value::as_str)
             .any(|k| suite_dir.is_empty() || k.starts_with(&format!("{suite_dir}/")) || k.starts_with(&format!("{suite_dir}: ")));
-        let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, &suite_dir).is_some());
+        let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, &suite_dir).or_else(|| crate::suite::unlocked(s, &suite_dir)).is_some());
         suite(dir, label, runner, (unconfirmed, uneven)).map(|verdict| Judged { verdict, runner, suite_dir })
     }).collect()).flatten();
     if let Some(judged) = &judged {
@@ -100,6 +100,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
         let kept_runs = labels.iter().any(|label| dir.join(format!("tests-new-kept{label}.out")).is_file());
         for l in crate::suite::LISTS.iter().filter(|l| **l != "rewritten" && !(kept_runs && **l == "gone")) { tests[*l] = merged[*l].clone(); }
         tests["problem_why"] = merged["problem_why"].clone();
+        tests["setup_uneven"] = merged.get("setup_uneven").cloned().unwrap_or(json!(false));
     }
     if let Some(f) = faults(dir, &suites, &tests["faults"]) { tests["faults"] = json!(f); }
     let mut seen = json!({});
