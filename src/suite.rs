@@ -1065,7 +1065,10 @@ pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::pr
         let gone: BTreeSet<String> = removed.into_iter().filter_map(|i| a.get(i)).map(|l| l.trim().to_string()).collect();
         spread(crate::proof::plant_lines(path, new, &lines, &gone), OPERATOR_FAULTS_PER_FILE_COUNT_MAX).into_iter().collect()
     }).collect();
-    let mut undone: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| crate::proof::undos(path, old, new).into_iter().collect()).collect();
+    let mut undone: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| {
+        let elsewhere: Vec<&str> = files.iter().filter(|f| f.0 != *path).map(|f| f.2.as_str()).collect();
+        crate::proof::undos(path, old, new, &elsewhere).into_iter().collect()
+    }).collect();
     let mut out: Vec<crate::proof::Mutant> = Vec::new();
     while out.len() < limit && undone.iter().any(|f| !f.is_empty()) {
         for f in undone.iter_mut() { if out.len() < limit && let Some(m) = f.pop_front() { out.push(m); } }

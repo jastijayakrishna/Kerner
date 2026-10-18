@@ -161,6 +161,22 @@ fn ocean_web_1278_a_change_typescript_erases_is_not_behaviour() {
 }
 
 #[test]
+fn nabimd_15_a_function_moved_to_another_file_of_the_change_is_not_a_change_to_undo() {
+    let body = "function placeTransferAtNextStep(ids, at, id) {\n  const next = at + 1;\n  return ids.indexOf(id, next) === next ? [...ids] : [...ids.slice(0, next), id, ...ids.slice(next)];\n}\n";
+    let old = format!("import {{ pick }} from \"./pick\";\n\n{body}\nexport function advance(s) {{\n  return placeTransferAtNextStep(s.ids, s.at, pick(s));\n}}\n");
+    let new = "import { pick } from \"./pick\";\nimport { placeTransferAtNextStep } from \"./runSchedule\";\n\nexport function advance(s) {\n  return placeTransferAtNextStep(s.ids, s.at, pick(s));\n}\n".to_string();
+    let schedule = format!("export {body}\nexport function isReachable(ids) {{\n  return ids.length > 0;\n}}\n");
+    let files = vec![("src/session/learningSession.ts".to_string(), old.clone(), new.clone()), ("src/session/runSchedule.ts".to_string(), String::new(), schedule)];
+    let planted: Vec<kern::proof::Mutant> = kern::suite::faults(&files, 23).into_iter().filter(|m| m.kind == FaultKind::Undo).collect();
+    assert!(planted.iter().all(|m| m.path != "src/session/learningSession.ts"),
+        "the only change to this file moves placeTransferAtNextStep to runSchedule.ts and imports it back, which no test can tell apart, so nothing is undone and the agent gets no task: {planted:?}");
+    let edited = new.replace("s.ids, s.at, pick(s)", "s.ids, s.at + 1, pick(s)");
+    let files = vec![("src/session/learningSession.ts".to_string(), old, edited), files[1].clone()];
+    let planted: Vec<kern::proof::Mutant> = kern::suite::faults(&files, 23).into_iter().filter(|m| m.kind == FaultKind::Undo && m.path == "src/session/learningSession.ts").collect();
+    assert_eq!(planted.iter().map(|m| m.target.clone()).collect::<Vec<_>>(), [Some("advance".to_string())], "a real change beside the move is still undone, and only it: {planted:?}");
+}
+
+#[test]
 fn a_name_kern_cannot_tell_apart_falls_back_to_the_whole_file() {
     let old = "export function f(a) { return a; }\nfunction g() { function f() { return 1; } return f(); }\n";
     let new = "export function f(a) { return a + 1; }\nfunction g() { function f() { return 1; } return f(); }\n";
@@ -385,6 +401,24 @@ fn lightdash_12942_a_fault_only_a_broken_test_file_could_have_loaded_is_not_said
     assert_eq!(fault_verdict(Jest, &control, served, &report(vec![passing.clone(), all_failing.clone()]), b""), "unknown", "a file none of whose tests pass is as good as broken");
     let clean = read_report(Jest, &report(vec![passing.clone()])).unwrap();
     assert_eq!(fault_verdict(Jest, &clean, served, &report(vec![passing.clone()]), b""), "missed", "with every related file working, a passing test did load the change");
+}
+
+#[test]
+fn kern_check_demo_7_an_undo_that_only_makes_the_code_crash_is_not_a_test_catching_the_change() {
+    use kern::policy::Runner::Vitest;
+    use kern::proof::{fault_verdict, read_report};
+    let result = |title: &str, status: &str, message: &str| json!({ "ancestorTitles": [], "title": title, "status": status, "failureMessages": if message.is_empty() { json!([]) } else { json!([message]) } });
+    let report = |results: Vec<serde_json::Value>| json!({ "numTotalTests": results.len(), "testResults": [{ "name": "/workspace/test/cart.test.js", "status": "passed", "assertionResults": results }] }).to_string().into_bytes();
+    let clean = read_report(Vitest, &report(vec![result("checkout: discount first, then shipping", "passed", ""), result("free from 50.00", "passed", "")])).unwrap();
+    let served = (true, true);
+    for crash in ["ReferenceError: coupon is not defined", "TypeError: (0 , queryBuilder_1.removeComments) is not a function", "TypeError: Cannot read properties of undefined (reading 'apply')"] {
+        let only_crash = report(vec![result("checkout: discount first, then shipping", "failed", crash), result("free from 50.00", "passed", "")]);
+        assert_eq!(fault_verdict(Vitest, &clean, served, &only_crash, b""), "unknown", "undoing one function left code that calls it, so the test crashed instead of checking anything: {crash}");
+    }
+    let real = report(vec![result("checkout: discount first, then shipping", "failed", "AssertionError: expected 9000 to be 8500"), result("free from 50.00", "passed", "")]);
+    assert_eq!(fault_verdict(Vitest, &clean, served, &real, b""), "caught", "a test that compares values did catch the undone change");
+    let mixed = report(vec![result("checkout: discount first, then shipping", "failed", "ReferenceError: coupon is not defined"), result("free from 50.00", "failed", "AssertionError: expected 0 to be 499")]);
+    assert_eq!(fault_verdict(Vitest, &clean, served, &mixed, b""), "caught", "one real assertion is enough");
 }
 
 #[test]

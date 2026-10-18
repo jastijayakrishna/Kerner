@@ -977,6 +977,8 @@ fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, befor
     Ok(record)
 }
 
+const CRASHES: [&str; 5] = ["is not defined", "is not a function", "is not iterable", "is not a constructor", "Cannot read properties of"];
+fn crashed(why: &str) -> bool { let first = why.lines().next().unwrap_or(why); CRASHES.iter().any(|c| first.contains(c)) }
 pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool, bool), output: &[u8], errors: &[u8]) -> &'static str {
     if !finished { return "unknown"; }
     let none = |b: &[u8]| { let t = String::from_utf8_lossy(b); t.contains("No tests found") || t.contains("No test files found") };
@@ -991,7 +993,8 @@ pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool,
     let file = |k: &String| k.split(" > ").next().unwrap_or(k).to_string();
     let working: BTreeSet<String> = r.tests.iter().filter(|(_, c)| c.passed > 0).map(|(k, _)| file(k)).collect();
     let broken = failed.iter().any(|k| !working.contains(&file(k)));
-    if failed.iter().any(|k| !known.contains(k)) { "caught" } else if broken { "unknown" } else if r.sum().passed > 0 { "missed" } else { "unknown" }
+    let fresh: Vec<&&String> = failed.iter().filter(|k| !known.contains(*k)).collect();
+    if fresh.iter().any(|k| !r.why.get(**k).is_some_and(|w| crashed(w))) { "caught" } else if !fresh.is_empty() || broken { "unknown" } else if r.sum().passed > 0 { "missed" } else { "unknown" }
 }
 pub fn caught(runner: Runner, known: &BTreeSet<String>, stdout: &[u8], passed: bool) -> bool {
     if known.is_empty() { return !passed; }
@@ -1118,8 +1121,26 @@ fn units(path: &str, source: &str) -> Option<BTreeMap<String, (usize, usize)>> {
     })
 }
 fn first_difference(a: &str, b: &str) -> usize { a.char_indices().zip(b.chars()).find(|((_, x), y)| x != y).map_or(a.len().min(b.len()), |((i, _), _)| i) }
-pub fn undos(path: &str, old: &str, new: &str) -> Vec<Mutant> {
+const MOVED_BODY_CHARS_MIN: usize = 40;
+fn compact(s: &str) -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") }
+fn without_moved(path: &str, old: &str, new: &str, elsewhere: &[&str]) -> (String, String) {
+    let (Some(before), Some(after)) = (units(path, old), units(path, new)) else { return (old.to_string(), new.to_string()) };
+    let homes: Vec<String> = elsewhere.iter().map(|s| compact(s)).collect();
+    let mut gone: Vec<(String, usize, usize)> = before.iter().filter(|(n, _)| !after.contains_key(*n)).map(|(n, (s, e))| (n.clone(), *s, *e))
+        .filter(|(_, s, e)| e - s >= MOVED_BODY_CHARS_MIN && homes.iter().any(|h| h.contains(&compact(&old[*s..*e]).trim_start_matches("export ").to_string()))).collect();
+    if gone.is_empty() { return (old.to_string(), new.to_string()); }
+    gone.sort_by_key(|(_, s, _)| std::cmp::Reverse(*s));
+    let mut stripped = old.to_string();
+    for (_, s, e) in &gone { stripped.replace_range(*s..*e, ""); }
+    let names: Vec<&str> = gone.iter().map(|(n, _, _)| n.as_str()).collect();
+    let imports_moved = |line: &str| line.trim_start().starts_with("import ") && line.contains(" from ") && names.iter().any(|n| line.contains(n));
+    let kept: Vec<&str> = new.lines().filter(|l| !imports_moved(l)).collect();
+    (stripped, format!("{}{}", kept.join("\n"), if new.ends_with('\n') { "\n" } else { "" }))
+}
+pub fn undos(path: &str, old: &str, new: &str, elsewhere: &[&str]) -> Vec<Mutant> {
     if old.is_empty() || old == new || same_behaviour(path, old, new) { return Vec::new(); }
+    let (stripped_old, stripped_new) = without_moved(path, old, new, elsewhere);
+    if same_behaviour(path, &stripped_old, &stripped_new) { return Vec::new(); }
     let (Some(before), Some(after)) = (units(path, old), units(path, new)) else { return undo(path, old, new).into_iter().collect() };
     let mut out = Vec::new();
     for (name, (s, e)) in &after {
@@ -1137,7 +1158,8 @@ pub fn undos(path: &str, old: &str, new: &str) -> Vec<Mutant> {
     let mut moved: Vec<(usize, usize, &str)> = out.iter().filter_map(|m| { let (s, e) = before.get(m.target.as_deref()?)?; Some((*s, *e, m.original.as_str())) }).collect();
     moved.sort_by_key(|(s, _, _)| std::cmp::Reverse(*s));
     for (s, e, text) in moved { forward.replace_range(s..e, text); }
-    if let Some(mut rest) = undo(path, &forward, new) {
+    let (rest_old, rest_new) = without_moved(path, &forward, new, elsewhere);
+    if let Some(mut rest) = undo(path, &forward, new).filter(|_| !same_behaviour(path, &rest_old, &rest_new)) {
         if !out.is_empty() { rest.what = "undoes the rest of the change".to_string(); }
         out.push(rest);
     }
