@@ -4,6 +4,22 @@ use kern::util::*;
 use std::path::PathBuf;
 
 #[test]
+fn counterexample_validation_deep_export_maps_are_unchecked_instead_of_silently_partial() {
+    for (depth, unchecked) in [(16, false), (17, true)] {
+        let (t, _) = project();
+        let mut exports = json!("./index.js");
+        for _ in 0..depth { exports = json!({"default": exports}); }
+        let mut manifest = json!({"name":"public-example","exports":exports});
+        let base = commit(&t, &[("package.json", &manifest.to_string()), ("index.js", "export const answer = 42;\n")], &[]);
+        manifest["description"] = json!("Changed description");
+        let head = commit(&t, &[("package.json", &manifest.to_string())], &[]);
+        let r = kern::rules::rules(&t.0, &base, &head).unwrap();
+        let found = r["not_checked"].as_array().unwrap().iter().any(|x| x["path"] == "package.json" && x["why"].as_str().is_some_and(|s| s.contains("export")));
+        assert_eq!(found, unchecked, "depth {depth}: {r}");
+    }
+}
+
+#[test]
 fn counterexample_validation_release_workflows_never_inherit_metadata_exemptions() {
     for path in [".github/workflows/release.yml", ".github/workflows/funding.yml", "nested/.github/workflows/release.yml"] {
         let (t, base) = project();

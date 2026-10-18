@@ -401,7 +401,7 @@ fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>)
     let reasons = strings(&tests["uneven_why"]);
     let because = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.iter().map(|r| plain(r, 400)).collect::<Vec<_>>().join("; ")) };
     if tests["setup_uneven"] == true {
-        f.unverified.push(item("test-setup", format!("Kern did not set up both sides the same way{because}, so passing results do not verify this change")));
+        f.unverified.push(item("test-setup", format!("Kern cannot establish comparable setup for both sides{because}, so passing results do not verify this change")));
     }
     f.unverified.extend(per_file("test-uneven", strings(&tests["uneven"]), &format!("This fails on the new code, but Kern did not set up both sides the same way{because}, so it cannot say whether the change broke it"),
         &format!("tests fail on the new code, but Kern did not set up both sides the same way{because}, so it cannot say whether the change broke them")));

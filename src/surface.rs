@@ -6,20 +6,22 @@ use std::collections::BTreeSet;
 
 const BUILD_DIRS: [&str; 9] = ["dist", "lib", "build", "out", "esm", "cjs", "es", "types", "module"];
 const SOURCE_EXTENSIONS: [&str; 6] = ["ts", "tsx", "mts", "js", "jsx", "mjs"];
+const EXPORT_DEPTH_COUNT_MAX: usize = 16;
 
-pub fn contracts(manifest: &Value) -> BTreeSet<String> {
-    fn walk(v: &Value, path: String, depth: usize, out: &mut BTreeSet<String>) {
-        if depth > 16 { return; }
+pub fn contracts(manifest: &Value) -> Option<BTreeSet<String>> {
+    fn walk(v: &Value, path: String, depth: usize, out: &mut BTreeSet<String>) -> Option<()> {
+        if depth > EXPORT_DEPTH_COUNT_MAX { return None; }
         match v {
             Value::String(_) => { out.insert(path); }
-            Value::Object(o) => { for (k, v) in o { walk(v, format!("{path}/{k}"), depth + 1, out); } }
-            Value::Array(a) => { for v in a { walk(v, path.clone(), depth + 1, out); } }
+            Value::Object(o) => { for (k, v) in o { walk(v, format!("{path}/{k}"), depth + 1, out)?; } }
+            Value::Array(a) => { for v in a { walk(v, path.clone(), depth + 1, out)?; } }
             _ => {}
         }
+        Some(())
     }
     let mut out = BTreeSet::new();
-    walk(&manifest["exports"], "exports".into(), 0, &mut out);
-    out
+    walk(&manifest["exports"], "exports".into(), 0, &mut out)?;
+    Some(out)
 }
 
 pub fn exported(path: &str, source: &str) -> Option<(BTreeSet<String>, Vec<String>)> {

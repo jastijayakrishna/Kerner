@@ -422,8 +422,13 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let joined = |e: &str| if dir.is_empty() { e.to_string() } else { format!("{dir}/{e}") };
         let read_old = |f: &str| shown(base, f);
         let read_new = |f: &str| shown(head, f);
-        let removed_contracts: Vec<String> = crate::surface::contracts(&before).difference(&crate::surface::contracts(&after)).cloned().collect();
-        if !removed_contracts.is_empty() { public_api.push(json!({ "package": name, "entry": manifest, "removed": removed_contracts })); }
+        match (crate::surface::contracts(&before), crate::surface::contracts(&after)) {
+            (Some(was), Some(now)) => {
+                let removed: Vec<String> = was.difference(&now).cloned().collect();
+                if !removed.is_empty() { public_api.push(json!({ "package": name, "entry": manifest, "removed": removed })); }
+            }
+            _ => not_checked.push(json!({ "path": manifest, "why": "The public export map exceeds Kern's supported nesting depth" })),
+        }
         let mut seen = BTreeSet::new();
         for entry in crate::surface::entries(&before).iter().map(|e| joined(e)).filter(|e| is_code(e)) {
             let Some(was) = crate::surface::surface(&read_old, &entry) else { continue };
