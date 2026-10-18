@@ -39,12 +39,12 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
     let n = answers.len();
     let (mut blocked, mut combinations) = (0, 0);
     for requirement in requirements {
-        for bits in 0..16u8 {
-            let (shape_seen, reached_old, reached_new, uneven) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+        for bits in 0..32u8 {
+            let (shape_seen, reached_old, reached_new, uneven, extended) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
             for code in 0..n.pow(4) {
                 let pick = |i: u32| answers[code / n.pow(i) % n];
                 let (old, old_again, new, new_again) = (pick(0), pick(1), pick(2), pick(3));
-                let e = Evidence { requirement, shape_seen, reached_old, reached_new, uneven,
+                let e = Evidence { requirement, shape_seen, reached_old, reached_new, uneven, extended,
                     answers: Answers { old: old.map(str::to_string), old_again: old_again.map(str::to_string), new: new.map(str::to_string), new_again: new_again.map(str::to_string) } };
                 let v = probe::verdict(&e);
                 combinations += 1;
@@ -52,7 +52,7 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
                 let authority = requirement.map(|r| r.authority);
                 let usable = authority.is_some_and(|a| a != Authority::Unverified);
                 let violated = match (requirement, old, new) {
-                    (Some(r), Some(o), Some(w)) if o != w => match r.check { Check::Same => true, Check::Returns => succeeded(o) && failed(w), Check::Throws => failed(o) && succeeded(w) },
+                    (Some(r), Some(o), Some(w)) if o != w => match r.check { Check::Same => !extended, Check::Returns => succeeded(o) && failed(w), Check::Throws => failed(o) && succeeded(w) },
                     _ => false,
                 };
                 let said = format!("{e:?} gave {v:?}");
@@ -81,8 +81,26 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
             }
         }
     }
-    assert_eq!(combinations, 13 * 16 * 7usize.pow(4));
-    assert_eq!(blocked, 32, "five plain answers give 20 changed pairs for `same`, and 6 each for `returns` and `throws`; nothing else may block");
+    assert_eq!(combinations, 13 * 32 * 7usize.pow(4));
+    assert_eq!(blocked, 44, "five plain answers give 20 changed pairs for `same`, blockable only when the new answer is not the old one with fields added, and 6 each for `returns` and `throws`, either way; nothing else may block");
+}
+
+#[test]
+fn lightdash_12942_an_answer_that_keeps_every_old_value_and_only_adds_fields_breaks_no_same_requirement() {
+    let line = |side: &str, o: &str, v: Option<&str>| { let mut r = json!({ "p": "e1", "o": o }); if let Some(v) = v { r["v"] = json!(v); } let _ = side; format!("{}\n{}\n", json!({ "k": "src/sql.ts#removeComments" }), r) };
+    let judged = |old: (&str, Option<&str>), new: (&str, Option<&str>)| {
+        let traces = [line("old", old.0, old.1), line("old-again", old.0, old.1), line("new", new.0, new.1), line("new-again", new.0, new.1)].map(|t| Some(probe::seen(&t)));
+        let mut x = tried([None; 4], obligation("verified"));
+        probe::recorded(&mut x, &traces);
+        (probe::verdict(&probe::evidence(&x)), x["extended"].clone())
+    };
+    let was = ("returns {\"rows\":[1,2],\"meta\":{\"total\":2}}", Some(r#"{"rows":[1,2],"meta":{"total":2}}"#));
+    assert_eq!(judged(was, ("returns {\"cursor\":null,\"meta\":{\"page\":1,\"total\":2},\"rows\":[1,2]}", Some(r#"{"rows":[1,2],"meta":{"total":2,"page":1},"cursor":null}"#))), (Verdict::Note, json!(true)),
+        "a new field, even inside a nested object, adds to the answer and keeps everything a caller relied on");
+    assert_eq!(judged(was, ("returns {\"meta\":{\"total\":3},\"rows\":[1,2]}", Some(r#"{"rows":[1,2],"meta":{"total":3}}"#))), (Verdict::Blocked, json!(false)), "an old value that changed is a break");
+    assert_eq!(judged(was, ("returns {\"rows\":[1,2]}", Some(r#"{"rows":[1,2]}"#))), (Verdict::Blocked, json!(false)), "a field that disappeared is a break");
+    assert_eq!(judged(was, ("returns {\"meta\":{\"total\":2},\"rows\":[1,2,3]}", Some(r#"{"rows":[1,2,3],"meta":{"total":2}}"#))), (Verdict::Blocked, json!(false)), "a list with another item is a different answer");
+    assert_eq!(judged(was, ("returns Map{}", None)), (Verdict::Blocked, json!(false)), "without a value Kern can read on both sides, a changed answer is compared as it is shown");
 }
 
 fn obligation(authority: &str) -> Value {
@@ -129,7 +147,7 @@ fn lightdash_12942_a_broken_requirement_short_of_proof_is_a_look_that_says_what_
     let cases = [
         (tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("contested")), "the change edits the quoted text in `src/sql.test.ts`"),
         (tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("authorized")), "the pull request says it changes this: `Strip // comments too, as MySQL does`"),
-        (shapeless, "no existing test or caller passes inputs of this shape"),
+        (shapeless, "neither the old code's tests and callers nor its declared parameter types pass inputs of this shape"),
         (tried([Some(KEPT), None, Some(CUT), Some(CUT)], obligation("verified")), "Kern could not run it a second time on each side to confirm"),
     ];
     for (x, missing) in cases {
@@ -493,12 +511,14 @@ fn lightdash_12942_the_probe_runtime_records_one_answer_per_input_and_never_thro
     let runtime = t.0.join("trace.cjs");
     std::fs::write(&runtime, kern::sandbox::TRACE).unwrap();
     let script = format!("const t = require({:?});\n\
-        const mod = {{ strip(s) {{ return s.split('//')[0]; }}, async later(x) {{ return x * 2; }}, boom() {{ throw new TypeError('no'); }}, async refuse() {{ throw new Error('nope'); }}, self() {{ return this === mod; }} }};\n\
+        const mod = {{ strip(s) {{ return s.split('//')[0]; }}, async later(x) {{ return x * 2; }}, boom() {{ throw new TypeError('no'); }}, async refuse() {{ throw new Error('nope'); }}, self() {{ return this === mod; }},\n\
+          bytes(b) {{ return Buffer.isBuffer(b) ? b.readUInt16BE(0) : 'not a buffer'; }}, own(o) {{ return Object.getOwnPropertyNames(o).join(','); }} }};\n\
         function slug(s) {{ return s.toLowerCase(); }}\n\
         (async () => {{\n\
           const said = await Promise.all([t.probe('e1', mod, 'strip', ['a//b']), t.probe('e2', mod, 'later', [21]), t.probe('e3', mod, 'boom', []), t.probe('e4', mod, 'refuse', []),\n\
-            t.probe('e5', mod, 'self', []), t.probe('e6', slug, 'default', ['A B']), t.probe('e7', {{ default: slug }}, 'default', ['C']), t.probe('e8', null, 'gone', []), t.probe('e9', mod, 'missing', [])]);\n\
-          if (said.some((x) => x !== undefined)) process.exit(4);\n\
+            t.probe('e5', mod, 'self', []), t.probe('e6', slug, 'default', ['A B']), t.probe('e7', {{ default: slug }}, 'default', ['C']), t.probe('e8', null, 'gone', []), t.probe('e9', mod, 'missing', []),\n\
+            t.probe('e10', mod, 'bytes', [{{ type: 'Buffer', data: [1, 2] }}]), t.probe('e11', mod, 'own', [JSON.parse('{{\"__proto__\": {{\"polluted\": 1}}, \"a\": 1}}')])]);\n\
+          if (said.some((x) => x !== undefined) || ({{}}).polluted !== undefined) process.exit(4);\n\
         }})().then(() => process.exit(0), () => process.exit(3));\n", runtime.to_string_lossy());
     let trace = t.0.join("trace.jsonl");
     let Ok(ran) = Command::new("node").args(["-e", &script]).env("KERN_TRACE", &trace).output() else { eprintln!("node is not installed here; the runtime is checked where it is"); return };
@@ -513,4 +533,7 @@ fn lightdash_12942_the_probe_runtime_records_one_answer_per_input_and_never_thro
     assert_eq!(answer("e6"), "returns \"a b\"", "a module that is itself the function is its default export");
     assert_eq!(answer("e7"), "returns \"c\"");
     assert!(answer("e8").starts_with("throws TypeError") && answer("e9").starts_with("throws TypeError"), "a missing function is an answer, never a crash: {seen:?}");
+    assert_eq!(answer("e10"), "returns 258", "a Buffer in Node's own JSON form arrives as a Buffer, as the code under test expects");
+    assert_eq!(answer("e11"), "returns \"__proto__,a\"", "a __proto__ key in an input stays a plain key and changes no prototype");
+    assert_eq!((seen.values.get("e1"), seen.values.get("e2"), seen.values.get("e3")), (Some(&json!("a")), Some(&json!(42)), None), "a plain answer keeps its value for the kernel to compare");
 }

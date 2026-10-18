@@ -334,6 +334,18 @@ fn lightdash_12942_the_job_that_runs_the_code_accepts_every_investigation_this_s
 }
 
 #[test]
+fn lightdash_12942_a_typed_function_no_test_calls_with_plain_values_gets_its_shapes_from_its_old_signature() {
+    let t = Temp::new();
+    let old = "export function formatPrice(cents: number, currency?: 'USD' | 'EUR'): string { return (cents / 100).toFixed(2) + (currency ?? ''); }\n";
+    let new = "export function formatPrice(cents: number, currency?: 'USD' | 'EUR', exact = false): string { return (cents / 100).toFixed(exact ? 3 : 2) + (currency ?? ''); }\n";
+    let test = "import { formatPrice } from './price';\n\nit('formats cents', () => {\n  const cents = 1999;\n  expect(formatPrice(cents)).toBe('19.99');\n});\n";
+    let r = repo(&t, &[("src/price.ts", old), ("src/price.test.ts", test)], &[("src/price.ts", new), ("src/price.test.ts", test)]);
+    let record = run(&r, &t.out("out"), Some(&both(&json!({ "obligations": [] }), &json!({ "experiments": [] }))));
+    assert_eq!(record["targets"], json!([{ "path": "src/price.ts", "export": "formatPrice", "shapes": [["number"], ["number", "string"]] }]),
+        "the old signature's plain parameter types, never the new one's, say what a type-correct caller can pass");
+}
+
+#[test]
 fn lightdash_12942_argument_shapes_come_only_from_the_old_codes_tests_and_callers() {
     let t = Temp::new();
     let r = lightdash(&t);

@@ -179,11 +179,12 @@ What Kern checks on every pull request:
    realistic inputs could break those requirements. Kern checks each quote itself: it must be in a file that existed before the change
    and be about the function (inside a test that calls it, next to a line of the documentation that names it, or in its own comment).
    Then it calls the function with each input through the project's own test runner (vitest or jest), on the old and the new code with
-   the network off, and runs both again when an answer differs. An answer that changed is a note. It blocks only when the quote checks
-   out and the change leaves it in place, existing tests or callers pass inputs of the same kind, both old runs agree, both new runs
-   agree, and both sides were set up the same way. When the pull request says it changes that behaviour, or a piece of that evidence is
-   missing, it is a look that says which. The receipt gives the call, both answers and the quote, and a rerun of the same change reuses
-   the AI's answers.
+   the network off, and runs both again when an answer differs. An answer that changed is a note, and so is one that keeps every old
+   value and only adds fields. It blocks only when the quote checks out and the change leaves it in place, inputs of that kind are ones
+   existing tests or callers pass or the old code's plain parameter types allow, both old runs agree, both new runs agree, and both
+   sides were set up the same way. When the pull request says it changes that behaviour, or a piece of that evidence is missing, it is
+   a look that says which. The receipt gives the call, both answers and the quote, and a rerun of the same change reuses the AI's
+   answers.
 11. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
    every changed line run; Kern runs it on the old and the new code and lists what behaves differently.
 

@@ -439,7 +439,7 @@ fn probe_missing(x: &Value, m: crate::probe::Missing) -> String {
     let mut why = Vec::new();
     if m.contested { why.push(format!("the change edits the quoted text in {}", code(o["source"]["path"].as_str().unwrap_or(""), 160))); }
     if m.authorized { why.push(format!("the pull request says it changes this: {}", code(o["authorized_by"].as_str().unwrap_or(""), 200))); }
-    if m.shape { why.push("no existing test or caller passes inputs of this shape".to_string()); }
+    if m.shape { why.push("neither the old code's tests and callers nor its declared parameter types pass inputs of this shape".to_string()); }
     if m.rerun { why.push("Kern could not run it a second time on each side to confirm".to_string()); }
     why.join(", and ")
 }

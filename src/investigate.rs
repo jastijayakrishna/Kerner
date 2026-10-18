@@ -723,11 +723,11 @@ fn experiments(answer: &Value, targets: &[Target], both: &BTreeMap<String, BTree
     }
     kept
 }
-fn shapes(targets: &[Target], examples: &[Examples], dropped: &mut Vec<Value>) -> Vec<Value> {
+fn shapes(targets: &[Target], examples: &[Examples], sources: &[Source], dropped: &mut Vec<Value>) -> Vec<Value> {
     targets.iter().zip(examples).map(|(t, found)| {
+        let old = sources.iter().find(|s| s.path == t.path).map_or("", |s| s.old.as_str());
         let mut shapes: Vec<Vec<&str>> = Vec::new();
-        for args in found {
-            let shape = crate::calls::shape(args);
+        for shape in found.iter().map(|args| crate::calls::shape(args)).chain(crate::calls::declared_shapes(&t.path, old, &t.export)) {
             if !shapes.contains(&shape) { shapes.push(shape); }
         }
         if shapes.len() > SHAPES_PER_TARGET_COUNT_MAX {
@@ -773,7 +773,7 @@ impl Run<'_> {
         let callers = mentioning(self.repo, &new, &targets, caller, CALLER_FILES_COUNT_MAX, "files of the new code that call the changed functions", &mut self.dropped)?;
         let Some(said) = self.answer(&hunter(&targets, &obligations, &examples, &sources, &callers, &new))? else { return Ok(Found::Nothing(NO_KEY.into())) };
         let experiments = experiments(&said, &targets, &both, &obligations, &mut self.dropped);
-        let shaped = shapes(&targets, &examples, &mut self.dropped);
+        let shaped = shapes(&targets, &examples, &sources, &mut self.dropped);
         Ok(Found::Investigated(shaped, obligations.iter().map(|o| o.json(&targets)).collect(), experiments))
     }
     fn record(self, (base, head): (&str, &str), found: R<Found>) -> Value {

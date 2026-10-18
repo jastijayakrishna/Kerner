@@ -26,6 +26,7 @@ pub const QUOTE_CHARS_MAX: usize = 600;
 const ID_CHARS_MAX: usize = 64;
 const NAME_CHARS_MAX: usize = 128;
 const ANSWER_BYTES_MAX: usize = 2048;
+const VALUE_BYTES_MAX: usize = 65_536;
 const TEST_TIMEOUT_MS: u64 = 10_000;
 const HOSTS_COUNT_MAX: usize = 200;
 const HOST_BYTES_MAX: u64 = 1 << 20;
@@ -328,25 +329,35 @@ pub fn plan(out: &Path, repo: &Path, (base, head): (&str, &str), inv: &Investiga
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Seen { pub answers: BTreeMap<String, String>, pub keys: BTreeSet<String> }
+pub struct Seen { pub answers: BTreeMap<String, String>, pub values: BTreeMap<String, Value>, pub keys: BTreeSet<String> }
 fn outcome(o: &str) -> bool { o.len() <= ANSWER_BYTES_MAX && VERBS.iter().any(|v| o.starts_with(v)) }
 pub fn seen(trace: &str) -> Seen {
     let mut s = Seen::default();
     for line in trace.lines().take(TRACE_LINES_COUNT_MAX) {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if let (Some(id), Some(o)) = (v["p"].as_str(), v["o"].as_str()) {
-            if outcome(o) { s.answers.entry(id.to_string()).or_insert_with(|| o.to_string()); }
+            if !outcome(o) || s.answers.contains_key(id) { continue; }
+            s.answers.insert(id.to_string(), o.to_string());
+            if let Some(value) = v["v"].as_str().filter(|t| t.len() <= VALUE_BYTES_MAX).and_then(|t| serde_json::from_str::<Value>(t).ok()) { s.values.insert(id.to_string(), value); }
         } else if let Some(k) = v["k"].as_str() { s.keys.insert(k.to_string()); }
     }
     s
+}
+fn kept(old: &Value, new: &Value) -> bool {
+    match (old, new) {
+        (Value::Object(was), Value::Object(now)) => was.iter().all(|(k, v)| now.get(k).is_some_and(|w| kept(v, w))),
+        _ => old == new,
+    }
 }
 pub fn recorded(x: &mut Value, traces: &[Option<Seen>; 4]) {
     let id = x["id"].as_str().unwrap_or("").to_string();
     let key = format!("{}#{}", x["path"].as_str().unwrap_or(""), x["export"].as_str().unwrap_or(""));
     let answer = |t: &Option<Seen>| t.as_ref().and_then(|s| s.answers.get(&id)).map_or(Value::Null, |a| json!(a));
     let reached = |t: &Option<Seen>| t.as_ref().is_some_and(|s| s.keys.contains(&key));
+    let (old, new) = (traces[0].as_ref().and_then(|s| s.values.get(&id)), traces[2].as_ref().and_then(|s| s.values.get(&id)));
     x["reached"] = json!({ "old": reached(&traces[0]), "new": reached(&traces[2]) });
     x["answers"] = json!({ "old": answer(&traces[0]), "old_again": answer(&traces[1]), "new": answer(&traces[2]), "new_again": answer(&traces[3]) });
+    x["extended"] = json!(matches!((old, new), (Some(old), Some(new)) if old != new && kept(old, new)));
 }
 fn uneven(setup: &Value, dir: &str) -> Value { json!(crate::suite::setup_differs(setup, dir).or_else(|| crate::suite::unlocked(setup, dir))) }
 fn trace(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, (files, serve): (&Texts, &Texts), name: &str, seconds: u64) -> Option<Seen> {
@@ -416,7 +427,7 @@ pub fn run(out: &Path, investigation: Option<&Path>, until: u64) -> Value {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Answers { pub old: Option<String>, pub old_again: Option<String>, pub new: Option<String>, pub new_again: Option<String> }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Evidence { pub requirement: Option<Requirement>, pub shape_seen: bool, pub reached_old: bool, pub reached_new: bool, pub answers: Answers, pub uneven: bool }
+pub struct Evidence { pub requirement: Option<Requirement>, pub shape_seen: bool, pub reached_old: bool, pub reached_new: bool, pub answers: Answers, pub uneven: bool, pub extended: bool }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unchecked { Unreached, Unanswered, Sandbox, Chance }
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -427,8 +438,8 @@ impl Verdict {
     pub fn differs(self) -> bool { matches!(self, Verdict::Note | Verdict::Uneven | Verdict::Look(_) | Verdict::Blocked) }
 }
 fn succeeded(a: &str) -> bool { a.starts_with("returns ") || a.starts_with("resolves ") }
-fn violated(check: Check, old: &str, new: &str) -> bool {
-    match check { Check::Same => old != new, Check::Returns => succeeded(old) && crate::trace::failed(new), Check::Throws => crate::trace::failed(old) && succeeded(new) }
+fn violated(check: Check, (old, new): (&str, &str), extended: bool) -> bool {
+    match check { Check::Same => old != new && !extended, Check::Returns => succeeded(old) && crate::trace::failed(new), Check::Throws => crate::trace::failed(old) && succeeded(new) }
 }
 pub fn verdict(e: &Evidence) -> Verdict {
     let a = &e.answers;
@@ -437,7 +448,7 @@ pub fn verdict(e: &Evidence) -> Verdict {
     if [&a.old, &a.old_again, &a.new, &a.new_again].into_iter().flatten().any(|x| crate::trace::failed(x) && crate::suite::sandbox_error(x)) { return Verdict::Unchecked(Unchecked::Sandbox); }
     if old == new { return Verdict::Same; }
     if a.old_again.as_deref().is_some_and(|x| x != old) || a.new_again.as_deref().is_some_and(|x| x != new) { return Verdict::Unchecked(Unchecked::Chance); }
-    let Some(r) = e.requirement.filter(|r| r.authority != Authority::Unverified && violated(r.check, old, new)) else { return Verdict::Note };
+    let Some(r) = e.requirement.filter(|r| r.authority != Authority::Unverified && violated(r.check, (old, new), e.extended)) else { return Verdict::Note };
     if e.uneven { return Verdict::Uneven; }
     let missing = Missing { contested: r.authority == Authority::Contested, authorized: r.authority == Authority::Authorized, shape: !e.shape_seen,
         rerun: a.old_again.is_none() || a.new_again.is_none() };
@@ -451,7 +462,8 @@ pub fn evidence(x: &Value) -> Evidence {
     let o = &x["obligation"];
     let requirement = o["check"].as_str().and_then(check_named).map(|check| Requirement { check, authority: o["authority"].as_str().and_then(authority_named).unwrap_or(Authority::Unverified) });
     Evidence { requirement, shape_seen, reached_old: x["reached"]["old"] == true, reached_new: x["reached"]["new"] == true,
-        answers: Answers { old: answer("old"), old_again: answer("old_again"), new: answer("new"), new_again: answer("new_again") }, uneven: x["uneven"].as_str().is_some_and(|u| !u.is_empty()) }
+        answers: Answers { old: answer("old"), old_again: answer("old_again"), new: answer("new"), new_again: answer("new_again") }, uneven: x["uneven"].as_str().is_some_and(|u| !u.is_empty()),
+        extended: x["extended"] == true }
 }
 pub fn replayed(dir: &Path, stored: &Value, setup: Option<&Value>) -> Value {
     let read = |name: String| -> Option<Seen> {

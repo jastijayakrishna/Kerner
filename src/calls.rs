@@ -175,6 +175,71 @@ pub fn test_spans(path: &str, source: &str, target: (&str, &str), exists: &dyn F
     parsed(path, source, |program, _| { let mut v = Cases { locals: &locals, open: Vec::new(), found: Vec::new() }; v.visit_program(program); v.found }).unwrap_or_default()
 }
 
+const DECLARED_SHAPES_COUNT_MAX: usize = 16;
+fn kinds(t: &TSType) -> Option<(Vec<&'static str>, bool)> {
+    Some(match t {
+        TSType::TSStringKeyword(_) | TSType::TSTemplateLiteralType(_) => (vec!["string"], false),
+        TSType::TSNumberKeyword(_) => (vec!["number"], false),
+        TSType::TSBooleanKeyword(_) => (vec!["boolean"], false),
+        TSType::TSNullKeyword(_) => (vec!["null"], false),
+        TSType::TSUndefinedKeyword(_) => (Vec::new(), true),
+        TSType::TSLiteralType(l) => (vec![match &l.literal {
+            TSLiteral::StringLiteral(_) | TSLiteral::TemplateLiteral(_) => "string",
+            TSLiteral::NumericLiteral(_) => "number",
+            TSLiteral::BooleanLiteral(_) => "boolean",
+            _ => return None,
+        }], false),
+        TSType::TSParenthesizedType(p) => kinds(&p.type_annotation)?,
+        TSType::TSUnionType(u) => {
+            let (mut all, mut optional) = (Vec::new(), false);
+            for t in &u.types {
+                let (more, maybe) = kinds(t)?;
+                optional |= maybe;
+                for k in more { if !all.contains(&k) { all.push(k); } }
+            }
+            (all, optional)
+        }
+        _ => return None,
+    })
+}
+fn parameters<'p>(program: &'p Program, export: &str) -> Option<&'p FormalParameters<'p>> {
+    program.body.iter().find_map(|s| {
+        let declaration = match s { Statement::ExportDeclaration(e) => Some(&e.declaration), _ => s.as_declaration() }?;
+        match declaration {
+            Declaration::FunctionDeclaration(f) if f.body.is_some() && f.id.as_ref().is_some_and(|id| id.name == export) => Some(&*f.params),
+            Declaration::VariableDeclaration(v) => v.declarations.iter().find_map(|d| match (&d.id, d.init.as_ref().map(unwrap)) {
+                (BindingPattern::BindingIdentifier(id), Some(Expression::ArrowFunctionExpression(f))) if id.name == export => Some(&*f.params),
+                (BindingPattern::BindingIdentifier(id), Some(Expression::FunctionExpression(f))) if id.name == export => Some(&*f.params),
+                _ => None,
+            }),
+            _ => None,
+        }
+    })
+}
+pub fn declared_shapes(path: &str, source: &str, export: &str) -> Vec<Vec<&'static str>> {
+    parsed(path, source, |program, _| {
+        let Some(params) = parameters(program, export).filter(|p| p.rest.is_none()) else { return Vec::new() };
+        let mut known: Vec<(Vec<&'static str>, bool)> = Vec::new();
+        for p in &params.items {
+            let Some((all, maybe)) = p.type_annotation.as_ref().and_then(|t| kinds(&t.type_annotation)).filter(|(all, _)| !all.is_empty()) else { break };
+            known.push((all, maybe || p.optional || p.initializer.is_some()));
+        }
+        let typed = known.len();
+        let required = params.items.iter().enumerate().take_while(|(i, p)| !(p.optional || p.initializer.is_some() || known.get(*i).is_some_and(|(_, maybe)| *maybe))).count();
+        if required > typed { return Vec::new(); }
+        let mut shapes: Vec<Vec<&'static str>> = Vec::new();
+        let mut row: Vec<Vec<&'static str>> = vec![Vec::new()];
+        for (n, (all, _)) in known.iter().enumerate() {
+            if n >= required { shapes.extend(row.iter().cloned()); }
+            row = row.iter().flat_map(|r| all.iter().map(move |k| { let mut r = r.clone(); r.push(*k); r })).take(DECLARED_SHAPES_COUNT_MAX).collect();
+        }
+        shapes.extend(row);
+        shapes.retain(|s| s.len() >= required);
+        shapes.truncate(DECLARED_SHAPES_COUNT_MAX);
+        shapes
+    }).unwrap_or_default()
+}
+
 pub fn shape(args: &[Value]) -> Vec<&'static str> {
     args.iter().map(|a| match a {
         Value::String(_) => "string",

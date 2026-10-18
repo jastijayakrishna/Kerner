@@ -98,6 +98,23 @@ describe('removeComments', () => {
 }
 
 #[test]
+fn the_old_codes_plain_parameter_types_say_which_inputs_a_type_correct_caller_can_pass() {
+    let declared = |source: &str, export: &str| kern::calls::declared_shapes("src/money.ts", source, export);
+    let money = "export function formatPrice(cents: number, currency?: 'USD' | 'EUR', fill: string | null = null): string { return ''; }\n\
+                 export const parse = (text: string, strict: boolean | undefined) => text;\n\
+                 export function render(sql: string, options: { keepHints?: boolean } = {}): string { return sql; }\n\
+                 export function lookup(user: User, id: string) { return id; }\n\
+                 export function join(...parts: string[]) { return parts.join(''); }\n\
+                 export function plain(a, b) { return a + b; }\n";
+    assert_eq!(declared(money, "formatPrice"), vec![vec!["number"], vec!["number", "string"], vec!["number", "string", "string"], vec!["number", "string", "null"]]);
+    assert_eq!(declared(money, "parse"), vec![vec!["string"], vec!["string", "boolean"]], "a parameter that may be undefined may be left out");
+    assert_eq!(declared(money, "render"), vec![vec!["string"]], "an object type says nothing Kern can check about the fields, so the shapes stop before it");
+    assert!(declared(money, "lookup").is_empty(), "a first parameter of a type Kern cannot read leaves no shape a caller is known to pass");
+    assert!(declared(money, "join").is_empty() && declared(money, "plain").is_empty() && declared(money, "missing").is_empty());
+    assert!(kern::calls::declared_shapes("src/money.ts", "export function {", "formatPrice").is_empty());
+}
+
+#[test]
 fn the_shape_of_a_call_is_the_kind_of_each_value_it_passes() {
     let shape = |args: Value| kern::calls::shape(args.as_array().unwrap());
     assert_eq!(shape(json!(["a", 1, true, null, [], {}])), ["string", "number", "boolean", "null", "array", "object"]);

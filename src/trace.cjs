@@ -5,6 +5,7 @@ const FILE = process.env.KERN_TRACE;
 const CALLS_PER_KEY_MAX = 200;
 const BYTES_MAX = 8 << 20;
 const SHOWN_CHARS_MAX = 240;
+const VALUE_CHARS_MAX = 65536;
 const STOP = Symbol('stop');
 const state = { counts: new Map(), bytes: 0 };
 
@@ -122,16 +123,31 @@ function exported(file, value) {
   }
   return value;
 }
+function json(value) {
+  try { const t = JSON.stringify(value); return typeof t === 'string' && t.length <= VALUE_CHARS_MAX ? t : undefined; } catch { return undefined; }
+}
+function bytes(value) {
+  const keys = Object.keys(value);
+  return keys.length === 2 && value.type === 'Buffer' && Array.isArray(value.data) && value.data.every((b) => Number.isInteger(b) && b >= 0 && b < 256);
+}
+function revive(value) {
+  if (Array.isArray(value)) return value.map(revive);
+  if (!value || typeof value !== 'object') return value;
+  if (bytes(value)) return Buffer.from(value.data);
+  const out = {};
+  for (const k of Object.keys(value)) Object.defineProperty(out, k, { value: revive(value[k]), enumerable: true, writable: true, configurable: true });
+  return out;
+}
 async function probe(id, mod, name, args) {
-  let o;
+  let o, v;
   try {
     const self = name === 'default' ? undefined : mod;
     const f = name === 'default' ? (typeof mod === 'function' ? mod : mod.default) : mod[name];
-    const result = Reflect.apply(f, self, args);
+    const result = Reflect.apply(f, self, revive(args));
     if (Object.prototype.toString.call(result) === '[object Promise]') {
-      try { o = 'resolves ' + shown(await result); } catch (e) { o = 'rejects ' + text(e); }
-    } else o = 'returns ' + shown(result);
+      try { const value = await result; o = 'resolves ' + shown(value); v = json(value); } catch (e) { o = 'rejects ' + text(e); }
+    } else { o = 'returns ' + shown(result); v = json(result); }
   } catch (e) { o = 'throws ' + text(e); }
-  try { record({ p: String(id), o }); } catch {}
+  try { record(v === undefined ? { p: String(id), o } : { p: String(id), o, v }); } catch {}
 }
 module.exports = { fn: wrap, value: wrap, class: methods, exports: exported, probe };
