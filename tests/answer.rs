@@ -28,13 +28,15 @@ fn counterexample_validation_missing_or_unknown_evidence_cannot_be_signed_clear(
 
 #[test]
 fn counterexample_validation_passing_tests_with_uneven_setup_are_not_verified() {
-    let mut tests = ran();
-    tests["setup_uneven"] = json!(true);
-    tests["uneven_why"] = json!(["Kern used different fallback images"]);
-    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
-    assert_eq!(r["decision"], "unverified", "{r}");
-    let md = receipt::markdown(&r, None);
-    assert!(!md.contains("✅ Tests") && md.contains("different fallback images"), "{md}");
+    for flag in [true, false] {
+        let mut tests = ran();
+        tests["setup_uneven"] = json!(flag);
+        tests["uneven_why"] = json!(["Kern used different fallback images"]);
+        let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+        assert_eq!(r["decision"], "unverified", "{r}");
+        let md = receipt::markdown(&r, None);
+        assert!(!md.contains("✅ Tests") && md.contains("different fallback images"), "{md}");
+    }
 }
 
 #[test]
