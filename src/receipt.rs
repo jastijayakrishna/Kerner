@@ -230,6 +230,24 @@ fn units(tests: &Value) -> Vec<Unit> {
     out
 }
 fn named(u: &Unit) -> String { u.target.as_ref().map_or_else(|| format!("The change in {}", code(&u.path, 160)), |t| format!("{} in {}", code(t, 120), code(&u.path, 160))) }
+const TASK_FILES_SHOWN: usize = 5;
+fn stem(path: &str) -> &str { let file = path.rsplit('/').next().unwrap_or(path); file.split('.').next().unwrap_or(file) }
+fn nearest(path: &str, ran: &[String]) -> Vec<String> {
+    let dirs: Vec<&str> = path.split('/').collect();
+    let mut ranked: Vec<(bool, std::cmp::Reverse<usize>, &String)> = ran.iter().map(|t| (stem(t) != stem(path), std::cmp::Reverse(t.split('/').filter(|s| dirs.contains(s)).count()), t)).collect();
+    ranked.sort();
+    ranked.into_iter().take(TASK_FILES_SHOWN).map(|(_, _, t)| t.clone()).collect()
+}
+const DIFFERENCE_LEAD_CHARS: usize = 40;
+fn window(was: &str, now: &str) -> Option<(String, String)> {
+    let kept = |s: &str| s.split_once("...#").map_or((s.to_string(), false), |(a, _)| (a.to_string(), true));
+    let ((a, a_cut), (b, b_cut)) = (kept(was), kept(now));
+    let at = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    if at >= a.chars().count().min(b.chars().count()) && (a_cut || b_cut) { return None; }
+    let from = at.saturating_sub(DIFFERENCE_LEAD_CHARS);
+    let show = |s: &str, cut: bool| format!("{}{}{}", if from > 0 { "\u{2026}" } else { "" }, s.chars().skip(from).collect::<String>(), if cut { "\u{2026}" } else { "" });
+    Some((show(&a, a_cut), show(&b, b_cut)))
+}
 fn example(tests: &Value, u: &Unit) -> Option<String> {
     let names: Vec<String> = u.target.iter().flat_map(|t| [t.clone(), t.replace('.', "#")]).collect();
     let keyed = |k: &str| k.strip_prefix(&format!("{}#", u.path)).is_some_and(|n| names.is_empty() || names.iter().any(|x| x == n));
@@ -238,7 +256,11 @@ fn example(tests: &Value, u: &Unit) -> Option<String> {
     let input = d["input"].as_str()?;
     let args = input.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(input);
     let answer = |k: &str| { let a = d[k].as_str().unwrap_or(""); a.strip_prefix("returns ").or_else(|| a.strip_prefix("resolves ")).unwrap_or(a).to_string() };
-    Some(format!(" For example, {} gave {} before and gives {} now.", code(&format!("{name}({args})"), 160), code(&answer("was"), 160), code(&answer("now"), 160)))
+    let call = code(&format!("{name}({args})"), 160);
+    Some(match window(&answer("was"), &answer("now")) {
+        Some((was, now)) => format!(" For example, {call} gave {} before and gives {} now.", code(&was, 160), code(&now, 160)),
+        None => format!(" For example, {call} gives another answer now (Kern keeps only the start of a long answer, and that start is the same)."),
+    })
 }
 fn proof_items(tests: &Value) -> (Vec<Value>, Vec<Value>) {
     let (mut claims, mut challenges) = (Vec::new(), Vec::new());
@@ -278,8 +300,9 @@ fn agent_md(r: &Value) -> String {
     for (i, c) in challenges.iter().take(SHOWN).enumerate() {
         let u = Unit { path: c["path"].as_str().unwrap_or("").to_string(), target: c["target"].as_str().map(str::to_string), outcome: String::new(), ran: strings(&c["tests"]), caught_by: Vec::new() };
         let ask = if c["kind"] == "unasserted" {
-            let who = if u.ran.is_empty() { "A test".to_string() } else { u.ran.iter().map(|t| code(t, 160)).collect::<Vec<_>>().join(", ") };
-            let (run, pass) = if u.ran.len() > 1 { ("run", "pass") } else { ("runs", "passes") };
+            let shown = nearest(&u.path, &u.ran);
+            let who = if shown.is_empty() { "A test".to_string() } else { shown.iter().map(|t| code(t, 160)).collect::<Vec<_>>().join(", ") };
+            let (run, pass) = if shown.len() > 1 { ("run", "pass") } else { ("runs", "passes") };
             format!("{who} {run} it, but still {pass} when your change is undone. If the change is meant to alter behaviour, add an assertion there that fails on the old code and passes on yours; if it keeps behaviour the same, say so in the pull request.{}", c["example"].as_str().unwrap_or(""))
         } else {
             "No test reaches this file. If it can run on its own, add a test that fails on the old code and passes on yours; if it needs a database, a network or other services, say in the pull request why it cannot be tested here.".to_string()
@@ -291,8 +314,10 @@ fn agent_md(r: &Value) -> String {
 fn bystander_items(f: &mut Found, tests: &Value) {
     for x in tests["bystanders"]["differences"].as_array().into_iter().flatten() {
         let what = match x["kind"].as_str() { Some("accepts") => "now accepts what it refused", Some("throws") => "now throws", Some("empty") => "now gives nothing back", _ => "now gives another answer" };
-        f.notes.push(item("bystander", format!("Tests this change does not touch call {} with {}, and it {what}: {} before, {} now", code(x["key"].as_str().unwrap_or(""), 160),
-            code(x["input"].as_str().unwrap_or(""), 160), code(x["was"].as_str().unwrap_or(""), 160), code(x["now"].as_str().unwrap_or(""), 160))));
+        let answers = window(x["was"].as_str().unwrap_or(""), x["now"].as_str().unwrap_or("")).map_or_else(|| "past the start of the answer, which is all Kern keeps".to_string(),
+            |(was, now)| format!("{} before, {} now", code(&was, 160), code(&now, 160)));
+        f.notes.push(item("bystander", format!("Tests this change does not touch call {} with {}, and it {what}: {answers}", code(x["key"].as_str().unwrap_or(""), 160),
+            code(x["input"].as_str().unwrap_or(""), 160))));
     }
 }
 fn rule_items(f: &mut Found, d: &Value, rules: &Value, tests: &Value) {

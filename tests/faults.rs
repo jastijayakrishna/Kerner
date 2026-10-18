@@ -303,6 +303,31 @@ fn authkit_session_46_a_task_reads_right_when_several_test_files_run_the_code() 
 }
 
 #[test]
+fn webdriverio_15574_a_task_names_the_test_files_nearest_the_changed_code_first() {
+    let ran: Vec<String> = ["packages/webdriverio/tests/addCommand.test.ts", "packages/webdriverio/tests/commands/browser.test.ts", "packages/webdriverio/tests/commands/browser/$$.test.ts",
+        "packages/webdriverio/tests/commands/browser/$.test.ts", "packages/webdriverio/tests/commands/browser/action.test.ts", "packages/webdriverio/tests/commands/element/getHTML.test.ts",
+        "packages/webdriverio/tests/commands/element/getText.test.ts"].map(String::from).to_vec();
+    let faults = json!([{ "path": "packages/webdriverio/src/commands/element/getHTML.ts", "line": 96, "what": "undoes the change to getHTML", "kind": "undo", "target": "getHTML", "outcome": "missed", "ran": ran }]);
+    let (r, md) = receipt_with(faults, json!({}));
+    let task = md.lines().find(|l| l.starts_with("1. ")).unwrap_or_default();
+    assert!(task.contains("`packages/webdriverio/tests/commands/element/getHTML.test.ts`, `packages/webdriverio/tests/commands/element/getText.test.ts`"), "the test named after the code comes first, then its neighbours: {task}");
+    assert!(!task.contains("action.test.ts"), "five files at most: {task}");
+    assert_eq!(r["challenges"][0]["tests"].as_array().map(Vec::len), Some(7), "the receipt's data keeps every file that ran it: {r}");
+}
+
+#[test]
+fn promptroot_837_an_example_shows_where_two_long_answers_differ_or_says_the_difference_is_past_what_kern_keeps() {
+    let undo = json!([{ "path": "src/modules/copen-manager.js", "line": 9, "what": "undoes the change to getUserCopens", "kind": "undo", "target": "getUserCopens", "outcome": "missed", "ran": ["src/a.test.js"] }]);
+    let start = format!("[{}", "{\"id\":\"blank\"},".repeat(8));
+    let seen = |was: String, now: String| json!({ "status": "RAN", "compared": 1, "unstable": 0, "changed": 1, "tests": 1,
+        "differences": [{ "key": "src/modules/copen-manager.js#getUserCopens", "input": "[\"user123\"]", "was": was, "now": now, "kind": "changed" }] });
+    let (_, md) = receipt_with(undo.clone(), seen(format!("resolves {start}...#01822208cc7d9a9c"), format!("resolves {start}...#0006cdbe65917b82")));
+    assert!(md.contains("`getUserCopens(\"user123\")` gives another answer now") && !md.contains("...#"), "the shown starts are the same, so quoting them twice says nothing: {md}");
+    let (_, md) = receipt_with(undo, seen(format!("returns {start}{{\"id\":\"claude\"}}]"), format!("returns {start}{{\"id\":\"devin\"}},{{\"id\":\"claude\"}}]")));
+    assert!(md.contains("devin") && md.contains("\"claude\"}]"), "the example shows the part that differs, even past the first 160 characters: {md}");
+}
+
+#[test]
 fn a_change_every_test_checks_earns_its_check_mark_and_gives_the_agent_nothing_to_do() {
     let faults = json!([{ "path": "src/price.js", "line": 3, "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "caught",
         "caught_by": [{ "test": "test/price.test.js > discount > from 100", "now": "90", "before": "100" }] }]);

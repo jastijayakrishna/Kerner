@@ -1068,7 +1068,7 @@ pub fn fault_outcomes(runner: Runner, new: &Report, placebo: Option<&Value>, res
     }).collect()
 }
 const CLAIMS_PER_FAULT_COUNT_MAX: usize = 3;
-const RAN_FILES_COUNT_MAX: usize = 5;
+const RAN_FILES_COUNT_MAX: usize = 50;
 pub fn fault_claims(runner: Runner, new: &Report, placebo: Option<&Value>, results: &[Value]) -> Vec<Value> {
     let (baseline, _) = controlled(runner, new, placebo);
     let known: BTreeSet<String> = baseline.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k.clone()).chain(baseline.problems.iter().cloned()).collect();
