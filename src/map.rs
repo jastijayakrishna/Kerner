@@ -95,6 +95,15 @@ pub fn flags(root_has: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
     f
 }
 
+pub fn files(root_has: &dyn Fn(&str) -> bool) -> Value {
+    if root_has("tsconfig.json") { json!({}) } else { json!({ "tsconfig.json": "{\"compilerOptions\":{\"allowJs\":true}}" }) }
+}
+
+pub fn stopped(ending: &str, errors: &[u8], output: &[u8]) -> String {
+    let last = |b: &[u8]| String::from_utf8_lossy(b).lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().chars().take(300).collect::<String>());
+    format!("the indexer stopped ({ending}): {}", last(errors).or_else(|| last(output)).unwrap_or_default())
+}
+
 pub fn summary(m: &Map) -> Value {
     json!({ "provenance": m.provenance, "documents": m.files.len(), "symbols": m.defined_in.len(), "references": m.refs.values().map(Vec::len).sum::<usize>() })
 }

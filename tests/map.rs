@@ -78,3 +78,23 @@ fn the_indexer_is_told_how_the_project_is_laid_out() {
     assert_eq!(map::flags(&has(&["yarn.lock", "package.json.workspaces"])), vec!["index", "--no-global-caches", "--output", "/tmp/.kern-report.json", "--yarn-workspaces", "--infer-tsconfig"]);
     assert_eq!(map::flags(&has(&["package-lock.json"])), vec!["index", "--no-global-caches", "--output", "/tmp/.kern-report.json", "--infer-tsconfig"]);
 }
+
+#[test]
+fn a_project_without_a_root_tsconfig_gets_kerns_own_because_the_indexers_guess_reads_node_modules_and_calls_a_javascript_project_typescript() {
+    let has = |files: &[&str]| { let f: Vec<String> = files.iter().map(|s| s.to_string()).collect(); move |p: &str| f.iter().any(|x| x == p) };
+    assert_eq!(map::files(&has(&["package-lock.json"])), serde_json::json!({ "tsconfig.json": "{\"compilerOptions\":{\"allowJs\":true}}" }));
+    assert_eq!(map::files(&has(&["package-lock.json", "tsconfig.json"])), serde_json::json!({}));
+}
+
+#[test]
+fn the_reason_an_indexer_stopped_quotes_what_it_printed_on_stdout_when_stderr_is_empty() {
+    let out = b"+ /workspace (47ms)
+error: no files got indexed. To fix this problem, make sure that the TypeScript projects [\".\"] contain input files or reference other projects.
+";
+    assert_eq!(map::stopped("exit 1", b"", out), "the indexer stopped (exit 1): error: no files got indexed. To fix this problem, make sure that the TypeScript projects [\".\"] contain input files or reference other projects.");
+    assert_eq!(map::stopped("exit 1", b"Error: Cannot find module
+    at x
+", out), "the indexer stopped (exit 1): at x");
+    assert_eq!(map::stopped("timeout", b"", b""), "the indexer stopped (timeout): ");
+    assert_eq!(map::stopped("exit 1", b"", &[b'x'; 400]).len(), "the indexer stopped (exit 1): ".len() + 300);
+}

@@ -1157,11 +1157,15 @@ fn mapped(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Opt
     };
     let mut command = vec!["/usr/local/bin/node".to_string(), format!("--max-old-space-size={}", test_limits(seconds).memory_mb * 3 / 4), INDEXER_MAIN.to_string()];
     command.extend(crate::map::flags(&has).into_iter().map(str::to_string));
-    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": {}, "early": false, "faults": [], "serve": {} });
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": crate::map::files(&has), "early": false, "faults": [], "serve": {} });
     let run = match in_test_box(out, volume, "tests-map", ("drive-test.json", &config), ("__drive_test", false, seconds)) { Ok(r) => r, Err(e) => return fallback(format!("the indexer could not run: {}", e.0)) };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return fallback(format!("the indexer gave no readable result: {}", crate::sandbox::refusal(&run.errors).unwrap_or_default())) };
     let _ = std::fs::write(out.join("map.err"), &parts["errors"]);
-    if parts["ending"] != b"exit 0" { return fallback(format!("the indexer stopped ({}): {}", String::from_utf8_lossy(&parts["ending"]), String::from_utf8_lossy(&parts["errors"]).lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(300).collect::<String>())); }
+    if parts["ending"] != b"exit 0" {
+        let _ = std::fs::write(out.join("map.err"), [parts["errors"].as_slice(), b"
+", &parts["output"]].concat());
+        return fallback(crate::map::stopped(&String::from_utf8_lossy(&parts["ending"]), &parts["errors"], &parts["output"]));
+    }
     let m = match crate::map::read(&parts["output"]) { Ok(m) => m, Err(e) => return fallback(e.0) };
     let _ = std::fs::write(out.join("map.scip"), &parts["output"]);
     let lines: Vec<(String, Vec<usize>)> = files.iter().map(|(p, old, new)| {
