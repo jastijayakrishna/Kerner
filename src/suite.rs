@@ -20,31 +20,21 @@ pub fn test_command(tests: &Tests) -> Vec<String> {
         Runner::Node => { if let Some(at) = c.iter().position(|a| a == crate::sandbox::NODE_REPORTER) { c.insert(at + 1, format!("--test-reporter-destination={REPORT}")); } }
         Runner::Jest => c.extend(std::iter::once("--bail=false").chain(crate::sandbox::PROGRESS_ARGS[1..].iter().copied()).map(str::to_string)),
     }
-    let flags = worker_flags(tests.runner, &c, box_memory_mb());
-    c.extend(flags);
     c
 }
-const WORKER_MB: u64 = 4096;
-const WORKERS_COUNT_MAX: u64 = 3;
-const OWN_WORKER_FLAGS: [&str; 8] = ["--runInBand", "-i", "--maxWorkers", "-w", "--no-file-parallelism", "--pool", "--poolOptions", "--maxThreads"];
-fn workers(memory_mb: u64) -> u64 { (memory_mb / WORKER_MB).clamp(1, WORKERS_COUNT_MAX) }
-pub fn worker_heap_mb(memory_mb: u64, workers: u64) -> u64 { memory_mb / (workers + 1) }
-pub fn worker_flags(runner: Runner, command: &[String], memory_mb: u64) -> Vec<String> {
-    let own = |a: &str| OWN_WORKER_FLAGS.iter().any(|o| a == *o || a.starts_with(&format!("{o}=")) || (o.len() > 2 && a.starts_with(&format!("{o}."))));
-    if !matches!(runner, Runner::Jest | Runner::Vitest) || command.iter().any(|a| own(a)) { return Vec::new(); }
-    vec![format!("--maxWorkers={}", workers(memory_mb))]
-}
+pub fn worker_heap_mb(memory_mb: u64, cpus: u64) -> u64 { memory_mb / cpus.max(2) }
 fn box_memory_mb() -> u64 { test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()) }
 pub fn sized_env(runner: Runner, env: &Env) -> Env {
     let mut out = env.clone();
     if matches!(runner, Runner::Jest | Runner::Vitest) {
         let memory = box_memory_mb();
-        let heap = format!("--max-old-space-size={}", worker_heap_mb(memory, workers(memory)));
+        let heap = format!("--max-old-space-size={}", worker_heap_mb(memory, crate::sandbox::box_cpus(memory, host_cpus())));
         let options = out.get("NODE_OPTIONS").map_or(heap.clone(), |o| format!("{o} {heap}"));
         out.insert("NODE_OPTIONS".to_string(), options);
     }
     out
 }
+pub fn host_cpus() -> u64 { std::thread::available_parallelism().map_or(1, |n| n.get() as u64) }
 
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
     let (name, command) = crate::init::runner(package)?;
@@ -806,6 +796,7 @@ pub fn guessed(package: &Value) -> Option<String> {
     let script = package["scripts"]["test"].as_str()?;
     (crate::script::found(package) == crate::script::Found::Nothing).then(|| script.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect())
 }
+pub fn failed_exit(ending: &[u8]) -> bool { String::from_utf8_lossy(ending).strip_prefix("exit ").is_some_and(|code| code.trim() != "0") }
 pub fn stopped_early(ending: &[u8], errors: &[u8], output: &[u8]) -> bool {
     let (errors, output) = (String::from_utf8_lossy(errors), String::from_utf8_lossy(output));
     let empty = [&errors, &output].iter().any(|t| t.contains("No tests found") || t.contains("No test files found"));
@@ -940,7 +931,7 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     if parts["ending"] == b"exit -1" { return Ok(Side::Cut("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
-        Ok(r) if r.tests.is_empty() && r.problems.is_empty() && stopped_early(&parts["ending"], &parts["errors"], &parts["output"]) =>
+        Ok(r) if r.tests.is_empty() && r.problems.is_empty() && (failed_exit(&parts["ending"]) || stopped_early(&parts["ending"], &parts["errors"], &parts["output"])) =>
             without_results("the runner stopped before running any test", &parts["ending"], &parts["errors"], &parts["output"]),
         Ok(r) => Side::Ran(r, created),
         Err(why) => without_results(&why, &parts["ending"], &parts["errors"], &parts["output"]),
@@ -966,7 +957,7 @@ pub fn packages(changed: &[&str], has_manifest: impl Fn(&str) -> bool) -> Vec<St
     out.into_iter().collect()
 }
 
-pub struct Suite { pub dir: String, pub old: Option<(Tests, Env)>, pub new: (Tests, Env) }
+pub struct Suite { pub dir: String, pub old: Option<(Tests, Env)>, pub new: (Tests, Env), pub uneven: Option<String> }
 const SUITES_COUNT_MAX: usize = 16;
 fn side_json((tests, env): &(Tests, Env)) -> Value { json!({ "runner": tests.runner.name(), "command": tests.command, "env": env }) }
 fn side_of(v: &Value) -> Option<(Tests, Env)> {
@@ -975,11 +966,12 @@ fn side_of(v: &Value) -> Option<(Tests, Env)> {
     Some((Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(v["runner"].as_str()?)?, command, edits: Edits::Checked }, env))
 }
 impl Suite {
-    pub fn json(&self) -> Value { json!({ "dir": self.dir, "old": self.old.as_ref().map(side_json), "new": side_json(&self.new) }) }
+    pub fn json(&self) -> Value { json!({ "dir": self.dir, "old": self.old.as_ref().map(side_json), "new": side_json(&self.new), "uneven": self.uneven }) }
 }
 pub fn ran_suites(out: &Path) -> Option<Vec<Suite>> {
     let v = read_json(out.join("suites.json")).ok()?;
-    v.as_array()?.iter().take(SUITES_COUNT_MAX).map(|s| Some(Suite { dir: s["dir"].as_str()?.to_string(), old: if s["old"].is_null() { None } else { Some(side_of(&s["old"])?) }, new: side_of(&s["new"])? })).collect()
+    v.as_array()?.iter().take(SUITES_COUNT_MAX).map(|s| Some(Suite { dir: s["dir"].as_str()?.to_string(), old: if s["old"].is_null() { None } else { Some(side_of(&s["old"])?) }, new: side_of(&s["new"])?,
+        uneven: match &s["uneven"] { Value::Null => None, Value::String(u) => Some(u.clone()), _ => return None } })).collect()
 }
 pub fn label(dir: &str) -> String { if dir.is_empty() { String::new() } else { format!("-{}", dir.replace('/', "_")) } }
 
@@ -1179,13 +1171,17 @@ const BYSTANDER_FILES_COUNT_MAX: usize = 40;
 const SERVE_BYTES_MAX: usize = 2 << 20;
 pub fn bystanders_fit(left_secs: u64) -> bool { left_secs >= BYSTANDER_SECS_MIN + TYPES_SECS_RESERVE }
 pub type Texts = serde_json::Map<String, Value>;
-pub fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, (files, serve): (&Texts, &Texts), label: &str, seconds: u64) -> Option<String> {
+pub struct Traced { pub trace: String, pub finished: bool, pub network: bool }
+pub fn reached_out(behavior: &str) -> bool {
+    behavior.lines().any(|l| l.starts_with("dns:") || l.strip_prefix("net:").is_some_and(|t| t != "ipc" && t != "loopback"))
+}
+pub fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, (files, serve): (&Texts, &Texts), label: &str, seconds: u64) -> Option<Traced> {
     let command: Vec<String> = test_command(tests).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
     let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early": false, "faults": [], "serve": serve });
     let run = in_test_box(out, volume, &format!("trace-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)).ok()?;
     let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).ok()?;
     let _ = std::fs::write(out.join(format!("trace-{label}.err")), &parts["errors"]);
-    parts["ending"].starts_with(b"exit").then(|| String::from_utf8_lossy(&parts["trace"]).to_string())
+    Some(Traced { trace: String::from_utf8_lossy(&parts["trace"]).to_string(), finished: parts["ending"].starts_with(b"exit"), network: reached_out(&String::from_utf8_lossy(&parts["behavior"])) })
 }
 pub fn watched(files: &[(String, String, String)], old_side: bool) -> Texts {
     let mut out = serde_json::Map::new();
@@ -1211,9 +1207,9 @@ fn bystanders(out: &Path, (old_volume, new_volume): (&str, &str), suite: &Suite,
     let each = (seconds / 3).max(60);
     let mut traces = Vec::new();
     for (side, volume, tests, serve) in [("old", old_volume, (&old_t, old_env), &old_serve), ("old-again", old_volume, (&old_t, old_env), &old_serve), ("new", new_volume, (&new_t, &suite.new.1), &new_serve)] {
-        let Some(trace) = traced_run(out, volume, tests, &suite.dir, (&Texts::new(), serve), &format!("{side}{label}"), each) else { return none(format!("the {side} run of the untouched tests did not finish")) };
-        let _ = std::fs::write(out.join(format!("trace-{side}{label}.jsonl")), &trace);
-        traces.push(trace);
+        let Some(traced) = traced_run(out, volume, tests, &suite.dir, (&Texts::new(), serve), &format!("{side}{label}"), each).filter(|t| t.finished) else { return none(format!("the {side} run of the untouched tests did not finish")) };
+        let _ = std::fs::write(out.join(format!("trace-{side}{label}.jsonl")), &traced.trace);
+        traces.push(traced.trace);
     }
     let mut c = crate::trace::compare(&traces[0], &traces[1], &traces[2]);
     c["status"] = json!("RAN");
@@ -1312,7 +1308,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     });
     let (mut not_run, mut testless) = (Vec::new(), Vec::new());
     let suites: Vec<Suite> = match plan(manifest(head, "").as_deref()) {
-        Plan::Run(t, env) => vec![Suite { dir: String::new(), old: ready(plan(manifest(base, "").as_deref())), new: (t, env) }],
+        Plan::Run(t, env) => vec![Suite { dir: String::new(), old: ready(plan(manifest(base, "").as_deref())), new: (t, env), uneven: None }],
         Plan::Packages | Plan::Nothing => {
             let changed = crate::rules::changed(repo, base, head)?;
             let paths: Vec<&str> = changed.iter().map(|(p, _)| p.as_str()).collect();
@@ -1329,7 +1325,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     continue;
                 };
                 if list.len() == MAX_PACKAGES { not_run.push(json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") })); continue; }
-                list.push(Suite { old: planned(base, &dir), dir, new });
+                list.push(Suite { old: planned(base, &dir), dir, new, uneven: None });
             }
             list
         }
@@ -1650,7 +1646,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             None => only,
         };
         ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
-        tested.push(suite.json());
+        tested.push(Suite { dir: suite.dir.clone(), old: suite.old.clone(), new: suite.new.clone(), uneven: uneven_why.clone() }.json());
     }
     let _ = std::fs::write(out.join("suites.json"), serde_json::to_vec(&tested).unwrap_or_default());
     let old_shapes: BTreeSet<String> = old_created.iter().map(|f: &String| path_shape(f)).collect();

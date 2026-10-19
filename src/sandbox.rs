@@ -229,7 +229,7 @@ pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> 
         [name, name.split('.').next().unwrap_or("")].iter().any(|n| errors.contains(&format!("Unknown option `--{n}`")))
     };
     let progress = errors.contains("/kern/vitest-progress.mjs") || errors.contains("/kern/jest-progress.cjs");
-    let shorter: Vec<String> = command.iter().filter(|a| !((["--no-cache", "--bail=0", "--sequence.shuffle=false"].contains(&a.as_str()) || a.starts_with("--maxWorkers=")) && unknown(a))
+    let shorter: Vec<String> = command.iter().filter(|a| !(["--no-cache", "--bail=0", "--sequence.shuffle=false"].contains(&a.as_str()) && unknown(a))
         && !(progress && PROGRESS_ARGS.contains(&a.as_str()))).cloned().collect();
     (shorter.len() < command.len()).then_some(shorter)
 }
@@ -513,8 +513,29 @@ fn mount(source: &Path, target: &str) -> R<[String; 2]> {
     ensure!(!s.contains([',', '\n', '"']), "Unsupported mount source");
     Ok(["--mount".into(), format!("type=bind,source={s},target={target},readonly")])
 }
+const WORKER_MB: u64 = 4096;
+const WORKERS_COUNT_MAX: u64 = 3;
+pub fn box_cpus(memory_mb: u64, host_cpus: u64) -> u64 { ((memory_mb / WORKER_MB).clamp(1, WORKERS_COUNT_MAX) + 1).min(host_cpus.max(1)) }
 fn cpus(spec: &Spec) -> usize {
-    if spec.entry.first().is_some_and(|e| e == "__drive_setup" || e == "__drive_test") { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4) } else { 1 }
+    match spec.entry.first().map(String::as_str) {
+        Some("__drive_test") => box_cpus(spec.limits.memory_mb, crate::suite::host_cpus()) as usize,
+        Some("__drive_setup") => crate::suite::host_cpus().clamp(1, 4) as usize,
+        _ => 1,
+    }
+}
+pub fn cpu_list(allowed: &str, count: usize) -> Option<String> {
+    let mut ids = Vec::new();
+    for part in allowed.trim().split(',').filter(|p| !p.is_empty()) {
+        let (from, to) = match part.split_once('-') { Some((a, b)) => (a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?), None => { let n = part.trim().parse::<u32>().ok()?; (n, n) } };
+        if from > to || to - from > 4096 { return None; }
+        ids.extend(from..=to);
+        if ids.len() >= count { break; }
+    }
+    (ids.len() >= count && count > 0).then(|| ids[..count].iter().map(u32::to_string).collect::<Vec<_>>().join(","))
+}
+fn own_cpus(count: usize) -> Option<String> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    cpu_list(status.lines().find_map(|l| l.strip_prefix("Cpus_allowed_list:"))?, count)
 }
 pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> { container_args_for(spec, name, runtime_name()) }
 pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<String>> {
@@ -549,6 +570,7 @@ pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<Strin
         "--ulimit", files, "--ulimit", "core=0", "--ipc=private", if drive_test { "--shm-size=512m" } else { "--shm-size=8m" }, "--log-driver=none", "--no-healthcheck", "--workdir=/workspace", "--entrypoint=/kern/kern",
     ].iter().map(|s| s.to_string()).collect();
     if drive_seal { a.extend(["--cap-add=CHOWN".to_string(), "--cap-add=DAC_OVERRIDE".to_string()]); }
+    if drive_test && let Some(set) = own_cpus(cpus) { a.push(format!("--cpuset-cpus={set}")); }
     if drive_test { a.extend(["--mount".to_string(), "type=volume,target=/tmp".to_string()]); } else { a.extend(["--tmpfs".to_string(), format!("/tmp:rw,noexec,nosuid,nodev,size={},mode=1777", 64 << 20)]); }
     match spec.workspace {
         Some((volume, readonly)) => {
@@ -595,6 +617,8 @@ pub fn execute(spec: &Spec) -> R<Execution> {
         let memory = spec.limits.memory_mb * 1048576;
         ensure!(h["Runtime"] == runtime_name() && h["NetworkMode"] == spec.network && h["ReadonlyRootfs"] == true && i["Config"]["User"] == if spec.root { "0:0" } else { "1000:1000" }, "Container configuration does not match the required boundary");
         ensure!(h["Memory"] == memory && h["MemorySwap"] == memory && h["PidsLimit"] == spec.limits.pids && h["NanoCpus"] == cpus(spec) as u64 * 1_000_000_000, "Container resource limits not applied");
+        let set = args.iter().find_map(|a| a.strip_prefix("--cpuset-cpus=")).unwrap_or("");
+        ensure!(h["CpusetCpus"].as_str().unwrap_or("") == set, "Container CPU set not applied");
         ensure!(h["Privileged"] == false && h["CapDrop"].as_array().is_some_and(|c| c.iter().any(|x| x == "ALL")) && h["SecurityOpt"].as_array().is_some_and(|s| s.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("no-new-privileges")))), "Container privilege constraints not applied");
         let added: Vec<String> = h["CapAdd"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|c| c.trim_start_matches("CAP_").to_string()).collect();
         let allowed: &[&str] = if spec.entry.first().is_some_and(|e| e == "__drive_seal") { &["CHOWN", "DAC_OVERRIDE"] } else { &[] };

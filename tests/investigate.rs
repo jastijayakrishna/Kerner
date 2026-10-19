@@ -187,7 +187,7 @@ fn lightdash_12942_the_oracle_sees_only_what_existed_before_the_change() {
     let record = run(&r, &t.out("out"), Some(&model));
     assert_eq!(record["status"], "INVESTIGATED", "{record}");
     let oracle = model.prompt("oracle");
-    let seen = format!("{}\n{}", oracle.system, oracle.user);
+    let seen = format!("{}\n{}", oracle.system, oracle.message());
     for old in [RC, NORM, "export function removeComments(sql: string, options: { keepHints?: boolean } = {}): string", "Text inside quoted strings stays as written.",
         "it('keeps -- inside quoted strings'", r"toBe('SELECT 1 \n');", "It never changes text inside quotes", "removeComments keeps every character inside a quoted string.",
         "The runner now also removes `//` line comments"] {
@@ -197,7 +197,8 @@ fn lightdash_12942_the_oracle_sees_only_what_existed_before_the_change() {
         "let quote: string | null = null;", "@@", "\n+"] {
         assert!(!seen.contains(new), "the Oracle must not see {new:?}: it is new code, the diff, a test only the change adds, or the old function's body");
     }
-    assert!(oracle.user.contains("the author's claims, not facts") && oracle.user.contains("````\nfix(sql)"), "the pull request's words are fenced off as the author's claims, and a fence inside them cannot close Kern's");
+    assert!(oracle.untrusted.contains("the author's claims, not facts") && oracle.untrusted.contains("````\nfix(sql)") && !oracle.user.contains("fix(sql)"),
+        "the pull request's words are fenced off as the author's claims, apart from what Kern wrote, and a fence inside them cannot close Kern's");
     let hunter = model.prompt("hunter");
     assert!(hunter.user.contains(r"sql.replace(/(--[^\n]*|\/\/[^\n]*)/g, '')"), "the Hunter reads the change");
     assert!(hunter.user.contains(r#"- ["SELECT 1 -- warm up",{"keepHints":true}]"#), "the Hunter sees how the old code's callers call the function");
@@ -223,9 +224,9 @@ fn lightdash_12942_kern_decides_each_requirements_authority_from_the_files_thems
         ("o2", "verified", "doc", ""),
         ("o3", "verified", "comment", ""),
         ("o4", "verified", "types", ""),
-        ("o5", "contested", "test", "the change removes or edits this quote in src/sql.test.ts"),
+        ("o5", "contested", "test", "the change edits the part of src/sql.test.ts that holds this quote"),
         ("o6", "authorized", "test", "the pull request says it changes this"),
-        ("o7", "verified", "test", ""),
+        ("o7", "contested", "test", "the change edits the part of src/sql.test.ts that holds this quote"),
         ("o8", "unverified", "test", "src/missing.test.ts did not exist before the change"),
         ("o9", "unverified", "test", "src/sql.dollar.test.ts did not exist before the change"),
         ("o10", "unverified", "test", "the quote is not in src/sql.test.ts as it was before the change"),
@@ -237,7 +238,7 @@ fn lightdash_12942_kern_decides_each_requirements_authority_from_the_files_thems
     assert_eq!(got, want);
     let o = |id: &str| record["obligations"].as_array().unwrap().iter().find(|o| o["id"] == id).unwrap().clone();
     assert_eq!(o("o6")["authorized_by"], "The runner now also removes `//` line comments");
-    assert_eq!(o("o7")["authorized_by"], "", "a quote that is not verbatim in the pull request authorizes nothing");
+    assert_eq!(o("o7")["authorized_by"], "", "a quote that is not verbatim in the pull request authorizes nothing; the title of a test whose assertion the change rewrites is contested, so it never blocks");
     assert_eq!(o("o2")["targets"], json!([{ "path": "src/sql.ts", "export": "removeComments" }]), "the documentation never names normalize, so it cannot vouch for it");
     assert_eq!(o("o1")["source"], json!({ "path": "src/sql.test.ts", "quote": "it('keeps -- inside quoted strings'", "kind": "test" }));
     assert_eq!(o("o14")["source"]["quote"].as_str().unwrap().chars().count(), 600);
@@ -358,8 +359,8 @@ fn lightdash_12942_a_typed_function_no_test_calls_with_plain_values_gets_its_sha
     let test = "import { formatPrice } from './price';\n\nit('formats cents', () => {\n  const cents = 1999;\n  expect(formatPrice(cents)).toBe('19.99');\n});\n";
     let r = repo(&t, &[("src/price.ts", old), ("src/price.test.ts", test)], &[("src/price.ts", new), ("src/price.test.ts", test)]);
     let record = run(&r, &t.out("out"), Some(&both(&json!({ "obligations": [] }), &json!({ "experiments": [] }))));
-    assert_eq!(record["targets"], json!([{ "path": "src/price.ts", "export": "formatPrice", "shapes": [["number"], ["number", "string"]] }]),
-        "the old signature's plain parameter types, never the new one's, say what a type-correct caller can pass");
+    assert_eq!(record["targets"], json!([{ "path": "src/price.ts", "export": "formatPrice", "shapes": [["number"]], "retested": false }]),
+        "the old signature's plain parameter types, never the new one's, say what a type-correct caller can pass; a parameter typed 'USD' | 'EUR' admits no string a shape could vouch for");
 }
 
 #[test]
@@ -368,9 +369,9 @@ fn lightdash_12942_argument_shapes_come_only_from_the_old_codes_tests_and_caller
     let r = lightdash(&t);
     let record = run(&r, &t.out("out"), Some(&both(&oracle_answer(), &hunter_answer())));
     assert_eq!(record["targets"], json!([
-        { "path": "src/sql.ts", "export": "removeComments", "shapes": [["string"], ["string", "object"]] },
-        { "path": "src/sql.ts", "export": "normalize", "shapes": [["string"]] },
-    ]), "the test only the change adds calls removeComments(42); a pull request cannot vouch for itself, so no number shape appears");
+        { "path": "src/sql.ts", "export": "removeComments", "shapes": [["string"], ["string", "object"]], "retested": true },
+        { "path": "src/sql.ts", "export": "normalize", "shapes": [["string"]], "retested": true },
+    ]), "the test only the change adds calls removeComments(42); a pull request cannot vouch for itself, so no number shape appears, but the change adding or editing tests of both functions is recorded");
 }
 
 const OLD_CHARGE: &str = "const cardValidator = require('simple-card-validator');\n\nclass InvalidCreditCard extends Error {}\n\n/**\n * Verifies the credit card number and (pretend) charges the card.\n *\n * @param {*} request\n * @return transaction_id - a random uuid v4.\n */\nmodule.exports = function charge (request) {\n  const { credit_card: creditCard } = request;\n  if (!cardValidator(creditCard.credit_card_number).getCardDetails().valid) { throw new InvalidCreditCard(); }\n  return { transaction_id: 'old' };\n};\n";
@@ -388,7 +389,7 @@ fn microservices_demo_1015_a_whole_module_function_shows_its_signature_and_a_lic
     let r = repo(&t, &files, &changed);
     let model = both(&json!({ "obligations": [] }), &json!({ "experiments": [] }));
     let record = run(&r, &t.out("out"), Some(&model));
-    assert_eq!(record["targets"], json!([{ "path": "src/paymentservice/charge.js", "export": "default", "shapes": [["object"]] }]));
+    assert_eq!(record["targets"], json!([{ "path": "src/paymentservice/charge.js", "export": "default", "shapes": [["object"]], "retested": false }]));
     let oracle = model.prompt("oracle").user;
     for seen in ["module.exports = function charge (request)", "Verifies the credit card number and (pretend) charges the card.", "Call `charge(request)` with a card", "it('rejects an invalid card'"] {
         assert!(oracle.contains(seen), "{seen:?} belongs in the Oracle's prompt:\n{oracle}");
@@ -454,12 +455,11 @@ fn every_cap_holds_and_the_changed_functions_come_first() {
     let big: Vec<String> = (0..40).map(|i| json!([format!("{i}{}", "a".repeat(1900))]).to_string()).collect();
     let proposals: Vec<Value> = big.iter().enumerate().map(|(i, args)| trial(&format!("src/many.ts#f{}", 1 + i / 8), "", args, "big")).collect();
     let record = run(&r, &t.out("bytes"), Some(&both(&json!({ "obligations": [] }), &json!({ "experiments": proposals }))));
-    let mut total = 0;
-    let fit = big.iter().take_while(|args| { total += args.len(); total <= investigate::EXPERIMENTS_BYTES_MAX }).count();
     let kept = record["experiments"].as_array().unwrap();
-    assert!(fit < big.len() && kept.len() == fit, "{} of {} fit in {} bytes", kept.len(), big.len(), investigate::EXPERIMENTS_BYTES_MAX);
-    assert!(kept.iter().map(|e| e["args"].to_string().len()).sum::<usize>() <= investigate::EXPERIMENTS_BYTES_MAX);
-    assert_eq!(dropped(&record).iter().filter(|n| n.ends_with("the inputs would take more than 65536 bytes")).count(), big.len() - fit);
+    assert!(kept.len() < big.len() && kept.len() > big.len() / 2, "{} of {} fit in {} bytes", kept.len(), big.len(), investigate::EXPERIMENTS_BYTES_MAX);
+    assert!(record["experiments"].to_string().len() <= investigate::EXPERIMENTS_BYTES_MAX, "the cap is measured on the record the job that runs the code reads, so that job never refuses it");
+    assert!(matches!(kern::probe::parse(&record, (&r.base, &r.head)), kern::probe::Parsed::Investigated(_)));
+    assert_eq!(dropped(&record).iter().filter(|n| n.ends_with("the inputs would take more than 65536 bytes")).count(), big.len() - kept.len());
 }
 
 fn huge(t: &Temp) -> Repo {
@@ -488,10 +488,10 @@ fn a_huge_repository_and_pull_request_still_give_prompts_within_the_context_limi
     assert_eq!(record["status"], "INVESTIGATED", "{record}");
     for name in ["oracle", "hunter"] {
         let p = model.prompt(name);
-        assert!(p.user.len() <= investigate::CONTEXT_BYTES_MAX, "the {name} prompt holds {} bytes", p.user.len());
+        assert!(p.message().len() <= investigate::CONTEXT_BYTES_MAX, "the {name} prompt holds {} bytes", p.message().len());
         assert!(p.user.contains("src/sql.ts#removeComments") && p.user.contains("Kern left out"), "the {name} prompt keeps the functions first and says what it left out");
     }
-    let oracle = model.prompt("oracle").user;
+    let oracle = model.prompt("oracle").message();
     assert!(oracle.contains("refactor: tidy the SQL runner") && oracle.contains("Kern cut this at 8192 bytes"), "the pull request's words are cut, never dropped");
     assert!(oracle.contains("src/t0.test.ts") && oracle.contains("docs/sql.md"), "both tests and documentation get room");
 }
@@ -610,7 +610,7 @@ fn the_request_asks_opus_for_json_with_high_effort_and_server_side_fallback() {
         let body = investigate::request(investigate::MODEL, &p);
         assert_eq!((body["model"].as_str(), body["max_tokens"].as_u64(), body["fallbacks"].as_str()), (Some("claude-opus-5-5"), Some(20000), Some("default")));
         assert_eq!(body["output_config"], json!({ "effort": "high", "format": { "type": "json_schema", "schema": p.schema } }));
-        assert_eq!((body["system"].as_str(), body["messages"].clone()), (Some(p.system), json!([{ "role": "user", "content": p.user }])));
+        assert_eq!((body["system"].as_str(), body["messages"].clone()), (Some(p.system), json!([{ "role": "user", "content": p.message() }])));
         for absent in ["thinking", "tool_choice", "tools", "temperature", "top_p", "top_k", "stream"] { assert!(body.get(absent).is_none(), "{absent} returns 400 on this model or is not wanted"); }
         strict(&p.schema);
     }

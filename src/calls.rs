@@ -65,7 +65,24 @@ pub fn imports(path: &str, source: &str) -> Vec<Import> {
     parsed(path, source, |program, _| { let mut v = Imports(Vec::new()); v.visit_program(program); v.0 }).unwrap_or_default()
 }
 
-pub fn aliased(importer: &str, spec: &str, target: &str) -> bool {
+pub fn package_dir(dir: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    let mut dir = Some(dir);
+    while let Some(d) = dir {
+        if exists(&if d.is_empty() { "package.json".to_string() } else { format!("{d}/package.json") }) { return Some(d.to_string()); }
+        dir = if d.is_empty() { None } else { Some(d.rsplit_once('/').map_or("", |(parent, _)| parent)) };
+    }
+    None
+}
+pub fn package_of(path: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> { package_dir(path.rsplit_once('/').map_or("", |(d, _)| d), exists) }
+fn within(path: &str, dir: &str) -> bool { dir.is_empty() || path.starts_with(&format!("{dir}/")) }
+pub fn package_covers(source: &str, target: &str, exists: &dyn Fn(&str) -> bool) -> bool {
+    match (package_of(source, exists), package_of(target, exists)) {
+        (Some(s), Some(t)) => s == t || within(&t, &s),
+        (None, None) => true,
+        _ => false,
+    }
+}
+pub fn aliased(importer: &str, spec: &str, target: &str, exists: &dyn Fn(&str) -> bool) -> bool {
     if spec.starts_with(['.', '/']) || !crate::capability::is_code(target) { return false; }
     let Some((first, rest)) = spec.split_once('/') else { return false };
     let stem = target.rsplit_once('.').map_or(target, |(s, _)| s);
@@ -75,13 +92,14 @@ pub fn aliased(importer: &str, spec: &str, target: &str) -> bool {
     [Some(spec), marked.then_some(rest)].into_iter().flatten().filter(clean).any(|c| stems.iter().any(|s| {
         let root = if *s == c { Some("") } else { s.strip_suffix(c).filter(|r| r.ends_with('/')) };
         root.is_some_and(|r| {
-            let scope = r.trim_end_matches('/').rsplit_once('/').map_or("", |(parent, _)| parent);
-            scope.is_empty() || importer.starts_with(&format!("{scope}/"))
+            let root = r.trim_end_matches('/');
+            let scope = package_dir(root, exists).unwrap_or_else(|| if c == rest && marked { root.rsplit_once('/').map_or("", |(parent, _)| parent).to_string() } else { root.to_string() });
+            within(importer, &scope)
         })
     }))
 }
 pub fn points_to(importer: &str, spec: &str, target: &str, exists: &dyn Fn(&str) -> bool) -> bool {
-    resolve(importer, spec, exists).as_deref() == Some(target) || aliased(importer, spec, target)
+    resolve(importer, spec, exists).as_deref() == Some(target) || aliased(importer, spec, target, exists)
 }
 
 fn number(n: f64) -> Option<Value> {
@@ -151,19 +169,20 @@ pub fn literal_calls(path: &str, source: &str, target: (&str, &str), exists: &dy
 }
 
 const TEST_CALLS: [&str; 3] = ["it", "test", "specify"];
-fn root<'b>(e: &'b Expression) -> Option<&'b str> {
+const RUNS_ANYWAY: [&str; 5] = ["only", "concurrent", "sequential", "each", "for"];
+fn test_case(e: &Expression) -> bool {
     match unwrap(e) {
-        Expression::Identifier(id) => Some(id.name.as_str()),
-        Expression::StaticMemberExpression(m) => root(&m.object),
-        Expression::CallExpression(c) => root(&c.callee),
-        _ => None,
+        Expression::Identifier(id) => TEST_CALLS.contains(&id.name.as_str()),
+        Expression::StaticMemberExpression(m) => RUNS_ANYWAY.contains(&m.property.name.as_str()) && test_case(&m.object),
+        Expression::CallExpression(c) => test_case(&c.callee),
+        _ => false,
     }
 }
 struct Cases<'s> { locals: &'s Locals<'s>, open: Vec<(usize, usize, bool)>, found: Vec<(usize, usize)> }
 impl<'a> Visit<'a> for Cases<'_> {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if self.locals.called(&it.callee) { for case in self.open.iter_mut() { case.2 = true; } }
-        let case = root(&it.callee).is_some_and(|r| TEST_CALLS.contains(&r));
+        let case = test_case(&it.callee);
         if case { self.open.push((it.span.start as usize, it.span.end as usize, false)); }
         walk::walk_call_expression(self, it);
         if case && let Some((start, end, true)) = self.open.pop() && self.found.len() < CALLS_COUNT_MAX { self.found.push((start, end)); }
@@ -178,17 +197,11 @@ pub fn test_spans(path: &str, source: &str, target: (&str, &str), exists: &dyn F
 const DECLARED_SHAPES_COUNT_MAX: usize = 16;
 fn kinds(t: &TSType) -> Option<(Vec<&'static str>, bool)> {
     Some(match t {
-        TSType::TSStringKeyword(_) | TSType::TSTemplateLiteralType(_) => (vec!["string"], false),
+        TSType::TSStringKeyword(_) => (vec!["string"], false),
         TSType::TSNumberKeyword(_) => (vec!["number"], false),
         TSType::TSBooleanKeyword(_) => (vec!["boolean"], false),
         TSType::TSNullKeyword(_) => (vec!["null"], false),
         TSType::TSUndefinedKeyword(_) => (Vec::new(), true),
-        TSType::TSLiteralType(l) => (vec![match &l.literal {
-            TSLiteral::StringLiteral(_) | TSLiteral::TemplateLiteral(_) => "string",
-            TSLiteral::NumericLiteral(_) => "number",
-            TSLiteral::BooleanLiteral(_) => "boolean",
-            _ => return None,
-        }], false),
         TSType::TSParenthesizedType(p) => kinds(&p.type_annotation)?,
         TSType::TSUnionType(u) => {
             let (mut all, mut optional) = (Vec::new(), false);
@@ -202,23 +215,51 @@ fn kinds(t: &TSType) -> Option<(Vec<&'static str>, bool)> {
         _ => return None,
     })
 }
-fn parameters<'p>(program: &'p Program, export: &str) -> Option<&'p FormalParameters<'p>> {
-    program.body.iter().find_map(|s| {
-        let declaration = match s { Statement::ExportDeclaration(e) => Some(&e.declaration), _ => s.as_declaration() }?;
-        match declaration {
-            Declaration::FunctionDeclaration(f) if f.body.is_some() && f.id.as_ref().is_some_and(|id| id.name == export) => Some(&*f.params),
-            Declaration::VariableDeclaration(v) => v.declarations.iter().find_map(|d| match (&d.id, d.init.as_ref().map(unwrap)) {
-                (BindingPattern::BindingIdentifier(id), Some(Expression::ArrowFunctionExpression(f))) if id.name == export => Some(&*f.params),
-                (BindingPattern::BindingIdentifier(id), Some(Expression::FunctionExpression(f))) if id.name == export => Some(&*f.params),
-                _ => None,
-            }),
+fn local_name(program: &Program, export: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for s in &program.body {
+        let name = match s {
+            Statement::ExportNamedDeclaration(e) if !e.export_kind.is_type() => match e.specifiers.iter().find(|sp| !sp.export_kind.is_type() && sp.exported.name() == export) {
+                Some(sp) => match &sp.local { ModuleExportName::IdentifierReference(l) => Some(l.name.to_string()), _ => return None },
+                None => None,
+            },
+            Statement::ExportDefaultDeclaration(e) if export == "default" => match &e.declaration {
+                ExportDefaultDeclarationKind::Identifier(id) => Some(id.name.to_string()),
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => f.id.as_ref().map(|id| id.name.to_string()),
+                _ => return None,
+            },
             _ => None,
+        };
+        if let Some(n) = name { if found.as_deref().is_some_and(|f| f != n) { return None; } found = Some(n); }
+    }
+    Some(found.unwrap_or_else(|| export.to_string()))
+}
+fn parameters<'p>(program: &'p Program, local: &str) -> Option<&'p FormalParameters<'p>> {
+    let mut declared: Vec<&'p FormalParameters<'p>> = Vec::new();
+    for s in &program.body {
+        let declaration = match s {
+            Statement::ExportDeclaration(e) => Some(&e.declaration),
+            Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) if f.id.as_ref().is_some_and(|id| id.name == local) => { declared.push(&*f.params); continue; }
+                _ => None,
+            },
+            _ => s.as_declaration(),
+        };
+        match declaration {
+            Some(Declaration::FunctionDeclaration(f)) if f.id.as_ref().is_some_and(|id| id.name == local) => declared.push(&*f.params),
+            Some(Declaration::VariableDeclaration(v)) => declared.extend(v.declarations.iter().filter_map(|d| match (&d.id, d.init.as_ref().map(unwrap)) {
+                (BindingPattern::BindingIdentifier(id), Some(Expression::ArrowFunctionExpression(f))) if id.name == local => Some(&*f.params),
+                (BindingPattern::BindingIdentifier(id), Some(Expression::FunctionExpression(f))) if id.name == local => Some(&*f.params),
+                _ => None,
+            })),
+            _ => {}
         }
-    })
+    }
+    match declared.as_slice() { [one] => Some(one), _ => None }
 }
 pub fn declared_shapes(path: &str, source: &str, export: &str) -> Vec<Vec<&'static str>> {
     parsed(path, source, |program, _| {
-        let Some(params) = parameters(program, export).filter(|p| p.rest.is_none()) else { return Vec::new() };
+        let Some(params) = local_name(program, export).and_then(|local| parameters(program, &local)).filter(|p| p.rest.is_none()) else { return Vec::new() };
         let mut known: Vec<(Vec<&'static str>, bool)> = Vec::new();
         for p in &params.items {
             let Some((all, maybe)) = p.type_annotation.as_ref().and_then(|t| kinds(&t.type_annotation)).filter(|(all, _)| !all.is_empty()) else { break };

@@ -69,10 +69,11 @@ const HUNTER_SYSTEM: &str = "You are the Hunter step of Kern, a tool that checks
 const HUNTER_TASK: &str = "A pull request changes the functions below. Propose inputs for Kern to run on the old and the new code.\n";
 
 #[derive(Clone, Debug)]
-pub struct Prompt { pub name: &'static str, pub system: &'static str, pub user: String, pub schema: Value }
+pub struct Prompt { pub name: &'static str, pub system: &'static str, pub user: String, pub untrusted: String, pub schema: Value }
 impl Prompt {
-    pub fn text(&self) -> String { format!("# System\n\n{}\n\n# User\n\n{}\n", self.system, self.user) }
-    fn sha256(&self) -> String { sha256(format!("{}\n{}", self.text(), self.schema)) }
+    pub fn message(&self) -> String { format!("{}{}", self.user, self.untrusted) }
+    pub fn text(&self) -> String { format!("# System\n\n{}\n\n# User\n\n{}\n", self.system, self.message()) }
+    fn sha256(&self) -> String { sha256(format!("{}\n{}\n{}", self.system, self.user, self.schema)) }
 }
 pub type Ask<'a> = &'a dyn Fn(&Prompt) -> R<Value>;
 
@@ -116,9 +117,9 @@ impl Kind {
 }
 
 struct Source { path: String, old: String, new: String }
-struct Target { path: String, export: String, changed: bool, old: String, new: String, signature: String, comment: String }
+struct Target { path: String, export: String, local: String, changed: bool, retested: bool, old: String, new: String, signature: String, comment: String }
 fn key(t: &Target) -> String { format!("{}#{}", t.path, t.export) }
-fn word(t: &Target) -> String { if t.export == "default" { stem(&t.path) } else { t.export.clone() } }
+fn word(t: &Target) -> String { if t.export != "default" { t.export.clone() } else if t.local.is_empty() { stem(&t.path) } else { t.local.clone() } }
 fn stem(path: &str) -> String {
     let mut parts = path.rsplit('/');
     let name = parts.next().unwrap_or(path).split('.').next().unwrap_or_default();
@@ -127,8 +128,8 @@ fn stem(path: &str) -> String {
 fn product(path: &str) -> bool {
     crate::capability::is_code(path) && !crate::suite::is_test_path(path) && crate::suite::product_code(path) && !crate::check::documentation(path)
 }
-fn sources(repo: &Path, (old, new): (&Side, &Side), dropped: &mut Vec<Value>) -> R<Vec<Source>> {
-    let mut paths: Vec<String> = crate::rules::changed(repo, &old.commit, &new.commit)?.into_iter().filter(|(p, op)| *op == "modify" && product(p)).map(|(p, _)| p).collect();
+fn sources(repo: &Path, (old, new): (&Side, &Side), changes: &[(String, &str)], dropped: &mut Vec<Value>) -> R<Vec<Source>> {
+    let mut paths: Vec<String> = changes.iter().filter(|(p, op)| *op == "modify" && product(p)).map(|(p, _)| p.clone()).collect();
     if paths.len() > CHANGED_FILES_COUNT_MAX {
         dropped.push(json!({ "what": format!("{} more changed files", paths.len() - CHANGED_FILES_COUNT_MAX), "why": format!("Kern investigates at most {CHANGED_FILES_COUNT_MAX} changed files") }));
         paths.truncate(CHANGED_FILES_COUNT_MAX);
@@ -152,7 +153,12 @@ fn homes(statement: &Statement) -> Vec<(String, Home)> {
     let default = |home: Home| vec![("default".to_string(), home)];
     match statement {
         Statement::ExportNamedDeclaration(e) => e.specifiers.iter().map(|sp| (sp.exported.name().to_string(), Home::Local(sp.local.name().to_string()))).collect(),
-        Statement::ExportDefaultDeclaration(e) => match &e.declaration { ExportDefaultDeclarationKind::Identifier(id) => default(Home::Local(id.name.to_string())), _ => Vec::new() },
+        Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+            ExportDefaultDeclarationKind::Identifier(id) => default(Home::Local(id.name.to_string())),
+            ExportDefaultDeclarationKind::FunctionDeclaration(f) => match &f.id { Some(id) => default(Home::Local(id.name.to_string())), None => default(Home::Here(f.span.start as usize, f.span.end as usize)) },
+            ExportDefaultDeclarationKind::ClassDeclaration(c) => match &c.id { Some(id) => default(Home::Local(id.name.to_string())), None => default(Home::Here(c.span.start as usize, c.span.end as usize)) },
+            _ => Vec::new(),
+        },
         Statement::ExpressionStatement(e) => match &e.expression {
             Expression::AssignmentExpression(a) if whole_module(&a.left) => match crate::proof::unwrap(&a.right) {
                 Expression::Identifier(id) => default(Home::Local(id.name.to_string())),
@@ -164,17 +170,19 @@ fn homes(statement: &Statement) -> Vec<(String, Home)> {
         _ => Vec::new(),
     }
 }
-fn spans(path: &str, source: &str) -> BTreeMap<String, (usize, usize)> {
+fn spans(path: &str, source: &str) -> (BTreeMap<String, (usize, usize)>, BTreeMap<String, String>) {
     let mut out = crate::proof::units(path, source).unwrap_or_default();
+    let mut locals = BTreeMap::new();
     for (export, home) in crate::proof::parsed(path, source, |program, _| program.body.iter().flat_map(homes).collect::<Vec<_>>()).unwrap_or_default() {
-        let span = match home { Home::Local(local) => out.get(&local).copied(), Home::Here(start, end) => Some((start, end)) };
+        let span = match &home { Home::Local(local) => out.get(local).copied(), Home::Here(start, end) => Some((*start, *end)) };
+        if let Home::Local(local) = home { locals.insert(export.clone(), local); }
         if let Some(span) = span { out.insert(export, span); }
     }
-    out
+    (out, locals)
 }
 fn functions(s: &Source) -> Option<(BTreeSet<String>, Vec<Target>)> {
     let both: BTreeSet<String> = crate::trace::callable(&s.path, &s.old)?.intersection(&crate::trace::callable(&s.path, &s.new)?).cloned().collect();
-    let (before, after, marks) = (spans(&s.path, &s.old), spans(&s.path, &s.new), Marks::of(&s.path, &s.old));
+    let ((before, locals), (after, _), marks) = (spans(&s.path, &s.old), spans(&s.path, &s.new), Marks::of(&s.path, &s.old));
     let text = |source: &str, span: Option<&(usize, usize)>| span.and_then(|(a, b)| source.get(*a..*b)).unwrap_or_default().to_string();
     let targets = both.iter().map(|export| {
         let (a, b) = (before.get(export), after.get(export));
@@ -183,9 +191,19 @@ fn functions(s: &Source) -> Option<(BTreeSet<String>, Vec<Target>)> {
         let changed = a.is_some() && old != new && undone().is_some_and(|u| !crate::proof::same_behaviour(&s.path, &s.new, &u));
         let signature = a.map(|span| marks.signature(&s.old, *span)).unwrap_or_default();
         let comment = a.map(|(start, _)| marks.comment_above(&s.old, *start)).unwrap_or_default();
-        Target { path: s.path.clone(), export: export.clone(), changed, old, new, signature, comment }
+        let local = locals.get(export).cloned().unwrap_or_else(|| if export == "default" { String::new() } else { export.clone() });
+        Target { path: s.path.clone(), export: export.clone(), local, changed, retested: false, old, new, signature, comment }
     }).collect();
     Some((both, targets))
+}
+fn retested(repo: &Path, new: &Side, changes: &[(String, &str)], targets: &mut [Target]) -> R<()> {
+    let edited: Vec<&str> = changes.iter().filter(|(p, op)| *op != "delete" && Kind::of(p) == Some(Kind::Test) && crate::capability::is_code(p)).map(|(p, _)| p.as_str()).collect();
+    let texts = new.read(repo, edited.iter().copied())?;
+    let exists = |p: &str| new.has(p);
+    for t in targets.iter_mut() {
+        t.retested = texts.iter().any(|(path, text)| !crate::calls::test_spans(path, text, (&t.path, &t.export), &exists).is_empty());
+    }
+    Ok(())
 }
 fn pick(sources: &[Source], dropped: &mut Vec<Value>) -> (Vec<Target>, BTreeMap<String, BTreeSet<String>>) {
     let (mut all, mut both) = (Vec::new(), BTreeMap::new());
@@ -330,8 +348,8 @@ fn snippet(path: &str, text: &str, (start, end): (usize, usize)) -> String {
     format!("### {path}, lines {}-{end}\n{}", start + 1, fenced(&cut(&lines.join("\n"), EXCERPT_BYTES_MAX)))
 }
 struct Block { rank: (usize, usize, usize), section: usize, order: (usize, usize), text: String }
-fn fit(head: &str, titles: &[&str], mut blocks: Vec<Block>, tail: &str) -> String {
-    let fixed = head.len() + tail.len() + NOTE_BYTES_MAX + titles.iter().map(|t| t.len() + 2).sum::<usize>();
+fn fit(head: &str, titles: &[&str], mut blocks: Vec<Block>, tail_bytes: usize) -> String {
+    let fixed = head.len() + tail_bytes + NOTE_BYTES_MAX + titles.iter().map(|t| t.len() + 2).sum::<usize>();
     let mut room = CONTEXT_BYTES_MAX.saturating_sub(fixed);
     blocks.sort_by_key(|b| b.rank);
     let (mut kept, mut left) = (Vec::new(), 0usize);
@@ -345,7 +363,6 @@ fn fit(head: &str, titles: &[&str], mut blocks: Vec<Block>, tail: &str) -> Strin
         out.push_str(&b.text);
     }
     if left > 0 { out.push_str(&format!("\nKern left out {left} more excerpts to keep this message within {CONTEXT_BYTES_MAX} bytes.\n")); }
-    out.push_str(tail);
     out
 }
 
@@ -401,7 +418,8 @@ fn oracle(targets: &[Target], files: &[(String, String)], pr: &str, exists: &dyn
         for (w, span) in naming(text, &words, hit).into_iter().enumerate() { blocks.push(Block { rank: (1, w, f), section, order: (f, w), text: snippet(path, text, span) }); }
     }
     let titles = ["## Functions the change edits, as they were before it", "## Tests that existed before the change", "## Documentation and type definitions that existed before the change"];
-    Prompt { name: "oracle", system: ORACLE_SYSTEM, user: fit(ORACLE_TASK, &titles, blocks, &untrusted(pr)), schema: oracle_schema(targets) }
+    let untrusted = untrusted(pr);
+    Prompt { name: "oracle", system: ORACLE_SYSTEM, user: fit(ORACLE_TASK, &titles, blocks, untrusted.len()), untrusted, schema: oracle_schema(targets) }
 }
 
 fn requirements(shown: &[&Obligation], targets: &[Target]) -> Vec<Block> {
@@ -474,7 +492,7 @@ fn hunter(targets: &[Target], obligations: &[Obligation], examples: &[Examples],
     blocks.extend(call_sites(targets, callers, new));
     let titles = ["## Requirements", "## Functions you may call", "## What the change does", "## How the new code calls these functions"];
     let ids: Vec<&str> = shown.iter().map(|o| o.id.as_str()).collect();
-    Prompt { name: "hunter", system: HUNTER_SYSTEM, user: fit(HUNTER_TASK, &titles, blocks, ""), schema: hunter_schema(targets, &ids) }
+    Prompt { name: "hunter", system: HUNTER_SYSTEM, user: fit(HUNTER_TASK, &titles, blocks, 0), untrusted: String::new(), schema: hunter_schema(targets, &ids) }
 }
 
 pub fn model() -> String { crate::github::env("KERN_MODEL").unwrap_or_else(|| MODEL.to_string()) }
@@ -484,7 +502,7 @@ pub fn read_pr(path: &Path) -> R<String> {
     Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
 }
 pub fn request(model: &str, prompt: &Prompt) -> Value {
-    json!({ "model": model, "max_tokens": ANSWER_TOKENS_MAX, "system": prompt.system, "messages": [{ "role": "user", "content": prompt.user }],
+    json!({ "model": model, "max_tokens": ANSWER_TOKENS_MAX, "system": prompt.system, "messages": [{ "role": "user", "content": prompt.message() }],
         "output_config": { "effort": "high", "format": { "type": "json_schema", "schema": prompt.schema } }, "fallbacks": "default" })
 }
 fn backoff(attempt: u32) -> Duration { Duration::from_secs(1 << attempt.min(5)) }
@@ -556,7 +574,7 @@ impl Obligation {
         let named: Vec<Value> = self.targets.iter().filter_map(|i| targets.get(*i)).map(|t| json!({ "path": t.path, "export": t.export })).collect();
         json!({ "id": self.id, "statement": self.statement, "check": self.check, "targets": named,
             "source": { "path": self.path, "quote": clip(&self.quote, QUOTE_CHARS_MAX), "kind": self.kind },
-            "authority": self.authority, "why": self.why, "authorized_by": self.authorized_by })
+            "authority": self.authority, "why": clip(&self.why, WHY_CHARS_MAX), "authorized_by": clip(&self.authorized_by, QUOTE_CHARS_MAX) })
     }
 }
 fn listed<'v>(answer: &'v Value, field: &str, dropped: &mut Vec<Value>) -> &'v [Value] {
@@ -578,8 +596,8 @@ fn proposed(item: &Value, targets: &[Target]) -> Result<Obligation, String> {
         pr_quote: field("pr_quote"), kind: "", authority: "unverified", why: String::new(), authorized_by: String::new() })
 }
 enum Place<'t> { Test, Doc, Types, Comment(&'t str) }
-impl Place<'_> {
-    fn of<'t>(path: &str, text: &'t str, at: &[(usize, usize)]) -> Option<Place<'t>> {
+impl<'t> Place<'t> {
+    fn of(path: &str, text: &'t str, at: &[(usize, usize)]) -> Option<Place<'t>> {
         Some(match Kind::of(path)? {
             Kind::Test => Place::Test,
             Kind::Doc => Place::Doc,
@@ -597,11 +615,25 @@ impl Place<'_> {
             let windows = naming(text, &[word(t)], hit);
             at.iter().any(|(a, b)| { let (first, last) = (text[..*a].matches('\n').count(), text[..*b].matches('\n').count()); windows.iter().any(|(s, e)| *s <= first && last < *e) })
         };
+        let covers = crate::calls::package_covers(&o.path, &t.path, exists);
         match self {
             Place::Test => inside(&crate::calls::test_spans(&o.path, text, (&t.path, &t.export), exists)),
-            Place::Doc => near(cites),
-            Place::Types => near(names),
-            Place::Comment(comment) => (o.path == t.path && t.comment.contains(o.quote.as_str())) || names(comment, &word(t)),
+            Place::Doc => covers && near(cites),
+            Place::Types => covers && near(names),
+            Place::Comment(comment) => (o.path == t.path && t.comment.contains(o.quote.as_str())) || (covers && names(comment, &word(t))),
+        }
+    }
+    fn units(&self, (o, text, at): (&Obligation, &'t str, &[(usize, usize)]), t: &Target, exists: &dyn Fn(&str) -> bool) -> Vec<&'t str> {
+        let lines: Vec<(usize, usize)> = text.lines().map(|l| (l.as_ptr() as usize - text.as_ptr() as usize, l.len())).collect();
+        let window = |(a, b): (usize, usize)| {
+            let (first, last) = (text[..a].matches('\n').count(), text[..b].matches('\n').count());
+            let (from, to) = (first.saturating_sub(MARGIN_LINES_COUNT), (last + MARGIN_LINES_COUNT).min(lines.len().checked_sub(1)?));
+            text.get(lines[from].0..lines[to].0 + lines[to].1)
+        };
+        match self {
+            Place::Test => crate::calls::test_spans(&o.path, text, (&t.path, &t.export), exists).into_iter().filter(|(s, e)| at.iter().any(|(a, b)| s <= a && b <= e)).filter_map(|(s, e)| text.get(s..e)).collect(),
+            Place::Doc | Place::Types => at.iter().filter_map(|q| window(*q)).collect(),
+            Place::Comment(comment) => vec![*comment],
         }
     }
     fn unrelated(&self, path: &str, words: &str) -> String {
@@ -617,7 +649,8 @@ fn only_names(quote: &str) -> bool {
     let mut lines = quote.lines().map(str::trim).filter(|l| !l.is_empty()).peekable();
     lines.peek().is_some() && lines.all(|l| ["import ", "import{", "export {", "export{", "export *"].iter().any(|p| l.starts_with(p)) || l.contains("require("))
 }
-fn unverified(o: &Obligation, old: Text, targets: &[Target], exists: &dyn Fn(&str) -> bool) -> Result<(&'static str, Vec<usize>), String> {
+struct Found<'t> { place: Place<'t>, named: Vec<usize>, at: Vec<(usize, usize)>, text: &'t str }
+fn unverified<'t>(o: &Obligation, old: Text<'t>, targets: &[Target], exists: &dyn Fn(&str) -> bool) -> Result<Found<'t>, String> {
     let text = match old {
         Text::Missing => return Err(format!("{} did not exist before the change", o.path)),
         Text::Unreadable => return Err(format!("Kern could not read {}: it is not a text file of at most {FILE_BYTES_MAX} bytes", o.path)),
@@ -639,17 +672,24 @@ fn unverified(o: &Obligation, old: Text, targets: &[Target], exists: &dyn Fn(&st
         let words: Vec<String> = o.targets.iter().filter_map(|i| targets.get(*i)).map(word).collect();
         return Err(place.unrelated(&o.path, &words.join(" or ")));
     }
-    Ok((place.kind(), named))
+    Ok(Found { place, named, at, text })
 }
-fn judge(mut o: Obligation, (old, new): (Text, Text), targets: &[Target], (pr, exists): (&str, &dyn Fn(&str) -> bool)) -> Obligation {
+fn snapshot_of(test: &str) -> String {
+    let (dir, name) = test.rsplit_once('/').unwrap_or(("", test));
+    if dir.is_empty() { format!("__snapshots__/{name}.snap") } else { format!("{dir}/__snapshots__/{name}.snap") }
+}
+fn judge(mut o: Obligation, (old, new): (Text, Text), snapshot_edited: bool, targets: &[Target], (pr, exists): (&str, &dyn Fn(&str) -> bool)) -> Obligation {
     o.kind = Kind::of(&o.path).map_or("", Kind::name);
     match unverified(&o, old, targets, exists) {
         Err(why) => o.why = clip(&why, WHY_CHARS_MAX),
-        Ok((kind, named)) => {
-            (o.kind, o.targets) = (kind, named);
-            let kept = matches!(new, Text::Here(text) if text.contains(o.quote.as_str()));
+        Ok(found) => {
+            let units: Vec<&str> = found.named.iter().filter_map(|i| targets.get(*i)).flat_map(|t| found.place.units((&o, found.text, &found.at), t, exists)).collect();
+            let kept = matches!(new, Text::Here(text) if text.contains(o.quote.as_str()) && units.iter().all(|u| text.contains(u)));
+            let snapshot = snapshot_edited && matches!(found.place, Place::Test);
+            (o.kind, o.targets) = (found.place.kind(), found.named);
             let said = (QUOTE_CHARS_MIN..=QUOTE_CHARS_MAX).contains(&o.pr_quote.chars().count()) && pr.contains(o.pr_quote.as_str());
-            (o.authority, o.why, o.authorized_by) = if !kept { ("contested", format!("the change removes or edits this quote in {}", o.path), String::new()) }
+            (o.authority, o.why, o.authorized_by) = if !kept { ("contested", format!("the change edits the part of {} that holds this quote", o.path), String::new()) }
+                else if snapshot { ("contested", format!("the change edits the snapshot file of {}", o.path), String::new()) }
                 else if said { ("authorized", "the pull request says it changes this".to_string(), o.pr_quote.clone()) }
                 else { ("verified", String::new(), String::new()) };
         }
@@ -665,22 +705,29 @@ fn obligations(repo: &Path, (old, new): (&Side, &Side), answer: &Value, targets:
     let (before, after) = (old.read(repo, paths.iter().map(String::as_str))?, new.read(repo, paths.iter().map(String::as_str))?);
     let pr = pr.replace("\r\n", "\n");
     let exists = |p: &str| old.has(p);
-    let mut kept: Vec<Obligation> = Vec::new();
+    let snapshot_edited = |test: &str| { let snap = snapshot_of(test); old.items.get(&snap).is_some_and(|was| new.items.get(&snap).is_none_or(|now| now.oid != was.oid)) };
+    let mut judged: Vec<(usize, Obligation)> = Vec::new();
+    let mut repeats: Vec<(usize, usize)> = Vec::new();
     for (n, item) in items.iter().enumerate() {
-        let found = proposed(item, targets).map(|o| {
-            let cited = (old.text(&before, &o.path), new.text(&after, &o.path));
-            judge(o, cited, targets, (&pr, &exists))
-        }).and_then(|o| {
-            if let Some(k) = kept.iter().find(|k| k.same(&o)) { return Err(format!("it repeats {}", k.id)); }
-            if kept.len() == OBLIGATIONS_COUNT_MAX { return Err(format!("Kern keeps at most {OBLIGATIONS_COUNT_MAX} obligations")); }
-            Ok(o)
-        });
-        match found {
-            Ok(mut o) => { o.id = format!("o{}", kept.len() + 1); kept.push(o); }
+        match proposed(item, targets) {
+            Ok(o) => {
+                let (cited, snapshot) = ((old.text(&before, &o.path), new.text(&after, &o.path)), snapshot_edited(&o.path));
+                let o = judge(o, cited, snapshot, targets, (&pr, &exists));
+                match judged.iter().position(|(_, k)| k.same(&o)) { Some(i) => repeats.push((n, i)), None => judged.push((n, o)) }
+            }
             Err(why) => dropped.push(json!({ "what": format!("obligation {} of the Oracle's answer", n + 1), "why": why })),
         }
     }
-    Ok(kept)
+    let mut chosen: Vec<usize> = (0..judged.len()).filter(|i| judged[*i].1.shown()).chain((0..judged.len()).filter(|i| !judged[*i].1.shown())).collect();
+    let over = chosen.split_off(chosen.len().min(OBLIGATIONS_COUNT_MAX));
+    chosen.sort_unstable();
+    let ids: BTreeMap<usize, String> = chosen.iter().enumerate().map(|(k, i)| (*i, format!("o{}", k + 1))).collect();
+    for i in over { dropped.push(json!({ "what": format!("obligation {} of the Oracle's answer", judged[i].0 + 1), "why": format!("Kern keeps at most {OBLIGATIONS_COUNT_MAX} obligations, checked ones first") })); }
+    for (n, i) in repeats {
+        dropped.push(json!({ "what": format!("obligation {} of the Oracle's answer", n + 1), "why": format!("it repeats {}", ids.get(&i).map_or("an obligation Kern did not keep", String::as_str)) }));
+    }
+    let mut slots: Vec<Option<Obligation>> = judged.into_iter().map(|(_, o)| Some(o)).collect();
+    Ok(chosen.into_iter().filter_map(|i| { let mut o = slots[i].take()?; o.id = ids[&i].clone(); Some(o) }).collect())
 }
 fn experiment(item: &Value, targets: &[Target], both: &BTreeMap<String, BTreeSet<String>>) -> Result<(usize, Value), String> {
     let name = item["target"].as_str().unwrap_or_default();
@@ -709,14 +756,13 @@ fn link(item: &Value, (t, id): (usize, &str), targets: &[Target], obligations: &
     Value::Null
 }
 fn experiments(answer: &Value, targets: &[Target], both: &BTreeMap<String, BTreeSet<String>>, obligations: &[Obligation], dropped: &mut Vec<Value>) -> Vec<Value> {
-    let (mut kept, mut seen, mut per, mut bytes) = (Vec::new(), BTreeSet::new(), vec![0usize; targets.len()], 0usize);
+    let (mut kept, mut seen, mut per) = (Vec::new(), BTreeSet::new(), vec![0usize; targets.len()]);
     for (n, item) in listed(answer, "experiments", dropped).iter().enumerate() {
         let found = experiment(item, targets, both).and_then(|(t, args)| {
             let text = args.to_string();
             if seen.contains(&(t, text.clone())) { return Err("it repeats an earlier input".to_string()); }
             if per[t] == EXPERIMENTS_PER_TARGET_COUNT_MAX { return Err(format!("Kern runs at most {EXPERIMENTS_PER_TARGET_COUNT_MAX} inputs per function")); }
             if kept.len() == EXPERIMENTS_COUNT_MAX { return Err(format!("Kern runs at most {EXPERIMENTS_COUNT_MAX} inputs")); }
-            if bytes + text.len() > EXPERIMENTS_BYTES_MAX { return Err(format!("the inputs would take more than {EXPERIMENTS_BYTES_MAX} bytes")); }
             Ok((t, args, text))
         });
         let (t, args, text) = match found {
@@ -725,9 +771,12 @@ fn experiments(answer: &Value, targets: &[Target], both: &BTreeMap<String, BTree
         };
         let id = format!("e{}", kept.len() + 1);
         let obligation = link(item, (t, &id), targets, obligations, dropped);
-        (per[t], bytes) = (per[t] + 1, bytes + text.len());
+        per[t] += 1;
         seen.insert((t, text));
         kept.push(json!({ "id": id, "obligation": obligation, "path": targets[t].path, "export": targets[t].export, "args": args, "why": clip(item["why"].as_str().unwrap_or_default(), WHY_CHARS_MAX) }));
+    }
+    while serde_json::to_string(&kept).map_or(usize::MAX, |s| s.len()) > EXPERIMENTS_BYTES_MAX && let Some(x) = kept.pop() {
+        dropped.push(json!({ "what": format!("input {} of the Hunter's answer", x["id"].as_str().unwrap_or("")), "why": format!("the inputs would take more than {EXPERIMENTS_BYTES_MAX} bytes") }));
     }
     kept
 }
@@ -735,18 +784,18 @@ fn shapes(targets: &[Target], examples: &[Examples], sources: &[Source], dropped
     targets.iter().zip(examples).map(|(t, found)| {
         let old = sources.iter().find(|s| s.path == t.path).map_or("", |s| s.old.as_str());
         let mut shapes: Vec<Vec<&str>> = Vec::new();
-        for shape in found.iter().map(|args| crate::calls::shape(args)).chain(crate::calls::declared_shapes(&t.path, old, &t.export)) {
+        for shape in found.iter().map(|args| crate::calls::shape(args)).chain(crate::calls::declared_shapes(&t.path, old, &t.export)).filter(|s| s.len() <= ARGS_COUNT_MAX) {
             if !shapes.contains(&shape) { shapes.push(shape); }
         }
         if shapes.len() > SHAPES_PER_TARGET_COUNT_MAX {
             dropped.push(json!({ "what": format!("{} more argument shapes of {}", shapes.len() - SHAPES_PER_TARGET_COUNT_MAX, key(t)), "why": format!("Kern keeps at most {SHAPES_PER_TARGET_COUNT_MAX} shapes per function") }));
             shapes.truncate(SHAPES_PER_TARGET_COUNT_MAX);
         }
-        json!({ "path": t.path, "export": t.export, "shapes": shapes })
+        json!({ "path": t.path, "export": t.export, "shapes": shapes, "retested": t.retested })
     }).collect()
 }
 
-enum Found { Nothing(String), Investigated(Vec<Value>, Vec<Value>, Vec<Value>) }
+enum Outcome { Nothing(String), Investigated(Vec<Value>, Vec<Value>, Vec<Value>) }
 struct Run<'a> { repo: &'a Path, out: &'a Path, ask: Option<Ask<'a>>, tokens: [u64; 2], models: BTreeSet<String>, dropped: Vec<Value> }
 fn stored(file: &Path) -> Option<Value> {
     if std::fs::metadata(file).ok()?.len() > ANSWER_BYTES_MAX { return None; }
@@ -769,25 +818,29 @@ impl Run<'_> {
         if live { std::fs::write(&file, json!({ "prompt_sha256": sha, "response": response }).to_string())?; }
         Ok(Some(said))
     }
-    fn examine(&mut self, (base, head): (&str, &str), pr: &str) -> R<Found> {
+    fn examine(&mut self, (base, head): (&str, &str), pr: &str) -> R<Outcome> {
+        crate::git::oid(base)?;
+        crate::git::oid(head)?;
         let (old, new) = (Side::of(self.repo, base)?, Side::of(self.repo, head)?);
-        let sources = sources(self.repo, (&old, &new), &mut self.dropped)?;
-        let (targets, both) = pick(&sources, &mut self.dropped);
-        if targets.is_empty() { return Ok(Found::Nothing(NOTHING.into())); }
+        let changes = crate::rules::changed(self.repo, base, head)?;
+        let sources = sources(self.repo, (&old, &new), &changes, &mut self.dropped)?;
+        let (mut targets, both) = pick(&sources, &mut self.dropped);
+        if targets.is_empty() { return Ok(Outcome::Nothing(NOTHING.into())); }
+        retested(self.repo, &new, &changes, &mut targets)?;
         let files = mentioning(self.repo, &old, &targets, context_file, CONTEXT_FILES_COUNT_MAX, "files of the old code that mention the changed functions", &mut self.dropped)?;
         let examples = examples(&files, &targets, &old);
-        let Some(said) = self.answer(&oracle(&targets, &files, pr, &|p| old.has(p)))? else { return Ok(Found::Nothing(NO_KEY.into())) };
+        let Some(said) = self.answer(&oracle(&targets, &files, pr, &|p| old.has(p)))? else { return Ok(Outcome::Nothing(NO_KEY.into())) };
         let obligations = obligations(self.repo, (&old, &new), &said, &targets, pr, &mut self.dropped)?;
         let callers = mentioning(self.repo, &new, &targets, caller, CALLER_FILES_COUNT_MAX, "files of the new code that call the changed functions", &mut self.dropped)?;
-        let Some(said) = self.answer(&hunter(&targets, &obligations, &examples, &sources, &callers, &new))? else { return Ok(Found::Nothing(NO_KEY.into())) };
+        let Some(said) = self.answer(&hunter(&targets, &obligations, &examples, &sources, &callers, &new))? else { return Ok(Outcome::Nothing(NO_KEY.into())) };
         let experiments = experiments(&said, &targets, &both, &obligations, &mut self.dropped);
         let shaped = shapes(&targets, &examples, &sources, &mut self.dropped);
-        Ok(Found::Investigated(shaped, obligations.iter().map(|o| o.json(&targets)).collect(), experiments))
+        Ok(Outcome::Investigated(shaped, obligations.iter().map(|o| o.json(&targets)).collect(), experiments))
     }
-    fn record(self, (base, head): (&str, &str), found: R<Found>) -> Value {
+    fn record(self, (base, head): (&str, &str), found: R<Outcome>) -> Value {
         let (status, why, (targets, obligations, experiments)) = match found {
-            Ok(Found::Investigated(t, o, e)) => ("INVESTIGATED", String::new(), (t, o, e)),
-            Ok(Found::Nothing(why)) => ("NONE", why, Default::default()),
+            Ok(Outcome::Investigated(t, o, e)) => ("INVESTIGATED", String::new(), (t, o, e)),
+            Ok(Outcome::Nothing(why)) => ("NONE", why, Default::default()),
             Err(e) => ("FAILED", e.0, Default::default()),
         };
         json!({ "version": 1, "base": base, "head": head, "status": status, "why": why, "model": self.models.into_iter().collect::<Vec<_>>().join(", "),
@@ -801,12 +854,15 @@ fn summary(record: &Value, file: &Path) -> Value {
         "experiments": count("experiments"), "dropped": count("dropped"), "usage": record["usage"], "investigation": file.display().to_string() })
 }
 pub fn investigate(repo: &Path, (base, head): (&str, &str), pr: &str, out: &Path, ask: Option<Ask>) -> R<Value> {
-    crate::git::oid(base)?;
-    crate::git::oid(head)?;
     std::fs::create_dir_all(out)?;
     let mut run = Run { repo, out, ask, tokens: [0, 0], models: BTreeSet::new(), dropped: Vec::new() };
     let found = run.examine((base, head), pr);
-    let record = run.record((base, head), found);
+    let mut record = run.record((base, head), found);
+    if let crate::probe::Parsed::Unusable(why) = crate::probe::parse(&record, (base, head)) && record["status"] == "INVESTIGATED" {
+        record["status"] = json!("FAILED");
+        record["why"] = json!(clip(&format!("Kern's own record would not be accepted by the job that runs the code: {why}"), WHY_CHARS_MAX));
+        for field in ["targets", "obligations", "experiments"] { record[field] = json!([]); }
+    }
     let file = out.join("investigation.json");
     std::fs::write(&file, format!("{}\n", serde_json::to_string(&record)?))?;
     Ok(summary(&record, &file))

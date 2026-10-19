@@ -117,7 +117,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     let wanted: BTreeSet<String> = tests["rewritten"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
     if !wanted.is_empty() { tests["polarity"] = Value::Object(readings(dir, &suites, &labels, &wanted)); }
     if tests["builds"]["status"] == "CHECKED" { tests["builds"] = crate::build::rejudge(dir, &tests["builds"], setup.as_ref()); }
-    if tests["probes"]["status"] == "RAN" { tests["probes"] = crate::probe::replayed(dir, &tests["probes"], setup.as_ref()); }
+    if tests["probes"]["status"] == "RAN" { tests["probes"] = crate::probe::replayed(dir, &tests["probes"], setup.as_ref(), &crate::suite::ran_suites(dir).unwrap_or_default()); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });
     let receipt = crate::receipt::build(&d, &stored["rules"], &tests, &stored["behaviour"]);
     Ok(json!({ "replayed": judged.as_ref().map_or(0, Vec::len), "suites": labels.len(), "receipt": receipt }))

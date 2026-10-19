@@ -7,6 +7,7 @@ const write = (line) => {
 const total = (list) => { if (Array.isArray(list)) write(`total ${list.length}`); };
 const VALUES_BYTES_MAX = 1 << 20;
 const VALUE_CHARS_MAX = 2000;
+const ERRORS_COUNT_MAX = 20;
 const text = (v) => (typeof v === 'string' ? v.slice(0, VALUE_CHARS_MAX) : null);
 let valuesBytes = 0;
 const recorded = new Set();
@@ -22,6 +23,15 @@ const record = (task, result) => {
   valuesBytes += line.length;
   try { appendFileSync(out, `${line}\n`); } catch {}
 };
+let told = false;
+const unhandled = (errors) => {
+  if (told || !Array.isArray(errors) || errors.length === 0) return;
+  told = true;
+  for (const e of errors.slice(0, ERRORS_COUNT_MAX)) {
+    const said = e && typeof e === 'object' ? `${e.name || 'Error'}: ${String(e.message || '').slice(0, VALUE_CHARS_MAX)}` : String(e).slice(0, VALUE_CHARS_MAX);
+    try { process.stderr.write(`kern: the test runner caught an unhandled error: ${said.replace(/[\r\n]+/g, ' ')}\n`); } catch {}
+  }
+};
 
 export default class {
   onInit(ctx) { this.ctx = ctx; }
@@ -29,6 +39,8 @@ export default class {
   onSpecsCollected(specs) { total(specs); }
   onTestRunStart(specs) { total(specs); }
   onTestModuleEnd(module) { if (module && module.moduleId) write(`done ${Date.now()} ${module.moduleId}`); }
+  onFinished(files, errors) { unhandled(errors); }
+  onTestRunEnd(modules, errors) { unhandled(errors); }
   onTaskUpdate(packs) {
     for (const pack of Array.isArray(packs) ? packs : []) {
       const [id, result] = pack;

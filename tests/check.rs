@@ -126,9 +126,9 @@ fn every_runner_writes_its_report_to_a_file_kern_names() {
     let node = kern::suite::test_command(&kern::suite::detect(Some(br#"{"scripts":{"test":"node --test"}}"#)).unwrap()).join(" ");
     assert!(node.contains("--test-reporter=/kern/node-report.mjs --test-reporter-destination=/tmp/.kern-report.json"), "{node}");
     assert_eq!(kern::suite::test_command(&tests("jest"))[..kern::proof::command(&tests("jest")).len()], kern::proof::command(&tests("jest")), "jest writes the file through Kern's own results processor");
-    assert!(joined("jest").contains("--bail=false --reporters=default --reporters=/kern/jest-progress.cjs --maxWorkers="), "{}", joined("jest"));
-    assert!(joined("vitest").contains("--bail=0 --sequence.shuffle=false --reporter=/kern/vitest-progress.mjs --maxWorkers="),
-        "promptfoo sets bail: 1 in CI and shuffles its files, so each run stopped at a different first failure; condo's workers died for want of memory: {}", joined("vitest"));
+    assert!(joined("jest").ends_with("--bail=false --reporters=default --reporters=/kern/jest-progress.cjs"), "{}", joined("jest"));
+    assert!(joined("vitest").ends_with("--bail=0 --sequence.shuffle=false --reporter=/kern/vitest-progress.mjs"),
+        "promptfoo sets bail: 1 in CI and shuffles its files, so each run stopped at a different first failure; the worker count comes from the CPUs the box shows, never a flag (marathon-store-app's vitest 2 found no tests with --maxWorkers): {}", joined("vitest"));
 }
 
 #[test]

@@ -60,11 +60,14 @@ test('strips', async () => {
 
 #[test]
 fn an_alias_points_at_a_file_only_inside_the_package_that_owns_it() {
-    let at = |importer: &str, spec: &str, target: &str| kern::calls::aliased(importer, spec, target);
+    let manifests = ["package.json", "apps/web/package.json", "apps/api/package.json", "apps/admin/package.json", "apps/shop/package.json"];
+    let at = |importer: &str, spec: &str, target: &str| kern::calls::aliased(importer, spec, target, &|p: &str| manifests.contains(&p));
     assert!(at("apps/web/tests/page.test.ts", "@/lib/utils", "apps/web/src/lib/utils.ts"));
     assert!(at("src/app/page.test.tsx", "~/lib/format", "src/lib/format/index.ts"));
     assert!(at("test/a.test.ts", "src/lib/sql", "src/lib/sql.ts"), "a path from the project's base folder");
     assert!(!at("apps/api/tests/page.test.ts", "@/lib/utils", "apps/web/src/lib/utils.ts"), "another package's alias points into that package");
+    assert!(!at("apps/shop/test/money.test.ts", "src/utils/money", "apps/admin/src/utils/money.ts"), "a base-folder path stays inside the package that owns the folder");
+    assert!(at("apps/admin/test/money.test.ts", "src/utils/money", "apps/admin/src/utils/money.ts"));
     assert!(!at("test/a.test.ts", "lodash", "src/lodash.ts"), "a package name is not a path");
     assert!(!at("test/a.test.ts", "@scope/sql", "packages/sql/src/index.ts"), "a workspace package is loaded through its build, not its source");
     assert!(!at("test/a.test.ts", "./sql", "test/sql.ts"), "a relative path is resolved, not guessed");
@@ -105,9 +108,15 @@ fn the_old_codes_plain_parameter_types_say_which_inputs_a_type_correct_caller_ca
                  export function render(sql: string, options: { keepHints?: boolean } = {}): string { return sql; }\n\
                  export function lookup(user: User, id: string) { return id; }\n\
                  export function join(...parts: string[]) { return parts.join(''); }\n\
-                 export function plain(a, b) { return a + b; }\n";
-    assert_eq!(declared(money, "formatPrice"), vec![vec!["number"], vec!["number", "string"], vec!["number", "string", "string"], vec!["number", "string", "null"]]);
+                 export function plain(a, b) { return a + b; }\n\
+                 export function pick(a: string): string;\nexport function pick(a: number): number;\nexport function pick(a: any) { return a; }\n\
+                 function format(x: any) { return x; }\nexport function formatAmount(cents: number): string { return String(format(cents)); }\nexport { formatAmount as format };\n\
+                 export function tag(kind: 'a' | 'b', n: number) { return kind + n; }\n";
+    assert_eq!(declared(money, "formatPrice"), vec![vec!["number"]], "a parameter typed with literal values admits only those values, which the shape cannot say, so the shapes stop before it");
     assert_eq!(declared(money, "parse"), vec![vec!["string"], vec!["string", "boolean"]], "a parameter that may be undefined may be left out");
+    assert!(declared(money, "pick").is_empty(), "an overloaded function's implementation signature is not what callers see");
+    assert_eq!(declared(money, "format"), vec![vec!["number"]], "an export is read under its local name, not an unrelated local of the exported name");
+    assert!(declared(money, "tag").is_empty());
     assert_eq!(declared(money, "render"), vec![vec!["string"]], "an object type says nothing Kern can check about the fields, so the shapes stop before it");
     assert!(declared(money, "lookup").is_empty(), "a first parameter of a type Kern cannot read leaves no shape a caller is known to pass");
     assert!(declared(money, "join").is_empty() && declared(money, "plain").is_empty() && declared(money, "missing").is_empty());

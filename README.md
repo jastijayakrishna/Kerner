@@ -178,13 +178,17 @@ What Kern checks on every pull request:
    code), what must stay true about each changed exported function, each with a word-for-word quote of its source. Second, which
    realistic inputs could break those requirements. Kern checks each quote itself: it must be in a file that existed before the change
    and be about the function (inside a test that calls it, next to a line of the documentation that names it, or in its own comment).
-   Then it calls the function with each input through the project's own test runner (vitest or jest), on the old and the new code with
-   the network off, and runs both again when an answer differs. An answer that changed is a note, and so is one that keeps every old
-   value and only adds fields. It blocks only when the quote checks out and the change leaves it in place, inputs of that kind are ones
-   existing tests or callers pass or the old code's plain parameter types allow, both old runs agree, both new runs agree, and both
-   sides were set up the same way. When the pull request says it changes that behaviour, or a piece of that evidence is missing, it is
-   a look that says which. The receipt gives the call, both answers and the quote, and a rerun of the same change reuses the AI's
-   answers.
+   Then it calls the function with each input inside a copy of a test file that already loads it, through the project's own test
+   runner (vitest or jest), on the old and the new code with the network off, and runs both again when an answer differs. Answers are
+   compared as data: one that only adds fields, or prints differently but holds the same values, is a note, and so is a crash the old
+   code made on an input it never handled. A requirement that the answer must not change is a look at most, because which inputs it
+   covers is the AI's reading. Kern blocks only when a call that a requirement says must not throw now throws (or the reverse), the
+   quote checks out and the change leaves its test case, snapshot or paragraph in place, inputs of that kind are ones existing tests or
+   callers pass or the old code's plain parameter types allow, the real function answered, both old runs agree, both new runs agree,
+   and both sides were set up the same way, build steps included. When the pull request says it changes that behaviour, adds or edits
+   a test of that function, or a piece of that evidence is missing, it is a look that says which. Inputs that hang, reach for the
+   network, answer differently within one run, or never reach the real function (a mock answered) are set aside and listed. The
+   receipt gives the call, both answers and the quote, and a rerun of the same change reuses the AI's answers.
 11. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
    every changed line run; Kern runs it on the old and the new code and lists what behaves differently.
 
@@ -274,7 +278,8 @@ Next steps:
 - Kern does not prove that code is correct or well meant. A person still decides whether a change is good.
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - The AI step can miss a regression, and it can cite a requirement Kern cannot confirm. Kern never blocks on the AI's word: a block
-  needs the quote confirmed and the break repeated on both runs, and a difference without a confirmed requirement is only a note.
+  needs the quote confirmed, a call that now throws or no longer throws against it, and the break repeated on both runs. A changed
+  value is a look or a note, never a block, because no mechanical check says which inputs a "stays the same" requirement covers.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
   run (another runner, a failed install, no results, Kern's own environment failing), the answer is not verified and says why, never ✅;
   the rules that need no test run still apply, so a look they find is still a look. A

@@ -978,7 +978,7 @@ fn edits(tests: &Tests, base: &Files, candidate: &Files, screened: &Value, befor
 }
 
 const CRASHES: [&str; 5] = ["is not defined", "is not a function", "is not iterable", "is not a constructor", "Cannot read properties of"];
-fn crashed(why: &str) -> bool { let first = why.lines().next().unwrap_or(why); CRASHES.iter().any(|c| first.contains(c)) }
+pub fn crashed(why: &str) -> bool { let first = why.lines().next().unwrap_or(why); CRASHES.iter().any(|c| first.contains(c)) }
 pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool, bool), output: &[u8], errors: &[u8]) -> &'static str {
     if !finished { return "unknown"; }
     let none = |b: &[u8]| { let t = String::from_utf8_lossy(b); t.contains("No tests found") || t.contains("No test files found") };

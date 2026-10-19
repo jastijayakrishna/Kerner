@@ -1,5 +1,5 @@
 use kern::policy::Runner;
-use kern::probe::{self, Answers, Authority, Candidate, Check, Evidence, Missing, Parsed, Requirement, Style, Unchecked, Verdict};
+use kern::probe::{self, Answers, Authority, Candidate, Check, Data, Evidence, HUNG, Missing, Parsed, Requirement, Style, Unchecked, Verdict};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,7 +31,7 @@ fn succeeded(a: &str) -> bool { a.starts_with("returns ") || a.starts_with("reso
 
 #[test]
 fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promises() {
-    let answers = [None, Some(CUT), Some(KEPT), Some("resolves 1"), Some("throws TypeError: x is not iterable"), Some("rejects Error: no rows"), Some("rejects Error: getaddrinfo ENOTFOUND db.internal")];
+    let answers = [None, Some(CUT), Some(KEPT), Some(HUNG), Some("throws TypeError: x is not iterable"), Some("rejects Error: no rows"), Some("rejects Error: getaddrinfo ENOTFOUND db.internal")];
     let mut requirements = vec![None];
     for check in [Check::Same, Check::Returns, Check::Throws] {
         for authority in [Authority::Verified, Authority::Contested, Authority::Authorized, Authority::Unverified] { requirements.push(Some(Requirement { check, authority })); }
@@ -39,50 +39,65 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
     let n = answers.len();
     let (mut blocked, mut combinations) = (0, 0);
     for requirement in requirements {
-        for bits in 0..32u8 {
-            let (shape_seen, reached_old, reached_new, uneven, extended) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
-            for code in 0..n.pow(4) {
-                let pick = |i: u32| answers[code / n.pow(i) % n];
-                let (old, old_again, new, new_again) = (pick(0), pick(1), pick(2), pick(3));
-                let e = Evidence { requirement, shape_seen, reached_old, reached_new, uneven, extended,
-                    answers: Answers { old: old.map(str::to_string), old_again: old_again.map(str::to_string), new: new.map(str::to_string), new_again: new_again.map(str::to_string) } };
-                let v = probe::verdict(&e);
-                combinations += 1;
-                let sandbox = [old, old_again, new, new_again].into_iter().flatten().any(|a| failed(a) && a.contains("getaddrinfo"));
-                let authority = requirement.map(|r| r.authority);
-                let usable = authority.is_some_and(|a| a != Authority::Unverified);
-                let violated = match (requirement, old, new) {
-                    (Some(r), Some(o), Some(w)) if o != w => match r.check { Check::Same => !extended, Check::Returns => succeeded(o) && failed(w), Check::Throws => failed(o) && succeeded(w) },
-                    _ => false,
-                };
-                let said = format!("{e:?} gave {v:?}");
-                if sandbox { assert!(matches!(v, Verdict::Unchecked(_)), "a sandbox error never gives anything but not checked: {said}"); }
-                if !usable { assert!(!matches!(v, Verdict::Blocked | Verdict::Look(_) | Verdict::Uneven), "no verified requirement, no block and no look: {said}"); }
-                if !(reached_old && reached_new) { assert_eq!(v, Verdict::Unchecked(Unchecked::Unreached), "{said}"); }
-                match v {
-                    Verdict::Blocked => {
-                        blocked += 1;
-                        assert!(authority == Some(Authority::Verified) && shape_seen && reached_old && reached_new && !uneven && !sandbox && violated, "{said}");
-                        assert!(old.is_some() && new.is_some() && old_again == old && new_again == new && old != new, "a block needs four answers, both reruns agreeing: {said}");
+        for bits in 0..128u8 {
+            let (shape_seen, reached_old, reached_new, uneven) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let (chance, network, retested) = (bits & 16 != 0, bits & 32 != 0, bits & 64 != 0);
+            for data in [Data::Same, Data::Extended, Data::Differs, Data::Missing] {
+                for code in 0..n.pow(4) {
+                    let pick = |i: u32| answers[code / n.pow(i) % n];
+                    let (old, old_again, new, new_again) = (pick(0), pick(1), pick(2), pick(3));
+                    let e = Evidence { requirement, shape_seen, reached_old, reached_new, uneven, data, chance, network, retested,
+                        answers: Answers { old: old.map(str::to_string), old_again: old_again.map(str::to_string), new: new.map(str::to_string), new_again: new_again.map(str::to_string) } };
+                    let v = probe::verdict(&e);
+                    combinations += 1;
+                    let four = [old, old_again, new, new_again];
+                    let sandbox = four.into_iter().flatten().any(|a| failed(a) && a.contains("getaddrinfo"));
+                    let hung = four.into_iter().flatten().any(|a| a == HUNG);
+                    let authority = requirement.map(|r| r.authority);
+                    let usable = authority.is_some_and(|a| a != Authority::Unverified);
+                    let crash = |a: &str| failed(a) && kern::proof::crashed(a);
+                    let broken: Option<bool> = match (requirement, old, new) {
+                        (Some(r), Some(o), Some(w)) if o != w => match r.check {
+                            Check::Same if succeeded(o) && succeeded(w) => match data { Data::Differs => Some(true), Data::Missing => None, _ => Some(false) },
+                            Check::Same if crash(o) && succeeded(w) => Some(false),
+                            Check::Same => Some(succeeded(o) != succeeded(w)),
+                            Check::Returns => Some(succeeded(o) && failed(w)),
+                            Check::Throws => Some(failed(o) && succeeded(w)),
+                        },
+                        _ => Some(false),
+                    };
+                    let said = || format!("{e:?} gave {v:?}");
+                    if sandbox { assert!(matches!(v, Verdict::Unchecked(_)), "a sandbox error never gives anything but not checked: {}", said()); }
+                    if !usable { assert!(!matches!(v, Verdict::Blocked | Verdict::Look(_) | Verdict::Uneven), "no verified requirement, no block and no look: {}", said()); }
+                    if !(reached_old && reached_new) { assert_eq!(v, Verdict::Unchecked(Unchecked::Unreached), "{}", said()); }
+                    match v {
+                        Verdict::Blocked => {
+                            blocked += 1;
+                            assert!(authority == Some(Authority::Verified) && shape_seen && reached_old && reached_new && !uneven && !sandbox && !hung && !chance && !network && !retested && broken == Some(true), "{}", said());
+                            assert!(old.is_some() && new.is_some() && old_again == old && new_again == new && old != new, "a block needs four answers, both reruns agreeing: {}", said());
+                            assert!(requirement.is_some_and(|r| r.check != Check::Same), "a requirement that the answer must not change never blocks: which inputs it covers is the AI's reading, not evidence: {}", said());
+                        }
+                        Verdict::Look(m) => {
+                            assert!(usable && broken != Some(false) && !uneven && !sandbox && !hung && !chance && !network && m != Missing::default(), "{}", said());
+                            assert_eq!(m, Missing { contested: authority == Some(Authority::Contested), authorized: authority == Some(Authority::Authorized), shape: !shape_seen,
+                                rerun: old_again.is_none() || new_again.is_none(), values: broken.is_none(), retested, scope: requirement.is_some_and(|r| r.check == Check::Same) }, "a look names exactly what is missing for a block: {}", said());
+                        }
+                        Verdict::Uneven => assert!(usable && broken != Some(false) && uneven && !sandbox && !hung && !chance && !network, "{}", said()),
+                        Verdict::Same => assert!(reached_old && reached_new && old.is_some() && old == new && !sandbox && !hung, "{}", said()),
+                        Verdict::Note => assert!(old.is_some() && new.is_some() && old != new && !sandbox && !hung && !chance && !network && (!usable || broken == Some(false)), "{}", said()),
+                        Verdict::Unchecked(Unchecked::Unanswered) => assert!(old.is_none() || new.is_none(), "{}", said()),
+                        Verdict::Unchecked(Unchecked::Sandbox) => assert!(sandbox || (network && old != new && !hung), "{}", said()),
+                        Verdict::Unchecked(Unchecked::Hung) => assert!(hung && !sandbox, "{}", said()),
+                        Verdict::Unchecked(Unchecked::Chance) => assert!(old != new && (chance || (old_again.is_some() && old_again != old) || (new_again.is_some() && new_again != new)), "{}", said()),
+                        Verdict::Unchecked(Unchecked::Unreached) => assert!(!(reached_old && reached_new), "{}", said()),
                     }
-                    Verdict::Look(m) => {
-                        assert!(usable && violated && !uneven && !sandbox && m != Missing::default(), "{said}");
-                        assert_eq!(m, Missing { contested: authority == Some(Authority::Contested), authorized: authority == Some(Authority::Authorized), shape: !shape_seen,
-                            rerun: old_again.is_none() || new_again.is_none() }, "a look names exactly what is missing for a block: {said}");
-                    }
-                    Verdict::Uneven => assert!(usable && violated && uneven && !sandbox, "{said}"),
-                    Verdict::Same => assert!(reached_old && reached_new && old.is_some() && old == new && !sandbox, "{said}"),
-                    Verdict::Note => assert!(old.is_some() && new.is_some() && old != new && !sandbox && (!usable || !violated), "{said}"),
-                    Verdict::Unchecked(Unchecked::Unanswered) => assert!(old.is_none() || new.is_none(), "{said}"),
-                    Verdict::Unchecked(Unchecked::Sandbox) => assert!(sandbox, "{said}"),
-                    Verdict::Unchecked(Unchecked::Chance) => assert!(old != new && ((old_again.is_some() && old_again != old) || (new_again.is_some() && new_again != new)), "{said}"),
-                    Verdict::Unchecked(Unchecked::Unreached) => assert!(!(reached_old && reached_new), "{said}"),
                 }
             }
         }
     }
-    assert_eq!(combinations, 13 * 32 * 7usize.pow(4));
-    assert_eq!(blocked, 44, "five plain answers give 20 changed pairs for `same`, blockable only when the new answer is not the old one with fields added, and 6 each for `returns` and `throws`, either way; nothing else may block");
+    assert_eq!(combinations, 13 * 128 * 4 * 7usize.pow(4));
+    assert_eq!(blocked, 32, "four plain answers give 12 changed pairs: `returns` blocks when a value became an error and `throws` when an error became a value, 4 pairs each, whatever the data (16 each); \
+        `same` never blocks, and nothing else may");
 }
 
 #[test]
@@ -101,20 +116,26 @@ fn meshcore_ts_15_one_function_breaking_one_requirement_is_one_item_however_many
 
 #[test]
 fn lightdash_12942_an_answer_that_keeps_every_old_value_and_only_adds_fields_breaks_no_same_requirement() {
-    let line = |side: &str, o: &str, v: Option<&str>| { let mut r = json!({ "p": "e1", "o": o }); if let Some(v) = v { r["v"] = json!(v); } let _ = side; format!("{}\n{}\n", json!({ "k": "src/sql.ts#removeComments" }), r) };
+    let line = |o: &str, v: Option<&str>| { let mut r = json!({ "p": "e1", "o": o, "k": "src/sql.ts#removeComments" }); if let Some(v) = v { r["v"] = json!(v); } format!("{}\n{}\n", json!({ "p": "e1", "s": 1 }), r) };
     let judged = |old: (&str, Option<&str>), new: (&str, Option<&str>)| {
-        let traces = [line("old", old.0, old.1), line("old-again", old.0, old.1), line("new", new.0, new.1), line("new-again", new.0, new.1)].map(|t| Some(probe::seen(&t)));
+        let traces = [line(old.0, old.1), line(old.0, old.1), line(new.0, new.1), line(new.0, new.1)].map(|t| Some(probe::seen(&t)));
         let mut x = tried([None; 4], obligation("verified"));
         probe::recorded(&mut x, &traces);
-        (probe::verdict(&probe::evidence(&x)), x["extended"].clone())
+        (probe::verdict(&probe::evidence(&x)), x["data"].clone())
     };
     let was = ("returns {\"rows\":[1,2],\"meta\":{\"total\":2}}", Some(r#"{"rows":[1,2],"meta":{"total":2}}"#));
-    assert_eq!(judged(was, ("returns {\"cursor\":null,\"meta\":{\"page\":1,\"total\":2},\"rows\":[1,2]}", Some(r#"{"rows":[1,2],"meta":{"total":2,"page":1},"cursor":null}"#))), (Verdict::Note, json!(true)),
+    let scope = Verdict::Look(Missing { scope: true, ..Missing::default() });
+    assert_eq!(judged(was, ("returns {\"cursor\":null,\"meta\":{\"page\":1,\"total\":2},\"rows\":[1,2]}", Some(r#"{"rows":[1,2],"meta":{"total":2,"page":1},"cursor":null}"#))), (Verdict::Note, json!("extended")),
         "a new field, even inside a nested object, adds to the answer and keeps everything a caller relied on");
-    assert_eq!(judged(was, ("returns {\"meta\":{\"total\":3},\"rows\":[1,2]}", Some(r#"{"rows":[1,2],"meta":{"total":3}}"#))), (Verdict::Blocked, json!(false)), "an old value that changed is a break");
-    assert_eq!(judged(was, ("returns {\"rows\":[1,2]}", Some(r#"{"rows":[1,2]}"#))), (Verdict::Blocked, json!(false)), "a field that disappeared is a break");
-    assert_eq!(judged(was, ("returns {\"meta\":{\"total\":2},\"rows\":[1,2,3]}", Some(r#"{"rows":[1,2,3],"meta":{"total":2}}"#))), (Verdict::Blocked, json!(false)), "a list with another item is a different answer");
-    assert_eq!(judged(was, ("returns Map{}", None)), (Verdict::Blocked, json!(false)), "without a value Kern can read on both sides, a changed answer is compared as it is shown");
+    assert_eq!(judged(was, ("returns {\"meta\":{\"total\":3},\"rows\":[1,2]}", Some(r#"{"rows":[1,2],"meta":{"total":3}}"#))), (scope, json!("differs")), "an old value that changed breaks the requirement, and a `same` requirement is a look at most");
+    assert_eq!(judged(was, ("returns {\"rows\":[1,2]}", Some(r#"{"rows":[1,2]}"#))), (scope, json!("differs")), "a field that disappeared is a break");
+    assert_eq!(judged(was, ("returns {\"meta\":{\"total\":2},\"rows\":[1,2,3]}", Some(r#"{"rows":[1,2,3],"meta":{"total":2}}"#))), (scope, json!("differs")), "a list with another item is a different answer");
+    assert_eq!(judged(was, ("returns Map{}", None)), (Verdict::Look(Missing { values: true, scope: true, ..Missing::default() }), json!("missing")),
+        "without a value Kern can read on both sides, a changed answer is a look that says so, never a block");
+    let renamed = ("returns {\"get\":[function request]}", Some(r#"{}"#));
+    assert_eq!(judged(("returns {\"get\":[function get]}", Some(r#"{}"#)), renamed), (Verdict::Note, json!("same")), "a function renamed inside the answer prints differently but is the same data: a note, never a break");
+    assert_eq!(judged(("throws TypeError: Cannot read properties of undefined (reading 'kind')", None), ("returns []", Some("[]"))), (Verdict::Note, json!("missing")),
+        "KerfDesk#566: the old code crashed on an entity kind it did not know and the new code handles it; a crash is no answer a requirement can keep");
 }
 
 fn obligation(authority: &str) -> Value {
@@ -124,8 +145,8 @@ fn obligation(authority: &str) -> Value {
 }
 fn tried(answers: [Option<&str>; 4], obligation: Value) -> Value {
     json!({ "id": "e1", "path": SQL, "export": "removeComments", "args": [DOLLARS], "why": "a dollar-quoted string that holds //", "obligation": obligation,
-        "shapes": [["string"]], "host": "src/sql.test.ts", "dir": "", "reached": { "old": true, "new": true },
-        "answers": { "old": answers[0], "old_again": answers[1], "new": answers[2], "new_again": answers[3] }, "uneven": null })
+        "shapes": [["string"]], "retested": false, "host": "src/sql.test.ts", "dir": "", "reached": { "old": true, "new": true },
+        "answers": { "old": answers[0], "old_again": answers[1], "new": answers[2], "new_again": answers[3] }, "data": "differs", "chance": false, "network": false, "uneven": null })
 }
 fn ran(experiments: Vec<Value>, not_run: Value) -> Value { json!({ "status": "RAN", "why": "", "experiments": experiments, "not_run": not_run }) }
 fn receipt(probes: Value) -> Value {
@@ -143,26 +164,39 @@ fn only(r: &Value, list: &str, kind: &str) -> String {
 fn probes_lines(r: &Value) -> Vec<String> { kern::receipt::markdown(r, None).lines().filter(|l| l.contains("Probes:")).map(str::to_string).collect() }
 
 #[test]
-fn lightdash_12942_a_stripper_that_truncates_a_dollar_quoted_string_breaks_a_verified_requirement_and_is_blocked() {
-    let r = receipt(ran(vec![tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified"))], json!([])));
+fn lightdash_12942_a_stripper_that_now_throws_on_a_dollar_quoted_string_breaks_a_verified_requirement_and_is_blocked() {
+    let mut returns = obligation("verified");
+    returns["check"] = json!("returns");
+    returns["statement"] = json!("Removing comments never throws for a query string.");
+    let r = receipt(ran(vec![tried([Some(KEPT), Some(KEPT), Some("throws TypeError: unterminated quote"), Some("throws TypeError: unterminated quote")], returns)], json!([])));
     assert_eq!(r["decision"], "blocked", "{r}");
     let what = only(&r, "blocked", "probe-regression");
-    for part in ["`removeComments` in `src/sql.ts`", "`removeComments(\"SELECT $$https://example.com/a//b$$ AS address\")`", "`\"SELECT $$https:\"`",
-        "`\"SELECT $$https://example.com/a//b$$ AS address\"`", CITED] {
+    for part in ["`removeComments` in `src/sql.ts`", "`removeComments(\"SELECT $$https://example.com/a//b$$ AS address\")`", "`TypeError: unterminated quote`",
+        "`\"SELECT $$https://example.com/a//b$$ AS address\"`", "The requirement: Removing comments never throws for a query string"] {
         assert!(what.contains(part), "the block names the function, the input as one call, both answers and the requirement with its quote ({part}): {what}");
     }
     assert_eq!(probes_lines(&r), ["- ⚠️ Probes: 1 of 1 input the AI step chose, for 1 function, got another answer on the new code (see above)"]);
+    let r = receipt(ran(vec![tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified"))], json!([])));
+    assert_eq!(r["decision"], "look", "civitai#3102 blocked a label the change added on purpose: which inputs a `same` requirement covers is the AI's reading, so it is a look at most: {r}");
+    let what = only(&r, "look", "probe-concern");
+    assert!(what.contains(CITED) && what.contains("`\"SELECT $$https:\"`") && what.contains("covers the inputs its source names"), "{what}");
 }
 
 #[test]
 fn lightdash_12942_a_broken_requirement_short_of_proof_is_a_look_that_says_what_a_block_would_need() {
     let mut shapeless = tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified"));
     shapeless["shapes"] = json!([["string", "object"]]);
+    let mut unread = tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified"));
+    unread["data"] = json!("missing");
+    let mut retested = tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified"));
+    retested["retested"] = json!(true);
     let cases = [
         (tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("contested")), "the change edits the quoted text in `src/sql.test.ts`"),
         (tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("authorized")), "the pull request says it changes this: `Strip // comments too, as MySQL does`"),
         (shapeless, "neither the old code's tests and callers nor its declared parameter types pass inputs of this shape"),
         (tried([Some(KEPT), None, Some(CUT), Some(CUT)], obligation("verified")), "Kern could not run it a second time on each side to confirm"),
+        (unread, "Kern could not read both answers as plain data, so it compared only how they print"),
+        (retested, "the change also adds or edits a test that calls `removeComments`, which may state the new behaviour"),
     ];
     for (x, missing) in cases {
         let r = receipt(ran(vec![x], json!([])));
@@ -291,7 +325,7 @@ fn lightdash_12942_kern_reads_the_ai_steps_findings_only_when_every_part_is_with
     }
 }
 
-fn candidate(path: &str, source: &str, both: bool) -> Candidate { Candidate { path: path.into(), source: source.into(), both } }
+fn candidate(path: &str, source: &str, both: bool) -> Candidate { Candidate { path: path.into(), source: source.into(), both, unchanged: both } }
 fn experiment(id: &str, path: &str, export: &str, args: Value) -> probe::Experiment {
     probe::Experiment { id: id.into(), path: path.into(), export: export.into(), args: args.as_array().unwrap().clone(), why: String::new(), obligation: Value::Null }
 }
@@ -313,8 +347,9 @@ fn lightdash_12942_a_test_that_imports_the_target_only_as_a_type_never_hosts_its
     assert_eq!(probe::probe_source(host.style, Runner::Vitest, &["./sql".to_string()], &[(0, &e)]),
         "// @ts-nocheck\nimport { test } from \"vitest\";\nimport * as m from \"/kern/trace.cjs\";\nimport * as target0 from \"./sql\";\nconst t = m.default ?? m;\n\
          test(\"kern probe e1\", async () => { await t.probe(\"e1\", target0, \"removeComments\", JSON.parse(\"[\\\"SELECT $$https://example.com/a//b$$ AS address\\\"]\")); }, 10000);\n");
-    assert_eq!(kern::suite::tagged("src/sql.test.ts", "kern-probe", 0).as_deref(), Some("src/sql.kern-probe.test.ts"), "the probe keeps the host's suffix, so the runner's patterns pick it up");
-    assert_eq!(kern::suite::tagged("src/__tests__/sql.ts", "kern-probe", 2).as_deref(), Some("src/__tests__/sql.kern-probe2.ts"));
+    assert_eq!(probe::probe_name("src/sql.test.ts", 0).as_deref(), Some("src/kern-probe.sql.test.ts"), "the probe keeps the host's whole name after a prefix, so every pattern that picked the host (*.test.ts, *_test.ts, __tests__/) picks it too");
+    assert_eq!(probe::probe_name("src/__tests__/sql.ts", 2).as_deref(), Some("src/__tests__/kern-probe2.sql.ts"));
+    assert_eq!(probe::probe_name("test/money_test.js", 0).as_deref(), Some("test/kern-probe.money_test.js"));
     assert_eq!(kern::suite::kept_name("src/sql.test.ts", 0).as_deref(), Some("src/sql.kern-kept.test.ts"));
 }
 
@@ -343,21 +378,60 @@ fn lightdash_12942_the_probe_file_copies_its_hosts_module_style_and_test_api() {
     assert!(source.contains("a\\u2028b\\u2029") && !source.contains('\u{2028}') && !source.contains('\u{2029}'), "line separators are escaped, so no parser reads them as the end of a line: {source}");
 }
 
+#[test]
+fn insighta_1137_a_probe_runs_inside_a_copy_of_its_host_test_so_the_hosts_own_mocks_and_setup_load_the_module() {
+    let files = ["src/modules/book.ts", "tests/unit/book.test.js", "tests/unit/book-old.test.js"];
+    let exists = |p: &str| files.contains(&p);
+    let host_text = "jest.mock('../../src/config', () => ({ config: { secret: 'test' } }));\nconst { buildBook } = require('../../src/modules/book');\n\ntest('builds', () => { expect(buildBook('a')).toBeTruthy(); });\n";
+    let unchanged = Candidate { path: "tests/unit/book.test.js".into(), source: host_text.into(), both: true, unchanged: true };
+    let edited = Candidate { path: "tests/unit/book-old.test.js".into(), source: host_text.into(), both: true, unchanged: false };
+    let hosts = probe::hosts(&["src/modules/book.ts"], &[edited, unchanged], &exists);
+    let host = &hosts["src/modules/book.ts"];
+    assert_eq!((host.path.as_str(), host.text.as_deref()), ("tests/unit/book.test.js", Some(host_text)), "a host the change leaves alone is preferred, and only it lends its text: its mocks are the same on both sides");
+    let e = experiment("e1", "src/modules/book.ts", "buildBook", json!(["a"]));
+    let source = probe::hosted_source(host_text, host.style, Runner::Jest, std::slice::from_ref(&host.spec), &[(0, &e)]);
+    assert!(source.starts_with(host_text), "the host's jest.mock and setup come first, exactly as the host has them:\n{source}");
+    assert!(source.ends_with("const __kern_m = require(\"/kern/trace.cjs\");\nconst __kern_target0 = require(\"../../src/modules/book\");\nconst __kern_test = test;\nconst __kern_t = __kern_m.default ?? __kern_m;\n\
+        __kern_test(\"kern probe e1\", async () => { await __kern_t.probe(\"e1\", __kern_target0, \"buildBook\", JSON.parse(\"[\\\"a\\\"]\")); }, 10000);\n"), "Kern's own names cannot clash with the host's:\n{source}");
+    let esm = "import { vi, test, expect } from 'vitest';\nvi.mock('../src/config');\nimport { removeComments } from '../src/sql';\n";
+    let source = probe::hosted_source(esm, Style { esm: true, typescript: true, jest_globals: false }, Runner::Vitest, &["../src/sql".to_string()], &[(0, &e)]);
+    assert!(source.starts_with(&format!("// @ts-nocheck\n{esm}")) && source.contains("\nimport { test as __kern_test } from \"vitest\";\n") && source.contains("import * as __kern_target0 from \"../src/sql\";"), "{source}");
+    let docblock = "/**\n * @jest-environment jsdom\n */\nimport { render } from '../src/render';\n";
+    let source = probe::hosted_source(docblock, Style { esm: true, typescript: true, jest_globals: false }, Runner::Jest, &["../src/render".to_string()], &[(0, &e)]);
+    assert!(source.starts_with("/**\n * @jest-environment jsdom\n */\n// @ts-nocheck\nimport { render } from '../src/render';\n"), "jest reads its environment only from a docblock that opens the file, so Kern's pragma comes after it:\n{source}");
+    let focused = probe::focus(&kern::policy::Tests { paths: vec![], kind: kern::policy::Kind::Feature, runner: Runner::Jest, command: vec!["node_modules/.bin/jest".into()], edits: kern::policy::Edits::Checked },
+        &["tests/unit/book.kern-probe.test.js".to_string()].into_iter().collect(), "").unwrap();
+    assert!(focused.command.ends_with(&["-t".to_string(), "kern probe".to_string()]), "only Kern's tests run, not the host's own: {:?}", focused.command);
+}
+
 fn line(v: Value) -> String { format!("{v}\n") }
 
 #[test]
-fn lightdash_12942_answers_come_from_the_first_probe_record_and_reached_from_the_real_modules_own_record() {
+fn lightdash_12942_each_input_is_answered_once_per_run_by_the_real_function_or_it_is_not_compared() {
     let key = format!("{SQL}#removeComments");
-    let old = [line(json!({ "k": key, "a": "[\"x\"]", "o": "returns \"x\"" })), line(json!({ "p": "e1", "o": KEPT })), line(json!({ "p": "e1", "o": "returns 9" })),
-        "not json\n".to_string(), line(json!({ "p": "e2", "o": "maybe 1" })), line(json!({ "p": "e3", "o": format!("returns {}", "x".repeat(5000)) }))].concat();
-    let new = [line(json!({ "p": "e1", "o": CUT })), line(json!({ "k": "src/other.ts#removeComments", "a": "[]", "o": "returns 1" }))].concat();
+    let old = [line(json!({ "k": key, "a": "[\"x\"]", "o": "returns \"x\"" })), line(json!({ "p": "e1", "s": 1 })), line(json!({ "p": "e1", "o": KEPT, "k": key })), line(json!({ "p": "e1", "o": KEPT, "k": key })),
+        "not json\n".to_string(), line(json!({ "p": "e2", "o": "maybe 1" })), line(json!({ "p": "e3", "o": format!("returns {}", "x".repeat(5000)) })), line(json!({ "p": "e4", "o": HUNG })),
+        line(json!({ "p": "e5", "s": 1, "k": key }))].concat();
+    let new = [line(json!({ "p": "e1", "s": 1 })), line(json!({ "p": "e1", "o": CUT, "k": "src/other.ts#removeComments" })), line(json!({ "p": "e5", "s": 1 })), line(json!({ "p": "e5", "o": CUT, "k": key }))].concat();
     let mut x = tried([None; 4], obligation("verified"));
     probe::recorded(&mut x, &[Some(probe::seen(&old)), None, Some(probe::seen(&new)), None]);
-    assert_eq!(x["answers"], json!({ "old": KEPT, "old_again": null, "new": CUT, "new_again": null }), "the first answer for an input counts; a run that did not happen has none");
-    assert_eq!(x["reached"], json!({ "old": true, "new": false }), "on the new side another file answered, so the call never went through the real module");
+    assert_eq!(x["answers"], json!({ "old": KEPT, "old_again": null, "new": CUT, "new_again": null }), "a run that did not happen has no answer");
+    assert_eq!(x["reached"], json!({ "old": true, "new": false }), "on the new side a mock or another file's function answered, so the call never went through the real function");
+    assert_eq!(x["chance"], json!(false), "two records with the same answer are one answer");
     assert_eq!(probe::verdict(&probe::evidence(&x)), Verdict::Unchecked(Unchecked::Unreached));
     let seen = probe::seen(&old);
-    assert!(!seen.answers.contains_key("e2") && !seen.answers.contains_key("e3"), "an answer Kern's recorder could not have written is ignored: {seen:?}");
+    assert!(!seen.answers.contains_key("e2") && !seen.answers.contains_key("e3") && !seen.answers.contains_key("e4"), "an answer Kern's recorder could not have written is ignored: {seen:?}");
+    let mut hung = tried([None; 4], obligation("verified"));
+    hung["id"] = json!("e5");
+    probe::recorded(&mut hung, &[Some(probe::seen(&old)), None, Some(probe::seen(&new)), None]);
+    assert_eq!(hung["answers"]["old"], HUNG, "an input that started and never answered before the run ended is a hang, not a missing run");
+    assert_eq!(hung["reached"]["new"], json!(true));
+    assert_eq!(probe::verdict(&probe::evidence(&hung)), Verdict::Unchecked(Unchecked::Hung));
+    let twice = [line(json!({ "p": "e1", "o": KEPT, "k": key })), line(json!({ "p": "e1", "o": CUT, "k": key }))].concat();
+    let mut x = tried([None; 4], obligation("verified"));
+    probe::recorded(&mut x, &[Some(probe::seen(&twice)), None, Some(probe::seen(&new.replace("src/other.ts", SQL))), None]);
+    assert_eq!(x["chance"], json!(true), "two test projects ran the same probe and answered differently, so which one Kern read first is luck");
+    assert_eq!(probe::verdict(&probe::evidence(&x)), Verdict::Unchecked(Unchecked::Chance));
 }
 
 fn stored(dir: &Path, probes: Value) {
@@ -373,13 +447,17 @@ fn stored(dir: &Path, probes: Value) {
 fn lightdash_12942_the_replay_judges_stored_probe_traces_with_the_same_code() {
     let t = Temp::new();
     let key = format!("{SQL}#removeComments");
-    stored(&t.0, ran(vec![tried([Some(KEPT), Some(KEPT), Some(KEPT), Some(KEPT)], obligation("verified"))], json!([])));
-    for (side, answer) in [("old", KEPT), ("old-again", KEPT), ("new", CUT), ("new-again", CUT)] {
-        std::fs::write(t.0.join(format!("probe-{side}.jsonl")), [line(json!({ "k": key, "a": "[]", "o": answer })), line(json!({ "p": "e1", "o": answer }))].concat()).unwrap();
+    let mut returns = obligation("verified");
+    returns["check"] = json!("returns");
+    stored(&t.0, ran(vec![tried([Some(KEPT), Some(KEPT), Some(KEPT), Some(KEPT)], returns)], json!([])));
+    for (side, answer) in [("old", KEPT), ("old-again", KEPT), ("new", "throws TypeError: unterminated quote"), ("new-again", "throws TypeError: unterminated quote")] {
+        let mut record = json!({ "p": "e1", "o": answer, "k": key });
+        if let Some(v) = answer.strip_prefix("returns ") { record["v"] = json!(serde_json::from_str::<Value>(v).unwrap().to_string()); }
+        std::fs::write(t.0.join(format!("probe-{side}.jsonl")), [line(json!({ "p": "e1", "s": 1, "k": key })), line(record)].concat()).unwrap();
     }
     let r = kern::replay::rejudge(&t.0).unwrap();
     assert_eq!(r["receipt"]["decision"], "blocked", "the stored receipt said the answers were the same, but its own traces show the break: {r}");
-    assert_eq!(r["receipt"]["tests"]["probes"]["experiments"][0]["answers"]["new"], CUT);
+    assert_eq!(r["receipt"]["tests"]["probes"]["experiments"][0]["answers"]["new"], "throws TypeError: unterminated quote");
     let setup = json!({ "old": { "installs": [{ "dir": ".", "result": "installed" }] }, "new": { "installs": [{ "dir": ".", "result": "installed from package.json (the lockfile is out of date)" }] } });
     std::fs::write(t.0.join("setup.json"), setup.to_string()).unwrap();
     let r = kern::replay::rejudge(&t.0).unwrap();
@@ -394,12 +472,12 @@ fn lightdash_12942_the_probe_phase_reads_back_each_suite_kern_ran_with_its_own_c
     let tests = |runner: Runner, command: &[&str]| Tests { paths: Vec::new(), kind: Kind::Feature, runner, command: command.iter().map(|c| c.to_string()).collect(), edits: Edits::Checked };
     let env: kern::suite::Env = [("TZ_OFFSET".to_string(), "0".to_string())].into_iter().collect();
     let suites = [kern::suite::Suite { dir: "packages/backend".into(), old: Some((tests(Runner::Jest, &["/workspace/node_modules/.bin/jest", "--config", "jest.config.js"]), env.clone())),
-            new: (tests(Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run"]), kern::suite::Env::new()) },
-        kern::suite::Suite { dir: String::new(), old: None, new: (tests(Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run"]), env) }];
+            new: (tests(Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run"]), kern::suite::Env::new()), uneven: Some("packages/shared build worked on one side only".into()) },
+        kern::suite::Suite { dir: String::new(), old: None, new: (tests(Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run"]), env), uneven: None }];
     std::fs::write(t.0.join("suites.json"), json!(suites.iter().map(kern::suite::Suite::json).collect::<Vec<_>>()).to_string()).unwrap();
     let back = kern::suite::ran_suites(&t.0).unwrap();
     assert_eq!(back.len(), 2);
-    for (a, b) in suites.iter().zip(&back) { assert!(a.dir == b.dir && a.old == b.old && a.new == b.new, "{:?} came back as {:?}", a.json(), b.json()); }
+    for (a, b) in suites.iter().zip(&back) { assert!(a.dir == b.dir && a.old == b.old && a.new == b.new && a.uneven == b.uneven, "{:?} came back as {:?}", a.json(), b.json()); }
     assert_eq!(kern::suite::label("packages/backend"), "-packages_backend");
     std::fs::write(t.0.join("suites.json"), "[{\"dir\": \"\", \"new\": {\"runner\": \"ava\", \"command\": [], \"env\": {}}}]").unwrap();
     assert!(kern::suite::ran_suites(&t.0).is_none(), "a record Kern cannot read whole is not read in part");
@@ -495,11 +573,13 @@ fn lightdash_12942_kern_plans_one_probe_file_beside_a_test_that_loads_the_target
     let (plans, not_run) = probe::plan(&out, &r, (&base, &head), &i, &suites);
     assert_eq!(plans.len(), 1);
     let p = &plans[0];
-    let name = "test/sql.kern-probe.test.js";
+    let name = "test/kern-probe.sql.test.js";
     for side in 0..2 {
         let source = p.files[side][name].as_str().unwrap();
-        assert!(source.starts_with("import { test } from \"vitest\";\n") && source.contains("import * as target0 from \"../src/sql.js\";"), "{source}");
-        assert!(source.contains("t.probe(\"e1\", target0, \"removeComments\"") && source.contains("t.probe(\"e2\", target0, \"removeComments\"") && !source.contains("\"e3\""), "{source}");
+        assert!(source.starts_with("import { test, expect } from 'vitest';\nimport { removeComments } from '../src/sql.js';\n") && source.contains("import * as __kern_target0 from \"../src/sql.js\";"),
+            "the host test is the same on both sides, so the probe runs inside a copy of it: {source}");
+        assert!(source.contains("__kern_t.probe(\"e1\", __kern_target0, \"removeComments\"") && source.contains("__kern_t.probe(\"e2\", __kern_target0, \"removeComments\"") && !source.contains("\"e3\""), "{source}");
+        assert!(p.sides[side].0.command.ends_with(&["-t".to_string(), "kern probe".to_string()]), "only Kern's tests run: {:?}", p.sides[side].0.command);
         assert!(p.serve[side]["src/sql.js"].as_str().unwrap().contains("__kern_trace.fn(\"src/sql.js\", \"removeComments\", removeComments)"), "the real module is served, watched");
     }
     assert!(p.serve[0]["src/sql.js"].as_str().unwrap().contains("split('$$')") && !p.serve[1]["src/sql.js"].as_str().unwrap().contains("split('$$')"), "each side serves its own code");
@@ -538,7 +618,8 @@ fn lightdash_12942_the_probe_runtime_records_one_answer_per_input_and_never_thro
     let Ok(ran) = Command::new("node").args(["-e", &script]).env("KERN_TRACE", &trace).output() else { eprintln!("node is not installed here; the runtime is checked where it is"); return };
     assert!(ran.status.success(), "probe never throws: {} {}", ran.status, String::from_utf8_lossy(&ran.stderr));
     let seen = probe::seen(&std::fs::read_to_string(&trace).unwrap());
-    let answer = |id: &str| seen.answers.get(id).cloned().unwrap_or_default();
+    let answer = |id: &str| seen.answers.get(id).and_then(|a| a.first()).cloned().unwrap_or_default();
+    assert!((1..=11).all(|n| seen.started.contains(&format!("e{n}"))), "every input marks its start before the call, so a hang leaves a trace: {seen:?}");
     assert_eq!(answer("e1"), "returns \"a\"");
     assert_eq!(answer("e2"), "resolves 42", "a promise is awaited");
     assert_eq!(answer("e3"), "throws TypeError: no");

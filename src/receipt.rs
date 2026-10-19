@@ -441,6 +441,9 @@ fn probe_missing(x: &Value, m: crate::probe::Missing) -> String {
     if m.authorized { why.push(format!("the pull request says it changes this: {}", code(o["authorized_by"].as_str().unwrap_or(""), 200))); }
     if m.shape { why.push("neither the old code's tests and callers nor its declared parameter types pass inputs of this shape".to_string()); }
     if m.rerun { why.push("Kern could not run it a second time on each side to confirm".to_string()); }
+    if m.values { why.push("Kern could not read both answers as plain data, so it compared only how they print".to_string()); }
+    if m.retested { why.push(format!("the change also adds or edits a test that calls {}, which may state the new behaviour", code(x["export"].as_str().unwrap_or(""), 160))); }
+    if m.scope { why.push("a requirement that the answer must not change covers the inputs its source names, and nothing Kern can check says this input is one of them".to_string()); }
     why.join(", and ")
 }
 type ProbeGroup<'a> = (String, crate::probe::Verdict, Vec<&'a Value>);
@@ -499,7 +502,8 @@ fn probe_summary(p: &Value) -> String {
         else if p["not_run"].as_array().is_none_or(Vec::is_empty) { format!("- ✅ Probes: {same}\n") }
         else { format!("- ⏭️ Probes: {same}, but Kern could not try them all (see below)\n") };
     let reasons = [(Unchecked::Unreached, "never reached the real function (the run gave no record, the test file did not load, or a mock or another file answered)"), (Unchecked::Unanswered, "gave no answer on one side"),
-        (Unchecked::Sandbox, "needed something the sandbox does not have"), (Unchecked::Chance, "answered differently between two runs of the same code, so Kern sets them aside")];
+        (Unchecked::Sandbox, "needed something the sandbox does not have (the network, a service or a program)"), (Unchecked::Chance, "answered differently between two runs of the same code, so Kern sets them aside"),
+        (Unchecked::Hung, "gave no answer before the run ended")];
     let said: Vec<String> = reasons.iter().filter_map(|(k, what)| { let n = unchecked.iter().filter(|u| *u == k).count(); (n > 0).then(|| format!("{n} {what}")) }).collect();
     if !said.is_empty() { md += &format!("- ⏭️ Probes: {} of {inputs} not compared — {}\n", unchecked.len(), said.join("; ")); }
     md

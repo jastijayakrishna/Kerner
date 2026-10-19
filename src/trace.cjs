@@ -7,6 +7,7 @@ const BYTES_MAX = 8 << 20;
 const SHOWN_CHARS_MAX = 240;
 const VALUE_CHARS_MAX = 65536;
 const STOP = Symbol('stop');
+const KEY = Symbol.for('kern.trace.key');
 const state = { counts: new Map(), bytes: 0 };
 
 function text(e) {
@@ -93,10 +94,12 @@ function wrap(file, name, f) {
   if (typeof f !== 'function' || !FILE) return f;
   const key = file + '#' + name;
   try {
-    return new Proxy(f, {
+    const watched = new Proxy(f, {
       apply(target, self, args) { return call(key, () => Reflect.apply(target, self, args), args); },
       construct(target, args, newTarget) { return call(key, () => Reflect.construct(target, args, newTarget), args); },
     });
+    try { Object.defineProperty(f, KEY, { value: key }); } catch {}
+    return watched;
   } catch { return f; }
 }
 function methods(file, name, C) {
@@ -139,15 +142,20 @@ function revive(value) {
   return out;
 }
 async function probe(id, mod, name, args) {
-  let o, v;
+  let o, v, k, f;
+  const self = name === 'default' ? undefined : mod;
+  try { f = name === 'default' ? (typeof mod === 'function' ? mod : mod.default) : mod[name]; } catch {}
+  try { k = typeof f === 'function' ? f[KEY] : undefined; } catch {}
+  try { record(typeof k === 'string' ? { p: String(id), s: 1, k } : { p: String(id), s: 1 }); } catch {}
   try {
-    const self = name === 'default' ? undefined : mod;
-    const f = name === 'default' ? (typeof mod === 'function' ? mod : mod.default) : mod[name];
     const result = Reflect.apply(f, self, revive(args));
     if (Object.prototype.toString.call(result) === '[object Promise]') {
       try { const value = await result; o = 'resolves ' + shown(value); v = json(value); } catch (e) { o = 'rejects ' + text(e); }
     } else { o = 'returns ' + shown(result); v = json(result); }
   } catch (e) { o = 'throws ' + text(e); }
-  try { record(v === undefined ? { p: String(id), o } : { p: String(id), o, v }); } catch {}
+  const entry = { p: String(id), o };
+  if (v !== undefined) entry.v = v;
+  if (typeof k === 'string') entry.k = k;
+  try { record(entry); } catch {}
 }
 module.exports = { fn: wrap, value: wrap, class: methods, exports: exported, probe };

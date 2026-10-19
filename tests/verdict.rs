@@ -80,17 +80,21 @@ fn condo_6842_a_test_file_the_machine_killed_on_the_old_code_is_kerns_limit_not_
 
 #[test]
 fn condo_6842_test_workers_and_their_heaps_fit_the_sandboxs_memory() {
-    use kern::policy::Runner;
-    let jest: Vec<String> = ["/workspace/node_modules/.bin/jest", "--ci"].map(String::from).to_vec();
-    assert_eq!(suite::worker_flags(Runner::Jest, &jest, 12288), ["--maxWorkers=3"], "a 12 GB box runs 3 workers");
-    assert_eq!(suite::worker_flags(Runner::Vitest, &jest, 4096), ["--maxWorkers=1"], "a 4 GB box runs one");
-    assert_eq!(suite::worker_flags(Runner::Mocha, &jest, 12288), Vec::<String>::new(), "mocha and node run one process");
-    for own in ["--runInBand", "-i", "--maxWorkers=7", "-w=2", "--no-file-parallelism", "--pool=forks", "--poolOptions.threads.maxThreads=2"] {
-        let c: Vec<String> = [jest[0].as_str(), own].map(String::from).to_vec();
-        assert_eq!(suite::worker_flags(Runner::Jest, &c, 12288), Vec::<String>::new(), "the project's own choice stands: {own}");
-    }
-    assert_eq!(suite::worker_heap_mb(12288, 3), 3072, "3 workers and the parent share 12 GB");
-    assert_eq!(suite::worker_heap_mb(4096, 1), 2048);
+    use kern::sandbox::{box_cpus, cpu_list};
+    assert_eq!(box_cpus(12288, 16), 4, "a 12 GB box shows 4 CPUs, so jest and vitest start 3 workers by their own rule");
+    assert_eq!(box_cpus(4096, 16), 2, "a 4 GB box shows 2 CPUs: one worker");
+    assert_eq!(box_cpus(12288, 2), 2, "never more CPUs than the machine has");
+    assert_eq!(box_cpus(12288, 0), 1);
+    assert_eq!(suite::worker_heap_mb(12288, 4), 3072, "3 workers and the parent share 12 GB");
+    assert_eq!(suite::worker_heap_mb(4096, 2), 2048);
+    assert_eq!(cpu_list("0-3,8-11", 4).as_deref(), Some("0,1,2,3"), "the first CPUs this process may use");
+    assert_eq!(cpu_list("2,5-6\n", 3).as_deref(), Some("2,5,6"));
+    assert_eq!(cpu_list("0-1", 4), None, "fewer CPUs than wanted: no set, and the runners see what the machine shows");
+    assert_eq!(cpu_list("3-1", 1), None);
+    assert_eq!(cpu_list("", 1), None);
+    let command = kern::suite::test_command(&kern::policy::Tests { paths: vec![], kind: kern::policy::Kind::Feature, runner: kern::policy::Runner::Vitest,
+        command: vec!["/workspace/node_modules/.bin/vitest".into(), "run".into()], edits: kern::policy::Edits::Checked });
+    assert!(!command.iter().any(|a| a.contains("Workers")), "Kern adds no worker flag: vitest 2 refuses --maxWorkers below its default minimum and then finds no tests ({command:?})");
 }
 
 #[test]
