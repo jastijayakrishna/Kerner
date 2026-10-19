@@ -27,7 +27,7 @@ fn audience_binds_a_token_to_one_seal() {
     assert_eq!(a, "kern-receipt:84eb1a5ec7e3c7852cf993a24e5526aea2c4dc7d7496933f74e3a0cfb7b407d4", "stable: the fixture tokens were made for it");
     assert_eq!(a, oidc::audience(&json!({ "head": "abc", "v": 1 })).unwrap(), "the same seal written in another order");
     assert_ne!(a, oidc::audience(&json!({ "v": 1, "head": "abd" })).unwrap());
-    denied(oidc::audience(&json!({ "v": 1.5 })), "integers");
+    assert_eq!(oidc::audience(&json!({ "v": 1.5 })).unwrap(), format!("kern-receipt:{}", sha256(r#"{"v":1.5}"#)), "a decimal in the seal is hashed as written, so a probe input such as formatPrice(19.99) never stops the receipt from being signed");
 }
 
 #[test]

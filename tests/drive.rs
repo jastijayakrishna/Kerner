@@ -258,6 +258,18 @@ fn a_bun_package_json_names_only_what_npm_can_install() {
 }
 
 #[test]
+fn elizaos_eliza_10947_a_bun_project_whose_overrides_pin_other_versions_than_its_dependencies_installs_with_npm_as_bun_installs_it() {
+    let root = r#"{ "name": "eliza", "packageManager": "bun@1.4.0-canary.1", "workspaces": ["packages/*"],
+        "dependencies": { "vitest": "^4.0.17", "@elizaos/core": "workspace:*" }, "devDependencies": { "@types/react": "^19.2.3", "@biomejs/biome": "2.5.2" },
+        "overrides": { "vitest": "4.1.5", "@types/react": "19.2.14", "@biomejs/biome": "2.5.1", "@elizaos/core": "workspace:*", "nested": { "left-pad": "1.3.0" } } }"#;
+    let out: Value = serde_json::from_str(&kern::sandbox::bun_for_npm(root, root).expect("rewritten")).unwrap();
+    assert_eq!(out["dependencies"], serde_json::json!({ "vitest": "4.1.5", "@elizaos/core": "*" }), "npm refuses (EOVERRIDE) a direct dependency whose override names another version; Bun installs the override, so npm is asked for the same: {out}");
+    assert_eq!(out["devDependencies"], serde_json::json!({ "@types/react": "19.2.14", "@biomejs/biome": "2.5.1" }));
+    assert_eq!(out["overrides"], serde_json::json!({ "vitest": "4.1.5", "@types/react": "19.2.14", "@biomejs/biome": "2.5.1", "@elizaos/core": "*", "nested": { "left-pad": "1.3.0" } }), "a workspace: override becomes one npm reads; a nested override is left as it is");
+    assert!(!out.as_object().unwrap().contains_key("optionalDependencies"), "no field is added to the manifest");
+}
+
+#[test]
 fn a_change_to_many_files_fits_any_command_line() {
     let (t, base, _) = project();
     let r = t.join("repo");

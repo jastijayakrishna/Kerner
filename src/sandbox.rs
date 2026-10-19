@@ -456,7 +456,7 @@ pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
     let mut changed = false;
     if pkg["workspaces"].is_object() { pkg["workspaces"] = pkg["workspaces"]["packages"].take(); changed = true; }
     for field in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
-        for (name, version) in pkg[field].as_object_mut().into_iter().flatten() {
+        for (name, version) in pkg.get_mut(field).and_then(Value::as_object_mut).into_iter().flatten() {
             let new = match version.as_str() {
                 Some(v) if v.starts_with("workspace:") => "*".to_string(),
                 Some(v) if v.starts_with("catalog:") => catalog(v["catalog:".len()..].trim(), name).unwrap_or_else(|| "*".into()),
@@ -464,6 +464,17 @@ pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
             };
             *version = Value::String(new);
             changed = true;
+        }
+    }
+    for (name, pin) in pkg["overrides"].clone().as_object().into_iter().flatten() {
+        let want = match pin.as_str() {
+            Some(v) if v.starts_with("workspace:") => "*".to_string(),
+            Some(v) if v.starts_with("catalog:") => catalog(v["catalog:".len()..].trim(), name).unwrap_or_else(|| "*".into()),
+            Some(v) => v.to_string(),
+            None => continue,
+        };
+        for field in ["overrides", "dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
+            if let Some(spec) = pkg.get_mut(field).and_then(|f| f.get_mut(name)).filter(|s| s.is_string() && **s != Value::String(want.clone())) { *spec = Value::String(want.clone()); changed = true; }
         }
     }
     changed.then(|| serde_json::to_string_pretty(&pkg).unwrap_or_default())
@@ -1297,8 +1308,12 @@ mod inside {
             }
         }
         quiesce()?;
+        let over = |path: &str, max: u64| std::fs::metadata(path).is_ok_and(|m| m.len() > max);
         let report = some_of("/tmp/.kern-report.json", 64 << 20, false);
-        part("output", &if report.iter().any(|b| !b.is_ascii_whitespace()) { report } else { some_of("/tmp/.kern-test-out", 32 << 20, true) })?;
+        let reported = report.iter().any(|b| !b.is_ascii_whitespace());
+        if over("/tmp/.kern-report.json", 64 << 20) { ending = "cut: the test report was larger than Kern's limit of 64 MiB".to_string(); }
+        else if !reported && over("/tmp/.kern-test-out", OUT_TAIL_BYTES_MAX as u64) { ending = "cut: the tests printed more than Kern's limit of 32 MiB, so their results could not be read".to_string(); }
+        part("output", &if reported { report } else { some_of("/tmp/.kern-test-out", 32 << 20, true) })?;
         part("errors", &some_of("/tmp/.kern-test-err", 64 << 10, true))?;
         part("behavior", &some_of("/tmp/.kern-behavior", 4 << 20, false))?;
         let mut created = Vec::new();

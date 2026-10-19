@@ -131,11 +131,13 @@ What Kern checks on every pull request:
    limit of 23 faults in 20 files per check). When no test that runs here even loads a changed file (its related tests cannot load, or
    there are none), that file is not verified, said plainly. A small fault that only puts back the old line, logging calls, and a run Kern
    could not finish are not counted, and when a related test file fails as a whole, a fault it alone might have loaded is not checked
-   rather than missed. Then Kern watches what the changed code gives the tests this change does not touch: it rewrites each changed file so
-   that its exported functions note every input and answer, runs those tests (up to 40 files) on the old code twice and on the new code
+   rather than missed. Then Kern watches what the changed code gives the tests this change does not touch: it maps the code (every product
+   file, its exported functions and the imports between them, through barrels, path aliases and Vue script blocks), finds the files the
+   change reaches, nearest first (up to 40), and rewrites the changed files and those neighbours so that their exported functions note
+   every input and answer; it runs those tests (up to 40 files) on the old code twice and on the new code
    once, sets aside any input whose answer differs between the two old runs, and lists each input whose answer changed on the new code as a
    note, with both answers. These notes do not change the answer yet; Kern measures what they predict on real pull requests first. They
-   come after the planted faults, and when time runs short they are dropped first.
+   come after the planted faults, or after one control run alone when there is no time to plant faults, and when time runs short for both they are dropped first.
 3. **TypeScript errors.** For each TypeScript project the change touches, Kern runs the project's own `tsc` on the old and the new
    code, in the sandbox. It compares them only when the old code type-checks with no error at all there, so a missing generated file
    cannot make anything look new. New errors block when the project's own scripts run `tsc` (and the project has a lockfile, so both

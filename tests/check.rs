@@ -847,6 +847,32 @@ fn verify_reads_kern_s_receipt_and_checks_its_signature() {
 }
 
 #[test]
+fn a_changed_code_file_kern_could_not_read_earns_no_check_mark_for_powers_or_test_tricks() {
+    let mut rules = clean_rules();
+    rules["changed"] = json!([{ "path": "src/net.js", "operation": "modify" }]);
+    rules["not_checked"] = json!([{ "path": "src/net.js", "why": "Changed code cannot be parsed for capability analysis" }]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!(kinds(&r, "unverified"), vec!["not-checked-code"], "{r}");
+    let md = receipt::markdown(&r, None);
+    assert!(!md.contains("✅ No new powers"), "Kern never read src/net.js, so it cannot say no power was added:\n{md}");
+    assert!(!md.contains("✅ No skipped, focused or removed tests"), "nor that no test trick hides in code it could not read:\n{md}");
+}
+
+#[test]
+fn a_receipt_whose_probe_input_is_a_decimal_number_still_seals() {
+    let mut t = clean_tests();
+    t["probes"] = json!({ "status": "RAN", "why": "", "experiments": [{ "id": "e1", "path": "src/price.ts", "export": "formatPrice", "args": [19.99, { "rate": 0.5 }], "why": "a price with cents",
+        "obligation": null, "shapes": [["number"]], "host": "src/price.test.ts", "reached": { "old": true, "new": true },
+        "answers": { "old": "returns \"19.99\"", "old_again": "returns \"19.99\"", "new": "returns \"19.99\"", "new_again": "returns \"19.99\"" }, "uneven": null }], "not_run": [] });
+    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    assert_eq!(r["tests"]["probes"]["experiments"][0]["args"][0], 19.99, "the receipt keeps the input as the AI gave it");
+    let md = receipt::markdown(&r, None);
+    let seal = receipt::seal(&r, &md, "acme/shop", 7).unwrap();
+    assert_eq!(seal["receipt_sha256"], digest(&r).unwrap());
+    assert_eq!(digest(&r).unwrap(), digest(&serde_json::from_str::<Value>(&r.to_string()).unwrap()).unwrap(), "the digest is the same after the receipt is written and read back");
+}
+
+#[test]
 fn sign_asks_github_for_a_token_over_the_receipt_s_seal() {
     let dir = receipt_dir(clean_tests());
     let (url, seen) = stub_github(|m, p| if m == "GET" && p.starts_with("/token") { (200, r#"{"value":"signed-by-github"}"#.into()) } else { (404, "{}".into()) });

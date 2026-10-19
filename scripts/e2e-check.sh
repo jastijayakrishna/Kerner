@@ -654,6 +654,13 @@ for runner in vitest jest; do
     printf '%s\n' 'const { label } = require("../src/label.js");' '' > test/label.test.js
   fi
   printf '%s\n' 'test("labels one item", () => expect(label(1)).toBe("1 item"));' 'test("labels many", () => expect(label(3).length).toBeGreaterThan(0));' >> test/label.test.js
+  if [ "$runner" = vitest ]; then
+    printf '%s\n' 'import { label } from "./label.js";' 'export const summary = (n) => "Total: " + label(n);' > src/report.js
+    printf '%s\n' 'import { test, expect } from "vitest";' 'import { summary } from "../src/report.js";' 'test("summarises", () => expect(summary(2).length).toBeGreaterThan(0));' > test/report.test.js
+  else
+    printf '%s\n' 'const { label } = require("./label.js");' 'exports.summary = (n) => "Total: " + label(n);' > src/report.js
+    printf '%s\n' 'const { summary } = require("../src/report.js");' 'test("summarises", () => expect(summary(2).length).toBeGreaterThan(0));' > test/report.test.js
+  fi
   def label '(n) => (n === 1 ? "1 item" : n + " items")' > src/label.js
   git add -A && git commit -qm base && watch_base=$(git rev-parse HEAD)
   git checkout -q -b things
@@ -663,10 +670,11 @@ for runner in vitest jest; do
   cd "$W"
   check "watch-$runner" "$watch_base" "watch-$runner-repo"
   decision "watch-$runner" clear
-  jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 1 and .tests.bystanders.differences[0].input == "[3]"
+  jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 2 and .tests.bystanders.differences[0].input == "[3]"
     and (.tests.bystanders.differences[0].now | contains("3 things")) and ([.notes[].kind] | index("bystander") != null)
+    and ([.tests.bystanders.differences[] | select(.key == "src/report.js#summary") | .now] | any(contains("2 things")))
     and ([.challenges[] | "\(.target) \(.kind)"] == ["label unasserted"]) and (.challenges[0].example | contains("label(3)"))' "watch-$runner/receipt.json" > /dev/null \
-    || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named"; }
+    || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named, or the house did not watch src/report.js, which the change reaches"; }
   grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
 done
 

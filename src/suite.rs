@@ -884,7 +884,15 @@ pub fn without_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -
     let said = no_results(why, ending, errors, output);
     if sandbox_error(&String::from_utf8_lossy(errors)) || sandbox_error(&String::from_utf8_lossy(output)) { Side::Cut(said) } else { Side::Nothing(said) }
 }
-pub fn unreadable(refusal: Option<String>, error: String) -> Side { refusal.map_or(Side::Cut(error), |r| Side::Nothing(format!("Kern could not run the tests in the sandbox: {r}"))) }
+const CHANGE_REFUSALS: [&str; 1] = ["The test runner is not installed in the project"];
+pub fn unreadable(refusal: Option<String>, error: String) -> Side {
+    match refusal {
+        Some(r) if CHANGE_REFUSALS.iter().any(|c| r.contains(c)) => Side::Nothing(format!("Kern could not run the tests in the sandbox: {r}")),
+        Some(r) => Side::Cut(format!("Kern's own sandbox entry stopped before it could read the tests' results: {r}")),
+        None => Side::Cut(error),
+    }
+}
+pub fn capped(ending: &str) -> Option<String> { ending.strip_prefix("cut: ").map(str::to_string) }
 pub fn broke_run(first: &Side, again: &Side, uneven: bool) -> bool { matches!((first, again), (Side::Nothing(_), Side::Nothing(_))) && !uneven }
 
 fn run_side(out: &Path, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
@@ -926,6 +934,7 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     std::fs::write(out.join(format!("tests-{label}.out")), &parts["output"])?;
     std::fs::write(out.join(format!("tests-{label}.err")), &parts["errors"])?;
     if !parts["values"].is_empty() { std::fs::write(out.join(format!("tests-{label}.values")), &parts["values"])?; }
+    if let Some(why) = capped(&String::from_utf8_lossy(&parts["ending"])) { return Ok(Side::Cut(why)); }
     if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", limit / 60)) }); }
     if let Some(why) = stopped_why(&String::from_utf8_lossy(&parts["ending"]), limit) { return Ok(if cut { Side::Late } else { Side::Slow(why) }); }
     if parts["ending"] == b"exit -1" { return Ok(Side::Cut("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
@@ -1130,28 +1139,33 @@ const NO_FAULT_RELATED: &str = "Kern could not pick the tests related to this fi
 const NO_FAULT_CHANGE: &str = "Kern found nothing in its change to put a fault in (only comments, formatting, logging or TypeScript types changed, or no line it knows how to change)";
 const NO_FAULT_RESULTS: &str = "Kern's fault run gave no results";
 const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run under jest or vitest";
-#[allow(clippy::too_many_arguments)]
 type FaultRun = (Vec<Value>, Vec<Value>, BTreeSet<String>);
-fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, seconds: u64) -> FaultRun {
+pub const CONTROL_SECS_MAX: u64 = 240;
+pub fn after_tests(left_secs: u64) -> (bool, bool) {
+    let plant = faults_fit(left_secs);
+    let spent = if plant { fault_seconds(left_secs) } else { CONTROL_SECS_MAX };
+    (plant, bystanders_fit(left_secs.saturating_sub(spent)))
+}
+fn planted_faults(out: &Path, volume: &str, suite: &Suite, new: &Report, files: &[(String, String, String)], label: &str, (seconds, plant): (u64, bool)) -> FaultRun {
     let (tests, dir) = (&suite.new.0, suite.dir.as_str());
     let command = |paths: BTreeSet<String>| related(tests, &paths, dir).map(|t| test_command(&t).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS[1..].contains(&a.as_str())).collect::<Vec<String>>());
     let limit = crate::sandbox::FAULTS_COUNT_MAX - 1;
-    let planted = faults(files, limit);
+    let planted = if plant { faults(files, limit) } else { Vec::new() };
     let kept: Vec<(&crate::proof::Mutant, Vec<String>)> = planted.iter().filter_map(|m| Some((m, command([m.path.clone()].into())?))).collect();
-    let mut missing: Vec<Value> = files.iter().filter(|(p, _, _)| !kept.iter().any(|(m, _)| m.path == *p)).map(|f| {
+    let mut missing: Vec<Value> = files.iter().filter(|(p, _, _)| plant && !kept.iter().any(|(m, _)| m.path == *p)).map(|f| {
         let why = if planted.iter().any(|m| m.path == f.0) { NO_FAULT_RELATED.to_string() }
             else if !faults(std::slice::from_ref(f), limit).is_empty() { format!("Kern puts at most {limit} faults in one check, and the other changed files took them") }
             else { NO_FAULT_CHANGE.to_string() };
         json!({ "path": f.0, "why": why })
     }).collect();
-    let Some(first) = kept.first() else { return (Vec::new(), missing, BTreeSet::new()) };
-    let paths: BTreeSet<String> = kept.iter().map(|(m, _)| m.path.clone()).collect();
-    let control = command(paths.clone()).unwrap_or_else(|| first.1.clone());
-    let placebo = json!({ "path": first.0.path, "start": 0, "end": 0, "original": "", "replacement": "", "command": control });
+    let paths: BTreeSet<String> = if kept.is_empty() { files.iter().map(|(p, _, _)| p.clone()).collect() } else { kept.iter().map(|(m, _)| m.path.clone()).collect() };
+    let Some(control) = command(paths.clone()).or_else(|| kept.first().map(|(_, c)| c.clone())) else { return (Vec::new(), missing, BTreeSet::new()) };
+    let Some(first) = paths.iter().next() else { return (Vec::new(), missing, BTreeSet::new()) };
+    let placebo = json!({ "path": first, "start": 0, "end": 0, "original": "", "replacement": "", "command": control });
     let specs: Vec<Value> = std::iter::once(placebo).chain(kept.iter().map(|(m, c)| json!({ "path": m.path, "start": m.start, "end": m.end, "original": m.original, "replacement": m.replacement, "command": c }))).collect();
     let results = run_faults(out, volume, (tests, &suite.new.1), dir, specs, seconds);
     let Some((placebo, runs)) = results.split_first().filter(|(_, runs)| runs.len() == kept.len()) else {
-        missing.extend(paths.iter().map(|p| json!({ "path": p, "why": NO_FAULT_RESULTS })));
+        if plant { missing.extend(paths.iter().map(|p| json!({ "path": p, "why": NO_FAULT_RESULTS }))); }
         return (Vec::new(), missing, BTreeSet::new());
     };
     let _ = std::fs::write(out.join(format!("faults{label}.json")), serde_json::to_vec(&json!({ "placebo": placebo, "faults": runs })).unwrap_or_default());
@@ -1375,6 +1389,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().is_some_and(follows_script);
     let head_paths: Option<Vec<String>> = crate::drive::listing(repo, head).ok().map(|items| items.into_iter().map(|i| i.path).collect());
     let testless_here = |dir: &str| followed(dir) && head_paths.as_ref().is_some_and(|p| !repo_has_tests(p, dir));
+    let mut house_once: Option<Option<crate::house::House>> = None;
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
@@ -1614,15 +1629,20 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
             let product: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p)).map(|(p, _)| p).collect();
             let files: Vec<(String, String, String)> = product.iter().take(FAULT_FILES_COUNT_MAX).filter_map(|p| Some((p.to_string(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
+            let house = house_once.get_or_insert_with(|| if files.is_empty() { None } else { crate::house::build(repo, head).ok() });
+            let neighbours: Vec<(String, String, String)> = house.as_ref().map(|h| crate::house::neighbours(h, &files.iter().map(|f| f.0.clone()).collect::<Vec<_>>(), crate::house::NEIGHBOURS_COUNT_MAX)).unwrap_or_default()
+                .into_iter().filter_map(|(p, _)| { let s = shown(head, &p)?; Some((p, s.clone(), s)) }).collect();
             let mut missing: Vec<Value> = product.iter().skip(FAULT_FILES_COUNT_MAX).map(|p| json!({ "path": p, "why": format!("Kern puts faults in at most {FAULT_FILES_COUNT_MAX} changed files per check") })).collect();
             let mut found = Vec::new();
             let left = within(until, FAULTS_SECS_MAX + TYPES_SECS_RESERVE);
+            let (plant, watch) = after_tests(left);
             if files.is_empty() {}
             else if !matches!(runner, Runner::Jest | Runner::Vitest) { missing.extend(files.iter().map(|(p, _, _)| json!({ "path": p, "why": NO_FAULT_RUNNER }))); }
-            else if !faults_fit(left) { dropped.insert("planted faults"); }
+            else if !plant && !watch { dropped.insert("planted faults"); dropped.insert("untouched tests"); }
             else {
+                if !plant { dropped.insert("planted faults"); }
                 let at = now_ms();
-                let (planted, lacking, related) = planted_faults(out, &volume("new"), suite, &new, &files, &label, fault_seconds(left));
+                let (planted, lacking, related) = planted_faults(out, &volume("new"), suite, &new, &files, &label, (if plant { fault_seconds(left) } else { CONTROL_SECS_MAX.min(left.saturating_sub(TYPES_SECS_RESERVE)) }, plant));
                 timed(format!("faults{label}"), at);
                 found = planted;
                 missing.extend(lacking);
@@ -1631,7 +1651,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 if !related.is_empty() && bystanders_fit(left) {
                     let at = now_ms();
                     let touched: BTreeSet<String> = changes.iter().filter(|(p, _)| is_test_path(p)).map(|(p, _)| p.clone()).collect();
-                    let seen = bystanders(out, (&volume("old"), &volume("new")), suite, &files, &related, &touched, &label, left.saturating_sub(TYPES_SECS_RESERVE));
+                    let seen = bystanders(out, (&volume("old"), &volume("new")), suite, &[files.clone(), neighbours.clone()].concat(), &related, &touched, &label, left.saturating_sub(TYPES_SECS_RESERVE));
                     timed(format!("trace{label}"), at);
                     merged["bystanders"] = crate::trace::merged(&merged["bystanders"], &seen);
                 }

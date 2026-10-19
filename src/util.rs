@@ -37,18 +37,7 @@ pub fn sha256(bytes: impl AsRef<[u8]>) -> String { hex::encode(Sha256::digest(by
 pub fn is_hex64(s: &str) -> bool { s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) }
 pub fn is_oid(s: &str) -> bool { s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) }
 
-fn integral(v: &Value) -> bool {
-    match v {
-        Value::Number(n) => n.is_i64() || n.is_u64(),
-        Value::Array(a) => a.iter().all(integral),
-        Value::Object(o) => o.values().all(integral),
-        _ => true,
-    }
-}
-pub fn canonical(v: &Value) -> R<String> {
-    ensure!(integral(v), "Canonical JSON permits integers only");
-    Ok(serde_json::to_string(v)?)
-}
+pub fn canonical(v: &Value) -> R<String> { Ok(serde_json::to_string(v)?) }
 pub fn digest(v: &Value) -> R<String> { Ok(sha256(canonical(v)?)) }
 
 pub fn exact<'a>(v: &'a Value, keys: &[&str], label: &str) -> R<&'a Map<String, Value>> {

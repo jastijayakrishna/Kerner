@@ -1323,6 +1323,21 @@ fn review_2_a4_the_pull_request_cannot_set_the_clock_that_ages_its_dependencies(
 }
 
 #[test]
+fn the_untouched_tests_watch_runs_on_its_own_when_planted_faults_cannot_and_is_dropped_first_when_they_compete() {
+    let both = suite::FAULTS_SECS_MAX + suite::BYSTANDER_SECS_MIN + suite::TYPES_SECS_RESERVE;
+    assert_eq!(suite::after_tests(both), (true, true), "with time for the faults, the watch and the type check, all three run");
+    assert_eq!(suite::after_tests(both - 1), (true, false), "when the faults and the watch compete, the watch is dropped first (CLAUDE.md)");
+    let control_only = suite::CONTROL_SECS_MAX + suite::BYSTANDER_SECS_MIN + suite::TYPES_SECS_RESERVE;
+    assert!(!suite::faults_fit(control_only) || control_only >= suite::FAULTS_SECS_MIN + suite::TYPES_SECS_RESERVE);
+    for left in 0..=3600u64 {
+        let (plant, watch) = suite::after_tests(left);
+        if !plant && left >= control_only { assert!(watch, "with {left} seconds left the faults do not fit, but a control run and the watch do: on the 708-PR benchmark the watch ran on only half the pull requests because it waited for the faults"); }
+        if watch { assert!(suite::bystanders_fit(left.saturating_sub(if plant { suite::fault_seconds(left) } else { suite::CONTROL_SECS_MAX })), "the watch never runs into the type check's time"); }
+        if plant { assert!(suite::types_fit(left), "{left}"); }
+    }
+}
+
+#[test]
 fn h4_when_time_runs_short_planted_faults_go_first_then_the_type_check_and_dropped_work_is_listed_as_not_checked() {
     for left in 0..=3600u64 { assert!(!suite::faults_fit(left) || suite::types_fit(left), "with {left} seconds left the planted faults would run while the type check could not"); }
     assert!(suite::faults_fit(suite::FAULTS_SECS_MIN + suite::TYPES_SECS_RESERVE) && !suite::faults_fit(suite::FAULTS_SECS_MIN + suite::TYPES_SECS_RESERVE - 1));

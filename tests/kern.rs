@@ -418,6 +418,21 @@ fn agents_change_dependencies_only_for_packages_the_task_approves() {
 }
 
 #[test]
+fn a_file_named_like_kerns_own_message_cannot_hide_a_new_power() {
+    let base = files(&[("src/a.js", "module.exports = 1;
+")]);
+    let name = "src/x. If this is intended.js";
+    let mut sneaky = base.clone();
+    sneaky.insert(name.into(), file("const { execSync } = require('child_process');
+module.exports = () => execSync('id');
+"));
+    let changed = json!({ "files": [{ "path": name, "operation": "add" }] });
+    let widened = capability::widened(&base, &sneaky, &changed, &std::collections::BTreeMap::new()).unwrap();
+    assert_eq!(widened, json!([{ "path": name, "added": ["node:child_process"] }]).as_array().unwrap().clone(), "the widening is data, never text that a file name can break apart");
+    denied(capability::check(&base, &sneaky, &changed, &std::collections::BTreeMap::new()), "node:child_process");
+}
+
+#[test]
 fn dependency_installs_are_reused_only_for_the_same_manifests_registry_and_image() {
     use kern::flow::DepsCache;
     let t = Temp::new();

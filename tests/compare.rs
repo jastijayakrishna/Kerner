@@ -669,7 +669,7 @@ fn a_plan_is_the_same_for_the_same_change() {
     assert_ne!(plan(&"a".repeat(64))["modules"], plan(&"b".repeat(64))["modules"], "the seed picks the random inputs");
     let p = plan(&"a".repeat(64));
     assert_eq!((p["changes"][0]["function"].as_str(), p["examples"].as_array().map(Vec::len)), (Some("src/money.js#add"), Some(2)), "{p}");
-    canonical(&p).expect("the plan holds integers only");
+    canonical(&p).expect("the plan is canonical JSON");
 }
 
 fn sh(dir: &Path, args: &[&str]) -> String {

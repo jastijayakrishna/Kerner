@@ -813,7 +813,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let powers = all_powers.iter().filter(|p| shown_power(p)).count();
     let quiet: Vec<String> = all_powers.iter().filter(|p| !shown_power(p)).take(SHOWN).map(|p| code(p["path"].as_str().unwrap_or(""), 160)).collect();
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(crate::capability::other_code));
-    let unread = other_code || look.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"].is_string());
+    let unread = other_code || unverified.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"].is_string());
     let skipped_code = r["drive_skipped"].as_bool() == Some(true);
     if powers == 0 && !unread && quiet.is_empty() { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secret environment variables\n"; }
     if powers == 0 && !unread && !quiet.is_empty() {

@@ -482,9 +482,22 @@ fn analyze(name: &str, source: &str) -> R<Option<BTreeSet<String>>> {
 fn inspectable(files: &Files, name: &str) -> Option<BTreeSet<String>> {
     std::str::from_utf8(files.get(name)?.bytes.as_deref()?).ok().and_then(|s| analyze(name, s).ok().flatten())
 }
+pub fn widened(base: &Files, candidate: &Files, changed: &Value, allowances: &BTreeMap<String, Vec<String>>) -> R<Vec<Value>> { Ok(inspected(base, candidate, changed, allowances)?.1) }
 pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTreeMap<String, Vec<String>>) -> R<Value> {
+    let (report, widened) = inspected(base, candidate, changed, allowances)?;
+    let mut grant = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut listed = Vec::new();
+    for w in &widened {
+        let (name, added) = (w["path"].as_str().unwrap_or(""), w["added"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>());
+        listed.push(format!("{name} +[{}]", added.join(", ")));
+        grant.entry(name.rsplit_once('/').map_or(name.to_string(), |(d, _)| format!("{d}/"))).or_default().extend(added);
+    }
+    ensure!(widened.is_empty(), "Patch widens module capabilities: {}. If this is intended, allow it in operator.json: \"permissions\": {}", listed.join("; "), serde_json::to_string(&grant).unwrap_or_default());
+    Ok(json!({ "policy": POLICY, "files": report }))
+}
+fn inspected(base: &Files, candidate: &Files, changed: &Value, allowances: &BTreeMap<String, Vec<String>>) -> R<(Vec<Value>, Vec<Value>)> {
     let (mut report, mut siblings) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
-    let (mut widened, mut grant) = (Vec::new(), BTreeMap::<String, BTreeSet<String>>::new());
+    let mut widened = Vec::new();
     let approved = crate::deps::imports(changed);
     for f in changed["files"].as_array().into_iter().flatten() {
         let (name, op) = (f["path"].as_str().unwrap_or(""), f["operation"].as_str().unwrap_or(""));
@@ -498,12 +511,8 @@ pub fn check(base: &Files, candidate: &Files, changed: &Value, allowances: &BTre
         };
         let granted: BTreeSet<&String> = allowances.iter().filter(|(p, _)| covers(p, name)).flat_map(|(_, caps)| caps).collect();
         let added: Vec<&String> = after.iter().filter(|c| !before.contains(*c) && !granted.contains(c) && !approved.contains(*c)).collect();
-        if !added.is_empty() {
-            widened.push(format!("{name} +[{}]", added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-            grant.entry(name.rsplit_once('/').map_or(name.to_string(), |(d, _)| format!("{d}/"))).or_default().extend(added.iter().map(|s| s.to_string()));
-        }
+        if !added.is_empty() { widened.push(json!({ "path": name, "added": added })); }
         report.push(json!({ "path": name, "operation": op, "baseline": if base.contains_key(name) { "file" } else { "directory" }, "capabilities": after, "added": added }));
     }
-    ensure!(widened.is_empty(), "Patch widens module capabilities: {}. If this is intended, allow it in operator.json: \"permissions\": {}", widened.join("; "), serde_json::to_string(&grant).unwrap_or_default());
-    Ok(json!({ "policy": POLICY, "files": report }))
+    Ok((report, widened))
 }

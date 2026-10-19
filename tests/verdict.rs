@@ -140,6 +140,17 @@ fn a_new_run_cut_short_by_kerns_own_limits_never_proves_the_tests_broke() {
 }
 
 #[test]
+fn a_refusal_from_kerns_own_sandbox_entry_is_kerns_limit_never_a_block() {
+    for reason in ["Agent namespace did not quiesce", "No space left on device (os error 28)", "Invalid test run environment", "A test run file may not replace a project file: src/a.kern-kept.test.js", "Too many planted faults"] {
+        let side = suite::unreadable(Some(reason.into()), "The run's report is incomplete".into());
+        assert!(matches!(&side, suite::Side::Cut(w) if w.contains(reason)), "only a refusal the change can cause (a runner it does not install) is about the change; {reason:?} is Kern's own: {side:?}");
+        assert!(!suite::broke_run(&side, &side, false), "twice on the new code is still Kern's limit, never a block: {reason:?}");
+    }
+    assert_eq!(suite::capped("cut: the test report was larger than Kern's limit of 64 MiB"), Some("the test report was larger than Kern's limit of 64 MiB".to_string()), "a report cut at a cap is a run Kern could not read, so it is not checked");
+    assert_eq!(suite::capped("exit 1"), None);
+}
+
+#[test]
 fn a_sandbox_that_refuses_for_a_reason_in_the_project_is_about_the_change_and_a_broken_report_is_kerns_limit() {
     let refused = suite::unreadable(Some("The test runner is not installed in the project: /workspace/node_modules/.bin/jest does not exist".into()), "The run's report is incomplete".into());
     assert!(matches!(&refused, suite::Side::Nothing(w) if w.contains("not installed in the project")), "the e2e 'missing' case: the change switched the test script to a runner it does not install: {refused:?}");
