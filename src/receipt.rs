@@ -751,8 +751,10 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         let map = &tests["map"];
         if map["status"] == "RAN" {
             let rooms: Vec<String> = map["rooms"].as_array().into_iter().flatten().take(6).map(|r| format!("{} ({} away)", code(r["room"].as_str().unwrap_or(""), 160), r["hops"].as_u64().unwrap_or(0))).collect();
-            md += &format!("- 🗺️ Map: {} files, {} symbols and {} references, from {}; this change edits {} symbols and reaches {} files and {} rooms{}\n",
-                map["documents"], map["symbols"], map["references"], plain(map["provenance"].as_str().unwrap_or(""), 80), map["changed_symbols"], map["files_reached"], map["rooms_reached"],
+            let n = |k: &str| map[k].as_u64().unwrap_or(0) as usize;
+            md += &format!("- 🗺️ Map: {}, {} and {}, from {}; this change edits {} and reaches {} and {}{}\n",
+                plural(n("documents"), "file", "files"), plural(n("symbols"), "symbol", "symbols"), plural(n("references"), "reference", "references"), plain(map["provenance"].as_str().unwrap_or(""), 80),
+                plural(n("changed_symbols"), "symbol", "symbols"), plural(n("files_reached"), "file", "files"), plural(n("rooms_reached"), "room", "rooms"),
                 if rooms.is_empty() { String::new() } else { format!(": {}", rooms.join(", ")) });
         } else if let Some(why) = map["why"].as_str() { md += &format!("- ⏭️ Map: not built — {}; Kern used the files' imports instead\n", plain(why, 400)); }
         if tests["dropped"].as_array().is_some_and(|d| d.iter().any(|x| x == "untouched tests")) {

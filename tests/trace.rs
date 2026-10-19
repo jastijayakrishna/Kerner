@@ -94,6 +94,18 @@ fn untouched_tests_that_saw_the_changed_code_answer_differently_are_named_and_ch
 }
 
 #[test]
+fn the_map_line_counts_in_plain_words_one_symbol_one_file_one_room() {
+    let d = serde_json::json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = serde_json::json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let map = serde_json::json!({ "status": "RAN", "provenance": "scip-typescript 0.4.0", "documents": 4, "symbols": 4, "references": 8, "changed_symbols": 1, "files_reached": 1, "rooms_reached": 1, "rooms": [{ "room": "src/cli.js", "kind": "bin", "hops": 1 }], "not_indexed": 0 });
+    let tests = serde_json::json!({ "status": "RAN", "runner": "jest", "before": { "passed": 9, "failed": 0, "skipped": 0 }, "after": { "passed": 9, "failed": 0, "skipped": 0 },
+        "kept": 9, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "map": map });
+    let r = kern::receipt::build(&d, &rules, &tests, &serde_json::json!({ "status": "OFF", "why": "no AI key" }));
+    let md = kern::receipt::markdown(&r, None);
+    assert!(md.contains("Map: 4 files, 4 symbols and 8 references, from scip-typescript 0.4.0; this change edits 1 symbol and reaches 1 file and 1 room: `src/cli.js` (1 away)"), "{md}");
+}
+
+#[test]
 fn no_untouched_test_reached_the_changed_code_says_so() {
     let c = kern::trace::compare("", "", "");
     assert_eq!((c["compared"].as_u64(), c["differences"].as_array().map(Vec::len)), (Some(0), Some(0)));
