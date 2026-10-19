@@ -670,8 +670,8 @@ for runner in vitest jest; do
   cd "$W"
   check "watch-$runner" "$watch_base" "watch-$runner-repo"
   decision "watch-$runner" clear
-  jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 2 and .tests.bystanders.differences[0].input == "[3]"
-    and (.tests.bystanders.differences[0].now | contains("3 things")) and ([.notes[].kind] | index("bystander") != null)
+  jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 3
+    and ([.tests.bystanders.differences[] | select(.key == "src/label.js#label" and .input == "[3]") | .now] | any(contains("3 things"))) and ([.notes[].kind] | index("bystander") != null)
     and ([.tests.bystanders.differences[] | select(.key == "src/report.js#summary") | .now] | any(contains("2 things")))
     and .tests.map.status == "RAN" and .tests.map.symbols >= 2 and .tests.map.files_reached >= 2
     and ([.challenges[] | "\(.target) \(.kind)"] == ["label unasserted"]) and (.challenges[0].example | contains("label(3)"))' "watch-$runner/receipt.json" > /dev/null \
