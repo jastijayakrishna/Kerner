@@ -1666,7 +1666,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let product: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p)).map(|(p, _)| p).collect();
             let files: Vec<(String, String, String)> = product.iter().take(FAULT_FILES_COUNT_MAX).filter_map(|p| Some((p.to_string(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
             let (near, map_status) = near_once.get_or_insert_with(|| if files.is_empty() { (Vec::new(), json!({ "status": "NONE" })) } else { mapped(out, &volume("new"), (repo, head), head_paths.as_deref(), &files, until) });
-            merged["map"] = map_status.clone();
+            merged.insert("map".into(), map_status.clone());
             let neighbours: Vec<(String, String, String)> = near.iter().filter_map(|(p, _)| { let s = shown(head, p)?; Some((p.clone(), s.clone(), s)) }).collect();
             let mut missing: Vec<Value> = product.iter().skip(FAULT_FILES_COUNT_MAX).map(|p| json!({ "path": p, "why": format!("Kern puts faults in at most {FAULT_FILES_COUNT_MAX} changed files per check") })).collect();
             let mut found = Vec::new();
