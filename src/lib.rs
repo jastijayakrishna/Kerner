@@ -36,6 +36,7 @@ pub mod replay;
 pub mod polarity;
 pub mod trace;
 pub mod house;
+pub mod map;
 pub mod calls;
 pub mod probe;
 pub mod investigate;

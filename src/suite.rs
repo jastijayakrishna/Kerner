@@ -1141,6 +1141,42 @@ const NO_FAULT_RESULTS: &str = "Kern's fault run gave no results";
 const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run under jest or vitest";
 type FaultRun = (Vec<Value>, Vec<Value>, BTreeSet<String>);
 pub const CONTROL_SECS_MAX: u64 = 240;
+const INDEXER_MAIN: &str = "/workspace/.kern-tools/scip/node_modules/@sourcegraph/scip-typescript/dist/src/main.js";
+fn mapped(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Option<&[String]>, files: &[(String, String, String)], until: u64) -> (Vec<(String, usize)>, Value) {
+    let changed: Vec<String> = files.iter().map(|f| f.0.clone()).collect();
+    let house = crate::house::build(repo, head).ok();
+    let fallback = |why: String| {
+        let near = house.as_ref().map(|h| crate::house::neighbours(h, &changed, crate::house::NEIGHBOURS_COUNT_MAX)).unwrap_or_default();
+        (near, json!({ "status": "NOT_RUN", "why": why }))
+    };
+    let seconds = within(until, crate::map::MAP_SECS_MAX);
+    if seconds < crate::map::MAP_SECS_MIN { return fallback("Kern's time for this check ran short before the code could be mapped".into()); }
+    let has = |p: &str| match p {
+        "package.json.workspaces" => crate::git::git(repo, &["show", &format!("{head}:package.json")], None).ok().and_then(|m| serde_json::from_slice::<Value>(&m).ok()).is_some_and(|m| !m["workspaces"].is_null()),
+        _ => head_paths.is_some_and(|paths| paths.iter().any(|x| x == p)),
+    };
+    let mut command = vec!["/usr/local/bin/node".to_string(), format!("--max-old-space-size={}", test_limits(seconds).memory_mb * 3 / 4), INDEXER_MAIN.to_string()];
+    command.extend(crate::map::flags(&has).into_iter().map(str::to_string));
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": {}, "early": false, "faults": [], "serve": {} });
+    let run = match in_test_box(out, volume, "tests-map", ("drive-test.json", &config), ("__drive_test", false, seconds)) { Ok(r) => r, Err(e) => return fallback(format!("the indexer could not run: {}", e.0)) };
+    let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return fallback(format!("the indexer gave no readable result: {}", crate::sandbox::refusal(&run.errors).unwrap_or_default())) };
+    let _ = std::fs::write(out.join("map.err"), &parts["errors"]);
+    if parts["ending"] != b"exit 0" { return fallback(format!("the indexer stopped ({}): {}", String::from_utf8_lossy(&parts["ending"]), String::from_utf8_lossy(&parts["errors"]).lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(300).collect::<String>())); }
+    let m = match crate::map::read(&parts["output"]) { Ok(m) => m, Err(e) => return fallback(e.0) };
+    let _ = std::fs::write(out.join("map.scip"), &parts["output"]);
+    let lines: Vec<(String, Vec<usize>)> = files.iter().map(|(p, old, new)| {
+        let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+        (p.clone(), crate::compare::changed_lines(&a, &b).1.into_iter().map(|l| l + 1).collect())
+    }).collect();
+    let r = crate::map::reach(&m, &lines);
+    let rooms: Vec<Value> = house.as_ref().map(|h| { let mut v: Vec<(usize, &String, &String)> = r.files.iter().filter_map(|(f, hops)| h.rooms.get(f).map(|k| (*hops, f, k))).collect(); v.sort(); v.into_iter().map(|(hops, f, k)| json!({ "room": f, "kind": k, "hops": hops })).collect() }).unwrap_or_default();
+    let product: Vec<String> = house.as_ref().map(|h| h.exports.keys().cloned().collect()).unwrap_or_default();
+    let status = json!({ "status": "RAN", "provenance": m.provenance, "documents": m.files.len(), "symbols": m.defined_in.len(), "references": m.refs.values().map(Vec::len).sum::<usize>(),
+        "changed_symbols": r.hops.values().filter(|x| x.0 == 0).count(), "files_reached": r.files.len(), "farthest_hops": r.files.values().copied().max().unwrap_or(0), "rooms_reached": rooms.len(), "rooms": rooms.iter().take(12).cloned().collect::<Vec<_>>(),
+        "not_indexed": crate::map::coverage(&m, &product)["not_indexed_count"] });
+    let _ = std::fs::write(out.join("map.json"), serde_json::to_vec_pretty(&json!({ "summary": crate::map::summary(&m), "coverage": crate::map::coverage(&m, &product), "reach": crate::map::reach_json(&m, &r, &lines), "rooms": rooms, "house": house.as_ref().map(crate::house::summary) })).unwrap_or_default());
+    (crate::map::neighbours(&r, &changed, crate::house::NEIGHBOURS_COUNT_MAX), status)
+}
 pub fn after_tests(left_secs: u64) -> (bool, bool) {
     let plant = faults_fit(left_secs);
     let spent = if plant { fault_seconds(left_secs) } else { CONTROL_SECS_MAX };
@@ -1389,7 +1425,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().is_some_and(follows_script);
     let head_paths: Option<Vec<String>> = crate::drive::listing(repo, head).ok().map(|items| items.into_iter().map(|i| i.path).collect());
     let testless_here = |dir: &str| followed(dir) && head_paths.as_ref().is_some_and(|p| !repo_has_tests(p, dir));
-    let mut house_once: Option<Option<crate::house::House>> = None;
+    let mut near_once: Option<(Vec<(String, usize)>, Value)> = None;
     for suite in &suites {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
@@ -1629,9 +1665,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
             let product: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p)).map(|(p, _)| p).collect();
             let files: Vec<(String, String, String)> = product.iter().take(FAULT_FILES_COUNT_MAX).filter_map(|p| Some((p.to_string(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
-            let house = house_once.get_or_insert_with(|| if files.is_empty() { None } else { crate::house::build(repo, head).ok() });
-            let neighbours: Vec<(String, String, String)> = house.as_ref().map(|h| crate::house::neighbours(h, &files.iter().map(|f| f.0.clone()).collect::<Vec<_>>(), crate::house::NEIGHBOURS_COUNT_MAX)).unwrap_or_default()
-                .into_iter().filter_map(|(p, _)| { let s = shown(head, &p)?; Some((p, s.clone(), s)) }).collect();
+            let (near, map_status) = near_once.get_or_insert_with(|| if files.is_empty() { (Vec::new(), json!({ "status": "NONE" })) } else { mapped(out, &volume("new"), (repo, head), head_paths.as_deref(), &files, until) });
+            merged["map"] = map_status.clone();
+            let neighbours: Vec<(String, String, String)> = near.iter().filter_map(|(p, _)| { let s = shown(head, p)?; Some((p.clone(), s.clone(), s)) }).collect();
             let mut missing: Vec<Value> = product.iter().skip(FAULT_FILES_COUNT_MAX).map(|p| json!({ "path": p, "why": format!("Kern puts faults in at most {FAULT_FILES_COUNT_MAX} changed files per check") })).collect();
             let mut found = Vec::new();
             let left = within(until, FAULTS_SECS_MAX + TYPES_SECS_RESERVE);

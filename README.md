@@ -131,9 +131,10 @@ What Kern checks on every pull request:
    limit of 23 faults in 20 files per check). When no test that runs here even loads a changed file (its related tests cannot load, or
    there are none), that file is not verified, said plainly. A small fault that only puts back the old line, logging calls, and a run Kern
    could not finish are not counted, and when a related test file fails as a whole, a fault it alone might have loaded is not checked
-   rather than missed. Then Kern watches what the changed code gives the tests this change does not touch: it maps the code (every product
-   file, its exported functions and the imports between them, through barrels, path aliases and Vue script blocks), finds the files the
-   change reaches, nearest first (up to 40), and rewrites the changed files and those neighbours so that their exported functions note
+   rather than missed. Then Kern watches what the changed code gives the tests this change does not touch: it maps the code with the
+   TypeScript compiler's own index (`scip-typescript`, run inside the sandbox on the installed tree: every symbol, where it is defined and
+   every place it is used), finds the symbols the change edits and every symbol that uses them, nearest first (up to 40 files; when the
+   index cannot be built, the files' imports stand in), and rewrites the changed files and those neighbours so that their exported functions note
    every input and answer; it runs those tests (up to 40 files) on the old code twice and on the new code
    once, sets aside any input whose answer differs between the two old runs, and lists each input whose answer changed on the new code as a
    note, with both answers. These notes do not change the answer yet; Kern measures what they predict on real pull requests first. They

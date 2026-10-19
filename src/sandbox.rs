@@ -1015,6 +1015,7 @@ mod inside {
         }
         for dir in super::INSTALL_SCRATCH.iter().map(PathBuf::from).chain(super::store_links_back(Path::new(super::PNPM_STORE))) { let _ = std::fs::remove_dir_all(dir); }
         let (tools, bin) = (Path::new(super::TOOLS), Path::new(super::TOOLS).join("bin"));
+        if records.iter().any(|r| r["result"].as_str().is_some_and(|s| s.starts_with("installed"))) { npm_into(&tools.join("scip"), crate::map::INDEXER); }
         for (manager, launcher) in &launchers {
             std::fs::create_dir_all(&bin)?;
             std::fs::write(bin.join(manager), super::shim(launcher))?;

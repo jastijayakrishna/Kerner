@@ -673,6 +673,7 @@ for runner in vitest jest; do
   jq -e '.tests.bystanders.status == "RAN" and .tests.bystanders.changed == 2 and .tests.bystanders.differences[0].input == "[3]"
     and (.tests.bystanders.differences[0].now | contains("3 things")) and ([.notes[].kind] | index("bystander") != null)
     and ([.tests.bystanders.differences[] | select(.key == "src/report.js#summary") | .now] | any(contains("2 things")))
+    and .tests.map.status == "RAN" and .tests.map.symbols >= 2 and .tests.map.files_reached >= 2
     and ([.challenges[] | "\(.target) \(.kind)"] == ["label unasserted"]) and (.challenges[0].example | contains("label(3)"))' "watch-$runner/receipt.json" > /dev/null \
     || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named, or the house did not watch src/report.js, which the change reaches"; }
   grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
