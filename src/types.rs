@@ -141,6 +141,21 @@ pub fn added(old: &[Diag], new: &[Diag]) -> Vec<Diag> {
     }).cloned().collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict { Blocked, Look(String), Unverified(String) }
+pub fn verdict(p: &Value) -> Verdict {
+    if let Some(why) = p["uneven"].as_str() { return Verdict::Unverified(format!("Kern cannot compare the two sides fairly: {}", plain(why, 400))); }
+    if p["generated"] == true && p["enforced"] == true {
+        return Verdict::Unverified("some are about modules, exports or names that a build step may generate, and Kern did not run it, so it cannot say whether the change caused them".into());
+    }
+    if p["enforced"] != true { return Verdict::Look("the project's scripts do not run tsc, so Kern does not block on it".into()); }
+    if p["confirmed"] != true { return Verdict::Look("Kern could not run tsc a second time on the new code and see the same errors, so it does not block on one run".into()); }
+    Verdict::Blocked
+}
+pub fn confirm(p: &mut Value, new: &Value, again: &Value) {
+    let bag = |v: &Value| { let mut b: Vec<(String, String, String)> = listed(v).into_iter().map(|d| (d.file, d.code, d.message)).collect(); b.sort(); b };
+    p["confirmed"] = json!(again["status"] == "errors" && bag(new) == bag(again));
+}
 pub fn judge(config: &str, old: &Value, new: &Value, enforced: bool, even: Option<String>) -> Value {
     let mut p = json!({ "config": config, "old": old["status"], "new": new["status"], "version": new["version"].as_str().or(old["version"].as_str()).unwrap_or("") });
     match (old["status"].as_str(), new["status"].as_str()) {
@@ -165,7 +180,7 @@ const TSC_HEAP_MB_MIN: u64 = 1024;
 pub fn spec(config: &str, seconds: u64, memory_mb: u64) -> Value {
     let heap = (memory_mb * 7 / 10).max(TSC_HEAP_MB_MIN);
     json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", CHECK, format!("/workspace/{config}"), heap.to_string()], "timeout_seconds": seconds, "cwd": parent(config), "env": {},
-        "files": {}, "early": false, "faults": [], "serve": {} })
+        "files": {}, "early": false, "faults": [], "serve": {}, "steps": [] })
 }
 fn check_side(out: &Path, volume: &str, config: &str, until: u64, label: &str) -> Value {
     let seconds = within(until, 240);
@@ -241,7 +256,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> Value {
         };
         let even = crate::suite::setup_differs(&s, dir).or_else(|| crate::suite::unlocked(&s, dir))
             .or_else(|| (!locked(&head_files) || !locked(&base_files)).then(|| "the project has no lockfile, so each side's dependencies were resolved on their own".to_string()));
-        checked.push(judge(config, &old, &new, enforced(&scripts), even));
+        let mut p = judge(config, &old, &new, enforced(&scripts), even);
+        if p["result"] == "new-errors" && p["enforced"] == true && p["uneven"].is_null() && p["generated"] != true {
+            confirm(&mut p, &new, &check_side(out, &volume("new"), config, until, &format!("new-again-{i}")));
+        }
+        checked.push(p);
     }
     json!({ "status": "CHECKED", "projects": checked })
 }

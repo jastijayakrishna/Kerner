@@ -127,8 +127,8 @@ pub fn compare(old: &str, again: &str, new: &str) -> serde_json::Value {
     let (mut compared, mut unstable, mut found) = (0usize, 0usize, Vec::new());
     for (key, now) in &new {
         let Some(was) = old.get(key) else { continue };
-        compared += 1;
         if again.get(key) != Some(was) { unstable += 1; continue; }
+        compared += 1;
         if was == now { continue; }
         let (rank, kind) = kind(was, now);
         found.push((rank, key, kind, was, now));

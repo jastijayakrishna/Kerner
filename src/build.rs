@@ -105,7 +105,7 @@ pub fn judge(dir: &str, old: &Value, new: &Value, again: Option<&Value>, even: O
 
 pub fn spec(dir: &str, seconds: u64, memory_mb: u64) -> Value {
     json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", RUN, (memory_mb * 3 / 4).to_string(), seconds.saturating_sub(STOP_MARGIN_SECS).to_string()],
-        "timeout_seconds": seconds, "cwd": dir, "env": {}, "files": {}, "early": false, "faults": [], "serve": {} })
+        "timeout_seconds": seconds, "cwd": dir, "env": {}, "files": {}, "early": false, "faults": [], "serve": {}, "steps": [] })
 }
 pub fn builds_fit(left_secs: u64) -> bool { left_secs >= BUILD_SECS_MIN }
 fn build_side(out: &Path, volume: &str, dir: &str, until: u64, label: &str) -> Value {

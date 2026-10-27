@@ -90,7 +90,23 @@ fn untouched_tests_that_saw_the_changed_code_answer_differently_are_named_and_ch
     let sql = &c["differences"][3];
     assert_eq!((sql["input"].as_str(), sql["was"].as_str(), sql["now"].as_str()), (Some("[\"SELECT 'http://a'\"]"), Some("returns \"SELECT 'http://a'\""), Some("returns \"SELECT 'http:\"")));
     assert_eq!(c["unstable"], 1, "make() gave two answers on the old code alone, so its new answer proves nothing: {c}");
-    assert_eq!(c["compared"], 7, "inputs seen on both sides, set-aside ones included: {c}");
+    assert_eq!(c["compared"], 6, "inputs seen on both sides whose two old answers agree; the set-aside one is not compared: {c}");
+}
+
+#[test]
+fn alphaleadership_kanbanaction_3_an_input_that_changed_between_the_old_runs_is_not_counted() {
+    let key = "src/lib/stores/board.ts#createBoard";
+    let (old, again, new) = (line(key, "[]", "returns {\"id\":\"a1\"}"), line(key, "[]", "returns {\"id\":\"b2\"}"), line(key, "[]", "returns {\"id\":\"c3\"}"));
+    let mut c = kern::trace::compare(&old, &again, &new);
+    assert_eq!((c["compared"].as_u64(), c["unstable"].as_u64(), c["changed"].as_u64()), (Some(0), Some(1), Some(0)), "every input gave two old answers, so nothing was compared: {c}");
+    c["status"] = serde_json::json!("RAN");
+    c["tests"] = serde_json::json!(4);
+    let d = serde_json::json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = serde_json::json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
+    let tests = serde_json::json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 9, "failed": 0, "skipped": 0 }, "after": { "passed": 9, "failed": 0, "skipped": 0 },
+        "kept": 9, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "bystanders": c });
+    let md = kern::receipt::markdown(&kern::receipt::build(&d, &rules, &tests));
+    assert!(md.contains("⏭️ Untouched tests: not compared") && md.contains("1 input gave two answers on the old code") && !md.contains("✅ Untouched tests"), "{md}");
 }
 
 #[test]

@@ -34,8 +34,21 @@ fn storybook_36653_kerns_own_environment_problem_is_not_verified_and_says_so() {
     let r = receipt::build(&drive_json(), &clean_rules(), &tests);
     assert_eq!(r["decision"], "unverified", "{r}");
     assert!(said(&r, "unverified").contains("Kern's environment had a problem"), "{}", r["unverified"]);
-    let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true });
-    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &none)["decision"], "clear", "a project with no tests keeps its rules-only receipt");
+}
+
+#[test]
+fn camdenslade_missouristatelacrosse_29_a_project_with_no_test_script_is_not_verified() {
+    for why in ["the project has no test script, so no test checks this change", "the project's test script finds no test files, so no test checks this change",
+        "the test scripts of the changed packages run no tests, so no test checks this change"] {
+        let none = json!({ "status": "NOT_RUN", "why": why, "no_tests": true });
+        let r = receipt::build(&drive_json(), &clean_rules(), &none);
+        assert_eq!(r["decision"], "unverified", "no test checks the change, so Kern cannot say it is clear ({why}): {r}");
+        assert_eq!(kinds(&r, "unverified"), ["no-tests"], "{r}");
+        assert!(kinds(&r, "look").is_empty(), "a project without tests is not a finding: {}", r["look"]);
+        assert!(said(&r, "unverified").contains(why), "{}", r["unverified"]);
+        let md = receipt::markdown(&r);
+        assert!(md.contains("### ⏭️ Kern: Not verified") && !md.contains("✅ Kern") && !md.contains("rules it checked") && md.contains(why), "{md}");
+    }
 }
 
 #[test]
@@ -219,6 +232,42 @@ fn visgl_loaders_gl_4253_a_readme_in_a_test_data_folder_is_not_test_data() {
     assert_eq!(r["decision"], "clear", "{r}");
     let r = receipt::build(&drive_json(), &clean_rules(), &with(ran(), "test_data", json!(["packages/plugin/test/mock-browser-client.ts"])));
     assert_eq!(kinds(&r, "look"), ["test-data"], "{r}");
+}
+
+#[test]
+fn sebastianwessel_surrealdb_client_generator_81_type_errors_that_only_need_a_look_show_a_warning_not_a_red_cross() {
+    let project = |extra: Value| { let mut p = json!({ "config": "tsconfig.json", "result": "new-errors", "count": 2, "added": [{ "file": "src/a.ts", "line": 3, "code": "TS2322", "message": "x" }] }); for (k, v) in extra.as_object().unwrap() { p[k] = v.clone(); } p };
+    let check = |extra: Value| { let tests = with(ran(), "types", json!({ "status": "CHECKED", "projects": [project(extra)] })); let r = receipt::build(&drive_json(), &clean_rules(), &tests); (r.clone(), receipt::markdown(&r)) };
+    let (r, md) = check(json!({ "enforced": false }));
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["types-new".to_string()]), "{r}");
+    assert!(md.contains("- ⚠️ Types: 2 new TypeScript errors in `tsconfig.json`") && !md.contains("❌"), "a look is not a red cross:\n{md}");
+    let (r, md) = check(json!({ "enforced": false, "uneven": "the project has no lockfile, so each side's dependencies were resolved on their own" }));
+    assert_eq!((r["decision"].as_str(), kinds(&r, "unverified")), (Some("unverified"), vec!["types-new".to_string()]), "an uneven setup makes the comparison not verified before anything else: {r}");
+    assert!(md.contains("- ⏭️ Types: 2 new TypeScript errors") && !md.contains("❌") && !md.contains("⚠️ Types"), "{md}");
+    let (r, md) = check(json!({ "enforced": true, "confirmed": true }));
+    assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["types-broke".to_string()]), "{r}");
+    assert!(md.contains("- ❌ Types: 2 new TypeScript errors"), "{md}");
+}
+
+#[test]
+fn abhishek21lift_oss_619_erp_frontend_23_zero_inputs_watched_is_not_a_green_line() {
+    let seen = json!({ "status": "RAN", "compared": 0, "unstable": 0, "changed": 0, "tests": 2, "differences": [] });
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &with(ran(), "bystanders", seen)));
+    assert!(md.contains("- ⏭️ Untouched tests: not compared — no input reached the changed code in both old runs") && !md.contains("✅ Untouched tests") && !md.contains("every answer stayed the same"), "{md}");
+    let seen = json!({ "status": "RAN", "compared": 3, "unstable": 0, "changed": 0, "tests": 2, "differences": [] });
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &with(ran(), "bystanders", seen)));
+    assert!(md.contains("- ✅ Untouched tests:") && md.contains("for 3 inputs") && md.contains("every answer stayed the same"), "{md}");
+}
+
+#[test]
+fn auraoneai_aura3d_325_a_test_skip_in_an_existing_test_file_is_a_look_a_maintainer_can_approve() {
+    let mut rules = clean_rules();
+    rules["tricks"] = json!([{ "path": "src/__tests__/scene.test.ts", "operation": "modify", "why": "skips a test that ran before: it.skip('renders the grid')" }]);
+    let r = receipt::build(&drive_json(), &rules, &ran());
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look"), kinds(&r, "blocked")), (Some("look"), vec!["trick".to_string()], vec![]), "a static rule names a marker; it never blocks, so a reviewed skip of a flaky test can be approved: {r}");
+    assert!(said(&r, "look").contains("it.skip('renders the grid')"), "{}", r["look"]);
+    let md = receipt::markdown(&r);
+    assert!(md.contains("/kern approve") && !md.contains("An approval cannot clear"), "{md}");
 }
 
 #[test]

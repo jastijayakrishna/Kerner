@@ -113,10 +113,10 @@ decision breaks blocked
 [ "$(kinds breaks test-broke blocked)" = 1 ] || { jq .tests breaks/receipt.json; fail "breaks: expected one broken test"; }
 grep -q 'discount from 100' breaks/receipt.md || { cat breaks/receipt.md; fail "breaks: the broken test is not named"; }
 
-say "A focused test is blocked as a trick, and the tests it hides are named"
+say "A focused test needs a look as a trick, and the tests it hides are named"
 check only "$base"
-decision only blocked
-[ "$(kinds only trick blocked)" -ge 1 ] || { jq .rules only/receipt.json; fail "only: .only was not reported as a trick"; }
+decision only look
+[ "$(kinds only trick look)" -ge 1 ] || { jq .rules only/receipt.json; fail "only: .only was not reported as a trick"; }
 cat only/receipt.md
 
 say "A new power needs a look"
@@ -169,13 +169,14 @@ decision plants look
 [ "$(kinds plants wrote-code look)" = 1 ] && grep -q 'src/shadow.mjs' plants/receipt.md || { cat plants/receipt.md; fail "plants: the module a test wrote was not reported"; }
 jq -e '.tests.kept == 3 and (.tests.new_failing | length == 0)' plants/receipt.json > /dev/null || { jq .tests plants/receipt.json; fail "plants: committed code could be rewritten during a test run, or the tests did not run"; }
 
-say "A change after which the tests give no results, where they gave results before, is blocked"
+say "A change after which the tests give no results, where they gave results before and still do when run again, needs a look"
 git -C calc checkout -q -b broke "$base"
 printf '%s\n' "throw new Error('the test config cannot load');" > calc/vitest.config.mjs
 git -C calc add -A && git -C calc commit -qm "A test config that throws" && git -C calc rev-parse HEAD > broke.head && git -C calc checkout -q "$base"
 check broke "$base"
-decision broke blocked
-[ "$(kinds broke test-run-broke blocked)" = 1 ] || { jq .tests broke/receipt.json; fail "broke: tests that give nothing on the new code were not blocked"; }
+decision broke look
+[ "$(kinds broke test-run-broke look)" = 1 ] || { jq .tests broke/receipt.json; fail "broke: tests that give nothing on the new code were not reported for a look"; }
+[ -s broke/tests-old-again.out ] || { ls broke; fail "broke: the old code's tests were not run again to confirm they still give results"; }
 
 say "A check has one time limit, and a run it cuts short is reported as not run: not verified, never a failure or a green check"
 git -C calc checkout -q -b late "$base"
@@ -203,12 +204,13 @@ check scripted "$scripted_base" scriptrepo
 decision scripted blocked
 jq -e '.tests.status == "RAN" and (.tests.broke | length == 1)' scripted/receipt.json > /dev/null || { jq .tests scripted/receipt.json; fail "scripted: the project's own test script was not followed"; }
 
-say "A test script switched to a runner the project does not install is blocked, and the receipt says the runner is missing"
+say "A test script switched to a runner the project does not install needs a look, and the receipt says the runner is missing"
 git -C calc checkout -q -b missing "$base"
 sed -i 's/"test":"vitest run"/"test":"jest"/' calc/package.json
 git -C calc commit -qam "Run the tests with jest" && git -C calc rev-parse HEAD > missing.head && git -C calc checkout -q "$base"
 check missing "$base"
-decision missing blocked
+decision missing look
+[ "$(kinds missing test-run-broke look)" = 1 ] || { jq .tests missing/receipt.json; fail "missing: the runner the change does not install was not reported for a look"; }
 grep -q 'not installed' missing/receipt.md && [ "$(kinds missing settings look)" = 1 ] || { cat missing/receipt.md; fail "missing: the receipt does not say the runner is missing, or the script change is not a settings item"; }
 
 say "A suite too big for the time limit is checked with the tests related to the change"

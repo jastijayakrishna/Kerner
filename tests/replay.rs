@@ -198,8 +198,9 @@ fn orval_labs_orval_3772_stored_fault_runs_are_judged_again_with_todays_rules() 
     std::fs::write(dir.join("faults.json"), json!([crashed, crashed]).to_string()).unwrap();
     let r = kern::replay::rejudge(&dir).unwrap();
     let outcomes: Vec<&str> = r["receipt"]["tests"]["faults"].as_array().unwrap().iter().map(|f| f["outcome"].as_str().unwrap()).collect();
-    assert_eq!(outcomes, ["unreached", "unreached"], "the stored runs say no test loaded the changed file: {r}");
-    assert_eq!(r["receipt"]["decision"], "unverified", "no test reached the change, which Kern says plainly: {}", r["receipt"]["unverified"]);
+    assert_eq!(outcomes, ["unrun", "unrun"], "the stored runs crashed before any related test ran: never read as no test reaching the file: {r}");
+    assert_eq!(r["receipt"]["decision"], "unverified", "Kern cannot say a test reaches the change, which it says plainly: {}", r["receipt"]["unverified"]);
+    assert!(r["receipt"]["unverified"].as_array().unwrap().iter().all(|x| x["kind"] == "unrun-change") && r["receipt"]["challenges"] == json!([]), "{}", r["receipt"]);
 }
 
 #[test]

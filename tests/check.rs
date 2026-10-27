@@ -132,15 +132,15 @@ fn every_runner_writes_its_report_to_a_file_kern_names() {
 }
 
 #[test]
-fn tests_that_run_on_the_old_code_but_give_nothing_on_the_new_code_block() {
+fn tests_that_run_on_the_old_code_but_give_nothing_on_the_new_code_need_a_look() {
     let mut t = clean_tests();
-    t["run_broke"] = json!([{ "dir": "", "why": "the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load" }]);
+    t["run_broke"] = json!([{ "dir": "", "why": "the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load", "old_rerun_passed": 12 }]);
     let r = receipt::build(&drive_json(), &clean_rules(), &t);
-    assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-run-broke".to_string()]), "{r}");
-    let broke = json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [{ "dir": "packages/kit", "why": "the output contains no vitest report (exit 1); its first error: SyntaxError: Unexpected token '<'" }] });
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look"), kinds(&r, "blocked")), (Some("look"), vec!["test-run-broke".to_string()], vec![]), "a run with no results is not a failed test, so it never blocks: {r}");
+    let broke = json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [{ "dir": "packages/kit", "why": "the output contains no vitest report (exit 1); its first error: SyntaxError: Unexpected token '<'", "old_rerun_passed": 4 }] });
     let r = receipt::build(&drive_json(), &clean_rules(), &broke);
     let md = receipt::markdown(&r);
-    assert!(r["decision"] == "blocked" && md.contains("packages/kit") && md.contains("❌ Tests"), "{md}");
+    assert!(r["decision"] == "look" && md.contains("packages/kit") && md.contains("⚠️ Tests: they run on the old code but give no results") && !md.contains("❌"), "{md}");
 }
 
 #[test]
@@ -373,7 +373,7 @@ fn a_test_file_the_change_adds_needs_a_look_where_an_existing_one_would_block() 
     let mut tests = clean_tests();
     tests["new_problems"] = json!(["test/total.test.js"]);
     let r = receipt::build(&drive_json(), &rules, &tests);
-    assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-file".to_string(), "trick".to_string()]), "{r}");
+    assert_eq!((r["decision"].as_str(), kinds(&r, "blocked"), kinds(&r, "look")), (Some("blocked"), vec!["test-file".to_string()], vec!["trick".to_string(), "new-test-skips".to_string()]), "the test file no longer loading blocks; the skip is a look a maintainer can approve: {r}");
 }
 
 #[test]
@@ -486,13 +486,13 @@ fn a_conditional_skip_option_is_allowed_but_focusing_never_is() {
 }
 
 #[test]
-fn a_skip_moved_into_a_renamed_test_file_still_blocks() {
+fn a_skip_moved_into_a_renamed_test_file_still_needs_a_look() {
     let (t, base) = project();
     let head = commit(&t, &[("test/sum.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest.skip('adds', () => expect(total([1, 2])).toBe(3));\n")],
         &["test/total.test.js"]);
     let rules = kern::rules::rules(&t.0, &base, &head).unwrap();
     let r = receipt::build(&drive_json(), &rules, &clean_tests());
-    assert_eq!(r["decision"], "blocked", "deleting a test file and adding a renamed one cannot turn a skipped test into a look: {r}");
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["trick".to_string()]), "deleting a test file and adding a renamed one cannot hide a skipped test: it is the existing-file trick, a look, never the quieter new-file note: {r}");
 }
 
 #[test]
@@ -558,7 +558,7 @@ fn decision_table() {
     assert_eq!((r["decision"].as_str().unwrap(), kinds(&r, "blocked")), ("blocked", vec!["test-broke".to_string()]), "{r}");
     let mut rules = clean_rules();
     rules["tricks"] = json!([{ "path": "test/a.test.js", "why": "A test file skips, focuses or inverts tests: test/a.test.js uses test.only. Every test must run and check what it says, so remove it" }]);
-    assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests())["decision"], "blocked");
+    assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests())["decision"], "look", "a static rule names a marker and never blocks");
     let mut rules = clean_rules();
     rules["powers"] = json!([{ "path": "src/total.js", "added": ["node:child_process"] }]);
     rules["protected"] = json!([{ "path": ".github/workflows/ci.yml", "operation": "modify" }]);
@@ -601,7 +601,7 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     assert!(md.contains("### ⏭️ Kern: Not verified") && md.contains("no test runner Kern can read") && md.contains("Not run"), "a receipt whose tests could not run says it is not verified, and why:\n{md}");
     let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &none));
-    assert!(md.contains("in the rules it checked") && md.contains("no test script"), "a project with no tests gets a receipt that covers the rules only and says so:\n{md}");
+    assert!(md.contains("### ⏭️ Kern: Not verified") && md.contains("no test script") && !md.contains("✅ Kern"), "a project with no tests gets a receipt that is not verified and says so:\n{md}");
     let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" });
     let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing));
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");

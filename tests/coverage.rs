@@ -24,9 +24,9 @@ fn azu_ecmascript_proposals_json_20_a_test_script_that_finds_no_test_files_means
     assert!(!suite::no_test_files("the output contains no mocha report (exit 1); its first error: Error: Cannot find module './setup'"));
     let tests = json!({ "status": "NOT_RUN", "why": "the project's test script finds no test files, so no test checks this change", "no_tests": true });
     let r = receipt::build(&drive_json(), &clean_rules(), &tests);
-    assert_eq!(r["decision"], "clear", "a project with no tests has nothing for Kern to run; the receipt says so instead of asking for a look: {r}");
+    assert_eq!(r["decision"], "unverified", "a project with no tests has nothing for Kern to run; the receipt says so instead of asking for a look, and never says clear: {r}");
     let md = receipt::markdown(&r);
-    assert!(md.contains("finds no test files") && md.contains("rules only"), "{md}");
+    assert!(md.contains("finds no test files") && md.contains("Not verified"), "{md}");
 }
 
 #[test]
@@ -280,6 +280,24 @@ fn tryghost_ghost_28552_changed_code_no_test_here_reaches_never_gets_a_check_mar
 }
 
 #[test]
+fn formbricks_8269_a_file_whose_related_tests_never_loaded_in_a_fault_run_stays_not_verified_and_says_why() {
+    let file = "apps/web/app/api/v1/webhooks/lib/webhook.ts";
+    let fault = |line: u64, kind: &str, outcome: &str| json!({ "path": file, "line": line, "what": "changes true to false", "kind": kind, "target": "createWebhook", "outcome": outcome });
+    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(17, "undo", "unrun"), fault(22, "operator", "unrun"), fault(31, "operator", "untested")])));
+    assert_eq!(r["decision"], "unverified", "the related tests failed to load in every fault run (Failed to resolve entry for package \"@formbricks/database\"), so Kern cannot say a test reaches the change; that is never a green answer: {r}");
+    let items = r["unverified"].as_array().unwrap();
+    assert!(items.len() == 1 && items[0]["kind"] == "unrun-change" && items[0]["what"].as_str().unwrap().contains(file), "{r}");
+    assert!(!items[0]["what"].as_str().unwrap().contains("no test that runs here reaches"), "it never claims no test reaches the code: {r}");
+    assert_eq!(r["challenges"], json!([]), "and it gives the agent no 'No test reaches this file' task: {r}");
+    let md = receipt::markdown(&r);
+    assert!(md.contains("⚠️ Tests: 8 that passed before still pass, but the tests related to part of the changed code did not run in Kern's fault runs") && !md.contains("No test reaches") && md.contains("not decided"), "{md}");
+    let kinds = |faults: Value| -> Vec<String> { receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(faults))["unverified"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect() };
+    assert_eq!(kinds(json!([fault(17, "undo", "unrun"), fault(22, "operator", "unreached")])), ["untested-change"], "a related test that ran and never loaded the file is the plain fact");
+    assert!(kinds(json!([fault(17, "undo", "unrun"), fault(22, "operator", "missed")])).is_empty(), "a test that ran the changed code reaches it");
+    assert!(kinds(json!([fault(17, "undo", "unrun"), fault(22, "operator", "unknown")])).is_empty(), "a run that loaded the file and decided nothing is not evidence either way");
+}
+
+#[test]
 fn webdriverio_15574_a_fault_run_where_kern_s_own_reporter_did_not_load_is_kern_s_limit_not_unreached_code() {
     let before = kern::proof::Report::default();
     let errors = "Error: Cannot find module '/kern/vitest-progress.mjs'\n    at loadCustomReporterModule (file:///workspace/node_modules/vitest/dist/chunks/cli-api.js:7713:26)\n  [cause]: Error: Failed to load url /kern/vitest-progress.mjs (resolved id: /kern/vitest-progress.mjs). Does the file exist?";
@@ -291,10 +309,11 @@ fn webdriverio_15574_a_fault_run_where_kern_s_own_reporter_did_not_load_is_kern_
 }
 
 #[test]
-fn a_planted_fault_that_no_test_loaded_is_unreached() {
+fn orval_labs_orval_3772_a_fault_run_whose_related_tests_could_not_load_is_unrun_never_unreached() {
     let before = kern::proof::Report::default();
     let crashed = b"Error: Failed to resolve entry for package \"@orval/core\". The package may have incorrect main/module/exports specified in its package.json.";
-    assert_eq!(kern::proof::fault_verdict(kern::policy::Runner::Vitest, &before, (true, false), b"", crashed), "unreached", "orval-labs/orval#3772: the related tests could not load, so nothing reached the fault");
+    assert_eq!(kern::proof::fault_verdict(kern::policy::Runner::Vitest, &before, (true, false), b"", crashed), "unrun",
+        "orval-labs/orval#3772: the related tests could not load, so no related test ran: Kern cannot say a test reaches the fault, and it never says none does");
     assert_eq!(kern::proof::fault_verdict(kern::policy::Runner::Vitest, &before, (false, true), b"", b""), "unknown", "a run Kern stopped proves nothing");
     assert_eq!(kern::proof::fault_verdict(kern::policy::Runner::Vitest, &before, (true, false), b"", b"No test files found, exiting with code 1"), "untested");
 }

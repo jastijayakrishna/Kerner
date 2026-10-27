@@ -220,12 +220,13 @@ fn every_change_no_test_checks_becomes_an_exact_task_for_the_agent_and_the_claim
         { "path": "src/label.js", "line": 1, "what": "undoes the change to label", "kind": "undo", "target": "label", "outcome": "missed", "ran": ["test/label.test.js"] },
         { "path": "src/price.js", "line": 3, "what": "undoes the change to discount", "kind": "undo", "target": "discount", "outcome": "caught",
           "caught_by": [{ "test": "test/price.test.js > discount > from 100", "now": "90", "before": "100" }] },
-        { "path": "packages/backend/src/services/ProjectService/ProjectService.ts", "line": 160, "what": "undoes the change to ProjectService.compile", "kind": "undo", "target": "ProjectService.compile", "outcome": "untested" },
+        { "path": "packages/backend/src/services/ProjectService/ProjectService.ts", "line": 160, "what": "undoes the change to ProjectService.compile", "kind": "undo", "target": "ProjectService.compile", "outcome": "unreached" },
         { "path": "src/price.js", "line": 4, "what": "changes > to >=", "kind": "operator", "outcome": "caught" }]);
     let seen = json!({ "status": "RAN", "compared": 2, "unstable": 0, "changed": 1, "tests": 1,
         "differences": [{ "key": "src/label.js#label", "input": "[3]", "was": "returns \"3 items\"", "now": "returns \"3 things\"", "kind": "changed" }] });
     let (r, md) = receipt_with(faults, seen);
-    assert_eq!(r["decision"], "clear", "tasks and claims never decide on their own: {r}");
+    assert_eq!(r["decision"], "unverified", "no test reaches ProjectService.compile, which is said plainly; tasks and claims never decide on their own: {r}");
+    assert!(r["unverified"].as_array().unwrap().iter().all(|x| x["kind"] == "untested-change"), "{r}");
     let tasks: Vec<(String, String)> = r["challenges"].as_array().unwrap().iter().map(|c| (c["target"].as_str().unwrap().to_string(), c["kind"].as_str().unwrap().to_string())).collect();
     assert_eq!(tasks, [("label".to_string(), "unasserted".to_string()), ("ProjectService.compile".to_string(), "unreached".to_string())], "{r}");
     assert!(md.contains("For the agent that wrote this change"), "{md}");
@@ -387,6 +388,44 @@ fn a_changed_file_kern_put_no_fault_in_is_named_with_why() {
 }
 
 #[test]
+fn tonplaygram_25277_an_empty_related_test_pick_is_not_checked_not_no_test_reaches_this_file() {
+    use kern::policy::Runner::Jest;
+    use kern::proof::{fault_verdict, read_report};
+    let result = |title: &str, status: &str| json!({ "ancestorTitles": ["bot"], "title": title, "status": status, "failureMessages": [] });
+    let report = |results: Vec<serde_json::Value>| json!({ "numTotalTests": results.len(), "testResults": if results.is_empty() { json!([]) } else { json!([{ "name": "/workspace/test/bot.test.js", "status": "passed", "assertionResults": results }]) } }).to_string().into_bytes();
+    let control = read_report(Jest, &report(vec![result("moves", "passed")])).unwrap();
+    assert_eq!(fault_verdict(Jest, &control, (true, false), &report(vec![]), b""), "untested", "jest --findRelatedTests outside the config's roots picked no test: a zero-test pick, never proof that no test reaches the file");
+    assert_eq!(fault_verdict(Jest, &control, (true, false), b"", b""), "unrun", "no report at all: no related test ran");
+    let cut = &report(vec![result("moves", "passed")])[..40];
+    assert_eq!(fault_verdict(Jest, &control, (true, false), cut, b""), "unrun", "a report cut at the 4 MiB cap cannot be read");
+    assert_eq!(fault_verdict(Jest, &control, (true, true), cut, b""), "unknown", "a cut report from a run that loaded the file decides nothing");
+    assert_eq!(fault_verdict(Jest, &control, (true, false), &report(vec![result("moves", "passed")]), b""), "unreached", "a readable report in which a related test ran while the file was never served: no test reached it");
+    let undo = |outcome: &str| json!([{ "path": "bot/moves.js", "line": 3, "what": "undoes the change to pick", "kind": "undo", "target": "pick", "outcome": outcome }]);
+    for outcome in ["untested", "unrun", "unknown"] {
+        let (r, md) = receipt_with(undo(outcome), json!({}));
+        assert_eq!(r["challenges"], json!([]), "{outcome}: a fault run that decided nothing gives the agent no task: {r}");
+        assert!(!md.contains("No test reaches") && md.contains("Checked by a test: 0 of 1 changed functions; not checked: `pick` (`bot/moves.js`)"), "{outcome}: {md}");
+    }
+    let (r, md) = receipt_with(undo("unreached"), json!({}));
+    assert_eq!(r["challenges"][0]["kind"], "unreached", "{r}");
+    assert!(md.contains("No test reaches this file"), "{md}");
+}
+
+#[test]
+fn gdsc_osaka_iclub_reserve_86_a_file_without_an_undo_is_not_every_changed_function_checked() {
+    let op = |line: u64, outcome: &str| json!({ "path": "app/db/seed.ts", "line": line, "span": [line * 10, line * 10 + 1], "what": "changes < to <=", "kind": "operator", "outcome": outcome });
+    let (r, md) = receipt_with(json!([op(4, "caught"), op(9, "missed"), op(12, "missed")]), json!({}));
+    assert!(!md.contains("✅ Checked by a test") && md.contains("Checked by a test: 0 of 1 changed functions; not checked: `app/db/seed.ts`"), "one caught operator fault among misses, and no undo, is not a checked change: {md}");
+    assert!(md.contains("⚠️ Planted faults: the tests caught 1 of 3 small faults"), "{md}");
+    assert_eq!(r["challenges"], json!([]), "without an undo Kern cannot say what the tests let through, so it sets no task: {r}");
+    assert!(md.contains("⚠️ Tests: 4 that passed before still pass, but they check only 0 of 1 changed functions"), "{md}");
+    let (_, md) = receipt_with(json!([op(4, "caught"), op(9, "caught"), op(12, "unknown")]), json!({}));
+    assert!(md.contains("⏭️ Planted faults: the tests caught 2 of 3 small faults") && md.contains("not decided") && md.contains("app/db/seed.ts:12"), "an unknown fault counts and is named: {md}");
+    let (_, md) = receipt_with(json!([op(4, "caught"), op(9, "missed"), op(12, "unknown")]), json!({}));
+    assert!(md.contains("⚠️ Planted faults: the tests caught 1 of 3 small faults") && md.contains("not caught: `app/db/seed.ts:9") && md.contains("not decided (no test result Kern could judge): `app/db/seed.ts:12"), "{md}");
+}
+
+#[test]
 fn lightdash_12942_a_fault_only_a_broken_test_file_could_have_loaded_is_not_said_to_be_missed_by_a_passing_one() {
     use kern::policy::Runner::Jest;
     use kern::proof::{fault_verdict, read_report};
@@ -447,7 +486,9 @@ fn a_fault_counts_as_caught_only_when_a_test_that_passed_without_it_fails() {
     assert_eq!(fault_verdict(Jest, &clean, (false, true), &report(&[("rounds", "passed")], false), b""), "unknown", "a run that did not finish proves nothing");
     assert_eq!(fault_verdict(Jest, &clean, served, b"", b"No tests found, exiting with code 1
 Run with `--passWithNoTests` to exit with code 0"), "untested");
-    assert_eq!(fault_verdict(Jest, &clean, (true, false), &report(&[], false), b""), "untested", "no test reaches the file at all");
+    assert_eq!(fault_verdict(Jest, &clean, (true, false), &report(&[], false), b""), "untested", "no related test was picked: not proof on its own");
+    assert_eq!(fault_verdict(Jest, &clean, (true, false), &report(&[], true), b""), "unrun", "every related test file failed to load, so no related test ran: never 'no test reaches the file'");
+    assert_eq!(fault_verdict(Jest, &clean, (true, false), b"", b"Error: Cannot find module 'x'"), "unrun", "no report, and the file never loaded: the related tests did not run");
     assert_eq!(fault_verdict(Jest, &clean, served, b"", b"Error: Cannot find module 'x'"), "unknown");
 }
 

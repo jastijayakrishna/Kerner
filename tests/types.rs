@@ -1,5 +1,5 @@
 use kern::receipt;
-use kern::types::{added, diagnostics, enforced, is_ts, jsonc, judge, projects, side};
+use kern::types::{Verdict, added, confirm, diagnostics, enforced, is_ts, jsonc, judge, projects, side, verdict};
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -72,7 +72,8 @@ fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = |projects: serde_json::Value| json!({ "status": "NOT_RUN", "why": "no test runner", "types": { "status": "CHECKED", "projects": projects } });
 
-    let enforced_run = judge("tsconfig.json", &clean, &broken, true, None);
+    let mut enforced_run = judge("tsconfig.json", &clean, &broken, true, None);
+    confirm(&mut enforced_run, &broken, &broken);
     let r = receipt::build(&d, &rules, &tests(json!([enforced_run])));
     assert_eq!(r["decision"], "blocked", "{r}");
     assert!(r["blocked"][0]["what"].as_str().unwrap().contains("src/total.ts:4 TS2322"), "{r}");
@@ -92,6 +93,36 @@ fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a
     assert!(receipt::markdown(&r).contains("not compared — it already had 7 TypeScript errors here on the old code"));
     let same = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &clean, true, None)])));
     assert!(receipt::markdown(&same).contains("no new TypeScript errors in `tsconfig.json` (tsc on the old and the new code, TypeScript 5.6.3)"));
+}
+
+#[test]
+fn different_ai_agent_bank_27_new_type_errors_block_only_when_a_second_tsc_run_repeats_them() {
+    let clean = json!({ "status": "clean", "version": "5.6.3" });
+    let out = |line: &str| side(&format!("kern-types: typescript 5.6.3\n{line}\nkern-types: exit 2 \n"), "");
+    let broken = out("packages/web/src/components/invoice/invoice-form.tsx(247,9): error TS2345: Argument of type 'X' is not assignable to parameter of type 'InvoiceData'.");
+    let once = judge("packages/web/tsconfig.json", &clean, &broken, true, None);
+    assert!(matches!(verdict(&once), Verdict::Look(_)), "one tsc run never blocks on its own: {once}");
+    let mut twice = once.clone();
+    confirm(&mut twice, &broken, &broken);
+    assert_eq!(verdict(&twice), Verdict::Blocked, "the same new error on a second run of the new code, tsc enforced, matched setups, no generated name: {twice}");
+    let mut moved = once.clone();
+    confirm(&mut moved, &broken, &out("packages/web/src/components/invoice/invoice-form.tsx(250,9): error TS2345: Argument of type 'X' is not assignable to parameter of type 'InvoiceData'."));
+    assert_eq!(verdict(&moved), Verdict::Blocked, "a moved line is the same error");
+    let mut other = once.clone();
+    confirm(&mut other, &broken, &out("packages/web/src/other.tsx(1,1): error TS2322: y"));
+    assert!(matches!(verdict(&other), Verdict::Look(_)), "a second run with other errors is not a confirmation: {other}");
+    let mut gone = once.clone();
+    confirm(&mut gone, &broken, &json!({ "status": "unknown", "why": "Kern's time ran out" }));
+    assert!(matches!(verdict(&gone), Verdict::Look(_)), "{gone}");
+    let mut loose = twice.clone();
+    loose["enforced"] = json!(false);
+    assert!(matches!(verdict(&loose), Verdict::Look(_)), "tsc not enforced by the project's scripts: {loose}");
+    let mut uneven = twice.clone();
+    uneven["uneven"] = json!("the project has no lockfile");
+    assert!(matches!(verdict(&uneven), Verdict::Unverified(_)), "{uneven}");
+    let mut generated = twice.clone();
+    generated["generated"] = json!(true);
+    assert!(matches!(verdict(&generated), Verdict::Unverified(_)), "{generated}");
 }
 
 #[test]

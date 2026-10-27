@@ -547,7 +547,7 @@ impl Report {
         match status { Status::Passed => c.passed += 1, Status::Failed => c.failed += 1, Status::Skipped => c.skipped += 1 }
     }
     fn count(&self, key: &str) -> Count { self.tests.get(key).copied().unwrap_or_default() }
-    fn sum(&self) -> Count { self.tests.values().fold(Count::default(), |a, c| Count { passed: a.passed + c.passed, failed: a.failed + c.failed, skipped: a.skipped + c.skipped }) }
+    pub fn sum(&self) -> Count { self.tests.values().fold(Count::default(), |a, c| Count { passed: a.passed + c.passed, failed: a.failed + c.failed, skipped: a.skipped + c.skipped }) }
 }
 fn rel(path: &str) -> String { path.strip_prefix("/workspace/").unwrap_or(path).to_string() }
 pub fn first_lines(message: &str) -> String {
@@ -986,7 +986,8 @@ pub fn fault_verdict(runner: Runner, before: &Report, (finished, served): (bool,
     if report.is_err() && (none(output) || none(errors)) { return "untested"; }
     if report.as_ref().is_ok_and(|r| r.tests.values().all(|c| c.ran() == 0) && r.problems.is_empty()) { return "untested"; }
     if report.is_err() && crate::sandbox::kern_failed(&String::from_utf8_lossy(errors)) { return "unknown"; }
-    if !served { return "unreached"; }
+    let ran = report.as_ref().is_ok_and(|r| r.tests.values().any(|c| c.ran() > 0));
+    if !served { return if ran { "unreached" } else { "unrun" }; }
     let Ok(r) = report else { return "unknown" };
     let known: BTreeSet<&String> = failing(before).into_iter().collect();
     let failed = failing(&r);

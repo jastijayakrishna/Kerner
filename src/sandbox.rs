@@ -54,6 +54,7 @@ pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
 }
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
+pub const STEPS_COUNT_MAX: usize = 32;
 pub const TRACE_BYTES_MAX: usize = 8 << 20;
 pub const INSTALL_SCRATCH: [&str; 1] = ["/workspace/.kern-install"];
 pub const PNPM_STORE: &str = "/workspace/.kern-pnpm-store";
@@ -674,11 +675,11 @@ mod inside {
         })
     }
     fn config(name: &str) -> R<Value> { read_json(Path::new("/kern").join(name)) }
-    fn ended(mut child: std::process::Child, timeout: Duration) -> R<bool> {
+    fn ended(mut child: std::process::Child, timeout: Duration) -> R<(bool, Option<i64>)> {
         let started = std::time::Instant::now();
         loop {
-            if child.try_wait()?.is_some() { return Ok(true); }
-            if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); return Ok(false); }
+            if let Some(s) = child.try_wait()? { return Ok((true, s.code().map(i64::from))); }
+            if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); return Ok((false, None)); }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -951,13 +952,41 @@ mod inside {
         std::fs::write("/tmp/.kern-serve.json", serde_json::to_vec(&manifest)?)?;
         Ok(true)
     }
+    fn step_run(step: &Value, (env, options): (&[(String, String)], &str), wait: Duration) -> R<Value> {
+        let (dir, script) = (text(step, "dir")?, text(step, "script")?);
+        ensure!(!script.is_empty() && script.len() <= 100 && !script.starts_with('-') && !script.chars().any(char::is_control), "Invalid build step");
+        let cwd = super::test_dir(dir)?;
+        let name = format!("{} {script}", if dir.is_empty() { "." } else { dir });
+        let (out, err) = ("/tmp/.kern-step-out", "/tmp/.kern-step-err");
+        let child = Command::new("/usr/local/bin/npm").args(["run", script]).current_dir(&cwd).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+            .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create(out)?)).stderr(Stdio::from(std::fs::File::create(err)?)).spawn()?;
+        let (finished, exit) = ended(child, wait)?;
+        quiesce()?;
+        let tail = |p: &str| String::from_utf8_lossy(&some_of(p, 16 << 10, true)).to_string();
+        Ok(json!({ "name": name, "finished": finished, "exit": exit, "errors": format!("{}\n{}", tail(out), tail(err)) }))
+    }
+    fn run_steps(steps: &[Value], (env, options): (&[(String, String)], &str), timeout: Duration) -> R<()> {
+        ensure!(steps.len() <= super::STEPS_COUNT_MAX, "Too many build steps");
+        let started = std::time::Instant::now();
+        let mut results = Vec::new();
+        for step in steps {
+            let result = step_run(step, (env, options), timeout.saturating_sub(started.elapsed()))?;
+            let finished = result["finished"] == true;
+            results.push(result);
+            if !finished { break; }
+        }
+        for (name, body) in [("output", serde_json::to_vec(&results)?), ("errors", Vec::new()), ("behavior", Vec::new()), ("created", Vec::new()), ("ending", b"steps".to_vec()), ("values", Vec::new()),
+            ("trace", Vec::new())] { part(name, &body)?; }
+        std::io::Write::flush(&mut std::io::stdout())?;
+        Ok(())
+    }
     fn fault_run(run: &[String], dir: &str, (env, options): (&[(String, String)], &str), target: &Path, wait: Duration) -> R<Value> {
         for f in ["/tmp/.kern-report.json", "/tmp/.kern-fault-served", "/tmp/.kern-fault-values"] { let _ = std::fs::remove_file(f); }
         let child = Command::new(&run[0]).args(&run[1..]).current_dir(dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
             .env("NODE_OPTIONS", format!("--require=/kern/fault.cjs{options}")).env("KERN_REPORT", "/tmp/.kern-report.json")
             .env("KERN_FAULT_FILE", target).env("KERN_FAULT_SOURCE", "/tmp/.kern-fault-src").env("KERN_FAULT_SERVED", "/tmp/.kern-fault-served").env("KERN_VALUES", "/tmp/.kern-fault-values")
             .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-fault-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-fault-err")?)).spawn()?;
-        let finished = ended(child, wait)?;
+        let (finished, _) = ended(child, wait)?;
         quiesce()?;
         let report = some_of("/tmp/.kern-report.json", 4 << 20, false);
         let reported = report.iter().any(|b| !b.is_ascii_whitespace());
@@ -967,7 +996,7 @@ mod inside {
     }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early", "faults", "serve"], "test run")?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early", "faults", "serve", "steps"], "test run")?;
         let early = c["early"].as_bool().ok_or_else(|| Denied("Invalid test run".into()))?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
@@ -986,7 +1015,9 @@ mod inside {
         command[0] = super::runner_in(cwd, &command[0], |p| Path::new(p).exists());
         ensure!(Path::new(&command[0]).exists(), "The test runner is not installed in the project: {} does not exist (Kern needs node_modules; Yarn Plug'n'Play projects have none)", command[0]);
         let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
+        let steps = c["steps"].as_array().ok_or_else(|| Denied("Invalid build steps".into()))?;
         clear_added(Path::new("/workspace"));
+        if !steps.is_empty() { return run_steps(steps, (&env, &options), timeout); }
         let files = c["files"].as_object().filter(|f| f.len() <= 128).ok_or_else(|| Denied("Invalid test run files".into()))?;
         for (p, text) in files {
             file_path(p)?;

@@ -48,3 +48,13 @@ fn lightdash_12942_the_ai_step_holds_the_key_in_a_job_that_never_runs_the_pull_r
     assert!(run.contains("KERN_INVESTIGATION") && !run.contains("secrets."), "the run job reads the investigation as data and still holds no keys");
     assert!(!permissions(&run).contains("write"), "the run job's token stays read-only:\n{}", permissions(&run));
 }
+
+#[test]
+fn the_readme_install_line_uses_the_ref_examples_kern_yml_uses() {
+    let uses = |text: &str| text.lines().map(str::trim).filter(|l| l.starts_with("uses: jastijayakrishna/Kerner/")).map(str::to_string).collect::<Vec<_>>();
+    let example = uses(&std::fs::read_to_string("examples/kern.yml").unwrap());
+    assert_eq!(example.len(), 1, "examples/kern.yml calls Kern's reusable workflow once");
+    let readme = uses(&std::fs::read_to_string("README.md").unwrap());
+    assert!(!readme.is_empty(), "the README shows the install workflow");
+    for line in &readme { assert_eq!(line, &example[0], "a customer who copies the README must get the workflow examples/kern.yml points at, at a ref that exists"); }
+}

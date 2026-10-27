@@ -111,7 +111,11 @@ fn test_file_items(f: &mut Found, rules: &Value, tests: &Value) -> (Vec<Value>, 
     f.blocked.extend(per_file("test-broke", strings(&tests["broke"]), "A test that passed before now fails", "tests that passed before now fail"));
     for x in tests["run_broke"].as_array().into_iter().flatten() {
         let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
-        f.blocked.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code: {}", plain(x["why"].as_str().unwrap_or(""), 400))));
+        let why = plain(x["why"].as_str().unwrap_or(""), 400);
+        match x["old_rerun_passed"].as_u64().filter(|n| *n > 0) {
+            Some(n) => f.look.push(item("test-run-broke", format!("The tests{place} run on the old code but give no results on the new code, twice, while {} on the old code still passed when Kern ran them again after: {why}", plural(n as usize, "test", "tests")))),
+            None => f.unverified.push(item("test-unconfirmed", format!("The tests{place} give no results on the new code ({why}), but Kern has no record of running the old code's tests again after them, so it cannot say the change caused it"))),
+        }
     }
     for t in strings(&tests["new_problems"]) {
         if added(file_of(&t)) { new_test_file(&t, tests, &mut new_tests, &mut f.cannot_run); continue; }
@@ -133,7 +137,7 @@ fn test_file_items(f: &mut Found, rules: &Value, tests: &Value) -> (Vec<Value>, 
         if added_file && reach { new_tests.push(item("new-runner-reach", format!("{}: a file this change adds, outside the test folders, uses the test runner; if it is a test, Kern does not run it", code(path, 160)))); }
         else if reach { f.look.push(item("runner-reach", format!("{}: code outside the test folders uses the test runner; that is fine in test support code and a way to fake results in shipped code ({})", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
         else if added_file { new_tests.push(item("new-test-skips", format!("{}: a test file this change adds skips, focuses or inverts some of its own tests", code(path, 160)))); }
-        else { f.blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
+        else { f.look.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
     }
     (new_tests, unproven)
 }
@@ -154,14 +158,15 @@ fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Valu
         f.look.push(item("test-data", format!("{}: the change edits a file the tests use (data, a helper or a mock), so what they expect may have changed", code(&p, 160))));
     }
     f.look.extend(new_tests);
-    let mut reach: Vec<(String, bool, bool)> = Vec::new();
+    let mut reach: Vec<(String, bool, bool, bool)> = Vec::new();
     for x in tests["faults"].as_array().into_iter().flatten() {
-        let path = x["path"].as_str().unwrap_or("").to_string();
-        let (never, crashed) = (["unreached", "untested"].iter().any(|o| x["outcome"] == *o), x["outcome"] == "unreached");
-        match reach.iter_mut().find(|(p, _, _)| *p == path) { Some((_, all, any)) => { *all &= never; *any |= crashed; } None => reach.push((path, never, crashed)) }
+        let (path, outcome) = (x["path"].as_str().unwrap_or("").to_string(), x["outcome"].as_str().unwrap_or(""));
+        let (never, unreached, unrun) = (["unreached", "untested", "unrun"].contains(&outcome), outcome == "unreached", outcome == "unrun");
+        match reach.iter_mut().find(|(p, ..)| *p == path) { Some((_, all, a, b)) => { *all &= never; *a |= unreached; *b |= unrun; } None => reach.push((path, never, unreached, unrun)) }
     }
-    for (path, _, _) in reach.iter().filter(|(p, all, any)| *all && *any && !p.is_empty()) {
-        f.unverified.push(item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put faults in the changed code, and no test loaded them), so the tests say nothing about it", code(path, 160))));
+    for (path, _, unreached, _) in reach.iter().filter(|(p, all, a, b)| *all && (*a || *b) && !p.is_empty()) {
+        f.unverified.push(if *unreached { item("untested-change", format!("{}: no test that runs here reaches the code this change edits in it (Kern put faults in the changed code, and no test loaded them), so the tests say nothing about it", code(path, 160))) }
+            else { item("unrun-change", format!("{}: the tests related to it did not run in any of Kern's fault runs (they ended without a report and never loaded the file), so Kern cannot say a test reaches the code this change edits in it", code(path, 160))) });
     }
 }
 const NOTHING_TO_CHANGE: &str = "Kern found nothing in its change";
@@ -179,16 +184,9 @@ fn units(tests: &Value) -> Vec<Unit> {
     for (u, f) in out.iter_mut().zip(faults.iter().filter(|f| f["kind"] == "undo")) {
         if u.outcome == "missed" && guarded(&faults, f) && example(tests, u).is_none() { u.outcome = "covered".to_string(); }
     }
-    let undone: std::collections::BTreeSet<String> = out.iter().map(|u| u.path.clone()).collect();
-    let mut others: Vec<(String, Vec<String>)> = Vec::new();
-    for f in faults.iter().filter(|f| f["kind"] != "undo") {
-        let (path, outcome) = (f["path"].as_str().unwrap_or("").to_string(), f["outcome"].as_str().unwrap_or("unknown").to_string());
-        if undone.contains(&path) { continue; }
-        match others.iter_mut().find(|(p, _)| *p == path) { Some((_, o)) => o.push(outcome), None => others.push((path, vec![outcome])) }
-    }
-    for (path, outcomes) in others {
-        let outcome = ["caught", "missed", "unreached", "untested"].into_iter().find(|o| outcomes.iter().any(|x| x == o)).unwrap_or("unknown").to_string();
-        out.push(Unit { path, target: None, outcome, ran: Vec::new(), caught_by: Vec::new() });
+    let mut named: std::collections::BTreeSet<String> = out.iter().map(|u| u.path.clone()).collect();
+    for path in faults.iter().filter(|f| f["kind"] != "undo").filter_map(|f| f["path"].as_str()).filter(|p| named.insert(p.to_string())) {
+        out.push(Unit { path: path.to_string(), target: None, outcome: "not checked".to_string(), ran: Vec::new(), caught_by: Vec::new() });
     }
     for m in tests["faults_missing"].as_array().into_iter().flatten().filter(|m| !m["why"].as_str().unwrap_or("").starts_with(NOTHING_TO_CHANGE)) {
         out.push(Unit { path: m["path"].as_str().unwrap_or("").to_string(), target: None, outcome: "not checked".to_string(), ran: Vec::new(), caught_by: Vec::new() });
@@ -232,7 +230,7 @@ fn proof_items(tests: &Value) -> (Vec<Value>, Vec<Value>) {
     let (mut claims, mut challenges) = (Vec::new(), Vec::new());
     for u in units(tests) {
         for c in &u.caught_by { claims.push(json!({ "path": u.path, "target": u.target, "test": c["test"], "now": c["now"], "before": c["before"], "why": c["why"] })); }
-        let kind = match u.outcome.as_str() { "missed" => "unasserted", "untested" | "unreached" => "unreached", _ => continue };
+        let kind = match u.outcome.as_str() { "missed" => "unasserted", "unreached" => "unreached", _ => continue };
         challenges.push(json!({ "path": u.path, "target": u.target, "kind": kind, "tests": u.ran, "example": example(tests, &u) }));
     }
     (claims, challenges)
@@ -276,6 +274,19 @@ fn agent_md(r: &Value) -> String {
         md += &format!("{}. {}: {ask}\n", i + 1, named(&u));
     }
     md + "\n"
+}
+fn planted_line(tests: &Value) -> String {
+    let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["kind"] != "undo").collect();
+    if planted.is_empty() { return String::new(); }
+    let caught = planted.iter().filter(|f| f["outcome"] == "caught").count();
+    let named = |which: &dyn Fn(&Value) -> bool| -> Vec<String> {
+        planted.iter().filter(|f| which(f)).take(SHOWN).map(|f| code(&format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or("")), 200)).collect()
+    };
+    let decided = |f: &Value| ["caught", "missed", "unreached"].iter().any(|o| f["outcome"] == *o);
+    let (missed, undecided) = (named(&|f| decided(f) && f["outcome"] != "caught"), named(&|f| !decided(f)));
+    let mark = if !missed.is_empty() { "⚠️" } else if !undecided.is_empty() { "⏭️" } else { "✅" };
+    let also = |label: &str, list: &[String]| if list.is_empty() { String::new() } else { format!("; {label}: {}", list.join(", ")) };
+    format!("- {mark} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}{}\n", planted.len(), also("not caught", &missed), also("not decided (no test result Kern could judge)", &undecided))
 }
 fn bystander_items(f: &mut Found, tests: &Value) {
     for x in tests["bystanders"]["differences"].as_array().into_iter().flatten() {
@@ -344,11 +355,10 @@ fn type_items(f: &mut Found, tests: &Value) {
         let count = p["count"].as_u64().unwrap_or(0) as usize;
         let what = format!("The change brings {} to {}, which type-checked with none on the old code: {}{}", plural(count, "new TypeScript error", "new TypeScript errors"),
             code(p["config"].as_str().unwrap_or(""), 160), shown.join(", "), if count > shown.len() { ", …" } else { "" });
-        match p["uneven"].as_str() {
-            _ if p["generated"] == true && p["enforced"] == true => f.unverified.push(item("types-new", format!("{what} (some are about modules, exports or names that a build step may generate, and Kern did not run it, so it cannot say whether the change caused them)"))),
-            _ if p["enforced"] != true => f.look.push(item("types-new", format!("{what} (the project's scripts do not run tsc, so Kern does not block on it)"))),
-            Some(why) => f.unverified.push(item("types-new", format!("{what} (Kern cannot compare the two sides fairly: {})", plain(why, 400)))),
-            None => f.blocked.push(item("types-broke", what)),
+        match crate::types::verdict(p) {
+            crate::types::Verdict::Unverified(why) => f.unverified.push(item("types-new", format!("{what} ({why})"))),
+            crate::types::Verdict::Look(why) => f.look.push(item("types-new", format!("{what} ({why})"))),
+            crate::types::Verdict::Blocked => f.blocked.push(item("types-broke", what)),
         }
     }
 }
@@ -560,7 +570,8 @@ fn not_run_items(f: &mut Found, tests: &Value) {
         else { format!("Kern could not run the tests here, so it cannot say this change kept them passing: {}", plain(why, 400)) }
     };
     let said = tests["run_unconfirmed"].as_array().into_iter().flatten().any(|x| x["why"] == tests["why"]);
-    if tests["status"] == "NOT_RUN" && tests["no_tests"] != true && !said { f.unverified.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
+    if tests["status"] == "NOT_RUN" && tests["no_tests"] == true { f.unverified.push(item("no-tests", format!("No test checks this change: {}", plain(tests["why"].as_str().unwrap_or("the project has no test script"), 400)))); }
+    else if tests["status"] == "NOT_RUN" && !said { f.unverified.push(item("tests-not-run", unchecked(tests["why"].as_str().unwrap_or("no reason was given")))); }
     if tests["status"] == "RAN" {
         for n in tests["not_run"].as_array().into_iter().flatten() {
             f.unverified.push(item("tests-not-run", format!("{}: {}", code(n["dir"].as_str().filter(|d| !d.is_empty()).unwrap_or("."), 160), unchecked(n["why"].as_str().unwrap_or("no reason was given")))));
@@ -693,6 +704,8 @@ pub fn markdown(r: &Value) -> String {
             format!("- ⚠️ Tests: {kept} that passed before still pass, but Kern could not prove or rule out some failures (see Not verified above) ({runner})")
         } else if unverified.iter().any(|x| x["kind"] == "untested-change") {
             format!("- ⚠️ Tests: {kept} that passed before still pass, but no test that runs here reaches part of the changed code (see Not verified above) ({runner})")
+        } else if unverified.iter().any(|x| x["kind"] == "unrun-change") {
+            format!("- ⚠️ Tests: {kept} that passed before still pass, but the tests related to part of the changed code did not run in Kern's fault runs (see Not verified above) ({runner})")
         } else if checked < proved.len() {
             format!("- ⚠️ Tests: {kept} that passed before still pass, but they check only {checked} of {} changed functions (see below) ({runner})", proved.len())
         } else {
@@ -711,21 +724,18 @@ pub fn markdown(r: &Value) -> String {
         md += &line;
         md += "\n";
         md += &checked_md(r, &proved, checked);
-        let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["outcome"] != "unknown" && f["kind"] != "undo").collect();
-        if !planted.is_empty() {
-            let caught = planted.iter().filter(|f| f["outcome"] == "caught").count();
-            let missed: Vec<String> = planted.iter().filter(|f| f["outcome"] != "caught").take(SHOWN)
-                .map(|f| code(&format!("{}:{} {}", f["path"].as_str().unwrap_or(""), f["line"], f["what"].as_str().unwrap_or("")), 200)).collect();
-            md += &format!("- {} Planted faults: the tests caught {caught} of {} small faults Kern put in the changed lines{}\n", if missed.is_empty() { "✅" } else { "⚠️" }, planted.len(),
-                if missed.is_empty() { String::new() } else { format!("; not caught: {}", missed.join(", ")) });
-        }
+        md += &planted_line(tests);
         for (why, paths) in by_reason(&tests["faults_missing"]) { md += &format!("- ⏭️ No fault planted in {paths}: {why}\n"); }
         let seen = &tests["bystanders"];
         if seen["status"] == "RAN" {
-            let (n, m) = (seen["compared"].as_u64().unwrap_or(0), seen["changed"].as_u64().unwrap_or(0));
-            md += &format!("- {} Untouched tests: Kern watched what the changed code gave {} that this change does not touch, for {n} inputs on the old and the new code{}\n",
-                if m == 0 { "✅" } else { "🔍" }, plural(seen["tests"].as_u64().unwrap_or(0) as usize, "test file", "test files"),
-                if m == 0 { "; every answer stayed the same".to_string() } else { format!("; {m} changed (see Notes)") });
+            let (n, m, u) = (seen["compared"].as_u64().unwrap_or(0), seen["changed"].as_u64().unwrap_or(0), seen["unstable"].as_u64().unwrap_or(0) as usize);
+            let aside = if u == 0 { String::new() } else { format!(" ({} gave two answers on the old code alone, so {} set aside)", plural(u, "input", "inputs"), if u == 1 { "it was" } else { "they were" }) };
+            if n == 0 { md += &format!("- ⏭️ Untouched tests: not compared — no input reached the changed code in both old runs{aside}\n"); }
+            else {
+                md += &format!("- {} Untouched tests: Kern watched what the changed code gave {} that this change does not touch, for {n} inputs on the old and the new code{}{aside}\n",
+                    if m == 0 { "✅" } else { "🔍" }, plural(seen["tests"].as_u64().unwrap_or(0) as usize, "test file", "test files"),
+                    if m == 0 { "; every answer stayed the same".to_string() } else { format!("; {m} changed (see Notes)") });
+            }
         } else if let Some(why) = seen["why"].as_str() { md += &format!("- ⏭️ Untouched tests: not compared — {}\n", plain(why, 400)); }
         let map = &tests["map"];
         if map["status"] == "RAN" { md += &map_line(map); }
@@ -757,7 +767,7 @@ pub fn markdown(r: &Value) -> String {
         }
         else if edited > 0 { md += &format!("- ✅ Edited tests: their old versions still pass on the new code ({})\n", plural(edited, "test file", "test files")); }
     } else if tests["status"] == "BROKE" {
-        md += "- ❌ Tests: they run on the old code but give no results on the new code (see above)\n";
+        md += "- ⚠️ Tests: they run on the old code but give no results on the new code (see above)\n";
     } else if nothing {
         md += "- ✅ Tests: nothing to run — this change touches only documentation\n";
     } else {
@@ -780,7 +790,10 @@ pub fn markdown(r: &Value) -> String {
         let version = p["version"].as_str().filter(|v| !v.is_empty()).map(|v| format!(", TypeScript {v}")).unwrap_or_default();
         match p["result"].as_str() {
             Some("same") => md += &format!("- ✅ Types: no new TypeScript errors in {config} (tsc on the old and the new code{version})\n"),
-            Some("new-errors") => md += &format!("- ❌ Types: {} in {config}, which had none on the old code (see above)\n", plural(p["count"].as_u64().unwrap_or(0) as usize, "new TypeScript error", "new TypeScript errors")),
+            Some("new-errors") => {
+                let mark = match crate::types::verdict(p) { crate::types::Verdict::Blocked => "❌", crate::types::Verdict::Look(_) => "⚠️", crate::types::Verdict::Unverified(_) => "⏭️" };
+                md += &format!("- {mark} Types: {} in {config}, which had none on the old code (see above)\n", plural(p["count"].as_u64().unwrap_or(0) as usize, "new TypeScript error", "new TypeScript errors"));
+            }
             _ => md += &format!("- ⏭️ Types: {config} not compared — {}\n", plain(p["why"].as_str().unwrap_or("Kern could not run tsc on it"), 400)),
         }
     }

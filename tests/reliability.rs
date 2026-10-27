@@ -253,8 +253,8 @@ fn changed_files_the_rules_cannot_read_do_not_pass_as_clear() {
         let head = commit(&r, &[]);
         check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap()["decision"].clone()
     };
-    assert_eq!((skip(100), power(100)), (json!("blocked"), json!("look")), "in ordinary files a new skip blocks and a new power needs a look");
-    assert_eq!((skip(20_000), power(20_000), stray_byte), (json!("blocked"), json!("look"), json!("look")),
+    assert_eq!((skip(100), power(100)), (json!("look"), json!("look")), "in ordinary files a new skip and a new power each need a look");
+    assert_eq!((skip(20_000), power(20_000), stray_byte), (json!("look"), json!("look"), json!("look")),
         "the same changes pass as clear in files padded past 1 MiB, and in a file with one Latin-1 byte in a comment, which Node still runs");
 }
 
@@ -657,13 +657,6 @@ fn the_packages_a_test_needs_are_built_after_the_ones_they_need() {
 }
 
 #[test]
-fn the_build_steps_reach_the_sandbox_under_a_name_it_accepts() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/suite.rs")).unwrap();
-    let name = src.split("process.env.").nth(1).and_then(|s| s.split(')').next()).unwrap_or("");
-    assert!(kern::script::env_name(name), "the test run refuses variable {name:?}, so the build step would never run (KERN_ names are Kern's own)");
-}
-
-#[test]
 fn a_runner_that_crashes_is_quoted_by_its_first_error_not_only_its_last_lines() {
     let err = b"failed to load config from /workspace/apps/web/vite.config.ts
 
@@ -872,9 +865,9 @@ fn sides_set_up_differently_are_named() {
     assert!(suite::setup_differs(&setup("installed", "installed from package.json (the lockfile is out of date)", json!([])), "").unwrap().contains("lockfile"),
         "dependencies installed two different ways can differ in version");
     assert!(suite::setup_differs(&setup("installed", "installed", json!(["@rollup/rollup-linux-x64-gnu@4.20.0"])), "packages/web").is_some());
-    let steps = |exit: &str| format!("building\nkern-step packages/lib build exit {exit}\n");
-    assert_eq!(suite::uneven_steps(&steps("0"), &steps("0")), None);
-    assert!(suite::uneven_steps(&steps("0"), &steps("1")).unwrap().contains("packages/lib build"), "a build that worked on one side only");
+    let steps = |exit: i64| vec![suite::Step { name: "packages/lib build".into(), exit: Some(exit), errors: "building\n".into() }];
+    assert_eq!(suite::uneven_steps(&steps(0), &steps(0)), None);
+    assert!(suite::uneven_steps(&steps(0), &steps(1)).unwrap().contains("packages/lib build"), "a build that worked on one side only");
 }
 
 #[test]
@@ -1016,13 +1009,36 @@ fn mastra_18872_a_build_pass_starts_only_when_the_old_rerun_and_the_new_codes_ru
 }
 
 #[test]
+fn a_build_step_whose_exit_line_scrolled_out_of_the_log_tail_is_uneven_and_a_printed_kern_step_line_is_ignored() {
+    let step = |name: &str, exit: Option<i64>, errors: &str| suite::Step { name: name.into(), exit, errors: errors.into() };
+    let faked = step("packages/lib build", Some(1), "npm error code 1\nkern-step packages/lib build exit 0\n");
+    assert_eq!(suite::failed_steps(std::slice::from_ref(&faked)).len(), 1, "a step's result is its exit status from Kern's own entry, never a line a script printed");
+    assert!(suite::uneven_steps(&[step("packages/lib build", Some(0), "")], &[faked]).unwrap().contains("worked on one side only"));
+    let old = [step("packages/lib build", Some(0), ""), step("packages/web build", Some(0), "")];
+    let new = [step("packages/lib build", Some(0), "")];
+    let why = suite::uneven_steps(&old, &new).expect("a step with no recorded result on one side makes the sides uneven");
+    assert!(why.contains("packages/web build") && why.contains("no recorded result"), "{why}");
+    assert_eq!(suite::uneven_steps(&old, &old), None);
+    let results = serde_json::json!([{ "name": "packages/lib build", "finished": true, "exit": 0, "errors": "" }, { "name": "packages/web build", "finished": true, "exit": null, "errors": "killed" }]).to_string();
+    let read = suite::steps_run(results.as_bytes()).unwrap();
+    assert_eq!(read, [step("packages/lib build", Some(0), ""), step("packages/web build", None, "killed")], "a step killed by a signal finished with no exit code: a failure");
+    assert!(suite::steps_run(&results.as_bytes()[..results.len() / 2]).is_err(), "a cut result is not read as a run");
+    assert!(suite::steps_run(b"[{\"name\": \"x build\", \"finished\": true}]").is_err(), "a result without an exit status is not a recorded status");
+    let late = serde_json::json!([{ "name": "packages/lib build", "finished": false, "exit": null, "errors": "" }]).to_string();
+    let why = suite::steps_run(late.as_bytes()).expect_err("a step Kern's time limit stopped did not finish, which is never read as a failure the two sides share");
+    assert!(why.0.contains("packages/lib build") && why.0.contains("did not finish"), "{}", why.0);
+}
+
+#[test]
 fn mcpjam_inspector_4344_a_build_that_failed_is_named_with_its_error_never_counted_as_done() {
-    let log = "> @mcpjam/sdk@6.4.0 bundle:chatgpt-runtime\n\u{274c} Failed to bundle ChatGPT Apps runtime script: Error: EACCES: permission denied, open '/workspace/sdk/src/ChatGptAppsRuntime.bundled.ts'\nnpm error code 1\n\nkern-step sdk build exit 1\n\n> @x/core@1.0.0 build\n> tsc\n\nkern-step packages/core build exit 0\n";
-    let failed = suite::failed_steps(log);
+    let step = |name: &str, exit: Option<i64>, errors: &str| suite::Step { name: name.into(), exit, errors: errors.into() };
+    let ran = [step("sdk build", Some(1), "> @mcpjam/sdk@6.4.0 bundle:chatgpt-runtime\n\u{274c} Failed to bundle ChatGPT Apps runtime script: Error: EACCES: permission denied, open '/workspace/sdk/src/ChatGptAppsRuntime.bundled.ts'\nnpm error code 1\n"),
+        step("packages/core build", Some(0), "> @x/core@1.0.0 build\n> tsc\n")];
+    let failed = suite::failed_steps(&ran);
     assert_eq!(failed.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), ["sdk build"], "{failed:?}");
     assert!(failed[0].1.contains("EACCES: permission denied, open '/workspace/sdk/src/ChatGptAppsRuntime.bundled.ts'"), "{failed:?}");
-    assert!(suite::failed_steps("kern-step sdk build exit 0\n").is_empty());
-    assert_eq!(suite::failed_steps("kern-step sdk build exit null\n"), [("sdk build".to_string(), "exit null".to_string())], "a build killed by a signal has no exit code and no error line, and is still a failure");
+    assert!(suite::failed_steps(&[step("sdk build", Some(0), "")]).is_empty());
+    assert_eq!(suite::failed_steps(&[step("sdk build", None, "")]), [("sdk build".to_string(), "exit null".to_string())], "a build killed by a signal has no exit code and no error line, and is still a failure");
     let steps = ["sdk build".to_string(), "packages/core build".to_string()];
     let said = suite::ran_first(&steps, &failed);
     assert!(said.starts_with(" (Kern ran sdk build, packages/core build first, but sdk build failed: ") && said.contains("EACCES") && said.ends_with(')'),
@@ -1371,7 +1387,7 @@ fn a_project_with_no_test_script_is_said_plainly_and_one_kern_cannot_run_is_not_
     };
     for package in [r#"{"name":"shop"}"#, r#"{"name":"shop","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#] {
         let none = run(package);
-        assert_eq!((none["decision"].clone(), none["tests"]["no_tests"].clone()), (json!("clear"), json!(true)), "{package}: {none}");
+        assert_eq!((none["decision"].clone(), none["tests"]["no_tests"].clone()), (json!("unverified"), json!(true)), "{package}: {none}");
     }
     let ava = run(r#"{"name":"shop","scripts":{"test":"ava"}}"#);
     assert_eq!(ava["decision"], "unverified", "the project has tests Kern cannot run, so its answer cannot be a green check: {ava}");
@@ -1392,8 +1408,8 @@ fn review_2_a5_tests_that_could_not_run_on_changed_code_never_give_a_green_check
     assert_eq!(receipt::build(&drive_json(), &clean_rules(), &t)["decision"], "unverified", "a changed package whose tests did not run");
     let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true, "not_run": [] });
     let r = receipt::build(&drive_json(), &clean_rules(), &none);
-    assert_eq!(r["decision"], "clear", "a project with no tests at all would need a look on every pull request, which tells nobody anything: {r}");
-    assert!(!receipt::markdown(&r).contains("✅ Tests"), "{}", receipt::markdown(&r));
+    assert_eq!(r["decision"], "unverified", "a project with no tests at all is never clear: no test checks the change, and it is said plainly, never as a look: {r}");
+    assert!(r["look"].as_array().unwrap().is_empty() && !receipt::markdown(&r).contains("✅ Tests"), "{}", receipt::markdown(&r));
 }
 
 #[test]

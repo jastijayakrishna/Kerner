@@ -1,6 +1,7 @@
 use kern::proof::{Count, Report};
 use kern::suite::{self, Evidence, Observed, Unproven};
-use serde_json::Value;
+use kern::policy;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str], why: &[(&str, &str)]) -> Report {
@@ -130,12 +131,13 @@ fn a_break_with_no_old_rerun_is_unconfirmed_never_blocked() {
 fn a_new_run_cut_short_by_kerns_own_limits_never_proves_the_tests_broke() {
     use suite::Side::{Cut, Nothing, Slow};
     let runner = || Nothing("the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load".to_string());
-    assert!(suite::broke_run(&runner(), &runner(), false), "the runner itself gave no results twice where the old code's tests ran: the e2e 'broke' case blocks");
-    assert!(!suite::broke_run(&runner(), &runner(), true), "the sides were set up differently");
+    let old = || suite::Side::Ran(report(&[("t > adds", 1, 0, 0)], &[], &[]), Vec::new());
+    assert!(suite::broke_run(&runner(), &runner(), Some(&old()), false), "the runner itself gave no results twice where the old code's tests ran, and ran again: the e2e 'broke' case is a look");
+    assert!(!suite::broke_run(&runner(), &runner(), Some(&old()), true), "the sides were set up differently");
     for (first, again) in [(Slow("the tests did not finish in 15 minutes".into()), Slow("the tests did not finish in 15 minutes".into())),
         (Cut("the run was stopped: Sandbox exceeded limits: it ran out of memory (it allows 4096 MiB)".into()), Cut("the run was stopped: Sandbox exceeded limits: it ran out of memory (it allows 4096 MiB)".into())),
         (Cut("the test runner was stopped by a signal, so Kern does not trust its report".into()), runner()), (runner(), Slow("no test file finished in 7 minutes".into()))] {
-        assert!(!suite::broke_run(&first, &again, false), "review A1: Kern's own time, memory or signal limit is not proof the change broke the tests: {first:?} then {again:?}");
+        assert!(!suite::broke_run(&first, &again, Some(&old()), false), "review A1: Kern's own time, memory or signal limit is not proof the change broke the tests: {first:?} then {again:?}");
     }
 }
 
@@ -144,7 +146,7 @@ fn a_refusal_from_kerns_own_sandbox_entry_is_kerns_limit_never_a_block() {
     for reason in ["Agent namespace did not quiesce", "No space left on device (os error 28)", "Invalid test run environment", "A test run file may not replace a project file: src/a.kern-kept.test.js", "Too many planted faults"] {
         let side = suite::unreadable(Some(reason.into()), "The run's report is incomplete".into());
         assert!(matches!(&side, suite::Side::Cut(w) if w.contains(reason)), "only a refusal the change can cause (a runner it does not install) is about the change; {reason:?} is Kern's own: {side:?}");
-        assert!(!suite::broke_run(&side, &side, false), "twice on the new code is still Kern's limit, never a block: {reason:?}");
+        assert!(!suite::broke_run(&side, &side, Some(&suite::Side::Ran(report(&[("t > adds", 1, 0, 0)], &[], &[]), Vec::new())), false), "twice on the new code is still Kern's limit, never a finding: {reason:?}");
     }
     assert_eq!(suite::capped("cut: the test report was larger than Kern's limit of 64 MiB"), Some("the test report was larger than Kern's limit of 64 MiB".to_string()), "a report cut at a cap is a run Kern could not read, so it is not checked");
     assert_eq!(suite::capped("exit 1"), None);
@@ -154,8 +156,43 @@ fn a_refusal_from_kerns_own_sandbox_entry_is_kerns_limit_never_a_block() {
 fn a_sandbox_that_refuses_for_a_reason_in_the_project_is_about_the_change_and_a_broken_report_is_kerns_limit() {
     let refused = suite::unreadable(Some("The test runner is not installed in the project: /workspace/node_modules/.bin/jest does not exist".into()), "The run's report is incomplete".into());
     assert!(matches!(&refused, suite::Side::Nothing(w) if w.contains("not installed in the project")), "the e2e 'missing' case: the change switched the test script to a runner it does not install: {refused:?}");
-    assert!(suite::broke_run(&refused, &suite::unreadable(Some("The test runner is not installed in the project".into()), String::new()), false), "twice, where the old code's tests ran: a block");
+    let old = suite::Side::Ran(report(&[("t > adds", 1, 0, 0)], &[], &[]), Vec::new());
+    assert!(suite::broke_run(&refused, &suite::unreadable(Some("The test runner is not installed in the project".into()), String::new()), Some(&old), false), "twice, where the old code's tests ran and ran again: a look");
     assert!(matches!(suite::unreadable(None, "The run's report is incomplete".into()), suite::Side::Cut(_)), "a report cut short with no reason given is Kern's own limit");
+}
+
+#[test]
+fn andrewcourtice_ripl_5_and_vuetifyjs_0_840_runs_with_no_results_on_the_new_code_never_block() {
+    use kern::receipt;
+    use suite::Side::{Cut, Nothing, Ran};
+    let nothing = || Nothing("the runner stopped before running any test (exit 1); its first error: Error: yarn install crashed".to_string());
+    let ran = || Ran(report(&[("t > adds", 1, 0, 0)], &[], &[]), Vec::new());
+    assert!(!suite::broke_run(&nothing(), &nothing(), None, false), "andrewcourtice/ripl#5: no old rerun after the two new runs, so nothing says the old code's tests still run");
+    assert!(!suite::broke_run(&nothing(), &nothing(), Some(&nothing()), false), "vuetifyjs/0#840: the old code's tests gave no results again too (ENOSPC), so Kern's environment is the cause");
+    assert!(!suite::broke_run(&nothing(), &nothing(), Some(&Ran(kern::proof::Report::default(), Vec::new())), false), "an old rerun with no test in it confirms nothing");
+    assert!(!suite::broke_run(&nothing(), &nothing(), Some(&Ran(report(&[("t > adds", 0, 1, 0)], &["test/b.test.js"], &[]), Vec::new())), false), "an old rerun in which no test passed does not show the old code's tests still work");
+    assert!(!suite::broke_run(&nothing(), &Cut("the run was stopped: Sandbox exceeded limits".into()), Some(&ran()), false));
+    assert!(suite::broke_run(&nothing(), &nothing(), Some(&ran()), false));
+    let missing = || Nothing("Kern could not run the tests in the sandbox: The test runner is not installed in the project: /workspace/node_modules/.bin/jest does not exist".to_string());
+    let declared = json!({ "devDependencies": { "jest": "^29" } });
+    assert!(suite::runner_declared(Some(&declared), policy::Runner::Jest) && !suite::runner_declared(Some(&json!({ "devDependencies": { "vitest": "^2" } })), policy::Runner::Jest) && !suite::runner_declared(None, policy::Runner::Jest));
+    assert!(matches!(suite::kerns_install(missing(), true), Cut(w) if w.contains("Kern's install")), "the head declares jest, so a missing binary is Kern's install (Yarn Plug'n'Play has no node_modules), never the change's");
+    assert!(matches!(suite::kerns_install(missing(), false), Nothing(_)), "the head no longer declares the runner it runs: the change's doing");
+    assert!(matches!(suite::kerns_install(nothing(), true), Nothing(_)), "only the runner-missing refusal is read this way");
+    let drive = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] });
+    let broke = |item: Value| json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [item] });
+    let why = "the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load";
+    let stored = receipt::build(&drive, &rules, &broke(json!({ "dir": "", "why": why })));
+    assert_eq!((stored["decision"].as_str(), stored["blocked"].as_array().map(Vec::len), stored["look"].as_array().map(Vec::len)), (Some("unverified"), Some(0), Some(0)),
+        "ripl#5's stored item has no record of an old rerun after the new runs, so it is not verified, never a block or a look: {stored}");
+    assert_eq!(stored["unverified"][0]["kind"], "test-unconfirmed", "{stored}");
+    let r = receipt::build(&drive, &rules, &broke(json!({ "dir": "", "why": why, "old_rerun_passed": 3 })));
+    assert_eq!((r["decision"].as_str(), r["blocked"].as_array().map(Vec::len)), (Some("look"), Some(0)), "{r}");
+    assert_eq!(r["look"][0]["kind"], "test-run-broke");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("the test config cannot load") && r["look"][0]["what"].as_str().unwrap().contains("3 tests"), "the look names the first error and what the old rerun showed: {r}");
+    let md = receipt::markdown(&r);
+    assert!(md.contains("### ⚠️ Kern:") && md.contains("⚠️ Tests: they run on the old code but give no results") && !md.contains("❌"), "{md}");
 }
 
 #[test]
@@ -198,7 +235,7 @@ fn vuetifyjs_0_840_a_runner_that_dies_because_the_sandbox_is_full_never_blocks()
     let errors = b"node:events:505\n    throw er; // Unhandled 'error' event\n    ^\n\nError: ENOSPC: no space left on device, write\n    at writeSync (node:fs:1237:3)\n    at SyncWriteStream._write (node:internal/fs/sync_write_stream:27:5)\n\nNode.js v26.12.0\n";
     let full = suite::without_results("the output contains no vitest report", b"exit 1", errors, b"");
     assert!(matches!(&full, suite::Side::Cut(w) if w.contains("ENOSPC: no space left on device")), "the disk the sandbox gave the run filled up, which is Kern's limit, and the receipt names it: {full:?}");
-    assert!(!suite::broke_run(&full, &full, false), "twice out of space proves nothing about the change");
+    assert!(!suite::broke_run(&full, &full, Some(&suite::Side::Ran(report(&[("t > adds", 1, 0, 0)], &[], &[]), Vec::new())), false), "twice out of space proves nothing about the change");
     for limit in ["Error: EMFILE: too many open files, open '/workspace/a.json'", "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory", "Error: spawn ENOMEM"] {
         assert!(matches!(suite::without_results("no report", b"exit 1", limit.as_bytes(), b""), suite::Side::Cut(_)), "{limit}");
     }
