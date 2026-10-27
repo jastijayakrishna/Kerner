@@ -656,10 +656,9 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
 #[cfg(unix)]
 mod inside {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::process::{Command, Stdio};
 
-    const ENV: [(&str, &str); 3] = [("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8")];
     const OUT_HEAD_BYTES_MAX: usize = 1 << 20;
     const OUT_TAIL_BYTES_MAX: usize = 32 << 20;
     const ERR_HEAD_BYTES_MAX: usize = 64 << 10;
@@ -728,46 +727,6 @@ mod inside {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    fn walk(dir: &Path, prefix: &str, depth: u32, limits: (u64, u64), state: &mut (u64, u64, Vec<Value>)) -> R<()> {
-        ensure!(depth <= 32, "Output depth limit");
-        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            state.1 += 1;
-            ensure!(state.1 <= 10000, "Output entry limit");
-            let name = e.file_name().to_string_lossy().to_string();
-            let (path, meta) = (e.path(), std::fs::symlink_metadata(e.path())?);
-            if meta.file_type().is_symlink() { deny!("Symlink output refused"); }
-            if meta.is_dir() { walk(&path, &format!("{prefix}{name}/"), depth + 1, limits, state)?; continue; }
-            ensure!(meta.is_file() && meta.nlink() == 1, "Special or linked output refused");
-            state.0 += meta.len();
-            ensure!(meta.len() <= limits.0 && state.0 <= limits.1, "Output byte limit");
-            let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path)?;
-            let mut bytes = Vec::with_capacity(meta.len() as usize + 1);
-            std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, meta.len() + 1), &mut bytes)?;
-            ensure!(bytes.len() as u64 == meta.len(), "Unstable output file");
-            state.2.push(json!({ "path": format!("{prefix}{name}"), "content": b64(&bytes) }));
-        }
-        Ok(())
-    }
-    fn tree_digest(dir: &Path, prefix: &str, out: &mut Vec<Value>, totals: &mut (u64, u64)) -> R<()> {
-        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let (path, name) = (e.path(), format!("{prefix}{}", e.file_name().to_string_lossy()));
-            let meta = std::fs::symlink_metadata(&path)?;
-            totals.0 += 1;
-            ensure!(totals.0 <= 300_000, "Dependency tree entry limit");
-            if meta.file_type().is_symlink() { out.push(json!({ "path": name, "link": std::fs::read_link(&path)?.to_string_lossy() })); }
-            else if meta.is_dir() { tree_digest(&path, &format!("{name}/"), out, totals)?; }
-            else if meta.is_file() {
-                totals.1 += meta.len();
-                ensure!(totals.1 <= 4 << 30, "Dependency tree byte limit");
-                out.push(json!({ "path": name, "executable": meta.mode() & 0o111 != 0, "size": meta.len(), "sha256": sha256(std::fs::read(&path)?) }));
-            } else { deny!("Special file in dependency tree"); }
-        }
-        Ok(())
-    }
     fn copy_entry(from: &Path, to: &Path) -> R<()> {
         let meta = std::fs::symlink_metadata(from)?;
         if meta.is_dir() { return copy_tree(from, to); }
@@ -775,13 +734,6 @@ mod inside {
         std::fs::copy(from, to)?;
         std::fs::set_permissions(to, std::fs::Permissions::from_mode(if meta.mode() & 0o111 != 0 { 0o700 } else { 0o600 }))?;
         Ok(())
-    }
-    fn remove(path: &Path) -> R<()> {
-        match std::fs::symlink_metadata(path) {
-            Ok(m) if m.is_dir() => Ok(std::fs::remove_dir_all(path)?),
-            Ok(_) => Ok(std::fs::remove_file(path)?),
-            Err(_) => Ok(()),
-        }
     }
     fn lock_down(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
@@ -962,16 +914,6 @@ mod inside {
     fn some_of(path: &str, max: usize, end: bool) -> Vec<u8> {
         let b = std::fs::read(path).unwrap_or_default();
         if b.len() <= max { b } else if end { b[b.len() - max..].to_vec() } else { b[..max].to_vec() }
-    }
-    fn files_only(dir: &Path) -> R<()> {
-        for e in std::fs::read_dir(dir)? {
-            let path = e?.path();
-            let Ok(mut v) = serde_json::from_slice::<Value>(&std::fs::read(&path)?) else { continue };
-            if let Some(result) = v["result"].as_array_mut() { result.retain(|s| s["url"].as_str().is_some_and(|u| u.starts_with("file://"))); }
-            if let Some(maps) = v["source-map-cache"].as_object_mut() { maps.retain(|k, _| k.starts_with("file://")); }
-            std::fs::write(&path, serde_json::to_vec(&v)?)?;
-        }
-        Ok(())
     }
     fn seal(path: &Path, inside: bool, roots: &mut Vec<PathBuf>, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
