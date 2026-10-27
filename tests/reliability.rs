@@ -390,20 +390,22 @@ fn the_sandbox_says_why_it_could_not_run_the_tests() {
 
 #[test]
 fn a_package_json_change_says_what_changed_in_it() {
-    let look = |base: &str, head: &str| -> Vec<String> {
+    let said = |base: &str, head: &str| -> (Vec<String>, Vec<String>) {
         let t = Temp::new();
         let (r, b) = repo(&t, &[("package.json", base), ("src/math.js", MATH)]);
         let h = commit(&r, &[("package.json", head)]);
         let rules = kern::rules::rules(&r, &b, &h).unwrap();
-        receipt::build(&drive_json(), &rules, &clean_tests(), &off())["look"].as_array().unwrap().iter().filter(|x| x["kind"] == "dependencies").map(|x| x["what"].as_str().unwrap().to_string()).collect()
+        let built = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+        let whats = |list: &str, kind: &str| built[list].as_array().unwrap().iter().filter(|x| x["kind"] == kind).map(|x| x["what"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        (whats("look", "install"), whats("notes", "dependencies"))
     };
     let base = r#"{"name":"shop","main":"src/math.js","scripts":{"test":"vitest run","build":"tsc"},"devDependencies":{"vitest":"3.2.0"}}"#;
     let hook = r#"{"name":"shop","main":"src/math.js","scripts":{"test":"vitest run","build":"tsc","postinstall":"node setup.js"},"devDependencies":{"vitest":"3.2.0"}}"#;
-    let items = look(base, hook);
-    assert!(items.len() == 1 && items[0].contains("scripts.postinstall") && !items[0].contains("dependencies change"), "a new install hook is named as what it is: {items:?}");
+    let (looks, notes) = said(base, hook);
+    assert!(looks.len() == 1 && looks[0].contains("scripts.postinstall") && notes.is_empty(), "a new install hook is named as what it is, and no note repeats it: {looks:?} {notes:?}");
     let bump = r#"{"name":"shop","main":"src/index.js","scripts":{"test":"vitest run","build":"tsc"},"devDependencies":{"vitest":"3.2.4"}}"#;
-    let items = look(base, bump);
-    assert!(items.len() == 1 && items[0].contains("vitest 3.2.0") && !items[0].contains("main"), "main neither runs on install nor decides what gets installed: {items:?}");
+    let (looks, notes) = said(base, bump);
+    assert!(looks.is_empty() && notes.len() == 1 && notes[0].contains("vitest 3.2.0") && !notes[0].contains("main"), "main neither runs on install nor decides what gets installed: {notes:?}");
 }
 
 #[test]
@@ -891,42 +893,6 @@ fn failures_on_sides_set_up_differently_or_without_proof_are_not_verified_never_
 }
 
 #[test]
-fn a_dependency_update_is_routine_only_when_its_release_has_been_out_a_week_within_the_same_major() {
-    use kern::deps::{age, floor, rfc3339};
-    assert_eq!(floor("^1.6.0"), Some((1, 6, 0)));
-    assert_eq!(floor("~0.4"), Some((0, 4, 0)));
-    assert_eq!(floor(">=2 <3"), Some((2, 0, 0)));
-    assert_eq!(floor("1.2.3-beta.1"), Some((1, 2, 3)));
-    for odd in ["workspace:*", "npm:other@1.0.0", "github:a/b", "latest", "*", "file:../x"] { assert_eq!(floor(odd), None, "{odd}"); }
-    assert_eq!(rfc3339("1970-01-01T00:00:00.000Z"), Some(0));
-    assert_eq!(rfc3339("2000-03-01T00:00:00Z"), Some(951_868_800));
-    let now = rfc3339("2026-10-16T12:00:00.000Z").unwrap();
-    let old = |_: &str| rfc3339("2026-09-01T00:00:00.000Z");
-    let new = |_: &str| rfc3339("2026-10-14T09:00:00.000Z");
-    assert_eq!(age(Some("^1.6.0"), Some("^1.9.0"), &old, now)["age"], "routine");
-    assert_eq!(age(Some("^1.6.0"), Some("^1.9.1"), &new, now), json!({ "age": "fresh", "version": "1.9.1", "days": 2 }),
-        "chalk and debug were hijacked with patch releases that lived a few hours");
-    assert_eq!(age(Some("^1.6.0"), Some("^2.0.0"), &old, now)["age"], "major");
-    assert_eq!(age(Some("^0.3.0"), Some("^0.4.0"), &old, now)["age"], "major", "a 0.x minor bump may break");
-    assert_eq!(age(None, Some("^1.0.0"), &old, now)["age"], "new");
-    assert_eq!(age(Some("^1.0.0"), Some("^1.1.0"), &|_| None, now)["age"], "unknown", "a release the registry does not know of keeps its look");
-}
-
-#[test]
-fn routine_updates_need_no_look_and_a_fresh_release_does() {
-    let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
-    let rules = |moves: Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
-        "dependencies": [{ "path": "package.json", "operation": "modify", "packages": ["x"], "moves": moves }, { "path": "package-lock.json", "operation": "modify", "moves": [] }] });
-    let tests = json!({ "status": "NOT_RUN", "why": "no runner" });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
-    let routine = receipt::build(&d, &rules(json!([{ "name": "vitest", "from": "^3.2.0", "to": "^3.2.4", "age": "routine", "version": "3.2.4" }])), &tests, &off);
-    assert!(!routine["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "71 of 600 pull requests had a dependencies look: {routine}");
-    let fresh = receipt::build(&d, &rules(json!([{ "name": "chalk", "from": "^5.6.0", "to": "^5.6.1", "age": "fresh", "version": "5.6.1", "days": 0 }])), &tests, &off);
-    let kinds: Vec<&str> = fresh["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
-    assert!(kinds.contains(&"fresh-release") && kinds.contains(&"dependencies"), "{kinds:?}");
-}
-
-#[test]
 fn the_first_error_is_the_thrown_one_never_a_line_of_minified_code() {
     let yarn = format!("file:///workspace/.kern-install/corepack/v1/yarn/4.10.3/yarn.js:4\n(()=>{{var DGe=Object.create;{}throw new Error(x)}})\n   ^\n\nTypeError: Cannot read properties of undefined (reading 'resolve')\n    at file:///workspace/yarn.js:9:46349\n\nNode.js v22.23.3\n", "var a=1;".repeat(80));
     assert_eq!(kern::sandbox::first_error(&yarn), Some("TypeError: Cannot read properties of undefined (reading 'resolve')"),
@@ -1094,22 +1060,6 @@ fn an_env_file_is_read_the_way_dotenv_reads_it() {
 }
 
 #[test]
-fn review_2_a10_a_fresh_release_is_its_own_only_when_this_repository_contains_the_package() {
-    let t = Temp::new();
-    let (r, _) = repo(&t, &[("package.json", r#"{"name":"rl-cli","private":true,"workspaces":["packages/*"]}"#), ("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.0.0"}"#)]);
-    let head = commit(&r, &[("packages/sdk/package.json", r#"{"name":"@runloop/sdk","version":"1.1.0"}"#)]);
-    let own = check::own_packages(&r, &head);
-    assert!(own.contains("@runloop/sdk") && own.contains("rl-cli"), "{own:?}");
-    assert!(!own.contains("@runloop/api-client"), "a package published from another repository, even of the same organization, is not this change's own: a stolen token publishes there with the organization's repository field (Shai-Hulud)");
-    let rules = json!({ "dependencies": [{ "path": "package.json", "moves": [{ "name": "@runloop/sdk", "from": "^1.0.0", "to": "^1.1.0" }, { "name": "@runloop/api-client", "from": "^1.6.0", "to": "^1.9.0" }] }] });
-    let now = kern::deps::rfc3339("2026-02-26T00:00:00Z").unwrap();
-    let fresh = |_: &str, _: &str| kern::deps::rfc3339("2026-02-25T21:42:48Z");
-    let out = kern::deps::aged(rules, now, &fresh, &|name: &str| own.contains(name));
-    assert_eq!(out["dependencies"][0]["moves"][0]["age"], "internal", "a changesets release bumping a package of this same repository");
-    assert_eq!(out["dependencies"][0]["moves"][1]["age"], "fresh");
-}
-
-#[test]
 fn a_jest_project_with_reporters_of_its_own_keeps_them() {
     use kern::sandbox::own_reporters;
     assert!(own_reporters("{\"configs\":[{}],\"globalConfig\":{\"reporters\":[[\"default\",{}],[\"detox/runners/jest/reporter\",{}]]}}\n"),
@@ -1120,17 +1070,17 @@ fn a_jest_project_with_reporters_of_its_own_keeps_them() {
 }
 
 #[test]
-fn removing_a_dependency_needs_no_look_and_the_receipt_still_names_it() {
+fn removing_or_adding_a_dependency_is_a_note_that_names_it() {
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
-    let rules = |moves: serde_json::Value, packages: serde_json::Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
-        "dependencies": [{ "path": "package.json", "packages": packages, "fields": [], "moves": moves }] });
+    let rules = |packages: serde_json::Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
+        "dependencies": [{ "path": "package.json", "operation": "modify", "packages": packages, "fields": [] }] });
     let tests = json!({ "status": "NOTHING_TO_RUN", "why": "x" });
     let off = json!({ "status": "OFF", "why": "no AI key" });
-    let removed = kern::receipt::build(&d, &rules(json!([{ "name": "babel-plugin-styled-components", "age": "removed" }]), json!(["babel-plugin-styled-components (removed)"])), &tests, &off);
-    assert!(!removed["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "ETH-Taipei#322 removed a babel plugin: nothing new can come in by removing a package: {removed}");
-    assert!(kern::receipt::markdown(&removed, None).contains("✅ Dependencies: `babel-plugin-styled-components (removed)`"));
-    let added = kern::receipt::build(&d, &rules(json!([{ "name": "react-native-purchases", "to": "9.5.4", "age": "new" }]), json!(["react-native-purchases 9.5.4 (new)"])), &tests, &off);
-    assert!(added["look"].as_array().unwrap().iter().any(|x| x["kind"] == "dependencies"), "a new package still needs a look");
+    let removed = kern::receipt::build(&d, &rules(json!(["babel-plugin-styled-components (removed)"])), &tests, &off);
+    assert!(removed["look"].as_array().unwrap().is_empty() && removed["notes"][0]["what"].as_str().unwrap().contains("babel-plugin-styled-components (removed)"), "ETH-Taipei#322 removed a babel plugin: {removed}");
+    assert!(kern::receipt::markdown(&removed, None).contains("**Notes.**"), "the move is listed where a person scans it");
+    let added = kern::receipt::build(&d, &rules(json!(["react-native-purchases 9.5.4 (new)"])), &tests, &off);
+    assert!(added["look"].as_array().unwrap().is_empty() && added["notes"][0]["what"].as_str().unwrap().contains("react-native-purchases 9.5.4 (new)"), "a new package is named; nothing Kern measures says more about it: {added}");
 }
 
 #[test]
@@ -1165,8 +1115,8 @@ fn reading_a_setting_from_the_environment_is_not_a_power_but_reading_a_secret_is
 }
 
 #[test]
-fn a_lockfile_only_change_is_routine_when_every_version_it_moves_to_has_been_out_a_week() {
-    use kern::deps::{aged, lock_moves};
+fn a_lockfile_only_change_lists_what_moved_and_leaves_the_workspaces_own_packages_and_links_out() {
+    use kern::deps::lock_moves;
     let old = json!({ "lockfileVersion": 3, "packages": { "": { "name": "app" }, "node_modules/a": { "version": "1.0.0" }, "node_modules/b": { "version": "2.0.0" },
         "node_modules/gone": { "version": "0.1.0" }, "packages/lib": { "name": "@app/lib", "version": "1.0.0" }, "node_modules/@app/lib": { "resolved": "packages/lib", "link": true } } });
     let new = json!({ "lockfileVersion": 3, "packages": { "": { "name": "app" }, "node_modules/a": { "version": "1.0.1" }, "node_modules/b": { "version": "2.0.0" },
@@ -1174,20 +1124,12 @@ fn a_lockfile_only_change_is_routine_when_every_version_it_moves_to_has_been_out
     let moves = lock_moves(&old, &new);
     let shown: Vec<String> = moves.iter().map(|m| format!("{} {} {}", m["name"].as_str().unwrap(), m["from"].as_str().unwrap_or("-"), m["to"].as_str().unwrap_or("-"))).collect();
     assert_eq!(shown, ["a 1.0.0 1.0.1", "c - 3.1.0", "gone 0.1.0 -"], "the workspace's own package and links are not dependencies: {shown:?}");
-    let rules = |m: Vec<serde_json::Value>| json!({ "dependencies": [{ "path": "package-lock.json", "packages": [], "fields": [], "moves": m }] });
-    let now = kern::deps::rfc3339("2026-10-16T00:00:00Z").unwrap();
-    let old_release = |_: &str, _: &str| kern::deps::rfc3339("2026-09-01T00:00:00Z");
-    let r = aged(rules(moves.clone()), now, &old_release, &|_| false);
-    assert!(r["dependencies"][0]["moves"].as_array().unwrap().iter().all(|m| m["age"] == "routine" || m["age"] == "removed"), "{r}");
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
-    let full = |deps: serde_json::Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [], "dependencies": deps["dependencies"] });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
-    let tests = json!({ "status": "NOTHING_TO_RUN", "why": "x" });
-    let calm = kern::receipt::build(&d, &full(r), &tests, &off);
+    let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
+        "dependencies": [{ "path": "package-lock.json", "operation": "modify", "packages": moves.iter().map(kern::deps::shown).collect::<Vec<_>>() }] });
+    let calm = kern::receipt::build(&d, &rules, &json!({ "status": "NOTHING_TO_RUN", "why": "x" }), &json!({ "status": "OFF", "why": "no AI key" }));
     assert_eq!(calm["decision"], "clear", "Azure/AppConfiguration-JavaScriptProvider#330 only refreshed package-lock.json: {calm}");
-    let fresh = |name: &str, _: &str| if name == "c" { kern::deps::rfc3339("2026-10-15T12:00:00Z") } else { kern::deps::rfc3339("2026-09-01T00:00:00Z") };
-    let hot = kern::receipt::build(&d, &full(aged(rules(moves), now, &fresh, &|_| false)), &tests, &off);
-    assert!(hot["look"].as_array().unwrap().iter().any(|x| x["kind"] == "fresh-release" && x["what"].as_str().unwrap().contains("c@3.1.0")), "a brand-new release deep in the tree is named: {hot}");
+    assert!(calm["notes"][0]["what"].as_str().unwrap().contains("c 3.1.0 (new)"), "a new package deep in the tree is named: {}", calm["notes"]);
 }
 
 #[test]
@@ -1350,29 +1292,6 @@ fn review_2_c_a_receipt_comment_whose_text_changed_after_signing_does_not_verify
 }
 
 #[test]
-fn review_2_a2_and_a9_dependencies_are_routine_only_when_every_changed_file_and_every_move_is_explained() {
-    let bump = json!({ "path": "package.json", "operation": "modify", "packages": ["vitest"], "moves": [{ "name": "vitest", "from": "^3.2.0", "to": "^3.2.4", "age": "routine", "version": "3.2.4" }] });
-    let decide = |deps: Value| -> (Value, String) {
-        let mut rules = clean_rules();
-        rules["dependencies"] = deps;
-        let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
-        let md = receipt::markdown(&r, None);
-        (r["decision"].clone(), md)
-    };
-    let (alone, md) = decide(json!([bump.clone()]));
-    assert!(alone == "clear" && md.contains("✅ Dependencies"), "a routine bump on its own stays routine:\n{md}");
-    for other in ["pnpm-lock.yaml", "yarn.lock", "bun.lock", "requirements.txt"] {
-        let (decision, md) = decide(json!([bump.clone(), { "path": other, "operation": "modify" }]));
-        assert_eq!(decision, "look", "{other} could point at https://evil.example/x.tgz, and Kern does not read it:\n{md}");
-        assert!(!md.contains("✅ Dependencies") && md.contains(other), "{md}");
-    }
-    let lock = json!({ "path": "package-lock.json", "operation": "modify", "moves": [{ "name": "vitest", "from": "3.2.0", "to": "3.2.4", "lock": true, "age": "routine" },
-        { "name": "tiny-helper", "from": "1.0.0", "to": "1.0.1", "lock": true, "age": "fresh", "days": 0 }] });
-    let (decision, md) = decide(json!([bump, lock]));
-    assert_eq!(decision, "look", "a release out for less than a day, pulled in through the lockfile next to a routine bump:\n{md}");
-}
-
-#[test]
 fn review_2_a11_no_check_mark_line_says_more_than_kern_checked() {
     let mut rules = clean_rules();
     rules["weakened"] = json!([{ "path": "test/total.test.js", "removed": ["test/total.test.js > rounds to cents"] }]);
@@ -1398,7 +1317,7 @@ fn review_2_a7_files_that_run_code_or_grant_access_outside_github_need_a_look() 
 }
 
 #[test]
-fn review_2_a9_a_lockfile_with_more_moves_than_kern_checks_says_so() {
+fn review_2_a9_a_lockfile_with_more_moves_than_kern_lists_says_how_many() {
     let lock = |version: &str| -> String {
         let packages: serde_json::Map<String, Value> = std::iter::once(("".to_string(), json!({ "name": "shop" })))
             .chain((0..201).map(|i| (format!("node_modules/dep{i}"), json!({ "version": version })))).collect();
@@ -1408,8 +1327,10 @@ fn review_2_a9_a_lockfile_with_more_moves_than_kern_checks_says_so() {
     let (r, base) = repo(&t, &[("package.json", PACKAGE), ("package-lock.json", &lock("1.0.0"))]);
     let head = commit(&r, &[("package-lock.json", &lock("1.0.1"))]);
     let rules = kern::rules::rules(&r, &base, &head).unwrap();
-    assert!(rules["not_checked"].as_array().unwrap().iter().any(|x| x["path"] == "package-lock.json" && x["why"].as_str().unwrap().contains("200")),
-        "201 versions move and Kern checks the release dates of at most 200; the receipt must say so: {}", rules["not_checked"]);
+    let lock = rules["dependencies"].as_array().unwrap().iter().find(|d| d["path"] == "package-lock.json").cloned().unwrap();
+    assert_eq!((lock["count"].clone(), lock["packages"].clone()), (json!(201), Value::Null), "201 versions move and Kern lists at most 200, so it says how many instead: {lock}");
+    let note = receipt::build(&drive_json(), &rules, &clean_tests(), &off())["notes"][0]["what"].as_str().unwrap().to_string();
+    assert!(note.contains("201 versions move in `package-lock.json`"), "{note}");
 }
 
 #[test]
@@ -1418,22 +1339,7 @@ fn review_2_a3_a_major_update_hidden_in_another_section_or_behind_an_or_range_is
     let new = json!({ "devDependencies": { "react": "^19.0.0" }, "peerDependencies": { "react": "^18.0.0 || ^19.0.0" } });
     let moves = kern::deps::changed_versions(&old, &new);
     assert_eq!(moves.len(), 2, "each section's move is kept: {moves:?}");
-    for m in &moves {
-        assert_eq!(kern::deps::age(m["from"].as_str(), m["to"].as_str(), &|_| Some(0), 100 * 86_400)["age"], "major", "react 18 to 19 is a major update in every section: {m}");
-    }
-}
-
-#[test]
-fn review_2_a4_the_pull_request_cannot_set_the_clock_that_ages_its_dependencies() {
-    let t = Temp::new();
-    let (r, _) = repo(&t, &[("package.json", PACKAGE)]);
-    write(&r, "src/a.js", "export const a = 1;\n");
-    git(&r, &["add", "-A"]);
-    let out = Command::new("git").args(["commit", "-q", "-m", "future"]).current_dir(&r).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t").env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00Z").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
-    assert!(out.status.success());
-    let head = git(&r, &["rev-parse", "HEAD"]);
-    assert!(check::clock(&r, &head) <= now_ms() / 1000 + 5, "a commit dated 2099 would make an hour-old release look a week old");
+    assert_eq!(kern::deps::moves(&old, &new), ["react ^18.0.0 → ^18.0.0 || ^19.0.0", "react ^18.2.0 → ^19.0.0"], "react 18 to 19 is named in every section");
 }
 
 #[test]

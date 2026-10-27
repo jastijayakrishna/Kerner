@@ -15,17 +15,6 @@ fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter
 fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
 fn tidy(key: &str) -> String { key.split(" > ").map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" > ") }
 fn file_of(key: &str) -> &str { key.split_once(" > ").map_or(key, |(f, _)| f) }
-fn routine_deps(rules: &Value) -> bool {
-    let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
-    let moves: Vec<&Value> = deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).collect();
-    let read = |d: &&Value| match d["path"].as_str().unwrap_or("").rsplit('/').next() {
-        Some("package.json") => true,
-        Some("package-lock.json" | "npm-shrinkwrap.json") => d["moves"].is_array(),
-        _ => false,
-    };
-    let settled = |m: &&Value| ["routine", "removed", "internal"].iter().any(|a| m["age"] == *a);
-    !moves.is_empty() && deps.iter().all(read) && moves.iter().all(settled) && deps.iter().all(|d| d["fields"].as_array().is_none_or(|f| f.is_empty()))
-}
 fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> {
     let mut files: Vec<(String, Vec<String>)> = Vec::new();
     for k in keys {
@@ -550,36 +539,43 @@ fn run_items(f: &mut Found, rules: &Value, tests: &Value, unproven: Vec<String>)
     f.unverified.extend(per_file("test-unconfirmed", strings(&tests["unconfirmed"]), "This failed once, and Kern could not run it again to confirm it", "tests failed once, and Kern could not run them again to confirm"));
     f.look.extend(per_file("test-skipped", strings(&tests["newly_skipped"]), "A test that passed before is now skipped", "tests that passed before are now skipped"));
 }
+fn listed(names: &[String], width: usize) -> String {
+    let shown: Vec<String> = names.iter().take(SHOWN).map(|n| code(n, width)).collect();
+    format!("{}{}", shown.join(", "), if names.len() > SHOWN { format!(" and {} more", names.len() - SHOWN) } else { String::new() })
+}
+fn dependency_note(deps: &[&Value]) -> String {
+    let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
+    let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
+    let counted: Vec<String> = deps.iter().filter_map(|d| d["count"].as_u64().map(|n| format!("{n} versions move in {}", path_of(d)))).collect();
+    let mut what = String::from("The project's dependencies change");
+    if !moved.is_empty() { what += &format!(": {}", listed(&moved, 120)); }
+    if !counted.is_empty() { what += &format!("{} {}", if moved.is_empty() { ":" } else { ";" }, counted.join("; ")); }
+    format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))
+}
 fn steering_items(f: &mut Found, rules: &Value) {
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
-    for (key, kind, says) in [("settings", "settings", "changes the test runner's settings, which decide which tests run and how their results are read"), ("protected", "protected", "is a CI, secret or configuration file")] {
-        for x in rules[key].as_array().into_iter().flatten() { f.look.push(item(kind, format!("{} {says}", path_of(x)))); }
+    for x in rules["settings"].as_array().into_iter().flatten() {
+        match x["adds"].as_array() {
+            Some(_) => f.notes.push(item("settings", format!("{} adds test patterns, so more tests run and none fewer: {}", path_of(x), listed(&strings(&x["adds"]), 160)))),
+            None => f.look.push(item("settings", format!("{} changes the test runner's settings, which decide which tests run and how their results are read", path_of(x)))),
+        }
+    }
+    for x in rules["protected"].as_array().into_iter().flatten() {
+        match x["moves"].as_array() {
+            Some(_) => f.notes.push(item("protected", format!("{} moves a pinned action to another release: {}", path_of(x), listed(&strings(&x["moves"]), 200)))),
+            None => f.look.push(item("protected", format!("{} is a CI, secret or configuration file", path_of(x)))),
+        }
     }
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
-    for m in deps.iter().flat_map(|d| d["moves"].as_array().into_iter().flatten()).filter(|m| m["age"] == "fresh") {
-        let days = m["days"].as_u64().unwrap_or(0);
-        f.look.push(item("fresh-release", format!("{} came out {} before this change; brand-new releases are where hijacked packages show up, so check it or wait until it is {} days old",
-            code(&format!("{}@{}", m["name"].as_str().unwrap_or(""), m["version"].as_str().unwrap_or("")), 120),
-            if days == 0 { "less than a day".to_string() } else if days == 1 { "1 day".to_string() } else { format!("{days} days") }, crate::deps::FRESH_DAYS)));
+    for d in &deps {
+        let fields = strings(&d["fields"]);
+        if d["operation"] == "delete" { f.look.push(item("install", format!("{} is deleted, so the next install is no longer held to the versions it pinned", path_of(d)))); }
+        else if !fields.is_empty() { f.look.push(item("install", format!("{} changes what runs or what gets installed when dependencies install: {}", path_of(d), listed(&fields, 80)))); }
     }
-    if !deps.is_empty() && !routine_deps(rules) {
-        let moved: Vec<String> = deps.iter().flat_map(|d| strings(&d["packages"])).collect();
-        let fields: std::collections::BTreeSet<String> = deps.iter().flat_map(|d| strings(&d["fields"])).collect();
-        let only_fields = moved.is_empty() && !fields.is_empty() && deps.iter().all(|d| d["path"].as_str().is_some_and(|p| p.rsplit('/').next() == Some("package.json")));
-        let mut what = String::from(if only_fields { "package.json changes" } else { "The project's dependencies change" });
-        if !moved.is_empty() {
-            what += &format!(": {}", moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "));
-            if moved.len() > SHOWN { what += &format!(" and {} more", moved.len() - SHOWN); }
-        }
-        if !fields.is_empty() {
-            let shown: Vec<String> = fields.iter().take(SHOWN).map(|n| code(n, 80)).collect();
-            what += &format!("{}{}", if only_fields { " " } else { "; package.json also changes " }, shown.join(", "));
-            if fields.len() > SHOWN { what += &format!(" and {} more", fields.len() - SHOWN); }
-        }
-        f.look.push(item("dependencies", format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))));
-    }
+    let noted: Vec<&Value> = deps.iter().copied().filter(|d| d["packages"].is_array() || d["count"].is_u64() || (strings(&d["fields"]).is_empty() && d["operation"] != "delete")).collect();
+    if !noted.is_empty() { f.notes.push(item("dependencies", dependency_note(&noted))); }
     for x in rules["lockfile"].as_array().into_iter().flatten() { f.look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""), 400)))); }
-    for x in rules["agent_notes"].as_array().into_iter().flatten() { f.look.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
+    for x in rules["agent_notes"].as_array().into_iter().flatten() { f.notes.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
 }
 fn not_run_items(f: &mut Found, tests: &Value) {
     let unchecked = |why: &str| -> String {
@@ -830,11 +826,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     }
     md += &build_lines(tests);
     md += &probe_lines(tests);
-    if routine_deps(&r["rules"]) {
-        let moved: Vec<String> = r["rules"]["dependencies"].as_array().into_iter().flatten().flat_map(|d| strings(&d["packages"])).collect();
-        md += &format!("- ✅ Dependencies: {}{} (each removed, from this repository, or updated within the same major version to a release out for at least {} days)\n",
-            moved.iter().take(SHOWN).map(|m| code(m, 120)).collect::<Vec<_>>().join(", "), if moved.len() > SHOWN { format!(" and {} more", moved.len() - SHOWN) } else { String::new() }, crate::deps::FRESH_DAYS);
-    }
     let all_powers: Vec<&Value> = r["rules"]["powers"].as_array().into_iter().flatten().collect();
     let powers = all_powers.iter().filter(|p| shown_power(p)).count();
     let quiet: Vec<String> = all_powers.iter().filter(|p| !shown_power(p)).take(SHOWN).map(|p| code(p["path"].as_str().unwrap_or(""), 160)).collect();

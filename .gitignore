@@ -2,3 +2,4 @@ target/
 *.pem
 *.key
 twin/bench/profiles/
+/target-own/

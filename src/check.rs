@@ -7,7 +7,6 @@ use std::path::Path;
 pub struct Ai<'a> { pub agent: &'a [String], pub rounds: usize }
 
 const MINUTES: u64 = 55;
-const REGISTRY_NAMES_COUNT_MAX: usize = 30;
 const TESTS_MINUTES: u64 = 25;
 pub fn minutes() -> u64 { std::env::var("KERN_CHECK_MINUTES").ok().and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| (1..=1440).contains(m)).unwrap_or(MINUTES) }
 
@@ -58,12 +57,6 @@ pub fn says_no_change(pr: &str) -> Option<String> {
     None
 }
 
-pub fn clock(repo: &Path, head: &str) -> u64 {
-    let wall = now_ms() / 1000;
-    let commit = crate::git::git(repo, &["show", "-s", "--format=%ct", head], None).ok().and_then(|b| String::from_utf8_lossy(&b).trim().parse::<u64>().ok()).filter(|c| *c > 0);
-    commit.map_or(wall, |c| c.min(wall))
-}
-pub fn own_packages(repo: &Path, head: &str) -> BTreeSet<String> { crate::suite::workspace(repo, head).into_keys().collect() }
 const SELF_TEST_PACKAGE: &str = r#"{"name":"kern-self-test","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node --test"}}"#;
 const SELF_TEST_CODE: &str = "export const add = (a, b) => a + b;\nexport const hello = (name) => `hello ${name}`;\n";
 const SELF_TEST_TESTS: &str = "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { add, hello } from '../math.js';\n\ntest('adds', () => assert.equal(add(2, 3), 5));\ntest('says hello', () => assert.equal(hello('kern'), 'hello kern'));\n";
@@ -105,17 +98,7 @@ fn judged(repo: &Path, (base, head): (&str, &str), out: &Path, op: &Operator, (p
     let until = started + minutes() * 60_000;
     crate::drive::prepare(repo, base, head, out, pr)?;
     let d = read_json(out.join("drive.json"))?;
-    let rules = crate::rules::rules(repo, base, head)?;
-    let now = clock(repo, head);
-    let times: std::cell::RefCell<std::collections::BTreeMap<String, Option<Value>>> = Default::default();
-    let meta = |name: &str| -> Option<Value> {
-        let mut cache = times.borrow_mut();
-        if !cache.contains_key(name) && cache.len() >= REGISTRY_NAMES_COUNT_MAX { return None; }
-        cache.entry(name.to_string()).or_insert_with(|| crate::deps::registry_meta(name)).clone()
-    };
-    let published = |name: &str, version: &str| -> Option<u64> { meta(name).and_then(|m| m["time"][version].as_str().and_then(crate::deps::rfc3339)) };
-    let ours = own_packages(repo, head);
-    let mut rules = crate::deps::aged(rules, now, &published, &|name: &str| ours.contains(name));
+    let mut rules = crate::rules::rules(repo, base, head)?;
     if let Some(words) = pr.and_then(says_no_change) { rules["says_no_change"] = json!(words); }
     let run = runnable(repo, head, &rules);
     let machine = if run { self_test() } else { Ok("not needed: nothing to run".to_string()) };

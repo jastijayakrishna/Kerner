@@ -67,13 +67,13 @@ fn finance_tracker_36_crashed_workers_and_old_tests_kern_could_not_run_are_not_v
 }
 
 #[test]
-fn a_new_package_that_fails_to_install_is_a_look_and_its_failed_install_is_not_verified_once() {
+fn a_new_package_that_fails_to_install_is_a_note_and_its_failed_install_is_not_verified_once() {
     let why = "the tests could not run on the new code, where installing its dependencies with npm failed: npm error code E404 (it worked on the old code)";
     let tests = json!({ "status": "NOT_RUN", "why": why, "run_unconfirmed": [{ "dir": "", "why": why }] });
     let mut rules = clean_rules();
-    rules["dependencies"] = json!([{ "path": "package.json", "operation": "modify", "packages": ["@kern-e2e/does-not-exist 1.0.0 (new)"], "moves": [{ "name": "@kern-e2e/does-not-exist", "to": "1.0.0", "age": "unknown" }] }]);
+    rules["dependencies"] = json!([{ "path": "package.json", "operation": "modify", "packages": ["@kern-e2e/does-not-exist 1.0.0 (new)"] }]);
     let r = receipt::build(&drive_json(), &rules, &tests, &off());
-    assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["dependencies".to_string()]), "the new package is a finding: {r}");
+    assert_eq!((r["decision"].as_str(), kinds(&r, "look"), kinds(&r, "notes")), (Some("unverified"), vec![], vec!["dependencies".to_string()]), "the new package is listed, and the install that failed is what Kern could not verify: {r}");
     assert_eq!(kinds(&r, "unverified"), ["test-unconfirmed"], "one failed install is one item, not two: {}", r["unverified"]);
 }
 

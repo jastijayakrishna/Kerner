@@ -165,15 +165,16 @@ What Kern checks on every pull request:
    imports, such as a UI library, a project's own modules or a build tool's `virtual:` module, are not powers.
 7. **Files that steer everything else.** Files that run code or grant access: CI and container files, `CODEOWNERS`, renovate's config,
    `.npmrc` and the like, and `.env` files that hold a secret or a setting that runs code (pictures, `FUNDING.yml`, notes such as
-   Markdown files and `.env.example` templates, and `.env` files of plain settings aside). The settings of the test runner Kern runs
-   (the test script in `package.json` included; a babel or vite config that runner never reads is not one), and the files that
-   instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) need a look too.
-8. **Dependencies.** The receipt names what moved (`vitest 3.2.4 → 4.0.18`). An update within the same major version to a release
-   that has been on npm for a week needs no look; a release less than a week old is named, because that is where hijacked packages
-   show up. A package of this repository (`workspace:`, `file:` or a workspace's name) is the project's own, and a package moved to
-   another section keeps its version. A new package, a major update, a `package.json` change that runs code on install or decides what
-   gets installed (install scripts, `overrides`, `packageManager` and the like), and a lockfile entry that downloads a package from
-   somewhere other than its own registry tarball need a look.
+   Markdown files and `.env.example` templates, and `.env` files of plain settings aside). A workflow whose only change moves a pinned
+   action to another release (`actions/checkout@v4` to `@v5`, the step and its inputs unchanged) is listed under Notes instead. The
+   settings of the test runner Kern runs (the test script in `package.json` included; a babel or vite config that runner never reads is
+   not one) need a look, unless the change only adds test patterns (`include`, `testMatch`), which runs more tests and never fewer, so
+   it is a note. The files that instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) are listed under Notes.
+8. **Dependencies.** The receipt lists what moved under Notes (`vitest 3.2.4 → 4.0.18`), never as a look: nothing Kern measures says
+   whether a version is right, and it does not look up release dates. What needs a look is what runs code or decides what gets
+   installed: a `package.json` change to install scripts, `overrides`, `packageManager` and the like; a deleted lockfile; and a
+   lockfile entry that downloads a package from somewhere other than its own registry tarball, swaps one package for another or changes
+   a checksum without a version. A lockfile Kern does not read (yarn, pnpm, Bun) is listed as not checked.
 9. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
    run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node

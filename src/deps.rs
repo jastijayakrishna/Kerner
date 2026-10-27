@@ -40,7 +40,6 @@ fn tarball_of(url: &str, name: &str, version: &str) -> bool {
     plain && valid_name(name) && [name.to_string(), name.replacen('/', "%2f", 1), name.replacen('/', "%2F", 1)].iter()
         .any(|n| { let own = format!("{n}/-/{base}-{version}.tgz"); path == own || path.ends_with(&format!("/{own}")) })
 }
-pub const FRESH_DAYS: u64 = 7;
 type Specs = BTreeMap<(String, &'static str), String>;
 fn specs(manifest: &Value) -> Specs {
     let spec = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
@@ -67,66 +66,6 @@ pub fn shown(m: &Value) -> String {
         _ => format!("{name} (removed)"),
     }
 }
-fn local(spec: &str) -> bool { ["workspace:", "link:", "file:", "portal:"].iter().any(|p| spec.starts_with(p)) }
-pub fn top(spec: &str) -> Option<(u64, u64, u64)> {
-    let floors: Vec<Option<(u64, u64, u64)>> = spec.split("||").map(floor).collect();
-    if floors.iter().any(Option::is_none) { return None; }
-    floors.into_iter().flatten().max()
-}
-pub fn floor(spec: &str) -> Option<(u64, u64, u64)> {
-    let s = spec.trim();
-    if s.contains(':') || s.contains('/') { return None; }
-    let first = s.split("||").next()?.split_whitespace().next()?;
-    let v = first.trim_start_matches(['^', '~', '>', '=', 'v']);
-    let mut parts = v.split('.');
-    let number = |p: Option<&str>| -> Option<u64> { match p { None => Some(0), Some(x) if ["x", "X", "*"].contains(&x) => Some(0), Some(x) => x.split(['-', '+']).next()?.parse().ok() } };
-    let major = parts.next().filter(|m| !m.is_empty() && *m != "*" && *m != "x")?.parse().ok()?;
-    Some((major, number(parts.next())?, number(parts.next())?))
-}
-pub fn rfc3339(s: &str) -> Option<u64> {
-    let (date, time) = s.split_once('T')?;
-    let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
-    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
-    let clock: Vec<i64> = time.trim_end_matches('Z').split(['.', '+']).next()?.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
-    let (hh, mm, ss) = (*clock.first()?, *clock.get(1)?, clock.get(2).copied().unwrap_or(0));
-    let yy = if m <= 2 { y - 1 } else { y };
-    let era = yy.div_euclid(400);
-    let yoe = yy - era * 400;
-    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
-    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-    u64::try_from(days * 86_400 + hh * 3_600 + mm * 60 + ss).ok()
-}
-pub fn age(from: Option<&str>, to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
-    let (Some(f), Some(t)) = (from, to) else { return serde_json::json!({ "age": if from.is_none() { "new" } else { "removed" } }) };
-    let (Some(a), Some(b)) = (top(f), top(t)) else { return serde_json::json!({ "age": "unknown" }) };
-    if a.0 != b.0 || (a.0 == 0 && a.1 != b.1) { return serde_json::json!({ "age": "major" }); }
-    released(&format!("{}.{}.{}", b.0, b.1, b.2), published, now)
-}
-pub fn lock_age(to: Option<&str>, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
-    let Some(version) = to else { return serde_json::json!({ "age": "removed" }) };
-    released(version, published, now)
-}
-fn released(version: &str, published: &dyn Fn(&str) -> Option<u64>, now: u64) -> Value {
-    match published(version) {
-        None => serde_json::json!({ "age": "unknown", "version": version }),
-        Some(at) if now.saturating_sub(at) < FRESH_DAYS * 86_400 => serde_json::json!({ "age": "fresh", "version": version, "days": now.saturating_sub(at) / 86_400 }),
-        Some(_) => serde_json::json!({ "age": "routine", "version": version }),
-    }
-}
-pub fn aged(mut rules: Value, now: u64, published: &dyn Fn(&str, &str) -> Option<u64>, own: &dyn Fn(&str) -> bool) -> Value {
-    for pass in [false, true] {
-        for d in rules["dependencies"].as_array_mut().into_iter().flatten() {
-            for m in d["moves"].as_array_mut().into_iter().flatten().filter(|m| (m["lock"] == true) == pass) {
-                let name = m["name"].as_str().unwrap_or("").to_string();
-                let verdict = if pass { lock_age(m["to"].as_str(), &|v| published(&name, v), now) }
-                    else if own(&name) || m["to"].as_str().is_some_and(local) { json!({ "age": "internal" }) }
-                    else { age(m["from"].as_str(), m["to"].as_str(), &|v| published(&name, v), now) };
-                for (k, v) in verdict.as_object().into_iter().flatten() { m[k] = v.clone(); }
-            }
-        }
-    }
-    rules
-}
 pub fn lock_moves(old: &Value, new: &Value) -> Vec<Value> {
     let deps = |lock: &Value| -> BTreeMap<String, Value> {
         let packaged = lock["packages"].as_object().is_some_and(|p| !p.is_empty());
@@ -138,20 +77,12 @@ pub fn lock_moves(old: &Value, new: &Value) -> Vec<Value> {
     for (key, e) in &after {
         let (version, was) = (e["version"].as_str().unwrap_or(""), before.get(key).and_then(|o| o["version"].as_str()));
         if was == Some(version) { continue; }
-        out.insert((name_of(key, e), version.to_string()), serde_json::json!({ "name": name_of(key, e), "from": was, "to": version, "lock": true }));
+        out.insert((name_of(key, e), version.to_string()), serde_json::json!({ "name": name_of(key, e), "from": was, "to": version }));
     }
     for (key, e) in before.iter().filter(|(k, _)| !after.contains_key(*k)) {
-        out.entry((name_of(key, e), String::new())).or_insert_with(|| serde_json::json!({ "name": name_of(key, e), "from": e["version"], "to": null, "lock": true }));
+        out.entry((name_of(key, e), String::new())).or_insert_with(|| serde_json::json!({ "name": name_of(key, e), "from": e["version"], "to": null }));
     }
     out.into_values().collect()
-}
-pub fn registry_meta(name: &str) -> Option<Value> {
-    if !valid_name(name) { return None; }
-    let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(2).http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(20))).build().into();
-    let mut response = agent.get(&format!("https://registry.npmjs.org/{}", name.replace('/', "%2F"))).header("Accept", "application/json").call().ok()?;
-    if response.status() != 200 { return None; }
-    let body = response.body_mut().with_config().limit(64 << 20).read_to_vec().ok()?;
-    serde_json::from_slice::<Value>(&body).ok().map(|v| serde_json::json!({ "time": v["time"], "repository": v["repository"] }))
 }
 pub fn moves(old: &Value, new: &Value) -> Vec<String> { changed_versions(old, new).iter().map(shown).collect::<BTreeSet<_>>().into_iter().collect() }
 const REGISTRIES: [&str; 2] = ["registry.npmjs.org", "registry.yarnpkg.com"];

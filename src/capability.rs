@@ -471,6 +471,42 @@ pub fn same_program(name: &str, a: &str, b: &str) -> bool {
         clean(&x) && clean(&y) && x.program.content_eq(&y.program)
     })
 }
+struct Listed<'k> { keys: &'k [&'k str], found: Vec<(usize, usize, String)> }
+impl<'a> Visit<'a> for Listed<'_> {
+    fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
+        if let (Some(name), Expression::ArrayExpression(array)) = (it.key.static_name(), &it.value) && self.keys.contains(&name.as_ref()) {
+            for e in &array.elements {
+                if let ArrayExpressionElement::StringLiteral(s) = e { self.found.push((s.span.start as usize, s.span.end as usize, s.value.to_string())); }
+            }
+        }
+        walk::walk_object_property(self, it);
+    }
+}
+fn without(text: &str, spans: &[(usize, usize, String)]) -> String {
+    let mut out = text.to_string();
+    for (start, end, _) in spans.iter().rev() {
+        let (mut a, mut b) = (*start, *end);
+        let after = &out[b..];
+        let next = after.trim_start();
+        if next.starts_with(',') { b += after.len() - next.len() + 1; }
+        else { let before = out[..a].trim_end(); if before.ends_with(',') { a = before.len() - 1; } }
+        out.replace_range(a..b, "");
+    }
+    out
+}
+pub fn added_strings(name: &str, keys: &[&str], old: &str, new: &str) -> Option<Vec<String>> {
+    let found = source_types(name)?.into_iter().find_map(|st| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, new, st).parse();
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() { return None; }
+        let mut v = Listed { keys, found: Vec::new() };
+        v.visit_program(&parsed.program);
+        Some(v.found)
+    })?;
+    let quoted = |s: &str| ['\'', '"', '`'].iter().any(|q| old.contains(&format!("{q}{s}{q}")));
+    let added: Vec<(usize, usize, String)> = found.into_iter().filter(|(_, _, s)| !quoted(s)).collect();
+    (!added.is_empty() && same_program(name, old, &without(new, &added))).then(|| added.into_iter().map(|(_, _, s)| s).collect())
+}
 pub fn footprint(name: &str, source: &str) -> R<BTreeSet<String>> {
     let attempts = source_types(name).ok_or_else(|| Denied(format!("Unsupported code file: {name}")))?;
     attempts.into_iter().find_map(|st| parse(name, source, st)).ok_or_else(|| Denied(format!("Changed code cannot be parsed for capability analysis: {name}. Fix its syntax, or make this change yourself")))

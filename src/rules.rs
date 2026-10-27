@@ -60,8 +60,13 @@ fn dependency_file(p: &str) -> bool {
 }
 fn harmless_note(p: &str) -> bool {
     let (lower, base) = (p.to_ascii_lowercase(), base_name(p).to_ascii_lowercase());
-    [".md", ".mdx", ".txt"].iter().any(|e| base.ends_with(e)) || [".env.example", ".env.sample", ".env.template", ".env.dist"].contains(&base.as_str())
+    [".md", ".mdx", ".txt"].iter().any(|e| base.ends_with(e)) || (base.starts_with(".env") && [".example", ".sample", ".template", ".dist"].iter().any(|e| base.ends_with(e)))
         || lower.starts_with(".github/issue_template/")
+}
+fn manager_move(a: &Value, b: &Value) -> Option<String> {
+    let (x, y) = (a["packageManager"].as_str()?, b["packageManager"].as_str()?);
+    let name = |m: &str| m.split_once('@').map_or(m, |(n, _)| n).to_string();
+    (x != y && name(x) == name(y)).then(|| format!("packageManager {x} → {y}"))
 }
 const INSTALL_FIELDS: [&str; 14] = ["bin", "name", "overrides", "resolutions", "pnpm", "workspaces", "packageManager", "publishConfig", "bundleDependencies", "bundledDependencies",
     "dependenciesMeta", "peerDependenciesMeta", "trustedDependencies", "installConfig"];
@@ -87,6 +92,35 @@ fn quiet(p: &str, text: Option<&str>) -> bool {
     let harmless = |k: &String| !crate::capability::secret_name(k) && !RUNS_CODE_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
     (base == ".env" || base.starts_with(".env.")) && text.and_then(env_keys).is_some_and(|keys| keys.iter().all(harmless))
 }
+fn shown_ref(r: &str) -> String {
+    let (at, comment) = r.split_once('#').map_or((r.trim(), ""), |(a, c)| (a.trim(), c.trim()));
+    let short = if at.len() == 40 && at.bytes().all(|b| b.is_ascii_hexdigit()) { &at[..12] } else { at };
+    if comment.is_empty() { short.to_string() } else { format!("{short} ({comment})") }
+}
+fn uses_line(l: &str) -> Option<(&str, &str, &str)> {
+    let (prefix, rest) = l.split_once("uses:")?;
+    let (action, at) = rest.trim().split_once('@')?;
+    (!action.is_empty() && !at.trim().is_empty() && prefix.trim_start_matches([' ', '\t', '-']).is_empty()).then_some((prefix, action.trim(), at.trim()))
+}
+fn line_counts(t: &str) -> BTreeMap<&str, usize> { t.lines().map(str::trim_end).fold(BTreeMap::new(), |mut m, l| { *m.entry(l).or_insert(0) += 1; m }) }
+fn action_moves(old: &str, new: &str) -> Option<Vec<String>> {
+    let (a, b) = (line_counts(old), line_counts(new));
+    let only = |x: &BTreeMap<&str, usize>, y: &BTreeMap<&str, usize>| -> Vec<String> {
+        x.iter().flat_map(|(l, n)| std::iter::repeat_n(l.to_string(), n.saturating_sub(y.get(l).copied().unwrap_or(0)))).collect()
+    };
+    let (removed, mut added) = (only(&a, &b), only(&b, &a));
+    if removed.is_empty() || removed.len() != added.len() { return None; }
+    let mut moves = BTreeSet::new();
+    for line in &removed {
+        let (prefix, action, from) = uses_line(line)?;
+        let i = added.iter().position(|l| uses_line(l).is_some_and(|(p, n, _)| p == prefix && n == action))?;
+        let line = added.remove(i);
+        let (_, _, to) = uses_line(&line)?;
+        moves.insert(format!("{action} {} → {}", shown_ref(from), shown_ref(to)));
+    }
+    Some(moves.into_iter().collect())
+}
+const PATTERN_KEYS: [&str; 2] = ["include", "testMatch"];
 fn agent_note(p: &str) -> bool {
     AGENT_NOTES.contains(&base_name(p)) || p.split('/').next().is_some_and(|d| AGENT_FOLDERS.contains(&d)) || [".github/instructions/", ".github/prompts/", ".github/chatmodes/"].iter().any(|d| p.starts_with(d))
 }
@@ -434,9 +468,10 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         let p = d["path"].as_str().unwrap_or("").to_string();
         let (a, b) = (json_of(&old, &p).unwrap_or_else(|| json!({})), json_of(&new, &p));
         if base_name(&p) == "package.json" && let Some(b) = &b {
-            let moved = crate::deps::moves(&a, b);
-            if !moved.is_empty() { d["packages"] = json!(moved); d["moves"] = json!(crate::deps::changed_versions(&a, b)); }
-            let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| steers_install(f)).collect();
+            let manager = manager_move(&a, b);
+            let moved: Vec<String> = crate::deps::moves(&a, b).into_iter().chain(manager.clone()).collect();
+            if !moved.is_empty() { d["packages"] = json!(moved); }
+            let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| steers_install(f) && !(f == "name" && d["operation"] == "add") && !(f == "packageManager" && manager.is_some())).collect();
             if !fields.is_empty() { d["fields"] = json!(fields); }
             if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }
         }
@@ -448,17 +483,15 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
                 Some(b) => {
                     lockfile.extend(crate::deps::lock_surprises(&a, &b).into_iter().map(|why| json!({ "path": p, "why": why })));
                     let moves = crate::deps::lock_moves(&a, &b);
-                    if moves.len() > LOCK_MOVES_COUNT_MAX {
-                        not_checked.push(json!({ "path": p, "why": format!("{} versions move in this lockfile, more than the {LOCK_MOVES_COUNT_MAX} whose release dates Kern checks", moves.len()) }));
-                    }
                     if moves.is_empty() { d["harmless"] = json!(true); }
-                    if !moves.is_empty() && moves.len() <= LOCK_MOVES_COUNT_MAX {
-                        d["packages"] = json!(moves.iter().map(crate::deps::shown).collect::<Vec<_>>());
-                        d["moves"] = json!(moves);
-                    }
+                    else if moves.len() > LOCK_MOVES_COUNT_MAX { d["count"] = json!(moves.len()); }
+                    else { d["packages"] = json!(moves.iter().map(crate::deps::shown).collect::<Vec<_>>()); }
                 }
                 None => not_checked.push(json!({ "path": p, "why": "Kern could not read this lockfile (not JSON, or larger than 64 MiB)" })),
             }
+        }
+        if base_name(&p) != "package.json" && !npm_lockfile(&p) && d["operation"] != "delete" {
+            not_checked.push(json!({ "path": p, "why": "Kern does not read this file, so it cannot see which packages it installs or where they download from" }));
         }
     }
     dependencies.retain(|d| d.get("harmless").is_none());
@@ -470,8 +503,16 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let text_now = |p: &str| new.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok());
     let unchanged = |x: &Value| x["path"].as_str().is_some_and(|p| (p.ends_with(".json") && json_of(&old, p).is_some_and(|a| json_of(&new, p).is_some_and(|b| a == b)))
         || (is_code(p) && text(&old, p).zip(text(&new, p)).is_some_and(|(a, b)| crate::capability::same_program(p, &a, &b))));
-    let protected: Vec<Value> = protected.into_iter().filter(|x| { let p = x["path"].as_str().unwrap_or(""); !quiet(p, text_now(p)) && !unchanged(x) }).collect();
+    let protected: Vec<Value> = protected.into_iter().filter(|x| { let p = x["path"].as_str().unwrap_or(""); !quiet(p, text_now(p)) && !unchanged(x) }).map(|mut x| {
+        let p = x["path"].as_str().unwrap_or("").to_string();
+        if let Some(moves) = text(&old, &p).zip(text(&new, &p)).and_then(|(a, b)| action_moves(&a, &b)) { x["moves"] = json!(moves); }
+        x
+    }).collect();
     settings.retain(|x| !unchanged(x));
+    for x in settings.iter_mut().filter(|x| x["why"].as_str().is_some_and(|w| w.starts_with("Test runner configuration cannot change")) && x["path"].as_str().is_some_and(is_code)) {
+        let p = x["path"].as_str().unwrap_or("").to_string();
+        if let Some(adds) = text(&old, &p).zip(text(&new, &p)).and_then(|(a, b)| crate::capability::added_strings(&p, &PATTERN_KEYS, &a, &b)) { x["adds"] = json!(adds); }
+    }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
     Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))
