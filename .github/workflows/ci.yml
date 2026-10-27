@@ -56,6 +56,16 @@ jobs:
         with:
           name: kern-linux-x64
           path: bin
+      - name: Install gVisor
+        run: |
+          if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
+            curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+            sudo apt-get update -qq && sudo apt-get install -y -qq runsc
+            sudo runsc install
+            sudo systemctl restart docker
+          fi
+          docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || { echo "::error::Docker has no runsc runtime after installing gVisor"; exit 1; }
       - name: Check end to end on gVisor
         run: chmod +x bin/kern && KERN_BIN="$PWD/bin/kern" sh scripts/e2e-check.sh
       - name: Installer

@@ -802,7 +802,7 @@ jq -e '[.old.installs[0], .new.installs[0]] | all(.manager == "bun" and .result 
   || { jq . bun/setup.json 2>/dev/null | head -60; fail "bun: a Bun workspace did not install with Kern's own Bun from its lockfile"; }
 jq -e '.tests.status == "RAN" and .tests.kept == 3' bun/receipt.json > /dev/null \
   || { jq .tests bun/receipt.json; fail "bun: the Bun workspace's tests did not run, a registry package's link pointed into Bun's deleted cache, or the tests could not call bun with the network off"; }
-"$K" drive clean bun > /dev/null || fail "bun: kern drive clean could not remove the volumes the kept check left"
+"$K" --control verifier.json drive clean bun > /dev/null || fail "bun: kern drive clean could not remove the volumes the kept check left"
 
 say "A project whose .nvmrc asks for Node 20 is installed and tested on Node 20"
 git init -q nvmrepo && cd nvmrepo
