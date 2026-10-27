@@ -88,7 +88,8 @@ What Kern checks on every pull request:
    version file that workflow reads, `.nvmrc`, `.node-version`, `.tool-versions`, `volta` or `engines.node`), with the package manager it
    pins (through corepack, which checks the `packageManager` hash; pnpm 12 and later through Kern's own pinned corepack, because the one
    in older Node images cannot start them; a project that pins nothing gets corepack's own fixed version, never whatever is newest that
-   day; the tests and build steps can call it), with the network off while the tests run. A test that passed before and fails now
+   day; a Bun project gets Kern's own Bun 1.4.2, which npm installs only if its bytes match the sha512 Kern carries, and installs from its
+   bun.lock as Bun does; the tests and build steps can call it), with the network off while the tests run. A test that passed before and fails now
    blocks only when it fails in every run of the new code that included it (the whole suite, its file alone, the whole suite again) and
    passes in every run of the old code, including a second one. A failure that shows only when the whole suite runs, that does not repeat
    in every run, that sits in a file whose other tests passed and failed by chance, or that comes from the sandbox (no network, a missing
@@ -133,8 +134,10 @@ What Kern checks on every pull request:
    could not finish are not counted, and when a related test file fails as a whole, a fault it alone might have loaded is not checked
    rather than missed. Then Kern watches what the changed code gives the tests this change does not touch: it maps the code with the
    TypeScript compiler's own index (`scip-typescript`, run inside the sandbox on the installed tree: every symbol, where it is defined and
-   every place it is used), finds the symbols the change edits and every symbol that uses them, nearest first (up to 40 files; when the
-   index cannot be built, the files' imports stand in), and rewrites the changed files and those neighbours so that their exported functions note
+   every place it is used), finds the functions the change edits and, through every function that runs them, the files that run the
+   change, nearest first (up to 40 files; a file that only imports a changed function, a test, or a file that declares against a changed
+   type is named as such and not watched; a use through a workspace package's built output is linked to its one source definition; when
+   the index cannot be built or does not hold a changed file, the files' imports stand in), and rewrites the changed files and those neighbours so that their exported functions note
    every input and answer; it runs those tests (up to 40 files) on the old code twice and on the new code
    once, sets aside any input whose answer differs between the two old runs, and lists each input whose answer changed on the new code as a
    note, with both answers. These notes do not change the answer yet; Kern measures what they predict on real pull requests first. They

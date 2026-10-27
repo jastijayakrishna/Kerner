@@ -72,7 +72,7 @@ const IMAGES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "a
 const GITHUB_NOTES: [&str; 3] = ["funding.yml", "funding.yaml", "release.yml"];
 const RUNS_CODE_KEYS: [&str; 16] = ["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PATH", "BASH_ENV", "ENV", "PYTHONSTARTUP", "PYTHONPATH",
     "PERL5OPT", "RUBYOPT", "JAVA_TOOL_OPTIONS", "GIT_SSH_COMMAND", "SHELL", "EDITOR"];
-const TOOL_PREFIXES: [&str; 4] = ["NPM_CONFIG_", "YARN_", "PNPM_", "COREPACK_"];
+const TOOL_PREFIXES: [&str; 5] = ["NPM_CONFIG_", "YARN_", "PNPM_", "COREPACK_", "BUN_"];
 fn env_keys(text: &str) -> Option<Vec<String>> {
     text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| {
         let (key, _) = l.strip_prefix("export ").unwrap_or(l).split_once('=')?;

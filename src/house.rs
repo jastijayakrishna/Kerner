@@ -11,7 +11,12 @@ const ROOM_NAMES: [&str; 8] = ["route", "page", "server", "main", "cli", "app", 
 const ALIAS_MARKS: [&str; 6] = ["@@/", "~~/", "@/", "~/", "#/", "$/"];
 const NOT_CODE: [&str; 8] = ["css", "scss", "svg", "png", "json", "md", "astro", "yaml"];
 
-pub struct House { pub exports: BTreeMap<String, BTreeSet<String>>, pub imports: BTreeMap<String, BTreeSet<String>>, pub rooms: BTreeMap<String, String>, pub unresolved: BTreeMap<&'static str, usize>, pub files: usize }
+pub struct House { pub exports: BTreeMap<String, BTreeSet<String>>, pub imports: BTreeMap<String, BTreeSet<String>>, pub import_lines: BTreeMap<String, Vec<(u32, u32)>>, pub rooms: BTreeMap<String, String>, pub unresolved: BTreeMap<&'static str, usize>, pub files: usize }
+impl House {
+    pub fn imported(&self, file: &str, line: usize) -> Option<bool> {
+        self.import_lines.get(file).map(|ranges| ranges.iter().any(|(a, b)| *a as usize <= line && line <= *b as usize))
+    }
+}
 pub struct Reach { pub hops: BTreeMap<String, (usize, String)>, pub rooms: Vec<(String, String, usize)> }
 
 fn stem(p: &str) -> &str { p.rsplit('/').next().unwrap_or(p).split('.').next().unwrap_or("") }
@@ -50,6 +55,28 @@ pub fn specs(p: &str, s: &str) -> Vec<String> {
         _ => None,
     }).collect::<Vec<String>>()).unwrap_or_default());
     out
+}
+fn line_of(starts: &[usize], offset: usize) -> u32 { starts.partition_point(|s| *s <= offset).saturating_sub(1) as u32 }
+fn loads(e: &oxc_ast::ast::Expression) -> bool {
+    use oxc_ast::ast::Expression;
+    let mut e = e;
+    while let Expression::StaticMemberExpression(m) = e { e = &m.object; }
+    matches!(e, Expression::CallExpression(c) if c.arguments.len() == 1 && matches!(&c.callee, Expression::Identifier(id) if id.name == "require"))
+}
+pub fn import_lines(path: &str, source: &str) -> Vec<(u32, u32)> {
+    use oxc_ast::ast::Statement;
+    use oxc_span::GetSpan;
+    let starts: Vec<usize> = std::iter::once(0).chain(source.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    crate::proof::parsed(path, source, |program, _| program.body.iter().filter_map(|st| {
+        let kept = match st {
+            Statement::ImportDeclaration(_) | Statement::ExportAllDeclaration(_) | Statement::ExportFromDeclaration(_) => true,
+            Statement::VariableDeclaration(d) => d.declarations.iter().any(|x| x.init.as_ref().is_some_and(loads)),
+            Statement::ExpressionStatement(e) => loads(&e.expression),
+            _ => false,
+        };
+        let span = st.span();
+        kept.then(|| (line_of(&starts, span.start as usize), line_of(&starts, (span.end as usize).saturating_sub(1).max(span.start as usize))))
+    }).collect()).unwrap_or_default()
 }
 fn candidates(dir: &str, sub: &str) -> Vec<String> {
     let base = if sub.is_empty() { dir.to_string() } else { format!("{dir}/{sub}") };
@@ -100,7 +127,7 @@ pub fn build(repo: &Path, commit: &str) -> R<House> {
         let dir = p.rsplit_once('/').map_or("", |(d, _)| d).to_string();
         if let Some(name) = m["name"].as_str() { packages.insert(name.to_string(), (dir, m)); }
     }
-    let mut h = House { exports: BTreeMap::new(), imports: BTreeMap::new(), rooms: BTreeMap::new(), unresolved: BTreeMap::new(), files: all.len() };
+    let mut h = House { exports: BTreeMap::new(), imports: BTreeMap::new(), import_lines: BTreeMap::new(), rooms: BTreeMap::new(), unresolved: BTreeMap::new(), files: all.len() };
     for (name, (dir, m)) in &packages {
         for e in entry_files(dir, m, &exists) { h.rooms.insert(e, format!("package {name}")); }
         for (b, v) in m["bin"].as_object().into_iter().flatten() {
@@ -113,6 +140,7 @@ pub fn build(repo: &Path, commit: &str) -> R<House> {
     for (p, s) in &sources {
         if !product(p) { continue; }
         h.exports.insert(p.clone(), if ui(p) { BTreeSet::new() } else { crate::trace::callable(p, s).unwrap_or_default() });
+        if !ui(p) { h.import_lines.insert(p.clone(), import_lines(p, s)); }
         let lower = p.to_ascii_lowercase();
         if ROOM_FOLDERS.iter().any(|f| lower.contains(f)) || ROOM_NAMES.contains(&stem(&lower)) || (ui(p) && lower.contains("/pages/")) { h.rooms.entry(p.clone()).or_insert_with(|| "route or entry".to_string()); }
         let mut targets = BTreeSet::new();

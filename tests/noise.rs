@@ -269,6 +269,15 @@ fn review_2_b_only_files_that_run_code_or_grant_access_need_a_look() {
 }
 
 #[test]
+fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
+    let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
+        (".env.ci", "BUN_CONFIG_REGISTRY=https://evil.example\n")], &[]);
+    assert_eq!(paths(&loud, "protected"), [".env.ci", "bunfig.toml", "packages/web/bunfig.toml"],
+        "Kern's own Bun reads bunfig.toml and BUN_ settings while it installs: a registry, a linker or a global store decides what the tests load");
+}
+
+#[test]
 fn launchdarkly_js_sdk_common_146_a_change_that_only_adds_tests_rewrites_nothing() {
     let path = "src/__tests__/diagnosticEvents-test.js";
     let before = "describe('diagnostics', () => {\n  it('counts events', () => {\n    expect(count(1)).toBe(1);\n  });\n});\n";

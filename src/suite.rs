@@ -527,6 +527,15 @@ fn put(k: &mut Kept, f: &str, c: Copy) {
     k.run.insert(c.name.clone());
     k.back.insert(c.name, f.to_string());
 }
+pub fn unloaded_edits(changes: &[(String, &'static str)], old: &Report, new: &Report, dir: &str) -> Vec<(String, String)> {
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let loaded = |r: &Report, f: &str| r.tests.keys().any(|t| file_of(t) == f);
+    changes.iter().filter(|(p, op)| *op == "modify" && p.starts_with(&prefix) && is_test_path(p) && crate::capability::is_code(p) && !loaded(old, p) && !loaded(new, p))
+        .filter_map(|(p, _)| {
+            let why = new.why.get(p).or_else(|| old.why.get(p))?;
+            Some((p.clone(), format!("it did not load on the old code or the new code: {}", crate::util::plain(why.lines().next().unwrap_or(""), 300))))
+        }).collect()
+}
 pub fn kept_plan(repo: &Path, (base, head): (&str, &str), changes: &[(String, &'static str)], old: &Report, dir: &str) -> Kept {
     let mut k = Kept::default();
     let code = crate::capability::is_code;
@@ -1034,9 +1043,10 @@ pub fn workspace(repo: &Path, commit: &str) -> Workspace {
     });
     out
 }
+pub const REPAIR_BUILDS_COUNT_MAX: usize = 20;
 pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: Option<&str>, (dir, before): (&str, &[String])) -> Vec<(String, String)> {
     fn visit(name: &str, packages: &Workspace, seen: &mut BTreeSet<String>, order: &mut Vec<(String, String)>) {
-        if !seen.insert(name.to_string()) || order.len() >= 20 { return; }
+        if !seen.insert(name.to_string()) || order.len() >= REPAIR_BUILDS_COUNT_MAX { return; }
         let Some((dir, v)) = packages.get(name) else { return };
         for section in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
             for dep in v[section].as_object().into_iter().flatten().map(|(k, _)| k) { if packages.contains_key(dep) { visit(dep, packages, seen, order); } }
@@ -1049,10 +1059,31 @@ pub fn repair_steps(packages: &Workspace, missing: &BTreeSet<String>, pretest: O
     for step in before { if !order.contains(&(dir.to_string(), step.clone())) { order.push((dir.to_string(), step.clone())); } }
     order
 }
+pub const PREPARE_SECS_MAX: u64 = 480;
+const PREPARE_SECS_MIN: u64 = 60;
+pub fn repair_fits(left_secs: u64, last_old_secs: u64, build_secs: u64) -> bool { left_secs >= build_secs + 2 * last_old_secs }
+pub fn failed_steps(log: &str) -> Vec<(String, String)> {
+    let (mut failed, mut since) = (Vec::new(), String::new());
+    for line in log.lines() {
+        match line.trim().strip_prefix("kern-step ").and_then(|r| r.rsplit_once(" exit ")) {
+            Some((step, code)) => {
+                if code != "0" { failed.push((step.to_string(), crate::sandbox::first_error(&since).map_or_else(|| format!("exit {code}"), str::to_string))); }
+                since.clear();
+            }
+            None => { since.push_str(line); since.push('\n'); }
+        }
+    }
+    failed
+}
+pub fn ran_first(steps: &[String], failed: &[(String, String)]) -> String {
+    if failed.is_empty() { return format!(" (even after Kern ran {} first)", steps.join(", ")); }
+    let why: Vec<String> = failed.iter().map(|(step, error)| format!("{step} failed: {}", crate::util::plain(error, 300))).collect();
+    format!(" (Kern ran {} first, but {})", steps.join(", "), why.join("; "))
+}
 const STEPS: &str = "const{spawnSync}=require('child_process');for(const[d,s]of JSON.parse(process.env.PREPARE_STEPS)){const r=spawnSync('/usr/local/bin/npm',['run',s],{cwd:'/workspace/'+d,stdio:'inherit'});process.stderr.write(`\\nkern-step ${d||'.'} ${s} exit ${r.status}\\n`)}";
 fn prepare(out: &Path, volume: &str, steps: &[(String, String)], label: &str, until: u64) -> R<String> {
-    let seconds = within(until, 480);
-    crate::ensure!(seconds >= 60, "Kern's time ran out before it could build what the tests need");
+    let seconds = within(until, PREPARE_SECS_MAX);
+    crate::ensure!(seconds >= PREPARE_SECS_MIN, "Kern's time ran out before it could build what the tests need");
     let env: Env = [("PREPARE_STEPS".to_string(), serde_json::to_string(steps)?)].into_iter().collect();
     let config = json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", STEPS], "timeout_seconds": seconds, "cwd": "", "env": env, "files": {}, "early": false, "faults": [], "serve": {} });
     let run = in_test_box(out, volume, &format!("prepare-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds));
@@ -1061,6 +1092,7 @@ fn prepare(out: &Path, volume: &str, steps: &[(String, String)], label: &str, un
     std::fs::write(out.join(format!("prepare-{label}.err")), &log)?;
     let sealed = in_test_box(out, volume, &format!("seal-{label}"), ("drive-seal.json", &json!({ "version": 1 })), ("__drive_seal", true, seconds));
     crate::ensure!(sealed?.exit_code == 0, "Kern could not make what the build wrote read-only");
+    crate::ensure!(parts["ending"] == b"exit 0", "the build did not finish in the {seconds} s Kern gave it ({})", String::from_utf8_lossy(&parts["ending"]));
     Ok(log)
 }
 const NOT_PRODUCT: [&str; 19] = ["node_modules", ".github", "scripts", "script", "examples", "example", "docs", "doc", "demo", "demos", "benchmark", "benchmarks", "bench",
@@ -1142,6 +1174,25 @@ const NO_FAULT_RUNNER: &str = "Kern puts faults in code only where the tests run
 type FaultRun = (Vec<Value>, Vec<Value>, BTreeSet<String>);
 pub const CONTROL_SECS_MAX: u64 = 240;
 const INDEXER_MAIN: &str = "/workspace/.kern-tools/scip/node_modules/@sourcegraph/scip-typescript/dist/src/main.js";
+fn indexed(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Option<&[String]>, seconds: u64) -> Result<crate::map::Map, String> {
+    let has = |p: &str| match p {
+        "package.json.workspaces" => crate::git::git(repo, &["show", &format!("{head}:package.json")], None).ok().and_then(|m| serde_json::from_slice::<Value>(&m).ok()).is_some_and(|m| !m["workspaces"].is_null()),
+        _ => head_paths.is_some_and(|paths| paths.iter().any(|x| x == p)),
+    };
+    let mut command = vec!["/usr/local/bin/node".to_string(), format!("--max-old-space-size={}", test_limits(seconds).memory_mb * 3 / 4), "/kern/map.cjs".to_string(), INDEXER_MAIN.to_string()];
+    command.extend(crate::map::flags(&has).into_iter().map(str::to_string));
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": crate::map::files(&has), "early": false, "faults": [], "serve": {} });
+    let run = in_test_box(out, volume, "tests-map", ("drive-test.json", &config), ("__drive_test", false, seconds)).map_err(|e| format!("the indexer could not run: {}", e.0))?;
+    let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).map_err(|_| format!("the indexer gave no readable result: {}", crate::sandbox::refusal(&run.errors).unwrap_or_default()))?;
+    if parts["ending"] != b"exit 0" {
+        let _ = std::fs::write(out.join("map.err"), [parts["errors"].as_slice(), b"\n", &parts["output"]].concat());
+        return Err(crate::map::stopped(&String::from_utf8_lossy(&parts["ending"]), &parts["errors"], &parts["output"]));
+    }
+    let _ = std::fs::write(out.join("map.err"), &parts["errors"]);
+    let m = crate::map::read(&parts["output"]).map_err(|e| e.0)?;
+    let _ = std::fs::write(out.join("map.facts.jsonl"), &parts["output"]);
+    Ok(m)
+}
 fn mapped(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Option<&[String]>, files: &[(String, String, String)], until: u64) -> (Vec<(String, usize)>, Value) {
     let changed: Vec<String> = files.iter().map(|f| f.0.clone()).collect();
     let house = crate::house::build(repo, head).ok();
@@ -1151,35 +1202,24 @@ fn mapped(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Opt
     };
     let seconds = within(until, crate::map::MAP_SECS_MAX);
     if seconds < crate::map::MAP_SECS_MIN { return fallback("Kern's time for this check ran short before the code could be mapped".into()); }
-    let has = |p: &str| match p {
-        "package.json.workspaces" => crate::git::git(repo, &["show", &format!("{head}:package.json")], None).ok().and_then(|m| serde_json::from_slice::<Value>(&m).ok()).is_some_and(|m| !m["workspaces"].is_null()),
-        _ => head_paths.is_some_and(|paths| paths.iter().any(|x| x == p)),
-    };
-    let mut command = vec!["/usr/local/bin/node".to_string(), format!("--max-old-space-size={}", test_limits(seconds).memory_mb * 3 / 4), INDEXER_MAIN.to_string()];
-    command.extend(crate::map::flags(&has).into_iter().map(str::to_string));
-    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": crate::map::files(&has), "early": false, "faults": [], "serve": {} });
-    let run = match in_test_box(out, volume, "tests-map", ("drive-test.json", &config), ("__drive_test", false, seconds)) { Ok(r) => r, Err(e) => return fallback(format!("the indexer could not run: {}", e.0)) };
-    let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return fallback(format!("the indexer gave no readable result: {}", crate::sandbox::refusal(&run.errors).unwrap_or_default())) };
-    let _ = std::fs::write(out.join("map.err"), &parts["errors"]);
-    if parts["ending"] != b"exit 0" {
-        let _ = std::fs::write(out.join("map.err"), [parts["errors"].as_slice(), b"
-", &parts["output"]].concat());
-        return fallback(crate::map::stopped(&String::from_utf8_lossy(&parts["ending"]), &parts["errors"], &parts["output"]));
-    }
-    let m = match crate::map::read(&parts["output"]) { Ok(m) => m, Err(e) => return fallback(e.0) };
-    let _ = std::fs::write(out.join("map.scip"), &parts["output"]);
+    let m = match indexed(out, volume, (repo, head), head_paths, seconds) { Ok(m) => m, Err(why) => return fallback(why) };
+    let missing = crate::map::uncovered(&m, &changed);
+    if !missing.is_empty() { return fallback(format!("the index does not hold {}", missing.join(", "))); }
     let lines: Vec<(String, Vec<usize>)> = files.iter().map(|(p, old, new)| {
         let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
         (p.clone(), crate::compare::changed_lines(&a, &b).1.into_iter().map(|l| l + 1).collect())
     }).collect();
-    let r = crate::map::reach(&m, &lines);
-    let rooms: Vec<Value> = house.as_ref().map(|h| { let mut v: Vec<(usize, &String, &String)> = r.files.iter().filter_map(|(f, hops)| h.rooms.get(f).map(|k| (*hops, f, k))).collect(); v.sort(); v.into_iter().map(|(hops, f, k)| json!({ "room": f, "kind": k, "hops": hops })).collect() }).unwrap_or_default();
+    let r = crate::map::reach(&m, &lines, &|file, line| house.as_ref().and_then(|h| h.imported(file, line)));
+    let rooms: Vec<Value> = house.as_ref().map(|h| {
+        let mut v: Vec<(usize, &str, &String, crate::map::Touch)> = r.files(&m).into_iter().filter(|(_, _, t)| *t != crate::map::Touch::Tests).filter_map(|(f, hops, t)| h.rooms.get(f).map(|k| (hops, f, k, t))).collect();
+        v.sort();
+        v.into_iter().map(|(hops, f, k, t)| json!({ "room": f, "kind": k, "hops": hops, "how": t.name() })).collect()
+    }).unwrap_or_default();
     let product: Vec<String> = house.as_ref().map(|h| h.exports.keys().cloned().collect()).unwrap_or_default();
-    let status = json!({ "status": "RAN", "provenance": m.provenance, "documents": m.files.len(), "symbols": m.defined_in.len(), "references": m.refs.values().map(Vec::len).sum::<usize>(),
-        "changed_symbols": r.hops.values().filter(|x| x.0 == 0).count(), "files_reached": r.files.len(), "farthest_hops": r.files.values().copied().max().unwrap_or(0), "rooms_reached": rooms.len(), "rooms": rooms.iter().take(12).cloned().collect::<Vec<_>>(),
-        "not_indexed": crate::map::coverage(&m, &product)["not_indexed_count"] });
-    let _ = std::fs::write(out.join("map.json"), serde_json::to_vec_pretty(&json!({ "summary": crate::map::summary(&m), "coverage": crate::map::coverage(&m, &product), "reach": crate::map::reach_json(&m, &r, &lines), "rooms": rooms, "house": house.as_ref().map(crate::house::summary) })).unwrap_or_default());
-    (crate::map::neighbours(&r, &changed, crate::house::NEIGHBOURS_COUNT_MAX), status)
+    let coverage = crate::map::coverage(&m, &product);
+    let _ = std::fs::write(out.join("map.json"), serde_json::to_vec_pretty(&json!({ "summary": crate::map::summary(&m), "coverage": coverage, "reach": crate::map::reach_json(&m, &r, &lines), "rooms": rooms, "house": house.as_ref().map(crate::house::summary) })).unwrap_or_default());
+    let not_indexed = coverage["not_indexed_count"].as_u64().unwrap_or(0) as usize;
+    (crate::map::neighbours(&m, &r, &changed, crate::house::NEIGHBOURS_COUNT_MAX), crate::map::report(&m, &r, rooms, not_indexed))
 }
 pub fn after_tests(left_secs: u64) -> (bool, bool) {
     let plant = faults_fit(left_secs);
@@ -1448,20 +1488,22 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds, mut whole_why) = (None, 0u64, String::new());
         let mut uneven_why = setup_differs(&s, &suite.dir);
-        let (mut built, mut tried, mut old_tests) = (Vec::new(), String::new(), None);
+        let (mut built, mut tried, mut old_tests, mut unbuilt) = (Vec::new(), String::new(), None, Vec::new());
         let old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
                 let (mut tests, mut phase, mut repairs_left, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), REPAIR_ROUNDS_COUNT_MAX, true, Vec::new());
-                let mut attempted: BTreeSet<String> = BTreeSet::new();
+                let (mut attempted, mut pending_failed, mut build_secs): (BTreeSet<String>, Vec<(String, String)>, u64) = (BTreeSet::new(), Vec::new(), 2 * PREPARE_SECS_MAX);
                 let run = loop {
                 let at = now_ms();
                 let run = run_side(out, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
                 timed(phase.clone(), at);
                 old_seconds = secs_since(at);
                 if !pending.is_empty() {
-                    if cannot_load(Some(&run)).is_some() { tried = format!(" (even after Kern ran {} first)", pending.join(", ")); } else { built.append(&mut pending); }
+                    if cannot_load(Some(&run)).is_some() { tried = ran_first(&pending, &pending_failed); }
+                    else { built.extend(pending.iter().filter(|p| !pending_failed.iter().any(|(f, _)| f == *p)).cloned()); }
                     pending.clear();
+                    pending_failed.clear();
                 }
                 let partial = match &run { Side::Ran(r, _) => partly_missing(r), _ => None };
                 if repairs_left > 0 && let Some(why) = cannot_load(Some(&run)).or(partial) {
@@ -1481,17 +1523,27 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                     if first && (own_build(&why) || from_build) && package.as_ref().is_some_and(|v| v["scripts"]["build"].is_string()) && !before.iter().any(|b| b == "build") { before.push("build".to_string()); }
                     let pretest = pretest.filter(|_| first);
                     let steps = repair_steps(&old_packages, &missing, pretest.as_deref(), (&suite.dir, &before));
-                    if !steps.is_empty() {
+                    let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
+                    let left = within(until, u64::MAX);
+                    if !steps.is_empty() && (!repair_fits(left, old_seconds, build_secs) || left.min(PREPARE_SECS_MAX) < PREPARE_SECS_MIN) { unbuilt = names; }
+                    else if !steps.is_empty() {
                         let at = now_ms();
-                        let names: Vec<String> = steps.iter().map(|(d, s)| format!("{} {s}", if d.is_empty() { "." } else { d })).collect();
                         let on_old = prepare(out, &volume("old"), &steps, &format!("old{label}"), until);
                         let on_new = prepare(out, &volume("new"), &repair_steps(&new_packages, &missing, pretest.as_deref(), (&suite.dir, &before)), &format!("new{label}"), until);
-                        timed(format!("prepare{label}"), at);
+                        timed(format!("prepare-{phase}"), at);
+                        build_secs = secs_since(at);
                         match (on_old, on_new) {
-                            (Err(e), _) => tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0),
-                            (Ok(_), Err(e)) => tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0),
+                            (Err(e), _) => {
+                                tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0);
+                                uneven_why = Some(format!("Kern's build of {} did not finish on the old code ({}), so the two sides may hold different builds", names.join(", "), e.0));
+                            }
+                            (Ok(_), Err(e)) => {
+                                tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0);
+                                uneven_why = Some(format!("Kern built {} on the old code but not on the new code ({})", names.join(", "), e.0));
+                            }
                             (Ok(lo), Ok(ln)) => {
                                 if let Some(u) = uneven_steps(&lo, &ln) { uneven_why = Some(u); }
+                                pending_failed = failed_steps(&lo);
                                 pending = names;
                                 phase = phase.replacen("old", "old-built", 1);
                                 continue;
@@ -1514,7 +1566,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
             Some(Side::Nothing(why)) if no_test_files(why) && tried.is_empty() && built.is_empty() && testless_here(&suite.dir) => { testless.push(suite.dir.clone()); continue; }
-            Some(Side::Nothing(why) | Side::Cut(why)) => { not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}") })); continue; }
+            Some(Side::Nothing(why) | Side::Cut(why)) => {
+                let skipped = if unbuilt.is_empty() { String::new() } else { format!(" (Kern did not run {} first: its time ran short)", unbuilt.join(", ")) };
+                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}{skipped}") }));
+                continue;
+            }
             Some(Side::Slow(why)) => {
                 let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{more}") }));
@@ -1649,6 +1705,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             kept += (was - g.len()) as u64;
         }
         edited_unchecked.extend(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })));
+        edited_unchecked.extend(unloaded_edits(&changes, &old, &new, &suite.dir).into_iter().filter(|(p, _)| !outcome.unchecked.iter().any(|(u, _)| u == p)).map(|(p, why)| json!({ "path": p, "why": why })));
         test_data.extend(keep.data.iter().map(|p| json!(p)));
         let wanted: BTreeSet<String> = outcome.rewritten.iter().filter(|k| !failing.contains(k.as_str())).cloned().collect();
         if let Some(a) = merged["rewritten"].as_array_mut() { a.extend(wanted.iter().map(|k| json!(named(k)))); }
@@ -1701,6 +1758,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         let only = if narrowed.is_some() { format!(", only the tests related to the change: {whole_why}") } else { String::new() };
         let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };
+        let only = if unbuilt.is_empty() { only } else { format!("{only}, without first running {}: Kern kept its time for the new code's run", unbuilt.join(", ")) };
         let only = match manifest(head, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed) {
             Some(script) => format!("{only}, run directly: the project's test script, `{script}`, is not one Kern can follow"),
             None => only,

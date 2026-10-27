@@ -57,4 +57,13 @@ fn scalar_9592_the_house_reaches_the_auth_selector_room_from_its_helper_through_
     assert_eq!(house::neighbours(&h, &changed, 2), vec![("packages/ui/src/blocks/auth/index.ts".to_string(), 2), ("packages/ui/src/index.ts".to_string(), 3)], "the files Kern watches next to a change: nearest first, never a Vue file (the recorder cannot rewrite it), never the change itself, capped");
     let r = house::reach(&h, &["packages/ui/src/version.ts".to_string()]);
     assert_eq!((r.hops.len(), r.rooms.len()), (3, 2), "a change to version.ts reaches the package entry and the command only");
+    assert_eq!((h.imported("packages/ui/src/index.ts", 0), h.imported("packages/ui/src/index.ts", 1), h.imported("packages/ui/src/blocks/auth/helpers/scheme.ts", 0)), (Some(true), Some(true), Some(false)), "the house knows which lines are import or re-export statements");
+    assert_eq!((h.imported("packages/ui/src/blocks/auth/AuthSelector.vue", 2), h.imported("packages/ui/src/missing.ts", 0)), (None, None), "a Vue file or a file outside the house gives no answer, never a guess");
+}
+
+#[test]
+fn import_statements_are_known_by_line_so_a_top_level_call_is_told_apart_from_an_import() {
+    let source = "import {\n  a,\n  b\n} from './x'\nexport * from './y'\nexport { c } from './z'\nconst q = require('./w')\nexport { a }\nconst r = a()\nexport function f() { return require('./lazy') }\nrequire('./side-effect')\nconst { d } = require('./v').inner\n";
+    assert_eq!(house::import_lines("src/m.ts", source), vec![(0, 3), (4, 4), (5, 5), (6, 6), (10, 10), (11, 11)], "a multi-line import, both re-export forms and require() at the top level; a local export list, a top-level call and a require() inside a function are not imports");
+    assert_eq!(house::import_lines("src/m.ts", "const = ;"), Vec::<(u32, u32)>::new(), "a file that does not parse has no known import lines");
 }

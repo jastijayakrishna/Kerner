@@ -961,6 +961,76 @@ fn a_project_with_no_lockfile_is_installed_with_the_package_manager_it_declares(
 }
 
 #[test]
+fn elizaos_eliza_15841_and_c15t_951_a_bun_project_installs_with_kerns_own_pinned_bun_from_its_lockfile_never_with_npm() {
+    let t = Temp::new();
+    write(&t.0, "package.json", r#"{"name":"eliza","packageManager":"bun@1.4.0","workspaces":["packages/*"],"overrides":{"@elizaos/core":"workspace:*"}}"#);
+    write(&t.0, "bun.lock", "{\n  \"lockfileVersion\": 1,\n  \"configVersion\": 1,\n  \"workspaces\": {}\n}\n");
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    let bun = kern::sandbox::own_bun();
+    assert!(bun.starts_with("/workspace/.kern-tools/bun/node_modules/@oven/bun-linux-") && bun.ends_with("/bin/bun"), "{bun}");
+    let plan: Vec<(String, &str)> = attempts.iter().map(|(argv, said)| (argv.join(" "), *said)).collect();
+    assert_eq!((manager, plan), ("bun", vec![(format!("{bun} install --frozen-lockfile --ignore-scripts"), "installed"),
+        (format!("{bun} install --no-save --ignore-scripts"), "installed from package.json (the lockfile is out of date)")]),
+        "npm cannot install what Bun installs: eliza's registry packages that ask for workspace:*, its macOS-only workspace, c15t's wasm32-only binding; Bun installs them from the lockfile as the projects' own CI does");
+    std::fs::remove_file(t.0.join("bun.lock")).unwrap();
+    write(&t.0, "bun.lockb", "\u{0}bun");
+    assert_eq!(kern::sandbox::install_plan(&t.0).1, attempts, "Bun's older binary lockfile is read by the same Bun");
+    let ci = kern::sandbox::install_plan_for(&t.0, true).1;
+    assert!(ci.len() == 4 && ci[..2].iter().all(|(argv, said)| !argv.iter().any(|a| a == "--ignore-scripts") && *said != kern::sandbox::UNSCRIPTED)
+        && ci[2..].iter().all(|(argv, said)| argv.iter().any(|a| a == "--ignore-scripts") && *said == kern::sandbox::UNSCRIPTED),
+        "on a throwaway machine Bun runs the install scripts eliza's postinstall needs, and falls back to an install without them: {ci:?}");
+    std::fs::remove_file(t.0.join("bun.lockb")).unwrap();
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!((manager, attempts.iter().map(|(argv, said)| (argv.join(" "), *said)).collect::<Vec<_>>()),
+        ("bun", vec![(format!("{bun} install --no-save --ignore-scripts"), "installed from package.json (the project has no lockfile)")]),
+        "a project that declares Bun and has no lockfile installs with Bun too");
+    assert!(kern::sandbox::INSTALL_ENV.contains(&("BUN_INSTALL_CACHE_DIR", "/workspace/.kern-install/bun")), "Bun's cache leaves with Kern's install folder");
+    assert!(kern::sandbox::INSTALL_ENV.contains(&("BUN_INSTALL_GLOBAL_STORE", "0")),
+        "a bunfig.toml with globalStore = true makes node_modules/.bun links into Bun's cache, which Kern deletes after the install, so no test would load on either side, as PostHog/posthog-js#4869 showed for pnpm's global store");
+}
+
+#[test]
+fn kerns_own_bun_comes_only_from_a_lockfile_that_pins_its_sha512_for_the_machine_s_processor() {
+    for (arch, package, cpu, integrity) in [
+        ("x86_64", "@oven/bun-linux-x64-baseline", "x64", "sha512-OKKzX/SOVIUVARCzTg+2r4Rcc4fPyWnQmBsd3K08buxeu7DAof4iwW9zSb6Lt1NhTCu4Uhi8k9UeI6f7GEE4Zg=="),
+        ("aarch64", "@oven/bun-linux-aarch64", "arm64", "sha512-3BBP9ovJ2RGHFH6Ae1CAtxNtG1+YY6GD6rmYbsUosoAk9+OEl6zeDQ/k4fBkc6dYOJCtWnx8hUxzNzQATSmvYQ=="),
+    ] {
+        let (manifest, lock) = kern::sandbox::bun_tools(arch).expect("a Linux processor Kern runs on has a pinned Bun");
+        let (manifest, lock): (Value, Value) = (serde_json::from_str(&manifest).unwrap(), serde_json::from_str(&lock).unwrap());
+        assert_eq!(manifest["dependencies"], json!({ package: kern::sandbox::BUN }), "{manifest}");
+        let entry = &lock["packages"][format!("node_modules/{package}")];
+        assert_eq!((lock["lockfileVersion"].as_u64(), entry["version"].as_str(), entry["integrity"].as_str(), entry["cpu"][0].as_str()),
+            (Some(3), Some(kern::sandbox::BUN), Some(integrity), Some(cpu)), "npm ci refuses any other bytes: {lock}");
+        assert_eq!(entry["resolved"].as_str().unwrap(), format!("https://registry.npmjs.org/{package}/-/{}-{}.tgz", package.rsplit('/').next().unwrap(), kern::sandbox::BUN));
+        assert_eq!(lock["packages"][""]["dependencies"], manifest["dependencies"]);
+        assert_eq!(kern::sandbox::own_bun_for(arch), format!("/workspace/.kern-tools/bun/node_modules/{package}/bin/bun"));
+    }
+    assert_eq!(kern::sandbox::BUN, "1.4.2", "the baseline x64 build runs on every x64 processor, AVX2 or not");
+    assert!(kern::sandbox::bun_tools("riscv64").is_none(), "a processor Kern has no pinned Bun for gets none, never an unpinned one");
+}
+
+#[test]
+fn simstudioai_sim_4382_a_bun_project_s_install_scripts_build_steps_and_tests_find_bun_as_its_own_ci_gives_it() {
+    let t = Temp::new();
+    write(&t.0, "package.json", r#"{"name":"sim","scripts":{"postinstall":"bun run scripts/setup.ts"}}"#);
+    write(&t.0, "bun.lock", "{}");
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    let bun = kern::sandbox::own_bun();
+    assert_eq!(kern::sandbox::launcher(manager, &attempts), Some(vec![bun.clone()]), "the shim in /workspace/.kern-tools/bin that tests and build steps call");
+    let dir = bun.rsplit_once('/').unwrap().0;
+    assert_eq!(kern::sandbox::install_path(manager), format!("{dir}:/usr/local/bin:/usr/bin:/bin"), "sim's postinstall called bun, and its install failed with `sh: 1: bun: not found`");
+    assert_eq!(kern::sandbox::install_path("npm"), "/usr/local/bin:/usr/bin:/bin");
+    assert!(!kern::sandbox::adds_platform_parts("bun") && !kern::sandbox::adds_platform_parts("pnpm") && kern::sandbox::adds_platform_parts("npm") && kern::sandbox::adds_platform_parts("yarn"),
+        "Bun, like pnpm, installs the Linux parts itself; only npm and yarn trees get the parts npm leaves out");
+    write(&t.0, "package-lock.json", "{}");
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!((manager, kern::sandbox::launcher(manager, &attempts)), ("npm", None));
+    write(&t.0, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!(kern::sandbox::launcher(manager, &attempts).map(|l| l.len()), Some(3), "pnpm's launcher is node, corepack and pnpm, as before");
+}
+
+#[test]
 fn test_files_that_miss_only_an_unbuilt_package_are_repaired_even_when_others_pass() {
     let mut r = report(&[("packages/app/test/other.test.ts > works", 1, 0, 0)], &["packages/app/test/uses-lib.test.ts"]);
     r.why.insert("packages/app/test/uses-lib.test.ts".into(), "Failed to resolve entry for package \"@adobe/data\". The package may have incorrect main/module/exports specified".into());
@@ -970,6 +1040,50 @@ fn test_files_that_miss_only_an_unbuilt_package_are_repaired_even_when_others_pa
     assert_eq!(suite::partly_missing(&plain), None, "an ordinary failure is not a missing module");
     assert!(suite::own_build("Cannot find module '../../dist/assembly/index.js' from 'test/a.test.ts'"), "the package's own build output");
     assert!(!suite::own_build("Cannot find module './helpers' from 'test/a.test.ts'"));
+}
+
+#[test]
+fn mastra_18872_a_build_pass_starts_only_when_the_old_rerun_and_the_new_codes_run_still_fit() {
+    assert!(suite::repair_fits(2710, 413, 2 * suite::PREPARE_SECS_MAX), "before the first pass Kern counts both sides' whole build window, then the old rerun and the new run");
+    assert!(suite::repair_fits(1815, 745, 150), "after the first pass, the time its builds took");
+    assert!(!suite::repair_fits(971, 744, 23), "#18872's third pass rebuilt five packages in 23 s, reran the 744-s suite to the same 7,161 passes, and left the new code 208 s, so its tests never ran");
+    assert!(suite::repair_fits(2 * 744 + 23, 744, 23) && !suite::repair_fits(2 * 744 + 22, 744, 23));
+}
+
+#[test]
+fn mcpjam_inspector_4344_a_build_that_failed_is_named_with_its_error_never_counted_as_done() {
+    let log = "> @mcpjam/sdk@6.4.0 bundle:chatgpt-runtime\n\u{274c} Failed to bundle ChatGPT Apps runtime script: Error: EACCES: permission denied, open '/workspace/sdk/src/ChatGptAppsRuntime.bundled.ts'\nnpm error code 1\n\nkern-step sdk build exit 1\n\n> @x/core@1.0.0 build\n> tsc\n\nkern-step packages/core build exit 0\n";
+    let failed = suite::failed_steps(log);
+    assert_eq!(failed.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), ["sdk build"], "{failed:?}");
+    assert!(failed[0].1.contains("EACCES: permission denied, open '/workspace/sdk/src/ChatGptAppsRuntime.bundled.ts'"), "{failed:?}");
+    assert!(suite::failed_steps("kern-step sdk build exit 0\n").is_empty());
+    assert_eq!(suite::failed_steps("kern-step sdk build exit null\n"), [("sdk build".to_string(), "exit null".to_string())], "a build killed by a signal has no exit code and no error line, and is still a failure");
+    let steps = ["sdk build".to_string(), "packages/core build".to_string()];
+    let said = suite::ran_first(&steps, &failed);
+    assert!(said.starts_with(" (Kern ran sdk build, packages/core build first, but sdk build failed: ") && said.contains("EACCES") && said.ends_with(')'),
+        "inspector#4344's receipt said '(even after Kern ran sdk build first)' as if the build had worked: {said}");
+    assert_eq!(suite::ran_first(&steps, &[]), " (even after Kern ran sdk build, packages/core build first)");
+}
+
+#[test]
+fn mastra_18872_an_edited_test_file_that_loads_on_neither_side_is_not_verified_never_a_silent_pass() {
+    let edited = "packages/core/src/tools/tool-builder/builder.test.ts";
+    let changes = vec![(edited.to_string(), "modify"), ("packages/core/src/tools/tool-builder/builder.ts".to_string(), "modify"), ("packages/core/src/fixed.test.ts".to_string(), "modify"),
+        ("packages/core/src/fresh.test.ts".to_string(), "add"), ("packages/web/src/elsewhere.test.ts".to_string(), "modify")];
+    let mut old = report(&[("packages/core/src/agent.test.ts > runs", 1, 0, 0)], &[edited, "packages/core/src/fixed.test.ts", "packages/web/src/elsewhere.test.ts"]);
+    old.why.insert(edited.into(), "Cannot find package '@internal/core/storage' imported from /workspace/packages/core/src/observability/types/tracing.ts\n at ...".into());
+    old.why.insert("packages/core/src/fixed.test.ts".into(), "Cannot find module './gone'".into());
+    old.why.insert("packages/web/src/elsewhere.test.ts".into(), "Cannot find module './gone'".into());
+    let mut new = old.clone();
+    new.why.remove("packages/core/src/fixed.test.ts");
+    new.tests.insert("packages/core/src/fixed.test.ts > now loads".into(), Count { passed: 1, failed: 0, skipped: 0 });
+    assert_eq!(suite::unloaded_edits(&changes, &old, &new, "packages/core"),
+        [(edited.to_string(), "it did not load on the old code or the new code: Cannot find package '@internal/core/storage' imported from /workspace/packages/core/src/observability/types/tracing.ts".to_string())],
+        "on #18872 the edited builder.test.ts loaded on neither side; with planted faults dropped for time, the receipt would have said the tests still pass; a test file the change fixes so it loads, a new file and a file outside this suite are not this case");
+    let mut d = clean_tests();
+    d["edited_unchecked"] = json!([{ "path": edited, "why": "it did not load on the old code or the new code: Cannot find package '@internal/core/storage'" }]);
+    let r = receipt::build(&drive_json(), &clean_rules(), &d, &off());
+    assert_eq!(r["decision"], "unverified", "{r}");
 }
 
 #[test]

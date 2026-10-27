@@ -26,6 +26,20 @@ fn the_playwright_versions_are_the_ones_the_install_put_on_disk_wherever_they_si
 }
 
 #[test]
+fn c15t_951_the_playwright_bun_installs_into_its_own_store_is_found_as_pnpm_s_is() {
+    let t = std::env::temp_dir().join(format!("kern-browser-bun-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&t);
+    package(&t, "node_modules/.bun/playwright@1.57.0/node_modules/playwright", r#"{"name":"playwright","version":"1.57.0"}"#);
+    package(&t, "node_modules/.bun/playwright-core@1.57.0/node_modules/playwright-core", r#"{"name":"playwright-core","version":"1.57.0"}"#);
+    package(&t, "node_modules/.bun/vitest@3.2.4/node_modules/vitest", r#"{"name":"vitest","version":"3.2.4"}"#);
+    package(&t, "node_modules/.bun/@playwright+test@1.57.0/node_modules/@playwright/test", r#"{"name":"@playwright/test","version":"1.57.0"}"#);
+    package(&t, "node_modules/.bun/@playwright+test@1.57.0/node_modules/playwright", r#"{"name":"playwright","version":"1.57.0"}"#);
+    package(&t, "node_modules/.bun/node_modules/playwright-core", r#"{"name":"playwright-core","version":"1.57.0"}"#);
+    assert_eq!(installed_versions(&t, &["playwright", "playwright-core"]), ["1.57.0"], "Bun's isolated linker keeps every package in node_modules/.bun, as pnpm keeps them in .pnpm");
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+#[test]
 fn versions_sort_by_number_and_a_prerelease_playwright_is_kept() {
     let t = std::env::temp_dir().join(format!("kern-browser-sort-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&t);

@@ -648,6 +648,27 @@ pub fn comment_matches(seal: &Value, body: &str) -> bool {
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
+fn map_line(map: &Value) -> String {
+    let n = |k: &str| map[k].as_u64().unwrap_or(0) as usize;
+    let some = |k: &str, one: &str, many: &str| if n(k) == 1 { format!("1 {one}") } else { format!("{} {many}", n(k)) };
+    let (functions, types) = (n("changed_functions"), n("changed_types"));
+    let mut said = Vec::new();
+    if functions > 0 {
+        let nearest = map["nearest"].as_str().map(|f| format!(" (nearest {})", code(f, 160))).unwrap_or_default();
+        let it = if functions == 1 { "it" } else { "them" };
+        said.push(format!("edits {}; {} {it}{nearest}", plural(functions, "function", "functions"), some("files_running", "file runs", "files run")));
+        if n("files_loading") > 0 { said.push(format!("{} {it} when they load", some("files_loading", "file runs", "files run"))); }
+        if n("test_files") > 0 { said.push(format!("{} {it}", some("test_files", "test file calls", "test files call"))); }
+        if n("files_mentioning") > 0 { said.push(format!("{} {it}", some("files_mentioning", "file only imports", "files only import"))); }
+    }
+    if types > 0 { said.push(format!("edits {} that {} against", plural(types, "type", "types"), some("files_declaring", "file declares", "files declare"))); }
+    if said.is_empty() { said.push("edits no function or type the index knows".to_string()); }
+    let rooms: Vec<String> = map["rooms"].as_array().into_iter().flatten().take(6).map(|r| format!("{} ({} away, {})", code(r["room"].as_str().unwrap_or(""), 160), r["hops"].as_u64().unwrap_or(0), plain(r["how"].as_str().unwrap_or(""), 20))).collect();
+    let rooms = if rooms.is_empty() { String::new() } else { format!("; rooms reached: {}", rooms.join(", ")) };
+    let partial = if map["complete"] == false { " (at least: Kern stopped at its limit)" } else { "" };
+    format!("- 🗺️ Map: {}, {} and {}, from {}. This change {}{rooms}{partial}\n", plural(n("documents"), "file", "files"), plural(n("symbols"), "symbol", "symbols"), plural(n("references"), "reference", "references"),
+        plain(map["provenance"].as_str().unwrap_or(""), 80), said.join("; "))
+}
 fn list(md: &mut String, items: &[Value]) {
     for x in items.iter().take(SHOWN) { md.push_str(&format!("- {}\n", x["what"].as_str().unwrap_or(""))); }
     if items.len() > SHOWN { md.push_str(&format!("- … and {} more in Kern's receipt.json\n", items.len() - SHOWN)); }
@@ -749,14 +770,8 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
                 if m == 0 { "; every answer stayed the same".to_string() } else { format!("; {m} changed (see Notes)") });
         } else if let Some(why) = seen["why"].as_str() { md += &format!("- ⏭️ Untouched tests: not compared — {}\n", plain(why, 400)); }
         let map = &tests["map"];
-        if map["status"] == "RAN" {
-            let rooms: Vec<String> = map["rooms"].as_array().into_iter().flatten().take(6).map(|r| format!("{} ({} away)", code(r["room"].as_str().unwrap_or(""), 160), r["hops"].as_u64().unwrap_or(0))).collect();
-            let n = |k: &str| map[k].as_u64().unwrap_or(0) as usize;
-            md += &format!("- 🗺️ Map: {}, {} and {}, from {}; this change edits {} and reaches {} and {}{}\n",
-                plural(n("documents"), "file", "files"), plural(n("symbols"), "symbol", "symbols"), plural(n("references"), "reference", "references"), plain(map["provenance"].as_str().unwrap_or(""), 80),
-                plural(n("changed_symbols"), "symbol", "symbols"), plural(n("files_reached"), "file", "files"), plural(n("rooms_reached"), "room", "rooms"),
-                if rooms.is_empty() { String::new() } else { format!(": {}", rooms.join(", ")) });
-        } else if let Some(why) = map["why"].as_str() { md += &format!("- ⏭️ Map: not built — {}; Kern used the files' imports instead\n", plain(why, 400)); }
+        if map["status"] == "RAN" { md += &map_line(map); }
+        else if let Some(why) = map["why"].as_str() { md += &format!("- ⏭️ Map: not used — {}; Kern used the files' imports instead\n", plain(why, 400)); }
         if tests["dropped"].as_array().is_some_and(|d| d.iter().any(|x| x == "untouched tests")) {
             md += "- ⏭️ Untouched tests: not compared — Kern's time ran short, so it dropped them first\n";
         }

@@ -271,7 +271,7 @@ pub fn protected(name: &str) -> bool {
     let base = parts.last().map(String::as_str).unwrap_or("");
     parts.iter().any(|p| [".github", "node_modules", ".circleci", ".devcontainer", ".buildkite", ".azure-pipelines"].contains(&p.as_str()))
         || ["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "cargo.toml", "cargo.lock", "go.mod", "go.sum", "pyproject.toml", ".gitmodules", ".gitattributes", ".npmrc", ".env",
-            ".gitlab-ci.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", ".travis.yml", "jenkinsfile", ".drone.yml", ".yarnrc.yml", ".yarnrc", ".pnpmfile.cjs", "codeowners",
+            ".gitlab-ci.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", ".travis.yml", "jenkinsfile", ".drone.yml", ".yarnrc.yml", ".yarnrc", ".pnpmfile.cjs", "bun.lock", "bun.lockb", "bunfig.toml", "codeowners",
             "renovate.json", "renovate.json5", ".renovaterc", ".renovaterc.json"].contains(&base)
         || base == "dockerfile" || base.ends_with(".dockerfile") || base.starts_with("dockerfile.")
         || (parts.len() >= 2 && parts[parts.len() - 2] == ".vscode" && ["tasks.json", "launch.json"].contains(&base))

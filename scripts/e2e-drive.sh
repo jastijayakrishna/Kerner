@@ -310,7 +310,7 @@ jq -e '.coverage.percent == 100' pnpm.json > /dev/null || { cat pnpmtask/task/fe
 grep -q '"step":"pnpmfile ran","value":false' pnpmtask/rounds/1/runs/new-1.out || { cat pnpmtask/rounds/1/runs/new-1.out; fail "the repository's .pnpmfile.cjs ran during setup"; }
 "$K" --control verifier.json drive clean "$W/pnpmtask" > /dev/null
 
-say "A Bun project: npm installs it from its package.json files, Bun's workspace: and catalog: versions read for npm"
+say "A Bun project installs with Kern's own Bun, its workspace: and catalog: versions as Bun reads them; a lockfile that does not match its manifests is said"
 git init -q bunapp && cd bunapp
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p packages/lib/src packages/app/src
@@ -336,7 +336,7 @@ EOF
 jq -e '.coverage.percent == 100' bun.json > /dev/null || { cat buntask/task/feedback.md; jq '.installs' buntask/rounds/1/report.json; fail "the Bun project did not run"; }
 grep -q '"step":"run(2)","value":5}' buntask/rounds/1/runs/new-1.out && grep -q '"step":"lib version","value":"workspace:\*"}' buntask/rounds/1/runs/new-1.out \
   || { cat buntask/rounds/1/runs/new-1.out; fail "the Bun workspace did not link, or its package.json did not come back"; }
-grep -q "Kern does not read Bun's lockfile" buntask/comment.md || { cat buntask/comment.md; fail "the comment did not say the Bun lockfile was not read"; }
+grep -q "the lockfile is out of date" buntask/comment.md || { cat buntask/comment.md; fail "the comment did not say the Bun lockfile was out of date"; }
 "$K" --control verifier.json drive clean "$W/buntask" > /dev/null
 
 say "Every cleaned task leaves no volume behind (only Kern's tools stay, once, in the dependency cache)"

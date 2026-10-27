@@ -203,10 +203,10 @@ fn the_comment_warns_of_installs_without_the_lockfile_and_of_code_that_touches_k
     let r = run(&[], covered("src/price.ts", &[(3, 1), (4, 1)]), &[], &[], "");
     let mut report = drive::score(&d, &[r.clone(), r.clone(), r.clone(), r], 1);
     report["installs"] = serde_json::json!({ "new": [{ "dir": ".", "manager": "npm", "result": "installed from package.json (the lockfile is out of date)" }],
-        "old": [{ "dir": "app", "manager": "bun", "result": "installed from package.json (Kern does not read Bun's lockfile)" }] });
+        "old": [{ "dir": "app", "manager": "bun", "result": "installed from package.json (the project has no lockfile)" }] });
     let comment = drive::comment(&d, &report);
     assert!(comment.contains("without the project's lockfile") && comment.contains("`.` (new code: the lockfile is out of date)")
-        && comment.contains("`app` (old code: Kern does not read Bun's lockfile)"), "{comment}");
+        && comment.contains("`app` (old code: the project has no lockfile)"), "{comment}");
     let (t, base, _) = project();
     let r = t.join("repo");
     write(&r, "src/report.ts", "export const out = () => process.env.NODE_V8_COVERAGE;\n");
@@ -239,34 +239,6 @@ fn a_changed_file_with_its_own_source_map_is_named_as_touching_kern_s_measuremen
     drive::prepare(&r, &base, &head, &t.join("out"), None).unwrap();
     let d: Value = serde_json::from_str(&read(&t.join("out"), "drive.json")).unwrap();
     assert_eq!(d["measurement"], serde_json::json!(["src/mapped.js"]), "{}", d["measurement"]);
-}
-
-#[test]
-fn a_bun_package_json_names_only_what_npm_can_install() {
-    let root = r#"{ "name": "root", "workspaces": { "packages": ["apps/*", "packages/*"], "catalog": { "zod": "3.25.0" } },
-        "catalogs": { "ui": { "react": "19.1.0" } },
-        "dependencies": { "@acme/lib": "workspace:*", "zod": "catalog:", "react": "catalog:ui", "left-pad": "1.3.0", "gone": "catalog:nope" },
-        "devDependencies": { "@acme/cfg": "workspace:^" } }"#;
-    let out: Value = serde_json::from_str(&kern::sandbox::bun_for_npm(root, root).expect("rewritten")).unwrap();
-    assert_eq!(out["workspaces"], serde_json::json!(["apps/*", "packages/*"]));
-    assert_eq!(out["dependencies"], serde_json::json!({ "@acme/lib": "*", "zod": "3.25.0", "react": "19.1.0", "left-pad": "1.3.0", "gone": "*" }));
-    assert_eq!(out["devDependencies"], serde_json::json!({ "@acme/cfg": "*" }));
-    let member = r#"{ "name": "@acme/web", "dependencies": { "@acme/lib": "workspace:^1.0.0" }, "peerDependencies": { "zod": "catalog:" } }"#;
-    let out: Value = serde_json::from_str(&kern::sandbox::bun_for_npm(member, root).expect("rewritten")).unwrap();
-    assert_eq!((out["dependencies"]["@acme/lib"].as_str(), out["peerDependencies"]["zod"].as_str()), (Some("*"), Some("3.25.0")));
-    assert!(kern::sandbox::bun_for_npm(r#"{ "name": "a", "workspaces": ["x/*"], "dependencies": { "left-pad": "1.3.0" } }"#, root).is_none());
-}
-
-#[test]
-fn elizaos_eliza_10947_a_bun_project_whose_overrides_pin_other_versions_than_its_dependencies_installs_with_npm_as_bun_installs_it() {
-    let root = r#"{ "name": "eliza", "packageManager": "bun@1.4.0-canary.1", "workspaces": ["packages/*"],
-        "dependencies": { "vitest": "^4.0.17", "@elizaos/core": "workspace:*" }, "devDependencies": { "@types/react": "^19.2.3", "@biomejs/biome": "2.5.2" },
-        "overrides": { "vitest": "4.1.5", "@types/react": "19.2.14", "@biomejs/biome": "2.5.1", "@elizaos/core": "workspace:*", "nested": { "left-pad": "1.3.0" } } }"#;
-    let out: Value = serde_json::from_str(&kern::sandbox::bun_for_npm(root, root).expect("rewritten")).unwrap();
-    assert_eq!(out["dependencies"], serde_json::json!({ "vitest": "4.1.5", "@elizaos/core": "*" }), "npm refuses (EOVERRIDE) a direct dependency whose override names another version; Bun installs the override, so npm is asked for the same: {out}");
-    assert_eq!(out["devDependencies"], serde_json::json!({ "@types/react": "19.2.14", "@biomejs/biome": "2.5.1" }));
-    assert_eq!(out["overrides"], serde_json::json!({ "vitest": "4.1.5", "@types/react": "19.2.14", "@biomejs/biome": "2.5.1", "@elizaos/core": "*", "nested": { "left-pad": "1.3.0" } }), "a workspace: override becomes one npm reads; a nested override is left as it is");
-    assert!(!out.as_object().unwrap().contains_key("optionalDependencies"), "no field is added to the manifest");
 }
 
 #[test]

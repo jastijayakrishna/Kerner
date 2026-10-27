@@ -676,8 +676,8 @@ for runner in vitest jest; do
     and ([.tests.bystanders.differences[] | select(.key == "src/report.js#summary") | .now] | any(contains("2 things")))
     and ([.challenges[] | "\(.target) \(.kind)"] == ["label unasserted"]) and (.challenges[0].example | test("label\\([23]\\)"))' "watch-$runner/receipt.json" > /dev/null \
     || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named, or the house did not watch src/report.js, which the change reaches"; }
-  jq -e '.tests.map.status == "RAN" and .tests.map.symbols >= 2 and .tests.map.files_reached >= 2' "watch-$runner/receipt.json" > /dev/null \
-    || { jq '.tests.map' "watch-$runner/receipt.json"; tail -n 20 "watch-$runner/map.err" 2> /dev/null; grep -h 'Map' "watch-$runner/receipt.md"; fail "watch-$runner: the compiler-backed map was not built in the sandbox, or it did not reach src/report.js"; }
+  jq -e '.tests.map.status == "RAN" and .tests.map.changed_functions == 1 and .tests.map.files_running == 1 and .tests.map.nearest == "src/report.js" and .tests.map.test_files == 2 and .tests.map.complete' "watch-$runner/receipt.json" > /dev/null \
+    || { jq '.tests.map' "watch-$runner/receipt.json"; tail -n 20 "watch-$runner/map.err" 2> /dev/null; grep -h 'Map' "watch-$runner/receipt.md"; fail "watch-$runner: the compiler-backed map was not built in the sandbox, or it did not say that src/report.js runs label() and two test files call it"; }
   grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
 done
 
@@ -739,6 +739,68 @@ cd "$W"
 check pnpm "$pnpm_base" pnpmrepo
 jq -e '.tests.status == "RAN" and .tests.kept == 2' pnpm/receipt.json > /dev/null || { jq .tests pnpm/receipt.json; jq . pnpm/setup.json 2>/dev/null | head -40; fail "pnpm: a pnpm 12 project did not install with its own pnpm, or its tests could not call pnpm"; }
 if grep -q 'kern-pnpm-store' pnpm/tests-new.out pnpm/tests-old.out; then fail "pnpm: the test runner found tests inside Kern's own package store"; fi
+
+say "A Bun workspace installs with Kern's own Bun, which npm checks against its sha512, from its bun.lock as Bun installs it (a macOS-only workspace package and a workspace: override, as in eliza; a bunfig.toml that asks for Bun's global store, whose links would point into the cache Kern deletes), and its tests can call bun with the network off"
+git init -q bunrepo && cd bunrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/lib packages/app/test packages/mac
+printf '%s\n' '{"name":"bunws","private":true,"type":"module","workspaces":["packages/*"],"overrides":{"@x/lib":"workspace:*"},"scripts":{"test":"node --test"}}' > package.json
+printf '%s\n' '[install]' 'globalStore = true' > bunfig.toml
+printf '%s\n' '{"name":"@x/lib","version":"1.0.0-beta.1","type":"module","exports":"./index.js"}' > packages/lib/package.json
+printf '%s\n' 'export const label = (n) => (n === 1 ? "1 item" : n + " items");' > packages/lib/index.js
+printf '%s\n' '{"name":"@x/app","version":"1.0.0","private":true,"type":"module","dependencies":{"@x/lib":"workspace:*","is-number":"7.0.0"}}' > packages/app/package.json
+printf '%s\n' '{"name":"@x/mac","version":"1.0.0","private":true,"os":["darwin"]}' > packages/mac/package.json
+printf '%s\n' "import { test } from 'node:test';" "import assert from 'node:assert/strict';" "import { execFileSync } from 'node:child_process';" "import isNumber from 'is-number';" "import { label } from '@x/lib';" '' \
+  "test('labels many', () => assert.equal(label(2), '2 items'));" "test('a registry package loads from node_modules/.bun', () => assert.equal(isNumber(5), true));" \
+  "test('bun is there with the network off', () => assert.equal(execFileSync('bun', ['--version'], { encoding: 'utf8' }).trim(), '1.4.2'));" > packages/app/test/app.test.js
+cat > bun.lock <<'EOF'
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "bunws",
+    },
+    "packages/app": {
+      "name": "@x/app",
+      "version": "1.0.0",
+      "dependencies": {
+        "@x/lib": "workspace:*",
+        "is-number": "7.0.0",
+      },
+    },
+    "packages/lib": {
+      "name": "@x/lib",
+      "version": "1.0.0-beta.1",
+    },
+    "packages/mac": {
+      "name": "@x/mac",
+      "version": "1.0.0",
+    },
+  },
+  "overrides": {
+    "@x/lib": "workspace:*",
+  },
+  "packages": {
+    "@x/app": ["@x/app@workspace:packages/app"],
+
+    "@x/lib": ["@x/lib@workspace:packages/lib"],
+
+    "@x/mac": ["@x/mac@workspace:packages/mac"],
+
+    "is-number": ["is-number@7.0.0", "", {}, "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="],
+  }
+}
+EOF
+git add -A && git commit -qm base && bun_base=$(git rev-parse HEAD)
+printf '%s\n' 'export const twice = (n) => n * 2;' >> packages/lib/index.js
+git commit -qam "Twice" && git rev-parse HEAD > "$W/bun.head"
+cd "$W"
+check bun "$bun_base" bunrepo
+jq -e '[.old.installs[0], .new.installs[0]] | all(.manager == "bun" and .result == "installed")' bun/setup.json > /dev/null \
+  || { jq . bun/setup.json 2>/dev/null | head -60; fail "bun: a Bun workspace did not install with Kern's own Bun from its lockfile"; }
+jq -e '.tests.status == "RAN" and .tests.kept == 3' bun/receipt.json > /dev/null \
+  || { jq .tests bun/receipt.json; fail "bun: the Bun workspace's tests did not run, a registry package's link pointed into Bun's deleted cache, or the tests could not call bun with the network off"; }
 
 say "A project whose .nvmrc asks for Node 20 is installed and tested on Node 20"
 git init -q nvmrepo && cd nvmrepo

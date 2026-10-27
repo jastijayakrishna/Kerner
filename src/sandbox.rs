@@ -13,11 +13,13 @@ pub const FAULT: &str = include_str!("fault.cjs");
 pub const NODE_REPORT: &str = include_str!("node-report.mjs");
 pub const TRACE: &str = include_str!("trace.cjs");
 pub const NODE_REPORTER: &str = "--test-reporter=/kern/node-report.mjs";
-pub const INSTALL_ENV: [(&str, &str); 22] = [("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0"),("HUSKY", "0"), ("HUSKY_SKIP_INSTALL", "1"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
+const INSTALL_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+pub const INSTALL_ENV: [(&str, &str); 24] = [("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0"),("HUSKY", "0"), ("HUSKY_SKIP_INSTALL", "1"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", INSTALL_PATH), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_HOME", "/home/kern/corepack"), ("YARN_NODE_LINKER", "node-modules"), ("YARN_ENABLE_GLOBAL_CACHE", "false"),
     ("npm_config_loglevel", "error"), ("YARN_IGNORE_PATH", "1"), ("TMPDIR", "/workspace/.kern-install/tmp"), ("npm_config_cache", "/workspace/.kern-install/npm"),
     ("npm_config_store_dir", "/workspace/.kern-install/pnpm-store"), ("YARN_CACHE_FOLDER", "/workspace/.kern-install/yarn"), ("XDG_CACHE_HOME", "/workspace/.kern-install/cache"),
-    ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state")];
+    ("XDG_DATA_HOME", "/workspace/.kern-install/data"), ("XDG_STATE_HOME", "/workspace/.kern-install/state"), ("BUN_INSTALL_CACHE_DIR", "/workspace/.kern-install/bun"),
+    ("BUN_INSTALL_GLOBAL_STORE", "0")];
 pub const TEST_ENV: [(&str, &str); 10] = [("PATH", "/workspace/.kern-tools/bin:/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("COREPACK_HOME", "/workspace/.kern-tools/corepack-home"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0")];
@@ -302,7 +304,7 @@ pub fn installed_versions(root: &Path, names: &[&str]) -> Vec<String> {
         if depth > VERSION_DEPTH_COUNT_MAX { return; }
         for (name, path) in dirs(dir, dirs_left) {
             if names.contains(&name.as_str()) { found.extend(version(&path, &name)); }
-            let inner: Vec<PathBuf> = if name.starts_with('@') || name == ".pnpm" { dirs(&path, dirs_left).into_iter().map(|(_, p)| p.join("node_modules")).collect() } else { vec![path.join("node_modules")] };
+            let inner: Vec<PathBuf> = if name.starts_with('@') || name == ".pnpm" || name == ".bun" { dirs(&path, dirs_left).into_iter().map(|(_, p)| p.join("node_modules")).collect() } else { vec![path.join("node_modules")] };
             for n in inner.into_iter().filter(|n| n.is_dir()) { modules(&n, names, depth + 1, dirs_left, found); }
         }
     }
@@ -385,6 +387,33 @@ impl Capped {
 pub const TOOLS: &str = "/workspace/.kern-tools";
 const IMAGE_COREPACK: &str = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
 fn own_corepack() -> String { format!("{TOOLS}/corepack/node_modules/corepack/dist/corepack.js") }
+pub const BUN: &str = "1.4.2";
+const BUN_BUILDS: [(&str, &str, &str, &str); 2] = [
+    ("x86_64", "@oven/bun-linux-x64-baseline", "x64", "sha512-OKKzX/SOVIUVARCzTg+2r4Rcc4fPyWnQmBsd3K08buxeu7DAof4iwW9zSb6Lt1NhTCu4Uhi8k9UeI6f7GEE4Zg=="),
+    ("aarch64", "@oven/bun-linux-aarch64", "arm64", "sha512-3BBP9ovJ2RGHFH6Ae1CAtxNtG1+YY6GD6rmYbsUosoAk9+OEl6zeDQ/k4fBkc6dYOJCtWnx8hUxzNzQATSmvYQ=="),
+];
+fn bun_build(arch: &str) -> Option<(&'static str, &'static str, &'static str)> { BUN_BUILDS.iter().find(|b| b.0 == arch).map(|b| (b.1, b.2, b.3)) }
+pub fn own_bun() -> String { own_bun_for(std::env::consts::ARCH) }
+pub fn own_bun_for(arch: &str) -> String { format!("{TOOLS}/bun/node_modules/{}/bin/bun", bun_build(arch).map_or("@oven/bun-none", |b| b.0)) }
+pub fn bun_tools(arch: &str) -> Option<(String, String)> {
+    let (package, cpu, integrity) = bun_build(arch)?;
+    let (file, entry) = (package.rsplit('/').next().unwrap_or(package), format!("node_modules/{package}"));
+    let manifest = json!({ "name": "kern-bun", "private": true, "dependencies": { package: BUN } });
+    let lock = json!({ "name": "kern-bun", "lockfileVersion": 3, "requires": true, "packages": {
+        "": { "name": "kern-bun", "dependencies": { package: BUN } },
+        entry: { "version": BUN, "resolved": format!("https://registry.npmjs.org/{package}/-/{file}-{BUN}.tgz"), "integrity": integrity, "license": "MIT", "os": ["linux"], "cpu": [cpu] } } });
+    Some((format!("{manifest:#}\n"), format!("{lock:#}\n")))
+}
+pub fn launcher(manager: &str, attempts: &[(Vec<String>, &str)]) -> Option<Vec<String>> {
+    if !["pnpm", "yarn", "bun"].contains(&manager) { return None; }
+    attempts.first().and_then(|(argv, _)| argv.iter().position(|a| a == "install").map(|i| argv[..i].to_vec()))
+}
+pub fn install_path(manager: &str) -> String {
+    if manager != "bun" { return INSTALL_PATH.to_string(); }
+    let bun = own_bun();
+    format!("{}:{INSTALL_PATH}", bun.rsplit_once('/').map_or("", |(dir, _)| dir))
+}
+pub fn adds_platform_parts(manager: &str) -> bool { !["pnpm", "bun"].contains(&manager) }
 const PNPM_OWN_COREPACK_MAJOR_MIN: u64 = 12;
 fn pinned_major(dir: &Path, manager: &str) -> Option<u64> {
     let declared = |d: &Path| std::fs::read(d.join("package.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["packageManager"].as_str().map(str::to_string));
@@ -443,41 +472,14 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     if declared == "yarn" && dir.join(".yarnrc.yml").is_file() {
         return ("yarn", vec![(node(&[corepack, "yarn", "install", "--no-immutable", "--mode=skip-build"]), "installed from package.json (the project has no lockfile)")]);
     }
+    let bun = |args: &[&str]| -> Vec<String> { std::iter::once(own_bun()).chain(args.iter().map(|a| a.to_string())).collect() };
     if dir.join("bun.lock").is_file() || dir.join("bun.lockb").is_file() {
-        return ("bun", vec![(loose, "installed from package.json (Kern does not read Bun's lockfile)")]);
+        return ("bun", vec![(bun(&["install", "--frozen-lockfile", "--ignore-scripts"]), "installed"), (bun(&["install", "--no-save", "--ignore-scripts"]), STALE)]);
+    }
+    if declared == "bun" {
+        return ("bun", vec![(bun(&["install", "--no-save", "--ignore-scripts"]), "installed from package.json (the project has no lockfile)")]);
     }
     ("npm", vec![(npm(&["install", "--ignore-scripts", "--no-package-lock"]), "installed"), (loose, "installed from package.json (npm's peer dependency checks were relaxed)")])
-}
-pub fn bun_for_npm(text: &str, root: &str) -> Option<String> {
-    let mut pkg: Value = serde_json::from_str(text).ok()?;
-    let root: Value = serde_json::from_str(root).unwrap_or(Value::Null);
-    let catalog = |group: &str, name: &str| [&root, &root["workspaces"]].iter()
-        .find_map(|at| (if group.is_empty() { &at["catalog"] } else { &at["catalogs"][group] })[name].as_str().map(str::to_string));
-    let mut changed = false;
-    if pkg["workspaces"].is_object() { pkg["workspaces"] = pkg["workspaces"]["packages"].take(); changed = true; }
-    for field in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
-        for (name, version) in pkg.get_mut(field).and_then(Value::as_object_mut).into_iter().flatten() {
-            let new = match version.as_str() {
-                Some(v) if v.starts_with("workspace:") => "*".to_string(),
-                Some(v) if v.starts_with("catalog:") => catalog(v["catalog:".len()..].trim(), name).unwrap_or_else(|| "*".into()),
-                _ => continue,
-            };
-            *version = Value::String(new);
-            changed = true;
-        }
-    }
-    for (name, pin) in pkg["overrides"].clone().as_object().into_iter().flatten() {
-        let want = match pin.as_str() {
-            Some(v) if v.starts_with("workspace:") => "*".to_string(),
-            Some(v) if v.starts_with("catalog:") => catalog(v["catalog:".len()..].trim(), name).unwrap_or_else(|| "*".into()),
-            Some(v) => v.to_string(),
-            None => continue,
-        };
-        for field in ["overrides", "dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
-            if let Some(spec) = pkg.get_mut(field).and_then(|f| f.get_mut(name)).filter(|s| s.is_string() && **s != Value::String(want.clone())) { *spec = Value::String(want.clone()); changed = true; }
-        }
-    }
-    changed.then(|| serde_json::to_string_pretty(&pkg).unwrap_or_default())
 }
 pub fn image_major(image: &str) -> Option<u64> {
     let info = docker_json(&["image", "inspect", image]).ok()?;
@@ -668,6 +670,7 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     create_new(dir.join("node-report.mjs"), NODE_REPORT.as_bytes(), 0o444)?;
     create_new(dir.join("trace.cjs"), TRACE.as_bytes(), 0o444)?;
     create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
+    create_new(dir.join("map.cjs"), crate::map::RUNNER.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
 }
@@ -924,22 +927,6 @@ mod inside {
             "milliseconds": { "old": old_time.as_millis() as u64, "new": new_time.as_millis() as u64, "total": started.elapsed().as_millis() as u64 }, "mutants": results }));
         Ok(())
     }
-    fn bun_rewrite(dir: &Path) -> R<Vec<(PathBuf, Vec<u8>)>> {
-        let root = std::fs::read_to_string(dir.join("package.json"))?;
-        let (mut originals, mut folders) = (Vec::new(), vec![(dir.to_path_buf(), 0)]);
-        while let Some((folder, depth)) = folders.pop() {
-            for e in std::fs::read_dir(&folder)? {
-                let e = e?;
-                let (name, kind) = (e.file_name().to_string_lossy().to_string(), e.file_type()?);
-                if kind.is_dir() && depth < 6 && name != "node_modules" && !name.starts_with('.') { folders.push((e.path(), depth + 1)); }
-                else if kind.is_file() && name == "package.json" {
-                    let text = std::fs::read(e.path())?;
-                    if let Some(new) = bun_for_npm(&String::from_utf8_lossy(&text), &root) { std::fs::write(e.path(), new)?; originals.push((e.path(), text)); }
-                }
-            }
-        }
-        Ok(originals)
-    }
     fn lock_down(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
         if meta.file_type().is_symlink() { return; }
@@ -1031,6 +1018,18 @@ mod inside {
         println!("{}", json!({ "version": 1, "installs": records, "browsers": playwright }));
         Ok(())
     }
+    fn pinned_bun((budget, started): (Duration, std::time::Instant)) -> Result<String, String> {
+        let bun = super::own_bun();
+        if Path::new(&bun).is_file() { return Ok(bun); }
+        let arch = std::env::consts::ARCH;
+        let (manifest, lock) = super::bun_tools(arch).ok_or_else(|| format!("Kern has no Bun {} for this machine's processor ({arch})", super::BUN))?;
+        let dir = Path::new(super::TOOLS).join("bun");
+        let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("package.json"), manifest)).and_then(|_| std::fs::write(dir.join("package-lock.json"), lock));
+        let child = written.and_then(|_| Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier"])
+            .current_dir(&dir).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn());
+        let ran = child.ok().is_some_and(|c| wait(c, budget.saturating_sub(started.elapsed())).unwrap_or(false));
+        if ran && std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).is_ok() { Ok(bun) } else { Err(format!("Kern could not install its own Bun {} with npm", super::BUN)) }
+    }
     fn npm_into(prefix: &Path, package: &str) {
         let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &prefix.to_string_lossy(), package, "--ignore-scripts",
             "--no-audit", "--no-fund", "--no-update-notifier"]).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
@@ -1047,10 +1046,13 @@ mod inside {
                 return Ok((json!({ "dir": d, "manager": manager, "result": format!("failed: Kern could not install {} with npm", super::COREPACK), "parts": [] }), None));
             }
         }
-        let launcher: Option<Vec<String>> = attempts.first().and_then(|(argv, _)| argv.iter().position(|a| a == "install").map(|i| argv[..i].to_vec())).filter(|_| manager == "pnpm" || manager == "yarn");
+        if manager == "bun" && let Err(why) = pinned_bun((budget, started)) {
+            return Ok((json!({ "dir": d, "manager": manager, "result": format!("failed: {why}"), "parts": [] }), None));
+        }
+        let launcher = super::launcher(manager, &attempts);
         let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
         let committed = if d == "." { PathBuf::from("/input") } else { Path::new("/input").join(d) };
-        let (mut result, mut originals, mut scripts_failed) = (json!("failed"), Vec::new(), None);
+        let (mut result, mut scripts_failed) = (json!("failed"), None);
         let log = Path::new("/home/kern/install.log");
         for (argv, said) in &attempts {
             if *said == super::UNSCRIPTED && scripts_failed.is_none() { scripts_failed = result.as_str().map(str::to_string); }
@@ -1059,10 +1061,9 @@ mod inside {
             if *dirty { quiesce()?; super::restore(&committed, dir, keep)?; }
             *dirty = true;
             if let Some(rc) = &berry { std::fs::write(dir.join(".kern-yarnrc.yml"), rc)?; }
-            originals = if manager == "bun" { bun_rewrite(dir)? } else { Vec::new() };
             let log_file = std::fs::File::create(log)?;
             let child = Command::new(&argv[0]).args(&argv[1..]).current_dir(dir).env_clear()
-                .envs(super::INSTALL_ENV)
+                .envs(super::INSTALL_ENV).env("PATH", super::install_path(manager))
                 .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
                 .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
             if wait(child, left)? { result = json!(said); break; }
@@ -1072,8 +1073,7 @@ mod inside {
             result = json!(format!("failed: {}{tail}", first.map_or(String::new(), |f| format!("{f}\n…\n"))));
         }
         quiesce()?;
-        for (path, text) in &originals { std::fs::write(path, text)?; }
-        let parts = if result.as_str().is_some_and(|r| r.starts_with("installed")) && manager != "pnpm" { platform_parts(dir, (budget, started))? } else { Vec::new() };
+        let parts = if result.as_str().is_some_and(|r| r.starts_with("installed")) && super::adds_platform_parts(manager) { platform_parts(dir, (budget, started))? } else { Vec::new() };
         let mut record = json!({ "dir": d, "manager": manager, "result": result, "parts": parts });
         if result == super::UNSCRIPTED && let Some(why) = scripts_failed { record["scripts_failed"] = json!(why); }
         Ok((record, launcher))
