@@ -29,6 +29,8 @@ Check (one receipt on every pull request; Kern's GitHub workflow, .github/workfl
                                   /kern approve: someone who can merge approves a signed \"needs a look\" receipt
   receipt verify <owner/repo> <pr-number> [receipt.json]
                                   check a receipt's signature with GitHub's keys, and receipt.json against its seal
+  replay <dir>...                 judge every stored check under the folders again with today's rules: one JSON line per
+                                  receipt with the answer before and after, then a summary (KERN_REPLAY_WORKERS: 1 to 4)
 Setup:
   profile <operator-template.json> <public.pem>        verifier side: export a verifier profile
   init <repo-dir> <profile.json|https://verifier> <owner/kern@sha> [task]
@@ -198,6 +200,12 @@ fn cli() -> R<(Option<Value>, i32)> {
             (Some(json!({ "status": report["summary"]["status"], "summary": report["summary"], "files": files })), code)
         }
         "report" => { count(a, 2)?; std::fs::write(&a[1], kern::audit::report(Path::new(&a[0]))?)?; (Some(json!({ "report": std::path::absolute(&a[1])? })), 0) }
+        "replay" => {
+            ensure!(!a.is_empty(), "Expected one or more folders of stored checks; see kern --help");
+            let workers = std::env::var("KERN_REPLAY_WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(kern::replay::WORKERS_COUNT_MAX);
+            let roots: Vec<std::path::PathBuf> = a.iter().map(std::path::PathBuf::from).collect();
+            (Some(kern::replay::run(&roots, workers, &mut std::io::stdout().lock())?), 0)
+        }
         "check" => {
             ensure!(a.len() == 5 || a.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
             let pr = a.get(5).map(std::fs::read_to_string).transpose()?;

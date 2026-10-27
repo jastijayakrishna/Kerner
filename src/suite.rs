@@ -83,6 +83,11 @@ fn sum(r: &Report) -> Value {
 }
 
 fn count(r: &Report, k: &str) -> proof::Count { r.tests.get(k).copied().unwrap_or_default() }
+fn names_by_file(r: &Report) -> std::collections::BTreeMap<&str, BTreeSet<&str>> {
+    let mut out: std::collections::BTreeMap<&str, BTreeSet<&str>> = std::collections::BTreeMap::new();
+    for k in r.tests.keys() { out.entry(file_of(k)).or_default().insert(k.as_str()); }
+    out
+}
 
 fn masked(name: &str) -> String {
     let (folder, rest) = match name.split_once(": ") {
@@ -726,9 +731,9 @@ pub fn judged(before: &Report, after: &Report, again: Option<&Report>, alone_old
     let signature = |w: &str| -> String { masked(&w.replace("/workspace/", "")).chars().take(160).collect() };
     let old_errors: BTreeSet<String> = before.tests.iter().filter(|(_, c)| c.failed > 0).map(|(k, _)| k).chain(&before.problems).filter_map(|k| before.why.get(k)).map(|w| signature(w)).collect();
     let known_error = |k: &str| raw_after.why.get(k).is_some_and(|w| old_errors.contains(&signature(w)));
-    let names = |r: &Report, f: &str| -> BTreeSet<String> { r.tests.keys().filter(|k| file_of(k) == f).cloned().collect() };
-    let by_chance: BTreeSet<&str> = before.tests.keys().map(|k| file_of(k)).filter(|f| [(before, alone_old), (after, again)].into_iter()
-        .any(|(a, b)| b.is_some_and(|b| { let n = names(b, f); !n.is_empty() && names(a, f) != n }))).collect();
+    let (named_before, named_after, named_alone_old, named_again) = (names_by_file(before), names_by_file(after), alone_old.map(names_by_file), again.map(names_by_file));
+    let by_chance: BTreeSet<&str> = named_before.keys().copied().filter(|f| [(&named_before, named_alone_old.as_ref()), (&named_after, named_again.as_ref())].into_iter()
+        .any(|(a, b)| b.and_then(|b| b.get(f)).is_some_and(|n| a.get(f) != Some(n)))).collect();
     let lacking = |k: &str| raw_after.why.get(k).is_some_and(|w| sandbox_error(w));
     for k in keys {
         let (b, a) = (count(before, k), count(after, k));

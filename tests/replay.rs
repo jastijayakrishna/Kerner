@@ -271,3 +271,65 @@ fn kerns_kept_copy_of_an_old_test_file_maps_back_to_the_file_it_came_from() {
         assert_eq!(kern::suite::kept_back(&kern::suite::kept_name(path, n).unwrap()).as_deref(), Some(path), "kept_back undoes kept_name");
     }
 }
+
+fn farm(root: &Path, name: &str, count: usize, broken: bool) {
+    for n in 0..count {
+        let dir = root.join(name).join(format!("receipt-acme__{name}__{n}"));
+        let (new, stored_lists) = if broken { ("failed", json!({})) } else { ("passed", json!({})) };
+        stored(&dir, "vitest", stored_lists, &[
+            ("old", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+            ("new", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", new)])),
+            ("new-alone", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", new)])),
+            ("old-alone", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+        ]);
+    }
+}
+
+#[test]
+fn the_replay_gate_judges_a_whole_farm_in_bounded_time_and_names_every_changed_answer() {
+    let t = Temp::new("gate");
+    farm(&t.0, "steady", 40, false);
+    farm(&t.0, "broke", 40, true);
+    let big: Vec<(String, String, &str)> = (0..20_000).map(|i| (format!("test/file{}.test.js", i % 200), format!("case {i}"), "passed")).collect();
+    let big: Vec<(&str, &str, &str)> = big.iter().map(|(f, c, s)| (f.as_str(), c.as_str(), *s)).collect();
+    let webpack = t.0.join("steady").join("receipt-webpack__webpack__22695");
+    stored(&webpack, "jest", json!({}), &[("old", vitest(&big)), ("new", vitest(&big)), ("new-alone", vitest(&big)), ("old-alone", vitest(&big))]);
+    let torn = t.0.join("steady").join("receipt-acme__torn__1");
+    std::fs::create_dir_all(&torn).unwrap();
+    std::fs::write(torn.join("receipt.json"), "{ not json").unwrap();
+    let started = std::time::Instant::now();
+    let mut out = Vec::new();
+    let summary = kern::replay::run(std::slice::from_ref(&t.0), 4, &mut out).unwrap();
+    let secs = started.elapsed().as_secs();
+    assert!(secs < 60, "82 stored checks, one with 20,000 assertions, took {secs} s: {summary}");
+    assert_eq!((summary["checks"].as_u64(), summary["judged"].as_u64(), summary["errors"].as_u64()), (Some(82), Some(81), Some(1)), "{summary}");
+    assert_eq!((summary["changed"].as_u64(), summary["changed_decisions"].as_u64()), (Some(40), Some(40)), "every broke/ check was stored as clear but its runs show a break: {summary}");
+    let lines: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 82);
+    let names: Vec<&str> = lines.iter().map(|l| l["receipt"].as_str().unwrap()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "lines come in the order the folders are found, so two outputs diff line by line");
+    let changed: Vec<&Value> = lines.iter().filter(|l| l["changed"] == true).collect();
+    assert_eq!(changed.len(), 40);
+    assert!(changed.iter().all(|l| l["receipt"].as_str().unwrap().starts_with("broke/") && l["before"]["decision"] == "clear" && l["after"]["decision"] == "blocked" && l["after"]["blocked"] == json!(["test-broke"])), "{}", changed[0]);
+    let error = lines.iter().find(|l| l["receipt"] == "steady/receipt-acme__torn__1").unwrap();
+    assert!(error["error"].as_str().is_some_and(|e| !e.is_empty()) && error["after"].is_null(), "a torn receipt is named, never judged in part: {error}");
+    let big_line = lines.iter().find(|l| l["receipt"] == "steady/receipt-webpack__webpack__22695").unwrap();
+    assert_eq!((big_line["changed"].as_bool(), big_line["replayed"].as_u64()), (Some(false), Some(1)), "{big_line}");
+}
+
+#[test]
+fn the_replay_finds_stored_checks_at_a_root_a_farm_or_a_folder_of_farms_and_no_deeper() {
+    let t = Temp::new("roots");
+    for rel in ["receipt-acme__a__1", "farm/receipt-acme__b__2", "data/farm/receipt-acme__c__3", "data/x/farm/receipt-acme__d__4", "farm/notes-acme__e__5"] {
+        let dir = t.0.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("receipt.json"), "{}").unwrap();
+    }
+    std::fs::create_dir_all(t.0.join("farm/receipt-acme__empty__6")).unwrap();
+    let found: Vec<String> = kern::replay::checks(std::slice::from_ref(&t.0)).iter().map(|p| p.strip_prefix(&t.0).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    assert_eq!(found, ["data/farm/receipt-acme__c__3", "farm/receipt-acme__b__2", "receipt-acme__a__1"]);
+    let one = kern::replay::checks(&[t.0.join("farm/receipt-acme__b__2")]);
+    assert_eq!(one, [t.0.join("farm/receipt-acme__b__2")], "a check's own folder is one check");
+}

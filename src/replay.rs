@@ -3,7 +3,7 @@ use crate::proof::Report;
 use crate::util::*;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const ROLES: [&str; 12] = ["old-built-related", "new-related", "old-related", "new-alone", "new-again", "old-alone", "old-again", "new-kept", "old-kept", "old-built", "new", "old"];
 const OLD: [&str; 4] = ["old-built-related", "old-related", "old-built", "old"];
@@ -121,4 +121,84 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });
     let receipt = crate::receipt::build(&d, &stored["rules"], &tests, &stored["behaviour"]);
     Ok(json!({ "replayed": judged.as_ref().map_or(0, Vec::len), "suites": labels.len(), "receipt": receipt }))
+}
+pub const WORKERS_COUNT_MAX: usize = 4;
+pub const FOLDERS_COUNT_MAX: usize = 100_000;
+const ROOT_DEPTH_MAX: usize = 3;
+fn is_check(dir: &Path) -> bool { dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with("receipt-")) && dir.join("receipt.json").is_file() }
+fn checks_under(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if is_check(dir) { out.push(dir.to_path_buf()); return; }
+    if depth == 0 || out.len() >= FOLDERS_COUNT_MAX { return; }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut dirs: Vec<PathBuf> = entries.flatten().take(FOLDERS_COUNT_MAX).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    dirs.sort();
+    for d in dirs { checks_under(&d, depth - 1, out); }
+}
+pub fn checks(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in roots { checks_under(root, ROOT_DEPTH_MAX, &mut out); }
+    out.truncate(FOLDERS_COUNT_MAX);
+    out
+}
+fn kinds(r: &Value, list: &str) -> Vec<String> {
+    let mut k: Vec<String> = r[list].as_array().into_iter().flatten().map(|i| i["kind"].as_str().unwrap_or("?").to_string()).collect();
+    k.sort();
+    k
+}
+pub fn answer(r: &Value) -> Value {
+    json!({ "decision": r["decision"].as_str().unwrap_or("?"), "blocked": kinds(r, "blocked"), "look": kinds(r, "look"), "unverified": kinds(r, "unverified"), "notes": kinds(r, "notes") })
+}
+pub fn judged_line(dir: &Path, shown: &str) -> Value {
+    let started = std::time::Instant::now();
+    let before = read_json(dir.join("receipt.json")).map(|r| answer(&r));
+    let result = rejudge(dir);
+    let ms = started.elapsed().as_millis() as u64;
+    match (before, result) {
+        (Ok(before), Ok(r)) => {
+            let after = answer(&r["receipt"]);
+            json!({ "receipt": shown, "before": before, "after": after, "changed": before != after, "replayed": r["replayed"], "suites": r["suites"], "ms": ms })
+        }
+        (Err(e), _) | (_, Err(e)) => json!({ "receipt": shown, "error": e.0, "ms": ms }),
+    }
+}
+fn shown_name(dir: &Path) -> String {
+    let parts: Vec<String> = dir.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+pub fn run(roots: &[PathBuf], workers: usize, out: &mut dyn std::io::Write) -> R<Value> {
+    let started = std::time::Instant::now();
+    let dirs = checks(roots);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Value)>();
+    let mut summary = json!({ "checks": dirs.len(), "judged": 0, "errors": 0, "changed": 0, "changed_decisions": 0, "slowest_ms": 0, "elapsed_secs": 0 });
+    std::thread::scope(|s| {
+        for _ in 0..workers.clamp(1, WORKERS_COUNT_MAX) {
+            let (tx, next, dirs) = (tx.clone(), &next, &dirs);
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some(dir) = dirs.get(i) else { break };
+                if tx.send((i, judged_line(dir, &shown_name(dir)))).is_err() { break; }
+            });
+        }
+        drop(tx);
+        let (mut pending, mut due) = (std::collections::BTreeMap::new(), 0usize);
+        for (i, line) in rx {
+            pending.insert(i, line);
+            while let Some(line) = pending.remove(&due) {
+                tally(&mut summary, &line);
+                let _ = writeln!(out, "{line}");
+                due += 1;
+            }
+        }
+    });
+    summary["elapsed_secs"] = json!(started.elapsed().as_secs());
+    Ok(summary)
+}
+fn tally(summary: &mut Value, line: &Value) {
+    let bump = |s: &mut Value, k: &str| s[k] = json!(s[k].as_u64().unwrap_or(0) + 1);
+    if line["error"].is_string() { bump(summary, "errors"); } else { bump(summary, "judged"); }
+    if line["changed"] == true { bump(summary, "changed"); }
+    if line["before"]["decision"] != line["after"]["decision"] && line["after"].is_object() { bump(summary, "changed_decisions"); }
+    let ms = line["ms"].as_u64().unwrap_or(0);
+    if ms > summary["slowest_ms"].as_u64().unwrap_or(0) { summary["slowest_ms"] = json!(ms); summary["slowest"] = line["receipt"].clone(); }
 }
