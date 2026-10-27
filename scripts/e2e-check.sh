@@ -676,8 +676,9 @@ for runner in vitest jest; do
     and ([.tests.bystanders.differences[] | select(.key == "src/report.js#summary") | .now] | any(contains("2 things")))
     and ([.challenges[] | "\(.target) \(.kind)"] == ["label unasserted"]) and (.challenges[0].example | test("label\\([23]\\)"))' "watch-$runner/receipt.json" > /dev/null \
     || { jq '.tests.bystanders, .notes' "watch-$runner/receipt.json"; fail "watch-$runner: the answer the untouched test never checked was not named, or the house did not watch src/report.js, which the change reaches"; }
-  jq -e '.tests.map.status == "RAN" and .tests.map.changed_functions == 1 and .tests.map.files_running == 1 and .tests.map.nearest == "src/report.js" and .tests.map.test_files == 2 and .tests.map.complete' "watch-$runner/receipt.json" > /dev/null \
-    || { jq '.tests.map' "watch-$runner/receipt.json"; tail -n 20 "watch-$runner/map.err" 2> /dev/null; grep -h 'Map' "watch-$runner/receipt.md"; fail "watch-$runner: the compiler-backed map was not built in the sandbox, or it did not say that src/report.js runs label() and two test files call it"; }
+  if [ "$runner" = vitest ]; then map_edit='.tests.map.changed_functions == 1 and .tests.map.files_running == 1'; else map_edit='.tests.map.changed_modules == 1 and .tests.map.files_loading == 1'; fi
+  jq -e ".tests.map.status == \"RAN\" and $map_edit and .tests.map.nearest == \"src/report.js\" and .tests.map.test_files == 2 and .tests.map.complete" "watch-$runner/receipt.json" > /dev/null \
+    || { jq '.tests.map' "watch-$runner/receipt.json"; tail -n 20 "watch-$runner/map.err" 2> /dev/null; grep -h 'Map' "watch-$runner/receipt.md"; fail "watch-$runner: the compiler-backed map was not built in the sandbox, or it did not say that src/report.js runs label() (inside summary() with vitest; when it loads with jest, whose exports.label the index sees only as the module) and two test files call it"; }
   grep -q '🔍 Untouched tests' "watch-$runner/receipt.md" || { cat "watch-$runner/receipt.md"; fail "watch-$runner: the receipt does not say what the untouched tests saw"; }
 done
 

@@ -104,6 +104,10 @@ fn the_map_line_counts_in_plain_words_one_symbol_one_file_one_room() {
     let r = kern::receipt::build(&d, &rules, &tests, &serde_json::json!({ "status": "OFF", "why": "no AI key" }));
     let md = kern::receipt::markdown(&r, None);
     assert!(md.contains("Map: 4 files, 4 symbols and 8 references, from scip-typescript 0.4.0. This change edits 1 function; 1 file runs it (nearest `src/report.js`); 1 file runs it when they load; 1 test file calls it; 2 files only import it; edits 1 type that 1 file declares against; rooms reached: `src/cli.js` (1 away, runs) (at least: Kern stopped at its limit)"), "{md}");
+    let mut commonjs = tests.clone();
+    commonjs["map"] = serde_json::json!({ "status": "RAN", "provenance": "scip-typescript 0.4.0", "documents": 4, "symbols": 4, "references": 8, "changed_functions": 0, "changed_types": 0, "changed_modules": 1, "files_running": 0, "files_loading": 1, "files_mentioning": 0, "files_declaring": 0, "test_files": 2, "nearest": "src/report.js", "complete": true, "rooms_reached": 0, "rooms": [], "not_indexed": 0 });
+    let md = kern::receipt::markdown(&kern::receipt::build(&d, &rules, &commonjs, &serde_json::json!({ "status": "OFF", "why": "no AI key" })), None);
+    assert!(md.contains("This change edits the top level of 1 file; 0 files run it (nearest `src/report.js`); 1 file runs it when they load; 2 test files call it"), "a CommonJS file whose exports the index cannot see is edited at its top level: {md}");
     let mut unheld = tests.clone();
     unheld["map"] = serde_json::json!({ "status": "NOT_RUN", "why": "the index does not hold src/x.ts" });
     let md = kern::receipt::markdown(&kern::receipt::build(&d, &rules, &unheld, &serde_json::json!({ "status": "OFF", "why": "no AI key" })), None);

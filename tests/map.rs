@@ -92,7 +92,7 @@ fn unknown(_: &str, _: usize) -> Option<bool> { None }
 #[test]
 fn a_symbols_kind_is_read_from_its_descriptor() {
     assert_eq!((map::kind(OPTIONS), map::kind(VERSION), map::kind(SHAPE)), (Kind::Term, Kind::Term, Kind::Type));
-    assert_eq!(map::kind(&format!("{UI}src/`x.ts`/")), Kind::Other, "a namespace or module is neither a value nor a type");
+    assert_eq!(map::kind(&format!("{UI}src/`x.ts`/")), Kind::Module, "a file's module, or a namespace, is neither a value nor a type: it runs when it loads");
     assert_eq!(map::kind(&format!("{UI}src/`x.ts`/f().(arg)")), Kind::Other, "a parameter is never followed");
 }
 
@@ -289,4 +289,59 @@ fn the_compactor_streams_the_index_so_a_document_may_straddle_its_read_window() 
     for chunk in ["100", "4097", "65536"] {
         assert_eq!(compacted(&raw, &[("KERN_MAP_CHUNK_BYTES", chunk)]), whole, "a read window of {chunk} bytes gives the same facts");
     }
+}
+
+const CJS_LABEL: &str = "scip-typescript npm watch 1.0.0 src/`label.js`/";
+const CJS_REPORT: &str = "scip-typescript npm watch 1.0.0 src/`report.js`/";
+fn commonjs_facts() -> Vec<u8> {
+    [
+        r#"{"path":"src/label.js","occ":[[0,1,0,1]]}"#,
+        r#"{"path":"src/report.js","occ":[[1,1,0,2],[2,0,0,0],[0,0,0,0]]}"#,
+        r#"{"path":"test/label.test.js","occ":[[3,1,0,3],[2,0,0,0],[0,0,0,0]]}"#,
+        r#"{"path":"test/report.test.js","occ":[[4,1,0,2],[2,0,0,0],[1,0,0,0],[5,0,1,1]]}"#,
+        concat!(r#"{"version":1,"tool":"scip-typescript 0.4.0","symbols":["scip-typescript npm watch 1.0.0 src/`label.js`/","scip-typescript npm watch 1.0.0 src/`report.js`/","#,
+            r#""scip-typescript npm @types/node 18.19.130 `module.d.ts`/`\"module\"`/global/require.","scip-typescript npm watch 1.0.0 test/`label.test.js`/","#,
+            r#""scip-typescript npm watch 1.0.0 test/`report.test.js`/","scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/String#length."]}"#),
+    ].join("\n").into_bytes()
+}
+fn commonjs_imports(file: &str, line: usize) -> Option<bool> { Some(line == 0 && file != "src/label.js") }
+
+#[test]
+fn a_commonjs_module_whose_exports_the_index_cannot_see_is_reached_through_the_files_that_require_it() {
+    let m = map::read(&commonjs_facts()).unwrap();
+    assert_eq!(map::kind(CJS_LABEL), Kind::Module, "scip-typescript indexes exports.label = ... as nothing but the module itself");
+    let r = map::reach(&m, &[("src/label.js".to_string(), vec![1])], &commonjs_imports);
+    assert_eq!(r.hop(&m, CJS_LABEL).map(|h| h.hops), Some(0), "the changed line is inside no function or type the index knows, so the change is to the module");
+    assert_eq!(r.hop(&m, CJS_REPORT).map(|h| (h.hops, h.via)), Some((1, CJS_LABEL.to_string())), "report.js requires label.js, so loading report.js runs the changed module");
+    assert_eq!(r.files(&m), vec![
+        ("src/label.js", 0, Touch::Changed),
+        ("src/report.js", 1, Touch::Loads),
+        ("test/label.test.js", 1, Touch::Tests),
+        ("test/report.test.js", 2, Touch::Tests),
+    ], "a require of a changed module runs it when the requiring file loads, and the test that requires report.js is two hops away");
+    let c = map::counts(&m, &r);
+    assert_eq!((c.changed_functions, c.changed_modules, c.running, c.loading, c.tests, c.farthest_hops), (0, 1, 0, 1, 2, 2));
+    assert_eq!(map::neighbours(&m, &r, &["src/label.js".into()], 10), vec![("src/report.js".to_string(), 1)], "the untouched-tests watch gets report.js, which the last green farm run also watched");
+    let report = map::report(&m, &r, vec![], 0);
+    assert_eq!((report["changed_modules"].as_u64(), report["changed_functions"].as_u64(), report["nearest"].as_str()), (Some(1), Some(0), Some("src/report.js")));
+}
+
+#[test]
+fn a_top_level_call_of_a_changed_function_runs_when_the_module_loads_and_the_files_that_load_that_module_run_it_too() {
+    let facts = [
+        r#"{"path":"src/label.js","occ":[[0,1,0,3],[1,1,1,1]]}"#,
+        r#"{"path":"src/boot.js","occ":[[2,1,0,2],[0,0,0,0],[1,0,0,0],[1,0,1,1]]}"#,
+        r#"{"path":"src/app.js","occ":[[3,1,0,2],[2,0,0,0]]}"#,
+        concat!(r#"{"version":1,"tool":"scip-typescript 0.4.0","symbols":["scip-typescript npm watch 1.0.0 src/`label.js`/","scip-typescript npm watch 1.0.0 src/`label.js`/label().","#,
+            r#""scip-typescript npm watch 1.0.0 src/`boot.js`/","scip-typescript npm watch 1.0.0 src/`app.js`/"]}"#),
+    ].join("\n").into_bytes();
+    let m = map::read(&facts).unwrap();
+    let imports = |file: &str, line: usize| Some(line == 0 && file != "src/label.js");
+    let r = map::reach(&m, &[("src/label.js".to_string(), vec![2])], &imports);
+    assert_eq!(map::counts(&m, &r).changed_modules, 0, "line 2 is inside label(), so the module itself is unchanged");
+    assert_eq!(r.touch(&m, "src/boot.js"), Some((1, Touch::Loads)), "boot.js calls label() at its top level, inside no function: the module itself runs the change when it loads");
+    assert_eq!(r.touch(&m, "src/app.js"), Some((2, Touch::Loads)), "app.js imports boot.js, so loading app.js runs the change too");
+    let r = map::reach(&m, &[("src/label.js".to_string(), vec![2])], &|_, _| None);
+    assert_eq!(r.touch(&m, "src/boot.js"), Some((1, Touch::Mentions)), "without import positions a module-level reference stays a mention");
+    assert_eq!(r.touch(&m, "src/app.js"), None);
 }

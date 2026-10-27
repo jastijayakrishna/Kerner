@@ -15,7 +15,7 @@ const DEFINITION: u32 = 1;
 const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind { Term, Type, Other }
+pub enum Kind { Term, Type, Module, Other }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Touch { Mentions, Tests, Declares, Loads, Runs, Changed }
 #[derive(Clone, Copy, Debug)]
@@ -30,11 +30,11 @@ pub struct Hop { pub hops: usize, pub via: String }
 pub struct Reach { hops: Vec<u32>, via: Vec<u32>, touched: Vec<(u32, Touch)>, pub complete: bool }
 #[derive(Clone, Copy)]
 pub struct Caps { pub hops_max: usize, pub nodes_count_max: usize }
-pub struct Counts { pub changed_functions: usize, pub changed_types: usize, pub running: usize, pub loading: usize, pub mentioning: usize, pub declaring: usize, pub tests: usize, pub farthest_hops: usize }
+pub struct Counts { pub changed_functions: usize, pub changed_types: usize, pub changed_modules: usize, pub running: usize, pub loading: usize, pub mentioning: usize, pub declaring: usize, pub tests: usize, pub farthest_hops: usize }
 pub type Imported<'a> = &'a dyn Fn(&str, usize) -> Option<bool>;
 
 pub fn kind(symbol: &str) -> Kind {
-    if symbol.ends_with('.') { Kind::Term } else if symbol.ends_with('#') { Kind::Type } else { Kind::Other }
+    if symbol.ends_with('.') { Kind::Term } else if symbol.ends_with('#') { Kind::Type } else if symbol.ends_with('/') { Kind::Module } else { Kind::Other }
 }
 fn parts(symbol: &str) -> Option<(&str, &str, &str)> {
     let descriptors = symbol.splitn(5, ' ').nth(4)?;
@@ -153,8 +153,21 @@ impl Map {
         let path = &self.paths[file as usize];
         if crate::suite::is_test_path(path) { return (Touch::Tests, None); }
         if edge == Kind::Type { return (Touch::Declares, None); }
-        if let Some(d) = self.enclosing(file, at) { return (Touch::Runs, Some(d.symbol)); }
-        (if imported(path, at as usize) == Some(false) { Touch::Loads } else { Touch::Mentions }, None)
+        let enclosing = self.enclosing(file, at);
+        if let Some(d) = enclosing.filter(|d| self.kinds[d.symbol as usize] != Kind::Module) { return (Touch::Runs, Some(d.symbol)); }
+        let module = enclosing.map(|d| d.symbol);
+        match imported(path, at as usize) {
+            Some(false) => (Touch::Loads, module),
+            Some(true) if edge == Kind::Module => (Touch::Loads, module),
+            _ => (Touch::Mentions, None),
+        }
+    }
+    fn seeds(&self, file: u32, lines: &[usize]) -> Vec<u32> {
+        let defs = &self.defs[file as usize];
+        let named = |d: &Def| self.kinds[d.symbol as usize] != Kind::Module;
+        let inside = |d: &Def, l: &usize| (d.start as usize) < *l && *l <= d.end as usize + 1;
+        let module_level = lines.is_empty() || lines.iter().any(|l| !defs.iter().any(|d| named(d) && inside(d, l)));
+        defs.iter().filter(|d| if named(d) { lines.is_empty() || lines.iter().any(|l| inside(d, l)) } else { module_level }).map(|d| d.symbol).collect()
     }
     fn own_definition(&self, symbol: u32, file: u32, at: u32) -> bool {
         self.defined_in[symbol as usize] == file && self.defs[file as usize].iter().any(|x| x.symbol == symbol && x.start <= at && at <= x.end)
@@ -168,8 +181,8 @@ pub fn reach_within(m: &Map, changed: &[(String, Vec<usize>)], imported: Importe
     for (path, lines) in changed {
         let Some(file) = m.file(path) else { continue };
         r.touched[file as usize] = (0, Touch::Changed);
-        for d in m.defs[file as usize].iter().filter(|d| lines.is_empty() || lines.iter().any(|l| (d.start as usize) < *l && *l <= d.end as usize + 1)) {
-            if r.hops[d.symbol as usize] == NONE { r.hops[d.symbol as usize] = 0; nodes += 1; queue.push_back(d.symbol); }
+        for symbol in m.seeds(file, lines) {
+            if r.hops[symbol as usize] == NONE { r.hops[symbol as usize] = 0; nodes += 1; queue.push_back(symbol); }
         }
     }
     'walk: while let Some(symbol) = queue.pop_front() {
@@ -216,7 +229,7 @@ impl Reach {
 pub fn counts(m: &Map, r: &Reach) -> Counts {
     let how = |t: Touch| r.touched.iter().filter(|(h, x)| *h != NONE && *x == t).count();
     let seeds = |k: Kind| r.hops.iter().enumerate().filter(|(s, h)| **h == 0 && m.kinds[*s] == k).count();
-    Counts { changed_functions: seeds(Kind::Term), changed_types: seeds(Kind::Type), running: how(Touch::Runs), loading: how(Touch::Loads), mentioning: how(Touch::Mentions), declaring: how(Touch::Declares), tests: how(Touch::Tests),
+    Counts { changed_functions: seeds(Kind::Term), changed_types: seeds(Kind::Type), changed_modules: seeds(Kind::Module), running: how(Touch::Runs), loading: how(Touch::Loads), mentioning: how(Touch::Mentions), declaring: how(Touch::Declares), tests: how(Touch::Tests),
         farthest_hops: r.touched.iter().filter(|(h, _)| *h != NONE).map(|(h, _)| *h as usize).max().unwrap_or(0) }
 }
 pub fn neighbours(m: &Map, r: &Reach, changed: &[String], count_max: usize) -> Vec<(String, usize)> {
@@ -250,7 +263,7 @@ pub fn summary(m: &Map) -> Value {
 pub fn report(m: &Map, r: &Reach, rooms: Vec<Value>, not_indexed: usize) -> Value {
     let c = counts(m, r);
     let mut out = summary(m);
-    for (k, v) in [("changed_functions", c.changed_functions), ("changed_types", c.changed_types), ("files_running", c.running), ("files_loading", c.loading), ("files_mentioning", c.mentioning),
+    for (k, v) in [("changed_functions", c.changed_functions), ("changed_types", c.changed_types), ("changed_modules", c.changed_modules), ("files_running", c.running), ("files_loading", c.loading), ("files_mentioning", c.mentioning),
         ("files_declaring", c.declaring), ("test_files", c.tests), ("farthest_hops", c.farthest_hops), ("rooms_reached", rooms.len()), ("not_indexed", not_indexed)] { out[k] = json!(v); }
     out["status"] = json!("RAN");
     out["complete"] = json!(r.complete);
@@ -261,7 +274,7 @@ pub fn report(m: &Map, r: &Reach, rooms: Vec<Value>, not_indexed: usize) -> Valu
 pub fn reach_json(m: &Map, r: &Reach, changed: &[(String, Vec<usize>)]) -> Value {
     let c = counts(m, r);
     json!({ "changed": changed.iter().map(|(f, l)| json!({ "file": f, "lines": l.len() })).collect::<Vec<_>>(),
-        "changed_functions": c.changed_functions, "changed_types": c.changed_types, "symbols_reached": r.symbols(m).len(), "files_running": c.running, "files_loading": c.loading, "files_mentioning": c.mentioning,
+        "changed_functions": c.changed_functions, "changed_types": c.changed_types, "changed_modules": c.changed_modules, "symbols_reached": r.symbols(m).len(), "files_running": c.running, "files_loading": c.loading, "files_mentioning": c.mentioning,
         "files_declaring": c.declaring, "test_files": c.tests, "farthest_hops": c.farthest_hops, "complete": r.complete,
         "files": r.files(m).iter().map(|(f, h, t)| json!({ "file": f, "hops": h, "how": t.name() })).collect::<Vec<_>>(),
         "symbols": r.symbols(m).iter().take(2000).map(|(s, h)| json!({ "symbol": s, "hops": h.hops, "via": h.via, "file": m.defined_in(s) })).collect::<Vec<_>>(),

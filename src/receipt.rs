@@ -651,12 +651,14 @@ fn plural(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n ==
 fn map_line(map: &Value) -> String {
     let n = |k: &str| map[k].as_u64().unwrap_or(0) as usize;
     let some = |k: &str, one: &str, many: &str| if n(k) == 1 { format!("1 {one}") } else { format!("{} {many}", n(k)) };
-    let (functions, types) = (n("changed_functions"), n("changed_types"));
+    let (functions, types, modules) = (n("changed_functions"), n("changed_types"), n("changed_modules"));
     let mut said = Vec::new();
-    if functions > 0 {
+    if functions + modules > 0 {
         let nearest = map["nearest"].as_str().map(|f| format!(" (nearest {})", code(f, 160))).unwrap_or_default();
-        let it = if functions == 1 { "it" } else { "them" };
-        said.push(format!("edits {}; {} {it}{nearest}", plural(functions, "function", "functions"), some("files_running", "file runs", "files run")));
+        let it = if functions + modules == 1 { "it" } else { "them" };
+        let top = || format!("the top level of {}", plural(modules, "file", "files"));
+        let what = match (functions, modules) { (_, 0) => plural(functions, "function", "functions"), (0, _) => top(), _ => format!("{} and {}", plural(functions, "function", "functions"), top()) };
+        said.push(format!("edits {what}; {} {it}{nearest}", some("files_running", "file runs", "files run")));
         if n("files_loading") > 0 { said.push(format!("{} {it} when they load", some("files_loading", "file runs", "files run"))); }
         if n("test_files") > 0 { said.push(format!("{} {it}", some("test_files", "test file calls", "test files call"))); }
         if n("files_mentioning") > 0 { said.push(format!("{} {it}", some("files_mentioning", "file only imports", "files only import"))); }
