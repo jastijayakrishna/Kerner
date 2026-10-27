@@ -10,7 +10,6 @@ Back to the [overview](../README.md).
 |---|---|
 | The twin on Infisical pull request #6995, which removed the last-admin safety check | Caught on real requests: 302 of 302 compared (with Postgres real reads), every difference from #6995, 0 false alarms |
 | The twin on firecrawl pull request #2638, which only added a log line | Silent, as it should be: 0 differences, all 22 changed lines seen running |
-| `kern drive` on 66 real pull requests written by AI agents | 55 (83%) had at least 80% of their changed lines run; 43 had all of them |
 | Proof of honest fix: 55 attempts to cheat the real sprintf.js suite | 0 accepted |
 | Red-team corpus of tricks that hide new powers | 92 of 92 blocked; 28 of 28 realistic edits accepted |
 | Test suites (2026-10-13) | Rust: 164 passing, no `clippy` warnings. Twin: 221 passing and 6 skipped on Windows and Linux; real Postgres and Redis 4 of 4; sandbox 2 of 2 |

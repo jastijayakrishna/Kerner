@@ -36,8 +36,16 @@ pub fn sized_env(runner: Runner, env: &Env) -> Env {
 }
 pub fn host_cpus() -> u64 { std::thread::available_parallelism().map_or(1, |n| n.get() as u64) }
 
+fn runner(package: Option<&[u8]>) -> Option<(&'static str, Vec<String>)> {
+    let pkg: Value = serde_json::from_slice(package?).ok()?;
+    let has = |name: &str| ["devDependencies", "dependencies"].iter().any(|k| pkg[*k].get(name).is_some());
+    let bin = |name: &str| format!("/workspace/node_modules/.bin/{name}");
+    if has("vitest") { return Some(("vitest", vec![bin("vitest"), "run".into()])); }
+    if let Some(name) = ["jest", "mocha"].into_iter().find(|n| has(n)) { return Some((name, vec![bin(name)])); }
+    pkg["scripts"]["test"].as_str().filter(|t| t.contains("node --test")).map(|_| ("node", vec!["/usr/local/bin/node".into(), "--test".into()]))
+}
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
-    let (name, command) = crate::init::runner(package)?;
+    let (name, command) = runner(package)?;
     Some(Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(name)?, command, edits: Edits::Checked })
 }
 
@@ -1114,7 +1122,7 @@ fn spread<T: Clone>(all: Vec<T>, n: usize) -> Vec<T> {
 pub fn faults(files: &[(String, String, String)], limit: usize) -> Vec<crate::proof::Mutant> {
     let mut per_file: Vec<std::collections::VecDeque<crate::proof::Mutant>> = files.iter().map(|(path, old, new)| {
         let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-        let (removed, added) = crate::compare::changed_lines(&a, &b);
+        let (removed, added) = crate::diff::changed_lines(&a, &b);
         let lines: BTreeSet<usize> = added.into_iter().map(|i| i + 1).collect();
         let gone: BTreeSet<String> = removed.into_iter().filter_map(|i| a.get(i)).map(|l| l.trim().to_string()).collect();
         spread(crate::proof::plant_lines(path, new, &lines, &gone), OPERATOR_FAULTS_PER_FILE_COUNT_MAX).into_iter().collect()
@@ -1212,7 +1220,7 @@ fn mapped(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Opt
     if !missing.is_empty() { return fallback(format!("the index does not hold {}", missing.join(", "))); }
     let lines: Vec<(String, Vec<usize>)> = files.iter().map(|(p, old, new)| {
         let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-        (p.clone(), crate::compare::changed_lines(&a, &b).1.into_iter().map(|l| l + 1).collect())
+        (p.clone(), crate::diff::changed_lines(&a, &b).1.into_iter().map(|l| l + 1).collect())
     }).collect();
     let r = crate::map::reach(&m, &lines, &|file, line| house.as_ref().and_then(|h| h.imported(file, line)));
     let rooms: Vec<Value> = house.as_ref().map(|h| {

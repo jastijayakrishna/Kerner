@@ -196,9 +196,6 @@ What Kern checks on every pull request:
    a test of that function, or a piece of that evidence is missing, it is a look that says which. Inputs that hang, reach for the
    network, answer differently within one run, or never reach the real function (a mock answered) are set aside and listed. The
    receipt gives the call, both answers and the quote, and a rerun of the same change reuses the AI's answers.
-11. **Behaviour, outside the workflow for now.** `kern drive` has Claude Code, in a locked-down mode, write a small program that makes
-   every changed line run; Kern runs it on the old and the new code and lists what behaves differently.
-
 Where the code runs: Kern's workflow has two jobs. The job that installs and tests the pull request's code holds no keys at all (its
 token can only read the repository) and runs on GitHub's throwaway machine, deleted when the job ends. There the code runs in locked
 containers (read-only system, no privileges, an unprivileged user, memory and process limits, the network off while tests run), and
@@ -211,45 +208,11 @@ only as data. On a machine that is kept between jobs, the code runs in gVisor in
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
 so an edited comment cannot change what `kern receipt verify owner/repo 12` reports, and `/kern approve` only counts signed receipts.
 
-Read more: [docs/drive.md](docs/drive.md) for the behaviour runs, [docs/merge-gate.md](docs/merge-gate.md) for the rules behind them.
-
-## For agent pipelines: the merge gate
-
-When an agent works on a task with written limits (which folders, which packages, which powers), the merge gate checks the change
-against them in a sealed sandbox, and a separate verifier signs the result. GitHub refuses the merge without a valid proof, and an
-audit re-checks every change merged in a period. Read more: [docs/merge-gate.md](docs/merge-gate.md)
-
-## In production: the twin
-
-```text
-customer request ──▶ old version ──▶ answer to the customer (as today)
-        │
-        └── copy ──▶ old ghost ──┐
-                     new ghost ──┴──▶ compare answers and writes ──▶ evidence
-
-enough clean comparisons ──▶ new version serves ──▶ first surprise ──▶ old version serves again, before the next request
-```
-
-- A **ghost** is a sealed copy of one version of your service. It answers a copy of a real request, but it can touch nothing real: its writes are written down, never done.
-- Both ghosts see the same clock and the same random numbers, so only real differences show.
-- The new version is switched on only after enough clean comparisons. For example, 3,000 clean comparisons show, with 95% confidence, that fewer than 1 in 1,000 requests would differ. You can also ask for a minimum time, such as 24 hours.
-- Each difference shows the exact request, the old answer and the new answer, and can name the pull request that caused it.
-- A difference becomes a test case, with private data replaced, that your coding agent can fix.
-
-The twin works with Node.js services today.
-
-Read more: [twin/README.md](twin/README.md)
-
 ## Proof on real code
 
 | What we tested | Result |
 |---|---|
-| Infisical pull request #6995, which removed a safety check | The twin caught it on real requests, with 0 false alarms |
-| firecrawl pull request #2638, which only added a log line | The twin stayed silent, and saw all 22 changed lines run |
-| 66 real pull requests written by AI agents | `kern drive` ran at least 80% of the changed lines in 55 of them (83%) |
-| 55 attempts to cheat a real test suite | 0 accepted |
 | 92 known tricks to hide new powers | 92 blocked, while 28 of 28 normal edits passed |
-| A change that stopped `/admin` from checking the user's token | Blocked: "401 before, 200 now" |
 
 Every result, with its date and how it was measured: [docs/evidence.md](docs/evidence.md)
 
@@ -258,7 +221,6 @@ Every result, with its date and how it was measured: [docs/evidence.md](docs/evi
 Kern is early, and there is no release yet, so build it from source. You need:
 
 - Rust, to build `kern`;
-- Node.js 22.3 or newer, for the twin and for `kern drive`;
 - Linux with Docker, plus gVisor on a machine that is kept between checks (on Windows, use WSL2).
 
 ```sh
@@ -268,17 +230,7 @@ cargo build --release --locked
 ./target/release/kern --help
 ```
 
-Watch the twin catch a planted bug in a small shop app (needs Docker):
-
-```sh
-sh twin/examples/shop/run.sh
-```
-
-Next steps:
-
-- Put the merge gate on a repository: [docs/merge-gate.md](docs/merge-gate.md#quick-start-about-10-minutes)
-- Comment on every pull request with `kern drive`: [docs/drive.md](docs/drive.md)
-- Put the twin in front of a Node.js service: [twin/README.md](twin/README.md#use)
+Then add the workflow file at the top of this page to a repository, pointing `uses:` at your build.
 
 ## What Kern does not promise
 
@@ -316,9 +268,6 @@ Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.m
 
 | Document | What it covers |
 |---|---|
-| [docs/merge-gate.md](docs/merge-gate.md) | Setup, task contracts, the test proof, the old-versus-new comparison, the local sandbox, the GitHub check, audits |
-| [docs/drive.md](docs/drive.md) | `kern drive` and its pull request comment |
-| [twin/README.md](twin/README.md) | The twin: setup, switching on and back, real databases, the fix loop |
 | [docs/evidence.md](docs/evidence.md) | Every measured result |
 | [docs/limits.md](docs/limits.md) | What Kern does not do yet |
 | [SECURITY.md](SECURITY.md) | The trust model, and how to report a security problem |

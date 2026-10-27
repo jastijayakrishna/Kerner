@@ -3,7 +3,6 @@ use serde_json::{Value, json};
 
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn argv(s: &str) -> Vec<String> { s.split_whitespace().map(str::to_string).collect() }
 
 #[test]
@@ -24,9 +23,9 @@ fn azu_ecmascript_proposals_json_20_a_test_script_that_finds_no_test_files_means
     assert!(suite::no_test_files("the output contains no vitest report (exit 1); the last lines it printed: No test files found, exiting with code 1"));
     assert!(!suite::no_test_files("the output contains no mocha report (exit 1); its first error: Error: Cannot find module './setup'"));
     let tests = json!({ "status": "NOT_RUN", "why": "the project's test script finds no test files, so no test checks this change", "no_tests": true });
-    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests);
     assert_eq!(r["decision"], "clear", "a project with no tests has nothing for Kern to run; the receipt says so instead of asking for a look: {r}");
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert!(md.contains("finds no test files") && md.contains("rules only"), "{md}");
 }
 
@@ -133,9 +132,9 @@ fn a_test_script_kern_cannot_follow_still_counts_as_changed_when_its_words_chang
 fn a_package_whose_test_script_finds_no_tests_is_named_next_to_the_ones_that_ran() {
     let tests = json!({ "status": "RAN", "runner": "vitest in packages/a", "before": { "passed": 2, "failed": 0, "skipped": 0 }, "after": { "passed": 2, "failed": 0, "skipped": 0 }, "kept": 2,
         "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "no_tests_in": ["packages/docs"] });
-    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests);
     assert_eq!(r["decision"], "clear", "{r}");
-    assert!(receipt::markdown(&r, None).contains("Tests in `packages/docs`: none"), "{}", receipt::markdown(&r, None));
+    assert!(receipt::markdown(&r).contains("Tests in `packages/docs`: none"), "{}", receipt::markdown(&r));
 }
 
 struct Temp(std::path::PathBuf);
@@ -212,8 +211,8 @@ fn webpack_22695_and_vercel_workflow_3052_temporary_files_live_on_disk_outside_t
         "a test run's /tmp is a fresh volume on disk: gatsby's jest cache outgrew a /tmp in memory, and a temporary folder inside the project made webpack's and vercel/workflow's temporary projects find the repository's own files: {args:?}");
     assert!(!args.iter().any(|a| a.starts_with("/tmp:")), "{args:?}");
     assert!(!kern::sandbox::TEST_ENV.iter().any(|(k, _)| *k == "TMPDIR"), "the tests' temporary folder is /tmp, as on the project's own CI: {:?}", kern::sandbox::TEST_ENV);
-    let drive = kern::sandbox::Spec { entry: vec!["__drive".into()], volumes: vec![], workspace: Some(("kern-deps-x", true)), ..run };
-    let args = kern::sandbox::container_args_for(&drive, "kern-x", "runc").unwrap();
+    let seal = kern::sandbox::Spec { entry: vec!["__drive_seal".into()], root: true, volumes: vec![], workspace: Some(("kern-deps-x", false)), ..run };
+    let args = kern::sandbox::container_args_for(&seal, "kern-x", "runc").unwrap();
     assert!(args.iter().any(|a| a.starts_with("/tmp:rw,noexec,nosuid,nodev,size=67108864")) && !args.iter().any(|a| a.ends_with("target=/tmp")), "other runs keep a small /tmp in memory: {args:?}");
 }
 
@@ -265,18 +264,18 @@ fn ran_with_faults(faults: Value) -> Value {
 fn tryghost_ghost_28552_changed_code_no_test_here_reaches_never_gets_a_check_mark() {
     let file = "ghost/core/core/shared/one-at-a-time.ts";
     let fault = |line: u64, outcome: &str| json!({ "path": file, "line": line, "what": "a condition turned around", "outcome": outcome });
-    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unreached"), fault(31, "untested"), fault(40, "unreached")])), &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unreached"), fault(31, "untested"), fault(40, "unreached")])));
     assert_eq!(r["decision"], "unverified", "8 tests passed, but none of them loads the code this change edits, so Kern says it could not verify it: {r}");
     assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change" && x["what"].as_str().unwrap().contains(file)), "{}", r["unverified"]);
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert!(!md.contains("✅ Tests") && md.contains("⚠️ Tests"), "{md}");
     for reached in ["caught", "missed"] {
-        let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unreached"), fault(31, reached)])), &off());
+        let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unreached"), fault(31, reached)])));
         assert!(!r["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change"), "a test loaded the changed code ({reached}): {}", r["look"]);
     }
-    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unknown")])), &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "unknown")])));
     assert_eq!(r["decision"], "clear", "a fault run Kern could not finish says nothing either way: {r}");
-    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "untested"), fault(31, "untested")])), &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &ran_with_faults(json!([fault(22, "untested"), fault(31, "untested")])));
     assert_eq!(r["decision"], "clear", "no related test by import is not proof: another package's tests may use this code through its build output: {r}");
 }
 

@@ -15,7 +15,7 @@ fn review_2_d_kern_has_one_markdown_escaper_and_it_neutralises_markup() {
     assert_eq!(kern::util::code("  abcdef ", 3), "`abc…`");
     assert_eq!(kern::util::plain("a`<b>\nc", 400), "a'‹b> c");
     assert_eq!(kern::util::plain("abcdef", 2), "ab");
-    for file in ["receipt", "drive", "compare", "feedback"] {
+    for file in ["receipt", "drive"] {
         let src = std::fs::read_to_string(format!("src/{file}.rs")).unwrap();
         for own in ["fn code(", "fn span(", "fn plain(s: &str"] {
             assert!(!src.contains(own), "src/{file}.rs keeps its own escaper ({own}); one escaper means one place to get it right, and drive's missed '<'");

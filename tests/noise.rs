@@ -53,7 +53,6 @@ fn rules_for(base: &[(&str, &str)], head: &[(&str, &str)], deleted: &[&str]) -> 
 }
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 0, "skipped": 0 }, "after": { "passed": 12, "failed": 0, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn paths(rules: &Value, key: &str) -> Vec<String> { rules[key].as_array().unwrap().iter().filter_map(|x| x["path"].as_str().map(str::to_string)).collect() }
 
 const VITEST: &str = r#"{"name":"poml","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#;
@@ -119,7 +118,7 @@ fn constructive_io_blocks_35_a_package_of_this_repository_added_as_a_dependency_
     let head = commit(&r, &[("packages/flow/package.json", r#"{"name":"flow","dependencies":{"left-pad":"^1.3.0","json-renderer":"*","local-helper":"file:../helper","linked":"link:../linked","yarn-portal":"portal:../portal","pinned":"workspace:^"}}"#)], &[]);
     let rules = kern::rules::rules(&r, &base, &head).unwrap();
     assert_eq!(rules["dependencies"][0]["packages"], json!(["json-renderer * (new)", "linked link:../linked (new)", "local-helper file:../helper (new)", "pinned workspace:^ (new)", "yarn-portal portal:../portal (new)"]), "{}", rules["dependencies"]);
-    let built = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let built = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((built["decision"].as_str(), look_kinds(&built), note_kinds(&built)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "what moved is listed where a person scans it; nothing Kern measures says more: {built}");
 }
 
@@ -312,7 +311,7 @@ fn agentforscience_flamebird_13_a_test_the_change_removes_is_named_once() {
     rules["weakened"] = json!([{ "path": file, "removed": 2, "missing": ["Challenge API Client — method signatures > client has commentOnChallenge method", "Challenge API Client — method signatures > client has getChallengeComments method"], "emptied": [], "loosened": [] }]);
     let mut tests = clean_tests();
     tests["gone"] = json!([format!("{file} >  > Challenge API Client — method signatures > client has commentOnChallenge method"), format!("{file} >  > Challenge API Client — method signatures > client has getChallengeComments method")]);
-    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    let r = receipt::build(&drive_json(), &rules, &tests);
     assert_eq!(look_kinds(&r), ["test-gone", "test-gone"], "vitest names an unnamed outer group with an empty title; the two removed tests are the two that no longer run: {}", r["look"]);
 }
 
@@ -323,7 +322,7 @@ fn a_deleted_test_file_is_one_look_that_says_how_many_tests_stopped_running() {
     rules["deleted_tests"] = json!([{ "path": "test/old.test.js" }]);
     let mut tests = clean_tests();
     tests["gone"] = json!(["test/old.test.js > a", "test/old.test.js > b", "test/old.test.js > c", "test/other.test.js > d"]);
-    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    let r = receipt::build(&drive_json(), &rules, &tests);
     assert_eq!(look_kinds(&r), ["test-deleted", "test-gone"], "{}", r["look"]);
     assert!(r["look"][0]["what"].as_str().unwrap().contains("3 tests that ran before"), "{}", r["look"][0]);
 }
@@ -336,20 +335,9 @@ fn agentforscience_flamebird_13_a_new_test_that_needs_the_network_is_not_checked
     after.why.insert("tests/unit.test.ts > adds".into(), "AssertionError: expected 3 to be 4".into());
     let c = kern::suite::compare(&before, &after, None);
     assert_eq!((&c["unrunnable"], &c["new_failing"]), (&json!(["tests/e2e.test.ts > registers"]), &json!(["tests/unit.test.ts > adds"])), "{c}");
-    let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &c);
     assert_eq!(look_kinds(&r), ["new-test-fails"], "a new test that fails its own assertion is a look: {}", r["look"]);
     assert!(r["not_checked"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("tests/e2e.test.ts")), "a new test that needs the network Kern's sandbox does not have is something Kern could not check: {}", r["not_checked"]);
-}
-
-#[test]
-fn review_2_a12_a_long_line_by_line_report_never_pushes_not_checked_off_the_receipt() {
-    let mut rules = clean_rules();
-    rules["not_checked"] = json!([{ "path": "src/legacy.flow.js", "why": "Kern could not read this file" }]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &json!({ "status": "RAN", "report": {} }));
-    let huge = format!("### What changed\n\n{}", "- a line the AI wrote about one changed line of code\n".repeat(3000));
-    let md = receipt::markdown(&r, Some(&huge));
-    assert!(md.contains("**Not checked**") && md.contains("src/legacy.flow.js"), "what Kern did not check is never cut to make room for prose:\n{}", &md[md.len().saturating_sub(800)..]);
-    assert!(md.len() <= 60_200 && md.contains("</details>"), "the long part is cut to fit and still closed: {} bytes", md.len());
 }
 
 #[test]
@@ -383,15 +371,15 @@ fn tests_run_next_to_ci_secrets_so_one_that_reads_a_secret_and_reaches_the_netwo
     let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", plain)], &[("test/trace.test.ts", quiet)], &[]);
     let p = power_of(&rules, "test/trace.test.ts").expect("the test gained fetch");
     assert_eq!((listed_caps(p, "added"), listed_caps(p, "has")), (vec!["global:fetch".to_string()], vec!["global:fetch".to_string()]), "{p}");
-    assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())).is_empty(), "bassa01/google-cloud-mcp#61: a test that calls fetch and reads no secret cannot leak one");
+    assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())).is_empty(), "bassa01/google-cloud-mcp#61: a test that calls fetch and reads no secret cannot leak one");
     let leaks = "import { test } from 'vitest';\ntest('x', async () => { await fetch('http://localhost:1/trace', { headers: { key: process.env.OPENAI_API_KEY } }); });\n";
     let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", quiet)], &[("test/trace.test.ts", leaks)], &[]);
     let p = power_of(&rules, "test/trace.test.ts").expect("the test now reads a secret");
     assert!(listed_caps(p, "added").contains(&"env:OPENAI_API_KEY".to_string()) && listed_caps(p, "has").contains(&"global:fetch".to_string()), "{p}");
-    assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())), ["power"], "a test that reads a secret and can send it out runs in CI next to that secret");
+    assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())), ["power"], "a test that reads a secret and can send it out runs in CI next to that secret");
     let settings = "import { test } from 'vitest';\ntest('x', async () => { process.env.NODE_ENV = 'test'; await fetch('http://localhost:1/trace'); });\n";
     let rules = rules_for(&[("package.json", VITEST), ("test/trace.test.ts", plain)], &[("test/trace.test.ts", settings)], &[]);
-    assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())).is_empty(), "NODE_ENV is a setting, not a secret: {}", rules["powers"]);
+    assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())).is_empty(), "NODE_ENV is a setting, not a secret: {}", rules["powers"]);
 }
 
 #[test]
@@ -402,7 +390,7 @@ fn posthog_js_5284_a_workflow_that_only_moves_a_pinned_action_to_another_release
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".github/workflows/ci.yml", before.as_str())];
     let rules = rules_for(&base, &[(".github/workflows/ci.yml", &after)], &[]);
     assert_eq!(rules["protected"][0]["moves"], json!(["step-security/harden-runner e14015d58371 (v2.21.1) → 351661ca32ac (v2.22.0)"]), "{}", rules["protected"]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["protected".to_string()]), "Comfy-Org/ComfyUI_frontend#15496 and WordPress/openstation#726 are the same move: {r}");
     assert!(r["notes"][0]["what"].as_str().unwrap().contains("v2.22.0"), "{}", r["notes"]);
     for (why, text) in [
@@ -414,7 +402,7 @@ fn posthog_js_5284_a_workflow_that_only_moves_a_pinned_action_to_another_release
     ] {
         let rules = rules_for(&base, &[(".github/workflows/ci.yml", &text)], &[]);
         assert!(rules["protected"][0]["moves"].is_null(), "{why} stays a look: {}", rules["protected"]);
-        assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())), ["protected"], "{why}");
+        assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())), ["protected"], "{why}");
     }
 }
 
@@ -423,12 +411,12 @@ fn apollo_client_13491_a_lockfile_that_moves_sixteen_packages_is_one_note_never_
     let mut rules = clean_rules();
     let moved: Vec<String> = (0..16).map(|i| format!("@rolldown/binding-{i} 1.2.13 → 1.2.14")).collect();
     rules["dependencies"] = json!([{ "path": "package.json", "operation": "modify", "packages": ["rolldown ^1.2.13 → ^1.2.14"] }, { "path": "package-lock.json", "operation": "modify", "packages": moved }]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "sixteen releases a day old were sixteen looks that measured nothing: {r}");
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert!(md.contains("**Notes.**") && md.contains("rolldown ^1.2.13 → ^1.2.14") && md.contains("and 2 more") && !md.contains("Dependencies:"), "{md}");
     rules["dependencies"] = json!([{ "path": "package-lock.json", "operation": "modify", "count": 350 }]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert!(r["notes"][0]["what"].as_str().unwrap().contains("350 versions move in `package-lock.json`"), "{}", r["notes"]);
 }
 
@@ -436,7 +424,7 @@ fn apollo_client_13491_a_lockfile_that_moves_sixteen_packages_is_one_note_never_
 fn beeline_1089_a_changed_agents_file_is_a_note_never_a_look() {
     let rules = rules_for(&[("package.json", VITEST), ("AGENTS.md", "# Agents\n")], &[("AGENTS.md", "# Agents\nAlways run the tests.\n")], &[]);
     assert_eq!(paths(&rules, "agent_notes"), ["AGENTS.md"]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["agent-notes".to_string()]), "{r}");
 }
 
@@ -447,7 +435,7 @@ fn a_test_config_that_only_adds_test_patterns_is_a_note_and_one_that_swaps_narro
     let widened = "import { defineConfig } from \"vitest/config\";\nexport default defineConfig({\n  test: {\n    include: [\"test/**/*.test.ts\", \"src/**/*.spec.ts\"],\n    setupFiles: [\"./setup.ts\"],\n  },\n});\n";
     let rules = rules_for(&base, &[("vitest.config.ts", widened)], &[]);
     assert_eq!(rules["settings"][0]["adds"], json!(["src/**/*.spec.ts"]), "{}", rules["settings"]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["settings".to_string()]), "{r}");
     for (why, text) in [
         ("a pattern swapped", config.replace("test/**/*.test.ts", "src/**/*.spec.ts")),
@@ -457,7 +445,7 @@ fn a_test_config_that_only_adds_test_patterns_is_a_note_and_one_that_swaps_narro
     ] {
         let rules = rules_for(&base, &[("vitest.config.ts", &text)], &[]);
         assert!(rules["settings"][0]["adds"].is_null(), "{why}: {}", rules["settings"]);
-        assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests(), &off())), ["settings"], "{why}");
+        assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())), ["settings"], "{why}");
     }
     let jest = rules_for(&[("package.json", JEST), ("src/a.js", "module.exports = 1;\n"), ("jest.config.js", "module.exports = { testMatch: ['**/*.test.js'] };\n")],
         &[("jest.config.js", "module.exports = { testMatch: ['**/*.test.js', '**/*.spec.js'] };\n")], &[]);
@@ -468,15 +456,15 @@ fn a_test_config_that_only_adds_test_patterns_is_a_note_and_one_that_swaps_narro
 fn a_deleted_lockfile_or_a_new_install_script_still_needs_a_look_and_a_version_move_does_not() {
     let lock = r#"{"name":"poml","lockfileVersion":3,"packages":{"":{"name":"poml","devDependencies":{"vitest":"3.2.0"}},"node_modules/vitest":{"version":"3.2.0","resolved":"https://registry.npmjs.org/vitest/-/vitest-3.2.0.tgz","integrity":"sha512-abc"}}}"#;
     let gone = rules_for(&[("package.json", VITEST), ("package-lock.json", lock)], &[], &["package-lock.json"]);
-    let r = receipt::build(&drive_json(), &gone, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &gone, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["install".to_string()]), "the next install picks versions the lockfile no longer pins: {r}");
     let hook = VITEST.replace(r#""scripts":{"test":"vitest run"}"#, r#""scripts":{"test":"vitest run","postinstall":"node fetch.js"}"#);
     let scripted = rules_for(&[("package.json", VITEST)], &[("package.json", &hook)], &[]);
-    let r = receipt::build(&drive_json(), &scripted, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &scripted, &clean_tests());
     assert_eq!((look_kinds(&r), note_kinds(&r)), (vec!["install".to_string()], vec![]), "the look names the script, and no note repeats a change in which no package moved: {r}");
     assert!(r["look"][0]["what"].as_str().unwrap().contains("scripts.postinstall"), "{}", r["look"]);
     let bumped = rules_for(&[("package.json", VITEST), ("package-lock.json", lock)], &[("package.json", &VITEST.replace("3.2.0", "3.2.4")), ("package-lock.json", &lock.replace("3.2.0", "3.2.4"))], &[]);
-    let r = receipt::build(&drive_json(), &bumped, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &bumped, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "{r}");
     assert!(r["notes"][0]["what"].as_str().unwrap().contains("vitest 3.2.0 → 3.2.4"), "{}", r["notes"]);
 }
@@ -485,7 +473,7 @@ fn a_deleted_lockfile_or_a_new_install_script_still_needs_a_look_and_a_version_m
 fn comfyui_frontend_17136_a_lockfile_kern_does_not_read_is_a_note_and_listed_as_not_checked() {
     let rules = rules_for(&[("package.json", VITEST), ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")], &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\nimporters: {}\n")], &[]);
     assert_eq!(paths(&rules, "not_checked"), ["pnpm-lock.yaml"], "{}", rules["not_checked"]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "{r}");
     assert!(r["not_checked"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("pnpm-lock.yaml")), "{}", r["not_checked"]);
 }
@@ -495,10 +483,10 @@ fn eslint_plugin_ember_2853_a_package_manager_version_move_is_a_note_and_create_
     let manifest = |manager: &str| format!(r#"{{"name":"eslint-plugin-ember","packageManager":"{manager}","scripts":{{"test":"vitest run"}},"devDependencies":{{"vitest":"3.2.0"}}}}"#);
     let rules = rules_for(&[("package.json", &manifest("pnpm@10.18.0"))], &[("package.json", &manifest("pnpm@10.19.0"))], &[]);
     assert_eq!((rules["dependencies"][0]["packages"].clone(), rules["dependencies"][0]["fields"].clone()), (json!(["packageManager pnpm@10.18.0 → pnpm@10.19.0"]), Value::Null), "{}", rules["dependencies"]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((look_kinds(&r), note_kinds(&r)), (vec![], vec!["dependencies".to_string()]), "{r}");
     let swapped = rules_for(&[("package.json", &manifest("pnpm@10.18.0"))], &[("package.json", &manifest("yarn@4.5.0"))], &[]);
     assert_eq!(swapped["dependencies"][0]["fields"], json!(["packageManager"]), "another manager installs by other rules and runs other hooks: {}", swapped["dependencies"]);
     let added = rules_for(&[("package.json", VITEST)], &[("template-nextjs/package.json", r#"{"name":"template-nextjs","private":true,"dependencies":{"next":"15.0.0"}}"#)], &[]);
-    assert_eq!((added["dependencies"][0]["fields"].clone(), look_kinds(&receipt::build(&drive_json(), &added, &clean_tests(), &off()))), (Value::Null, vec![]), "a new package has a name; nothing is renamed: {}", added["dependencies"]);
+    assert_eq!((added["dependencies"][0]["fields"].clone(), look_kinds(&receipt::build(&drive_json(), &added, &clean_tests()))), (Value::Null, vec![]), "a new package has a name; nothing is renamed: {}", added["dependencies"]);
 }

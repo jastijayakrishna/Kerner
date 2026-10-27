@@ -15,7 +15,7 @@ fn decision(tests: &Value, changed: &[(&str, &str)]) -> String {
     let d = json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": changed.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect::<Vec<_>>(), "powers": [], "tricks": [], "settings": [], "protected": [],
         "dependencies": [], "agent_notes": [], "not_checked": [] });
-    receipt::build(&d, &rules, tests, &json!({ "status": "OFF", "why": "no AI key" }))["decision"].as_str().unwrap_or("").to_string()
+    receipt::build(&d, &rules, tests)["decision"].as_str().unwrap_or("").to_string()
 }
 
 #[test]

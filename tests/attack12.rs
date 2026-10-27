@@ -60,7 +60,6 @@ fn names(c: &Value, key: &str) -> Vec<String> {
     c[key].as_array().unwrap_or_else(|| panic!("{key}: {c}")).iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()
 }
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn listed(rules: &Value, key: &str) -> Vec<String> {
     rules[key].as_array().into_iter().flatten().map(|x| format!("{}: {}", x["path"].as_str().unwrap_or(""), x["why"].as_str().unwrap_or(""))).collect()
 }
@@ -99,8 +98,8 @@ fn a_change_that_rewrites_what_an_existing_test_expects_is_not_cleared() {
         let kept_old = suite::unkept(&report(&[(&format!("{copy} > adds"), 1, 0, 0)], &[]), &plan.back);
         let mut tests = suite::compare(&old, &report(&[(key, 1, 0, 0)], &[]), None);
         tests["rewritten"] = json!(suite::rewritten(&old, &kept_new, Some(&kept_old)));
-        let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
-        if receipt["decision"] == "clear" { cleared.push(format!("{what}:\n{}", receipt::markdown(&receipt, None))); }
+        let receipt = receipt::build(&drive_json(), &rules, &tests);
+        if receipt["decision"] == "clear" { cleared.push(format!("{what}:\n{}", receipt::markdown(&receipt))); }
     }
     assert!(cleared.is_empty(),
         "total([2, 3]) now returns 6 and the change rewrites the test's expectation to 6 so that it passes; the old test fails on the new code, yet the receipt clears the change and says the test that passed before still passes, because Kern never runs the old tests on the new code and never mentions an edited expectation:\n{}", cleared.join("\n"));
@@ -139,7 +138,7 @@ fn test_support_code_outside_the_test_folders_does_not_block_when_it_uses_the_ru
         let rules = kern::rules::rules(&r, &base, &head).unwrap();
         let key = "test/total.test.js > adds";
         let tests = suite::compare(&report(&[(key, 1, 0, 0)], &[]), &report(&[(key, 1, 0, 0)], &[]), None);
-        let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
+        let receipt = receipt::build(&drive_json(), &rules, &tests);
         if receipt["decision"] == "blocked" { blocked.push(format!("{what}: {:?}", listed(&rules, "tricks"))); }
     }
     assert!(blocked.is_empty(),
@@ -159,7 +158,7 @@ fn moving_a_test_file_with_a_skip_it_already_had_does_not_block() {
     let after = report(&[("test/total.test.ts > adds", 1, 0, 0), ("test/total.test.ts > adds in another currency", 0, 0, 1)], &[]);
     let tests = suite::compare(&before, &after, Some(&after));
     assert!(names(&tests, "gone").is_empty() && names(&tests, "newly_skipped").is_empty(), "the move itself is understood: {tests}");
-    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    let r = receipt::build(&drive_json(), &rules, &tests);
     assert_ne!(r["decision"], "blocked",
         "a plain rename of a test file from .js to .ts (git mv, not one byte changed) whose one skipped test was skipped before too; Kern compares the new path with nothing, calls the old skip a new trick, and because a test file was deleted the trick blocks, which an approval cannot clear: {:?}", listed(&rules, "tricks"));
 }
@@ -215,7 +214,7 @@ fn a_moved_file_does_not_need_a_look_for_what_it_already_did() {
     let head = commit(&r, &[]);
     let rules = kern::rules::rules(&r, &base, &head).unwrap();
     let tests = suite::compare(&report(&[("test/total.test.js > adds", 1, 0, 0)], &[]), &report(&[("test/unit/total.test.js > adds", 1, 0, 0)], &[]), Some(&report(&[("test/unit/total.test.js > adds", 1, 0, 0)], &[])));
-    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    let r = receipt::build(&drive_json(), &rules, &tests);
     let items: Vec<String> = r["look"].as_array().unwrap().iter().map(|x| x["what"].as_str().unwrap_or("").to_string()).collect();
     assert_eq!(r["decision"], "clear",
         "two files are moved with git mv and not one byte changes; the test still passes under its new path. Kern diffs without rename detection, so the moved module 'can now' fetch and read the environment and the moved test file is a deleted test file: {items:#?}");
@@ -239,7 +238,7 @@ fn a_jest_test_file_that_cannot_load_says_why() {
     let after = kern::proof::read_report(policy::Runner::Jest, &out.stdout).unwrap();
     let before = report(&[("test/total.test.js > adds", 1, 0, 0), ("test/cart.test.js > totals", 1, 0, 0)], &[]);
     let c = suite::compare(&before, &after, Some(&after));
-    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [{ "path": "src/cart.js", "operation": "modify" }] }), &c, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [{ "path": "src/cart.js", "operation": "modify" }] }), &c));
     assert!(after.problems == ["test/cart.test.js"] && md.contains("Cannot find module"),
         "jest says why test/cart.test.js could not run, but Kern's jest report processor drops the message, so the block (and the not-run reason when no file loads) never says why, as it does for vitest: why {:?}\n{md}", after.why);
 }
@@ -272,7 +271,7 @@ fn a_page_in_a_nested_docs_folder_the_tests_read_still_runs_the_tests() {
     let test = "import { readdirSync, readFileSync } from 'node:fs';\nimport { test, expect } from 'vitest';\nconst dir = new URL('../docs/', import.meta.url);\nfor (const name of readdirSync(dir, { recursive: true }).filter((n) => n.endsWith('.md'))) {\n  test(name, () => expect(readFileSync(new URL(name, dir), 'utf8').startsWith('# ')).toBe(true));\n}\n";
     let (r, base) = repo(&t, &[("package.json", PACKAGE), ("test/docs.test.js", test), ("docs/intro.md", "# Intro\n\nWelcome.\n"), ("docs/guides/setup.md", "# Setup\n\nInstall it.\n")]);
     let head = commit(&r, &[("docs/guides/setup.md", "Install it.\n")]);
-    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap();
     let md = std::fs::read_to_string(t.0.join("out").join("receipt.md")).unwrap();
     assert_ne!(out["tests"], "NOTHING_TO_RUN",
         "test/docs.test.js reads every page under docs/, nested folders included, and the change removes the title of docs/guides/setup.md; Kern looks for code that names the file or its own folder 'guides', finds none, and clears the change as documentation:\n{md}");
@@ -307,6 +306,6 @@ fn only_edited_test_files_that_ran_are_put_back_and_only_real_failures_count() {
     assert_eq!(suite::rewritten(&old, &failing, Some(&alone_old)), ["test/snap.test.js > snaps"], "a copy that fails on the old code too says nothing about the change");
     let mut tests = suite::compare(&old, &old, None);
     tests["edited"] = json!(2);
-    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [] }), &tests, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [] }), &tests));
     assert!(md.contains("their old versions still pass on the new code (2 test files)"), "{md}");
 }

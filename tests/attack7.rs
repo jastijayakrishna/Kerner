@@ -57,7 +57,7 @@ fn a_code_file_named_like_a_doc_still_runs_the_tests() {
         let t = Temp::new();
         let (r, b) = repo(&t, &[("package.json", r#"{"name":"shop","scripts":{"test":"jest"},"devDependencies":{"jest":"30.0.0"}}"#), (&format!("src/{name}"), good)]);
         let h = commit(&r, &[(&format!("src/{name}"), bad)]);
-        let out = kern::check::check(&r, &b, &h, &t.0.join("out"), &operator(), None, None).unwrap();
+        let out = kern::check::check(&r, &b, &h, &t.0.join("out"), &operator(), None).unwrap();
         let md = std::fs::read_to_string(t.0.join("out").join("receipt.md")).unwrap();
         if out["tests"] == "NOTHING_TO_RUN" || md.contains("touches only documentation") {
             wrong.push(format!("src/{name}: tests={} decision={} says-documentation={}", out["tests"], out["decision"], md.contains("touches only documentation")));

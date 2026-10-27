@@ -119,7 +119,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     if tests["builds"]["status"] == "CHECKED" { tests["builds"] = crate::build::rejudge(dir, &tests["builds"], setup.as_ref()); }
     if tests["probes"]["status"] == "RAN" { tests["probes"] = crate::probe::replayed(dir, &tests["probes"], setup.as_ref(), &crate::suite::ran_suites(dir).unwrap_or_default()); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });
-    let receipt = crate::receipt::build(&d, &stored["rules"], &tests, &stored["behaviour"]);
+    let receipt = crate::receipt::build(&d, &stored["rules"], &tests);
     Ok(json!({ "replayed": judged.as_ref().map_or(0, Vec::len), "suites": labels.len(), "receipt": receipt }))
 }
 pub const WORKERS_COUNT_MAX: usize = 4;

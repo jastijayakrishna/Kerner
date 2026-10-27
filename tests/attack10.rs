@@ -65,9 +65,8 @@ fn rules_for(changed: &[(&str, &str)]) -> Value {
         "dependencies": [], "agent_notes": [], "not_checked": [] })
 }
 fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 0, "skipped": 0 }, "after": { "passed": 12, "failed": 0, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn decision(tests: &Value, changed: &[(&str, &str)]) -> String {
-    receipt::build(&drive_json(), &rules_for(changed), tests, &off())["decision"].as_str().unwrap_or("").to_string()
+    receipt::build(&drive_json(), &rules_for(changed), tests)["decision"].as_str().unwrap_or("").to_string()
 }
 
 #[test]
@@ -174,29 +173,28 @@ fn a_skipped_test_in_a_numbered_group_pairs_with_the_skipped_one_whatever_number
 #[test]
 fn a_receipt_whose_tests_did_not_run_does_not_open_with_an_unqualified_pass() {
     let tests = json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json, at the root or in a package this change touches (Kern runs vitest, jest, mocha and node --test)" });
-    let behaviour = json!({ "status": "RAN", "report": { "coverage": { "percent": 100, "new": { "ran": 4, "total": 4 }, "old": { "ran": 4, "total": 4 } } } });
-    let r = receipt::build(&drive_json(), &rules_for(&[("src/total.js", "modify")]), &tests, &behaviour);
+    let r = receipt::build(&drive_json(), &rules_for(&[("src/total.js", "modify")]), &tests);
     assert_eq!(r["decision"], "unverified", "the project's own tests did not run, so the answer is never a green check: {r}");
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert!(!md.contains("### ✅ Kern: Nothing unexpected\n"),
         "the project's tests never ran (an ava project with an AI key), yet the receipt opens with the bare answer that README defines as 'every test that passed before still passes', while the Kern status for the same receipt says the tests did not run:\n{md}");
 }
 
 #[test]
 fn a_receipt_makes_no_pass_claim_about_changed_code_it_skipped() {
-    let receipt_md = |skipped: Value, tests: Value, behaviour: Value| -> String {
+    let receipt_md = |skipped: Value, tests: Value| -> String {
         let mut d = drive_json();
         let changed: Vec<(String, String)> = skipped.as_array().unwrap().iter().map(|s| (s["path"].as_str().unwrap().to_string(), "modify".to_string())).collect();
         let changed: Vec<(&str, &str)> = changed.iter().map(|(p, o)| (p.as_str(), o.as_str())).collect();
         d["skipped"] = skipped;
-        receipt::markdown(&receipt::build(&d, &rules_for(&changed), &tests, &behaviour), None)
+        receipt::markdown(&receipt::build(&d, &rules_for(&changed), &tests))
     };
     let vue = receipt_md(json!([{ "path": "src/components/Checkout.vue", "why": "a .vue file; Kern does not run .vue code yet" },
-        { "path": "tests/test_refunds.py", "why": "a .py file; Kern does not run .py code yet" }]), clean_tests(), off());
+        { "path": "tests/test_refunds.py", "why": "a .py file; Kern does not run .py code yet" }]), clean_tests());
     let python = receipt_md(json!([{ "path": "app/payments.py", "why": "a .py file; Kern does not run .py code yet" }, { "path": "public/checkout.min.js", "why": "generated or minified code" }]),
-        json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json" }), json!({ "status": "NOTHING_TO_RUN" }));
-    let claims = ["✅ No new powers", "✅ No skipped, focused or removed tests", "✅ No changed line of code to run"];
-    let made: Vec<String> = [("a Vue component and a Python test file in a vitest project", &vue), ("Python code and a minified bundle, with an AI key", &python)].iter()
+        json!({ "status": "NOT_RUN", "why": "no test runner Kern can read was found in package.json" }));
+    let claims = ["✅ No new powers", "✅ No skipped, focused or removed tests"];
+    let made: Vec<String> = [("a Vue component and a Python test file in a vitest project", &vue), ("Python code and a minified bundle", &python)].iter()
         .flat_map(|(case, md)| claims.iter().filter(|c| md.contains(*c)).map(move |c| format!("{case}: {c}"))).collect();
     assert!(made.is_empty(),
         "every changed file here is listed under Not checked: the rules parse no .vue or .py file (so neither powers nor skips were looked for), and no line of the Python code or the minified bundle ran; yet the receipt passes them with these lines:\n{}\n\n{vue}\n{python}", made.join("\n"));
@@ -209,7 +207,7 @@ fn documentation_the_tests_read_by_folder_still_runs_the_tests() {
     let test = "import { readdirSync, readFileSync } from 'node:fs';\nimport { test, expect } from 'vitest';\nconst dir = new URL('../docs/', import.meta.url);\nfor (const name of readdirSync(dir)) {\n  test(name, () => expect(readFileSync(new URL(name, dir), 'utf8').startsWith('# ')).toBe(true));\n}\n";
     let (r, base) = repo(&t, &[("package.json", package), ("test/docs.test.js", test), ("docs/guide.md", "# Guide\n\nHow to use it.\n"), ("docs/intro.md", "# Intro\n\nWelcome.\n")]);
     let head = commit(&r, &[("docs/guide.md", "How to use it.\n")]);
-    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap();
     let md = std::fs::read_to_string(t.0.join("out").join("receipt.md")).unwrap();
     assert_ne!(out["tests"], "NOTHING_TO_RUN",
         "test/docs.test.js reads every page under docs/ and checks it has a title; the change removes the title of docs/guide.md, so the test that passed before fails. Kern sees only .md files, finds no code that names guide.md, skips the tests and says:\n{md}");

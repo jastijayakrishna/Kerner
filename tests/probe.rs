@@ -154,14 +154,14 @@ fn receipt(probes: Value) -> Value {
     let rules = json!({ "changed": [{ "path": SQL, "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 4, "failed": 0, "skipped": 0 }, "after": { "passed": 4, "failed": 0, "skipped": 0 },
         "kept": 4, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "probes": probes });
-    kern::receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }))
+    kern::receipt::build(&d, &rules, &tests)
 }
 fn only(r: &Value, list: &str, kind: &str) -> String {
     let items: Vec<&Value> = r[list].as_array().unwrap().iter().filter(|x| x["kind"] == kind).collect();
     assert_eq!(items.len(), 1, "one {kind} in {list}: {r}");
     items[0]["what"].as_str().unwrap().to_string()
 }
-fn probes_lines(r: &Value) -> Vec<String> { kern::receipt::markdown(r, None).lines().filter(|l| l.contains("Probes:")).map(str::to_string).collect() }
+fn probes_lines(r: &Value) -> Vec<String> { kern::receipt::markdown(r).lines().filter(|l| l.contains("Probes:")).map(str::to_string).collect() }
 
 #[test]
 fn lightdash_12942_a_stripper_that_now_throws_on_a_dollar_quoted_string_breaks_a_verified_requirement_and_is_blocked() {

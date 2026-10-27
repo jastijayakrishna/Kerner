@@ -1,7 +1,6 @@
 'use strict';
 const out = process.env.KERN_MONITOR;
-const harness = (() => { try { return require('worker_threads').isMainThread && process.argv[1] === '/kern/probe.cjs' && process.argv[2] === '/kern/probe.json'; } catch { return false; } })();
-if (out && !harness && !globalThis.__kernMonitor) {
+if (out && !globalThis.__kernMonitor) {
   globalThis.__kernMonitor = true;
   const fs = require('fs');
   const path = require('path');

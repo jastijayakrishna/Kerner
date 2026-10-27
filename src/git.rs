@@ -50,19 +50,6 @@ pub fn git_with(repo: &Path, args: &[&str], input: Option<&[u8]>, max_output: us
     run(&git_exe()?, &full, Run { cwd: Some(&repo), env: safe_env(&repo), input, timeout: Duration::from_secs(600), max_output })
 }
 pub fn git(repo: &Path, args: &[&str], input: Option<&[u8]>) -> R<Vec<u8>> { git_with(repo, args, input, BUNDLE_BYTES) }
-pub fn remote(repo: &Path, args: &[&str], server: &str, token: &str) -> R<Vec<u8>> {
-    let repo = std::path::absolute(repo)?;
-    let local = server.starts_with("file://");
-    ensure!(server.starts_with("https://") || local, "The git server must use https");
-    let mut full: Vec<String> = ["--no-replace-objects", "-c", "core.longpaths=true", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.followRedirects=false",
-        "-c", "protocol.allow=never", "-c", if local { "protocol.file.allow=always" } else { "protocol.https.allow=always" }, "-C"].map(String::from).to_vec();
-    full.push(repo.display().to_string());
-    full.extend(args.iter().map(|a| a.to_string()));
-    let mut env = safe_env(&repo);
-    env.extend([("GIT_CONFIG_COUNT".into(), "1".into()), ("GIT_CONFIG_KEY_0".into(), format!("http.{server}/.extraHeader")),
-        ("GIT_CONFIG_VALUE_0".into(), format!("Authorization: Basic {}", b64(format!("x-access-token:{token}").as_bytes())))]);
-    run(&git_exe()?, &full, Run { cwd: Some(&repo), env, input: None, timeout: Duration::from_secs(300), max_output: 1 << 20 })
-}
 pub fn trimmed(bytes: Vec<u8>) -> String { String::from_utf8_lossy(&bytes).trim().to_string() }
 pub fn mentions(repo: &Path, commit: &str, needles: &[&str]) -> R<Vec<String>> {
     ensure!(!needles.is_empty() && needles.iter().all(|n| !n.is_empty() && !n.contains('\n')), "Kern searches only for whole file names");
@@ -87,20 +74,6 @@ pub fn object_id(kind: &str, body: &[u8]) -> String {
     h.update(format!("{kind} {}\0", body.len()).as_bytes());
     h.update(body);
     hex::encode(h.finalize())
-}
-pub fn file_oid(path: &Path, size: u64) -> R<String> {
-    let mut file = std::fs::File::open(path)?;
-    let (mut h, mut buf, mut total) = (Sha1::new(), [0u8; 65536], 0u64);
-    h.update(format!("blob {size}\0").as_bytes());
-    loop {
-        let n = std::io::Read::read(&mut file, &mut buf)?;
-        if n == 0 { break; }
-        total += n as u64;
-        ensure!(total <= size, "File changed while reading: {}", path.display());
-        h.update(&buf[..n]);
-    }
-    ensure!(total == size, "File changed while reading: {}", path.display());
-    Ok(hex::encode(h.finalize()))
 }
 pub fn init_store(dir: &Path) -> R<PathBuf> {
     let dir = std::path::absolute(dir)?;
@@ -331,70 +304,4 @@ pub fn changes(base: &Files, candidate: &Files, policy: &Contract) -> R<Value> {
     }
     if let Some(t) = &policy.tests { out["tests"] = crate::proof::screen(base, candidate, &out, t)?; }
     Ok(out)
-}
-
-pub fn import_base(source: &Path, base: &str, dest: &Path) -> R<PathBuf> {
-    oid(base)?;
-    let store = init_store(dest)?;
-    let objects = git(source, &["rev-list", "--objects", "--no-walk", base], None)?;
-    let pack = git(source, &["pack-objects", "--stdout", "-q"], Some(&objects))?;
-    git(&store, &["index-pack", "--stdin", "--fsck-objects"], Some(&pack))?;
-    std::fs::write(store.join("shallow"), format!("{base}\n"))?;
-    ensure!(trimmed(git(&store, &["cat-file", "-t", base], None)?) == "commit", "Invalid base object");
-    Ok(store)
-}
-
-pub const RUN_FIELDS: [&str; 9] = ["version", "run_id", "repository", "base", "commit", "contract_sha256", "manifest_sha256", "executor", "dependencies"];
-pub fn validate_run(run: &Value) -> R<()> {
-    exact(run, &RUN_FIELDS, "run")?;
-    ensure!(run["version"] == 2 && is_uuid(text(run, "run_id")?), "Invalid run identity");
-    oid(text(run, "base")?)?;
-    oid(text(run, "commit")?)?;
-    ensure!(text(run, "repository").is_ok() && is_hex64(text(run, "contract_sha256")?) && is_hex64(text(run, "manifest_sha256")?), "Invalid run digests");
-    let e = &run["executor"];
-    match e["kind"].as_str() {
-        Some("external") => { exact(e, &["kind", "source_commit"], "external executor")?; oid(text(e, "source_commit")?)?; }
-        Some("kern-gvisor") => { exact(e, &["kind", "builder_sha256", "builder", "runtime", "image", "exit_code", "output_sha256"], "Kern executor")?; }
-        _ => deny!("Unknown executor kind"),
-    }
-    ensure!(run["dependencies"].is_null() || run["dependencies"]["sha256"].as_str().is_some_and(is_hex64), "Invalid dependency record");
-    Ok(())
-}
-pub fn handoff(store: &Path, run: &Value, dir: &Path) -> R<Value> {
-    validate_run(run)?;
-    let root = fresh_dir(dir)?;
-    let (base, commit) = (text(run, "base")?, text(run, "commit")?);
-    let objects = git(store, &["rev-list", "--objects", "--no-walk", base, commit], None)?;
-    let pack = git(store, &["pack-objects", "--stdout", "-q"], Some(&objects))?;
-    let mut bundle = format!("# v2 git bundle\n{base} refs/kern/base\n{commit} refs/kern/candidate\n\n").into_bytes();
-    bundle.extend_from_slice(&pack);
-    ensure!(bundle.len() <= BUNDLE_BYTES, "Handoff bundle exceeds 64 MiB");
-    create_new(root.join("artifact.bundle"), &bundle, 0o600)?;
-    write_json(root.join("run.json"), run)?;
-    Ok(json!({ "directory": root.display().to_string(), "bundle_sha256": sha256(&bundle), "bytes": bundle.len() }))
-}
-pub fn import_handoff(dir: &Path, output: &Path) -> R<Value> {
-    let (run_file, bundle_file) = (dir.join("run.json"), dir.join("artifact.bundle"));
-    for f in [&run_file, &bundle_file] { ensure!(std::fs::symlink_metadata(f).is_ok_and(|m| m.is_file()), "Handoff must contain regular run.json and artifact.bundle files"); }
-    ensure!(std::fs::metadata(&bundle_file)?.len() <= BUNDLE_BYTES as u64, "Handoff bundle exceeds 64 MiB");
-    let run = read_json(&run_file)?;
-    validate_run(&run)?;
-    let (base, commit) = (text(&run, "base")?, text(&run, "commit")?);
-    let bytes = std::fs::read(&bundle_file)?;
-    let header = format!("# v2 git bundle\n{base} refs/kern/base\n{commit} refs/kern/candidate\n\n");
-    ensure!(bytes.starts_with(header.as_bytes()), "Bundle refs must be exactly the run base and candidate, with no prerequisites");
-    ensure!(bytes[header.len()..].starts_with(b"PACK"), "Bundle does not contain a pack");
-    let root = fresh_dir(output)?;
-    let store = init_store(&root.join("objects.git"))?;
-    git(&store, &["-c", "core.bigFileThreshold=1m", "index-pack", "--stdin", "--fsck-objects", &format!("--max-input-size={BUNDLE_BYTES}")], Some(&bytes[header.len()..]))?;
-    std::fs::write(store.join("shallow"), format!("{base}\n"))?;
-    for (r, id) in [("refs/kern/base", base), ("refs/kern/candidate", commit)] {
-        ensure!(trimmed(git(&store, &["cat-file", "-t", id], None)?) == "commit", "Bundle lacks a declared commit");
-        git(&store, &["update-ref", r, id, &"0".repeat(40)], None)?;
-    }
-    ensure!(parents(&store, commit)? == vec![base.to_string()], "Candidate must have the approved base as its only parent");
-    read_commit(&store, base, MAX_FILE, MAX_TOTAL)?;
-    ensure!(digest(&manifest(&store, commit, MAX_FILE, MAX_TOTAL)?)? == text(&run, "manifest_sha256")?, "Transferred manifest mismatch");
-    write_json(root.join("run.json"), &run)?;
-    Ok(json!({ "status": "IMPORTED_UNVERIFIED", "output": root.display().to_string(), "base": base, "commit": commit }))
 }

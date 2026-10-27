@@ -447,7 +447,7 @@ fn calls_and_code(targets: &[Target], examples: &[Examples]) -> Vec<Block> {
 }
 fn hunks(old: &str, new: &str) -> Vec<(usize, String)> {
     let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-    let (gone, came) = crate::compare::changed_lines(&a, &b);
+    let (gone, came) = crate::diff::changed_lines(&a, &b);
     let (gone, came): (BTreeSet<usize>, BTreeSet<usize>) = (gone.into_iter().collect(), came.into_iter().collect());
     let (mut rows, mut i, mut j) = (Vec::new(), 0, 0);
     while i < a.len() || j < b.len() {

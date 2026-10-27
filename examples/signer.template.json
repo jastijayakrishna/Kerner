@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "executable": {"file": "/operator/bin/ed25519-kms-adapter", "sha256": "<reviewed-adapter-SHA256>"},
-  "arguments": [],
-  "public_key": "/operator/verifier-public.pem"
-}

@@ -9,7 +9,6 @@ pub const SEAL_MARK: &str = "<!-- kern-seal ";
 fn author() -> String { crate::github::env("KERN_COMMENT_AUTHOR").unwrap_or_else(|| "github-actions[bot]".into()) }
 const SHOWN: usize = 15;
 const RECEIPT_BYTES_MAX: usize = 60_000;
-const DETAILS_FRAME_BYTES: usize = 200;
 
 fn strings(v: &Value) -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() }
 fn item(kind: &str, what: String) -> Value { json!({ "kind": kind, "what": what }) }
@@ -26,20 +25,6 @@ fn per_file(kind: &str, keys: Vec<String>, one: &str, many: &str) -> Vec<Value> 
         let titles: Vec<String> = ks.iter().take(3).map(|k| code(k.split_once(" > ").map_or(k.as_str(), |(_, t)| t), 120)).collect();
         vec![item(kind, format!("{} {many} in {}: {}{}", ks.len(), code(&f, 160), titles.join(", "), if ks.len() > 3 { ", …" } else { "" }))]
     }).collect()
-}
-
-fn behaviour_items(report: &Value) -> (Vec<String>, Vec<String>) {
-    if !report.is_object() { return (Vec::new(), Vec::new()); }
-    let items = crate::drive::difference_items(report);
-    let has_record = items.iter().any(|(_, rec)| *rec);
-    let sorted = &report["sorted"];
-    let (mut described, mut surprises) = (Vec::new(), Vec::new());
-    for (i, (line, rec)) in items.iter().enumerate() {
-        if has_record && !*rec { continue; }
-        let says = sorted[format!("D{}", i + 1)]["says"].as_str();
-        if says == Some("yes") { described.push(line.clone()) } else { surprises.push(line.clone()) }
-    }
-    (described, surprises)
 }
 
 const OUTPUT_FOLDERS: [&str; 12] = ["dist", "out", ".nuxt", ".next", ".svelte-kit", ".output", "coverage", ".turbo", ".vite", ".cache", ".parcel-cache", "storybook-static"];
@@ -151,14 +136,6 @@ fn test_file_items(f: &mut Found, rules: &Value, tests: &Value) -> (Vec<Value>, 
         else { f.blocked.push(item("trick", format!("{}: {}", code(path, 160), plain(x["why"].as_str().unwrap_or(""), 400)))); }
     }
     (new_tests, unproven)
-}
-fn behaviour_looks(f: &mut Found, behaviour: &Value) -> (bool, Vec<String>, Vec<String>, bool) {
-    let summary = !behaviour["report"].is_object() && behaviour["not_mentioned"].is_array();
-    let (described, surprises) = if summary { (strings(&behaviour["described"]), strings(&behaviour["not_mentioned"])) } else { behaviour_items(&behaviour["report"]) };
-    let sorted = behaviour["report"]["sorted"].is_object() || behaviour["sorted"] == true;
-    for s in &surprises { f.look.push(item(if sorted { "not-mentioned" } else { "difference" }, if sorted { format!("Not mentioned by the pull request: {s}") } else { format!("Behaves differently: {s}") })); }
-    for s in &described { f.look.push(item("described", format!("The pull request says it changes this, which only a person can confirm: {s}"))); }
-    (summary, described, surprises, sorted)
 }
 fn change_items(f: &mut Found, rules: &Value, tests: &Value, new_tests: Vec<Value>) {
     for p in rules["powers"].as_array().into_iter().flatten().filter(|p| shown_power(p)) {
@@ -591,10 +568,9 @@ fn not_run_items(f: &mut Found, tests: &Value) {
     }
 }
 
-pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Value {
+pub fn build(d: &Value, rules: &Value, tests: &Value) -> Value {
     let mut f = Found::default();
     let (new_tests, unproven) = test_file_items(&mut f, rules, tests);
-    let (summary, described, surprises, sorted) = behaviour_looks(&mut f, behaviour);
     change_items(&mut f, rules, tests, new_tests);
     bystander_items(&mut f, tests);
     rule_items(&mut f, d, rules, tests);
@@ -603,18 +579,13 @@ pub fn build(d: &Value, rules: &Value, tests: &Value, behaviour: &Value) -> Valu
     not_run_items(&mut f, tests);
     let decision = if !f.blocked.is_empty() { "blocked" } else if !f.look.is_empty() { "look" } else if !f.unverified.is_empty() { "unverified" } else { "clear" };
     let (claims, challenges) = proof_items(tests);
-    let report = &behaviour["report"];
-    let lines = if summary { behaviour["lines"].clone() } else { json!({ "ran": report["coverage"]["new"]["ran"].as_u64().unwrap_or(0) + report["coverage"]["old"]["ran"].as_u64().unwrap_or(0),
-        "total": report["coverage"]["new"]["total"].as_u64().unwrap_or(0) + report["coverage"]["old"]["total"].as_u64().unwrap_or(0) }) };
-    let percent = if summary { behaviour["percent"].clone() } else { report["coverage"]["percent"].clone() };
     let said = |x: &Value| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400)) });
     let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(said).chain(d["skipped"].as_array().into_iter().flatten().map(said))
         .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
             .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).chain(f.cannot_run).collect();
     json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"],
-        "drive_skipped": d["skipped"].as_array().is_some_and(|s| !s.is_empty()), "decision": decision, "blocked": f.blocked, "look": f.look, "unverified": f.unverified, "notes": f.notes,
+        "decision": decision, "blocked": f.blocked, "look": f.look, "unverified": f.unverified, "notes": f.notes,
         "claims": claims, "challenges": challenges, "tests": tests,
-        "behaviour": { "status": behaviour["status"], "why": behaviour["why"], "percent": percent, "lines": lines, "described": described, "not_mentioned": surprises, "sorted": sorted },
         "rules": rules, "not_checked": not_checked, "drive": { "skipped": d["skipped"], "unmeasured": d["unmeasured"] } })
 }
 pub fn rebuild(r: &Value) -> R<Value> {
@@ -622,19 +593,11 @@ pub fn rebuild(r: &Value) -> R<Value> {
     ensure!(r["version"] == 1 && commit(&r["head"]) && commit(&r["base"]), "The receipt does not name the two commits it checked");
     ensure!(matches!(r["sandbox"].as_str(), Some("throwaway" | "gvisor")), "The receipt names no sandbox Kern knows");
     ensure!(r["kern"] == env!("CARGO_PKG_VERSION"), "The receipt was made by another version of Kern");
-    ensure!(r["tests"].is_object() && r["rules"].is_object() && r["behaviour"].is_object(), "The receipt is missing the facts its answer comes from");
+    ensure!(r["tests"].is_object() && r["rules"].is_object(), "The receipt is missing the facts its answer comes from");
     let d = json!({ "base": r["base"], "head": r["head"], "skipped": r["drive"]["skipped"], "unmeasured": r["drive"]["unmeasured"] });
-    let mut out = build(&d, &r["rules"], &r["tests"], &r["behaviour"]);
+    let mut out = build(&d, &r["rules"], &r["tests"]);
     out["sandbox"] = r["sandbox"].clone();
     Ok(out)
-}
-const KERN_TAGS: [&str; 6] = ["<details>", "</details>", "<summary>", "</summary>", "<sub>", "</sub>"];
-fn kern_html_only(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (i, c) in text.char_indices() {
-        out.push(if c == '<' && !KERN_TAGS.iter().any(|t| text[i..].starts_with(t)) { '‹' } else { c });
-    }
-    out
 }
 const SIGNED_LINE: &str = "<sub>Signed by GitHub for Kern's own workflow.";
 pub fn text_digest(md: &str) -> String { sha256(md.replace("\r\n", "\n").trim_end().as_bytes()) }
@@ -672,15 +635,13 @@ fn list(md: &mut String, items: &[Value]) {
     if items.len() > SHOWN { md.push_str(&format!("- … and {} more in Kern's receipt.json\n", items.len() - SHOWN)); }
 }
 
-pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
+pub fn markdown(r: &Value) -> String {
     let blocked = r["blocked"].as_array().cloned().unwrap_or_default();
     let look = r["look"].as_array().cloned().unwrap_or_default();
     let unverified = r["unverified"].as_array().cloned().unwrap_or_default();
     let notes = r["notes"].as_array().cloned().unwrap_or_default();
     let tests = &r["tests"];
-    let behaviour = &r["behaviour"];
     let tests_ran = tests["status"] == "RAN";
-    let behaviour_ran = behaviour["status"] == "RAN";
     let nothing = tests["status"] == "NOTHING_TO_RUN";
     let mut md = String::from(MARK);
     md.push('\n');
@@ -690,8 +651,7 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
         Some("unverified") => "### ⏭️ Kern: Not verified\n\nKern found nothing that needs a look, but it could not check all of this change (see below).\n\n".to_string(),
         _ if tests_ran && tests["not_run"].as_array().is_some_and(|n| !n.is_empty()) => "### ✅ Kern: Nothing unexpected in what it ran\n\nSome packages' tests did not run (see below).\n\n".to_string(),
         _ if tests_ran || nothing => "### ✅ Kern: Nothing unexpected\n\n".to_string(),
-        _ if behaviour_ran => "### ✅ Kern: Nothing unexpected in what it ran\n\nThe project's tests did not run (see below).\n\n".to_string(),
-        _ => "### ✅ Kern: Nothing unexpected in the rules it checked\n\nNot run: the project's tests and its changed code (see below), so this receipt covers the rules only.\n\n".to_string(),
+        _ => "### ✅ Kern: Nothing unexpected in the rules it checked\n\nNot run: the project's tests (see below), so this receipt covers the rules only.\n\n".to_string(),
     };
     if !blocked.is_empty() {
         md += "**Blocked: fix these.** An approval cannot clear them.\n\n";
@@ -831,7 +791,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     let quiet: Vec<String> = all_powers.iter().filter(|p| !shown_power(p)).take(SHOWN).map(|p| code(p["path"].as_str().unwrap_or(""), 160)).collect();
     let other_code = r["rules"]["changed"].as_array().into_iter().flatten().any(|c| c["operation"] != "delete" && c["path"].as_str().is_some_and(crate::capability::other_code));
     let unread = other_code || unverified.iter().any(|x| x["kind"] == "not-checked-code") || r["rules"]["not_checked"].as_array().into_iter().flatten().any(|x| x["code"].is_string());
-    let skipped_code = r["drive_skipped"].as_bool() == Some(true);
     if powers == 0 && !unread && quiet.is_empty() { md += "- ✅ No new powers: no changed code newly starts programs, reaches the network or reads secret environment variables\n"; }
     if powers == 0 && !unread && !quiet.is_empty() {
         md += &format!("- ✅ No new powers outside the tests: tests gained some, but none can both read a secret and send it out, or start other programs ({})\n", quiet.join(", "));
@@ -840,14 +799,6 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     if (tests_ran || nothing) && !unread && !blocked.iter().any(|x| x["kind"] == "test-file") && r["rules"]["tricks"].as_array().is_none_or(Vec::is_empty) && r["rules"]["deleted_tests"].as_array().is_none_or(Vec::is_empty)
         && r["rules"]["weakened"].as_array().is_none_or(Vec::is_empty) && none("gone") && none("newly_skipped") {
         md += "- ✅ No skipped, focused or removed tests\n";
-    }
-    match behaviour["status"].as_str() {
-        Some("RAN") => md += &format!("- {} {}% of the changed lines ran, on the old and the new code\n", if behaviour["percent"].as_u64().unwrap_or(0) >= 80 { "✅" } else { "⚠️" }, behaviour["percent"].as_u64().unwrap_or(0)),
-        Some("NOTHING_TO_RUN") if unread || skipped_code => md += "- ⏭️ Changed lines: none Kern can run here (it runs JavaScript and TypeScript, and leaves out generated or minified code)\n",
-        Some("NOTHING_TO_RUN") => md += "- ✅ No changed line of code to run: only tests, docs, configuration or types changed\n",
-        Some("OFF") if behaviour["why"] == "no AI key" => md += "- ⏭️ Changed lines: Not run. Add an AI key (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) and Kern runs every changed line on the old and the new code\n",
-        Some("OFF") => md += &format!("- ⏭️ Changed lines: not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the AI step is off"), 400)),
-        _ => md += &format!("- ⏭️ Changed lines: Not run — {}\n", plain(behaviour["why"].as_str().unwrap_or("the run did not finish"), 400)),
     }
     md += "\n";
     let not_checked = r["not_checked"].as_array().cloned().unwrap_or_default();
@@ -858,23 +809,12 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     }
     md += &agent_md(r);
     let short = |k: &str| r[k].as_str().filter(|h| h.len() >= 7).map(|h| h[..7].to_string()).unwrap_or_default();
-    let sandbox = match (tests_ran || behaviour_ran, r["sandbox"].as_str()) {
+    let sandbox = match (tests_ran, r["sandbox"].as_str()) {
         (false, _) => "",
         (true, Some("throwaway")) => ", and ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran",
         (true, _) => ", and ran the code only in a sealed sandbox with the network off",
     };
     let footer = format!("<sub>Kern {} checked `{}` against `{}`{sandbox}.</sub>\n", r["kern"].as_str().unwrap_or(""), short("head"), short("base"));
-    if let Some(c) = drive_comment.filter(|c| !c.trim().is_empty()) {
-        let mut body = c.lines().skip_while(|l| l.starts_with("### ") || l.trim().is_empty()).collect::<Vec<_>>().join("\n");
-        let room = RECEIPT_BYTES_MAX.saturating_sub(md.len() + footer.len() + DETAILS_FRAME_BYTES);
-        if body.len() > room {
-            let mut cut = room;
-            while !body.is_char_boundary(cut) { cut -= 1; }
-            body.truncate(body[..cut].rfind('\n').unwrap_or(cut));
-            body += "\n\n… (cut short to fit the comment)";
-        }
-        md += &format!("<details><summary>What this change does when it runs, line by line</summary>\n\n{body}\n\n</details>\n\n");
-    }
     md += &footer;
     if md.len() > RECEIPT_BYTES_MAX {
         let mut cut = RECEIPT_BYTES_MAX;
@@ -885,10 +825,10 @@ pub fn markdown(r: &Value, drive_comment: Option<&str>) -> String {
     md
 }
 
-pub fn write(out: &Path, r: &Value, drive_comment: Option<&str>) -> R<()> {
+pub fn write(out: &Path, r: &Value) -> R<()> {
     std::fs::create_dir_all(out)?;
     std::fs::write(out.join("receipt.json"), format!("{}\n", serde_json::to_string_pretty(r)?))?;
-    std::fs::write(out.join("receipt.md"), markdown(r, drive_comment))?;
+    std::fs::write(out.join("receipt.md"), markdown(r))?;
     Ok(())
 }
 
@@ -905,8 +845,7 @@ pub fn render(out: &Path, head: &str) -> R<Value> {
     ensure!(given["version"] == 1 && given["head"].as_str() == Some(head), "The receipt is not for this pull request's head commit");
     let _ = std::fs::remove_file(out.join("seal.json"));
     let r = rebuild(&given)?;
-    let comment = std::fs::read_to_string(out.join("comment.md")).ok().filter(|c| r["behaviour"]["status"] == "RAN" && c.len() <= 256 << 10).map(|c| kern_html_only(&c));
-    write(out, &r, comment.as_deref())?;
+    write(out, &r)?;
     Ok(json!({ "status": "RENDERED", "decision": r["decision"], "head": head }))
 }
 pub fn sign(out: &Path, repository: &str, number: u64) -> R<Value> {

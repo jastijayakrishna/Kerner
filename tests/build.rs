@@ -43,7 +43,7 @@ fn planyr_1262_a_build_that_breaks_twice_on_the_new_code_is_a_look_that_quotes_i
     let look = r["look"].as_array().unwrap().iter().find(|x| x["kind"] == "build-broke").expect("a build-broke look");
     let what = look["what"].as_str().unwrap();
     assert!(what.contains("apps/web") && what.contains("stripe-server") && what.contains("old code"), "{what}");
-    let md = kern::receipt::markdown(&r, None);
+    let md = kern::receipt::markdown(&r);
     assert!(md.contains("⚠️ Build:") && md.contains("apps/web"), "{md}");
 }
 
@@ -101,24 +101,24 @@ fn smart_cart_432_a_build_that_needs_the_network_or_more_memory_is_kerns_limit_n
     assert!(j["why"].as_str().unwrap().contains("ENOTFOUND"), "{j}");
     let r = receipt(json!({ "status": "CHECKED", "builds": [j] }));
     assert_eq!(r["decision"], "clear", "Kern's own limit is never the change's fault: {r}");
-    assert!(kern::receipt::markdown(&r, None).contains("⏭️ Build:"));
+    assert!(kern::receipt::markdown(&r).contains("⏭️ Build:"));
 }
 
 #[test]
 fn gov_bb_1970_each_build_result_has_its_own_receipt_line() {
     let same = kern::build::judge(".", &side_of("built").unwrap(), &side_of("built").unwrap(), None, None);
-    let md = kern::receipt::markdown(&receipt(json!({ "status": "CHECKED", "builds": [same] })), None);
+    let md = kern::receipt::markdown(&receipt(json!({ "status": "CHECKED", "builds": [same] })));
     assert!(md.contains("✅ Build: `npm run build` works on the old and the new code"), "{md}");
     let old_broken = kern::build::judge("packages/api", &side_of("failed-a").unwrap(), &json!({ "status": "skipped" }), None, None);
-    let md = kern::receipt::markdown(&receipt(json!({ "status": "CHECKED", "builds": [old_broken] })), None);
+    let md = kern::receipt::markdown(&receipt(json!({ "status": "CHECKED", "builds": [old_broken] })));
     assert!(md.contains("⏭️ Build: `npm run build` in `packages/api` not compared") && md.contains("old code"), "{md}");
     let late = receipt(json!({ "status": "NOT_RUN", "why": "Kern's time ran out before it could build the project" }));
-    assert!(kern::receipt::markdown(&late, None).contains("⏭️ Build: not checked — Kern's time ran out"));
+    assert!(kern::receipt::markdown(&late).contains("⏭️ Build: not checked — Kern's time ran out"));
     let uneven = kern::build::judge(".", &side_of("built").unwrap(), &side_of("failed-a").unwrap(), side_of("failed-a").as_ref(), Some("the project has no lockfile".into()));
     let r = receipt(json!({ "status": "CHECKED", "builds": [uneven] }));
     assert_eq!(r["decision"], "unverified", "{r}");
     assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "build-uneven"), "{r}");
-    assert!(kern::receipt::markdown(&receipt(json!({ "status": "NONE" })), None).lines().all(|l| !l.contains("Build:")), "no build, no line");
+    assert!(kern::receipt::markdown(&receipt(json!({ "status": "NONE" }))).lines().all(|l| !l.contains("Build:")), "no build, no line");
 }
 
 #[test]
@@ -136,5 +136,5 @@ fn receipt(builds: Value) -> Value {
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 4, "failed": 0, "skipped": 0 }, "after": { "passed": 4, "failed": 0, "skipped": 0 },
         "kept": 4, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "builds": builds });
-    kern::receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }))
+    kern::receipt::build(&d, &rules, &tests)
 }

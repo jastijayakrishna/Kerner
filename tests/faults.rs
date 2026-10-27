@@ -84,7 +84,7 @@ fn nothing_is_undone_when_only_comments_formatting_or_logging_changed() {
 fn a_change_too_big_to_diff_line_by_line_still_gets_faults() {
     let old: String = (0..1200).map(|i| format!("export const v{i} = {i};\n")).collect();
     let new: String = (0..1200).map(|i| format!("export const v{i} = {i} > 1 ? {i} : 0;\n")).collect();
-    let (removed, added) = kern::compare::changed_lines(&old.lines().collect::<Vec<_>>(), &new.lines().collect::<Vec<_>>());
+    let (removed, added) = kern::diff::changed_lines(&old.lines().collect::<Vec<_>>(), &new.lines().collect::<Vec<_>>());
     assert_eq!((removed.len(), added.len()), (1200, 1200), "a diff past the step limit counts every line in the changed middle, never none");
     let planted = kern::suite::faults(&[("src/consts.js".to_string(), old.clone(), new.clone())], 24);
     let lines: BTreeSet<usize> = planted.iter().filter(|m| m.kind == FaultKind::Operator).map(|m| m.line).collect();
@@ -209,8 +209,8 @@ fn receipt_with(faults: serde_json::Value, bystanders: serde_json::Value) -> (se
     let tests = json!({ "status": "RAN", "runner": "jest", "before": { "passed": 4, "failed": 0, "skipped": 0 }, "after": { "passed": 4, "failed": 0, "skipped": 0 },
         "kept": 4, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [], "faults": faults, "bystanders": bystanders,
         "faults_missing": [{ "path": "src/notes.js", "why": "Kern found nothing in its change to put a fault in (only comments, formatting, logging or TypeScript types changed, or no line it knows how to change)" }] });
-    let r = receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }));
-    let md = receipt::markdown(&r, None);
+    let r = receipt::build(&d, &rules, &tests);
+    let md = receipt::markdown(&r);
     (r, md)
 }
 
@@ -381,7 +381,7 @@ fn a_changed_file_kern_put_no_fault_in_is_named_with_why() {
         "kept": 3, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [],
         "faults": [{ "path": "packages/backend/src/queryBuilder.ts", "line": 347, "what": "changes > to >=", "kind": "operator", "outcome": "caught" }],
         "faults_missing": [{ "path": "packages/backend/src/services/ProjectService/ProjectService.ts", "why": "Kern could not pick the tests related to this file" }] });
-    let md = receipt::markdown(&receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" })), None);
+    let md = receipt::markdown(&receipt::build(&d, &rules, &tests));
     assert!(md.contains("No fault planted in") && md.contains("ProjectService.ts") && md.contains("Kern could not pick the tests related to this file"),
         "lightdash/lightdash#12942 was reverted after its bug landed in ProjectService.ts, a changed file Kern put no fault in and said nothing about: {md}");
 }
@@ -458,12 +458,11 @@ fn faults_no_test_noticed_are_named_and_a_change_no_test_checks_needs_a_look() {
     let tests = |outcomes: &[&str]| json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 3, "failed": 0, "skipped": 0 }, "after": { "passed": 3, "failed": 0, "skipped": 0 },
         "kept": 3, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [],
         "faults": outcomes.iter().enumerate().map(|(i, o)| json!({ "path": "src/price.js", "line": i + 2, "what": "changes > to >=", "outcome": o })).collect::<Vec<_>>() });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
-    let none = receipt::build(&d, &rules, &tests(&["missed", "untested", "missed"]), &off);
+    let none = receipt::build(&d, &rules, &tests(&["missed", "untested", "missed"]));
     assert_eq!(none["decision"], "clear", "no test checking a change is shown, not a look: 14 of 118 real pull requests changed code no test reaches, many of them CI scripts and examples: {none}");
-    assert!(receipt::markdown(&none, None).contains("the tests caught 0 of 3 small faults"));
-    let some = receipt::build(&d, &rules, &tests(&["caught", "missed", "caught"]), &off);
+    assert!(receipt::markdown(&none).contains("the tests caught 0 of 3 small faults"));
+    let some = receipt::build(&d, &rules, &tests(&["caught", "missed", "caught"]));
     assert!(!some["look"].as_array().unwrap().iter().any(|x| x["kind"] == "untested-change"));
-    let md = receipt::markdown(&some, None);
+    let md = receipt::markdown(&some);
     assert!(md.contains("caught 2 of 3") && md.contains("src/price.js:3"), "{md}");
 }

@@ -60,7 +60,7 @@ fn decision_when_tests_pass(rules: &Value) -> Value {
     let d = json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] });
     let tests = json!({ "status": "RAN", "runner": "jest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
         "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] });
-    kern::receipt::build(&d, rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }))["decision"].clone()
+    kern::receipt::build(&d, rules, &tests)["decision"].clone()
 }
 
 #[test]

@@ -71,10 +71,10 @@ fn condo_6842_a_test_file_the_machine_killed_on_the_old_code_is_kerns_limit_not_
     let mut tests = c.clone();
     tests["runner"] = serde_json::json!("jest");
     let r = kern::receipt::build(&serde_json::json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] }),
-        &serde_json::json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] }), &tests, &serde_json::json!({ "status": "OFF", "why": "no AI key" }));
+        &serde_json::json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] }), &tests);
     assert_eq!(r["decision"], "unverified", "{r}");
     assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "test-old-sandbox" && x["what"].as_str().unwrap().contains("config.spec.js")), "{r}");
-    let md = kern::receipt::markdown(&r, None);
+    let md = kern::receipt::markdown(&r);
     assert!(!md.contains("✅ Tests") && !md.contains("already failing before this change"), "{md}");
 }
 

@@ -1023,10 +1023,6 @@ pub fn decide(run: &mut dyn FnMut(Suite) -> R<Option<bool>>, focused: bool) -> R
     })
 }
 
-pub fn run_limit(left: std::time::Duration, limit: Option<std::time::Duration>) -> Option<std::time::Duration> {
-    match limit { None => (!left.is_zero()).then_some(left), Some(l) => (left >= l).then_some(l) }
-}
-
 const MAX_PLANTED: usize = 40;
 const MAX_TARGETS: usize = 40;
 const EXTENSIONS: [&str; 8] = [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".mts", ".cts"];
@@ -1265,39 +1261,6 @@ fn runtime_code(path: &str, source: &str) -> String {
 pub fn same_behaviour(path: &str, old: &str, new: &str) -> bool { crate::capability::same_program(path, &runtime_code(path, old), &runtime_code(path, new)) }
 #[derive(Clone, Debug)]
 pub struct Plan { pub targets: Vec<String>, pub mutants: Vec<Mutant>, pub command: Vec<String>, pub tests_paths: Vec<String>, pub old_files: Vec<String>, pub runner: Runner, pub known: Vec<String> }
-pub fn split_planting(plan: &Plan, n: usize) -> Vec<Plan> {
-    let total = plan.mutants.len();
-    let parts = n.min(total.div_ceil(4)).max(1);
-    let (size, extra) = (total / parts, total % parts);
-    let mut at = 0;
-    (0..parts).map(|i| {
-        let take = size + usize::from(i < extra);
-        let part = Plan { mutants: plan.mutants[at..at + take].to_vec(), ..plan.clone() };
-        at += take;
-        part
-    }).collect()
-}
-pub fn merge_planted(parts: Vec<Value>) -> R<Value> {
-    let mut merged = json!({ "version": 1, "baseline": { "old": true, "new": true, "old_error": "", "new_error": "" }, "milliseconds": { "old": 0, "new": 0, "total": 0 } });
-    let mut mutants = Vec::new();
-    for part in parts {
-        if part["version"] != 1 { return Ok(part); }
-        for side in ["old", "new"] {
-            if part["baseline"][side] != true && merged["baseline"][side] == true {
-                merged["baseline"][side] = json!(false);
-                merged["baseline"][format!("{side}_error")] = part["baseline"][format!("{side}_error")].clone();
-            }
-        }
-        for k in ["old", "new", "total"] {
-            let ms = part["milliseconds"][k].as_u64().unwrap_or(0);
-            if ms > merged["milliseconds"][k].as_u64().unwrap_or(0) { merged["milliseconds"][k] = json!(ms); }
-        }
-        mutants.extend(part["mutants"].as_array().cloned().unwrap_or_default());
-    }
-    mutants.sort_by_key(|m| m["id"].as_u64().unwrap_or(u64::MAX));
-    merged["mutants"] = json!(mutants);
-    Ok(merged)
-}
 impl Plan {
     pub fn json(&self, budget_seconds: u64) -> Value {
         json!({ "version": 1, "command": self.command, "tests_paths": self.tests_paths, "budget_seconds": budget_seconds, "old_files": self.old_files, "runner": self.runner.name(), "known": self.known,

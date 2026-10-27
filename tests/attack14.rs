@@ -54,7 +54,6 @@ fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str]) -> Report {
 }
 fn passing(keys: &[&str]) -> Report { report(&keys.iter().map(|k| (*k, 1, 0, 0)).collect::<Vec<_>>(), &[]) }
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn looks(receipt: &Value) -> Vec<String> { receipt["look"].as_array().into_iter().flatten().map(|x| x["what"].as_str().unwrap_or("").to_string()).collect() }
 fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
 fn runner(package: &str) -> Tests {
@@ -110,8 +109,8 @@ fn checked_like_run(r: &Path, base: &str, head: &str, package: &str, old: &Repor
     tests["edited"] = json!(outcome.checked);
     tests["edited_unchecked"] = json!(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })).collect::<Vec<_>>());
     tests["test_data"] = json!(keep.data);
-    let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
-    let md = receipt::markdown(&receipt, None);
+    let receipt = receipt::build(&drive_json(), &rules, &tests);
+    let md = receipt::markdown(&receipt);
     (receipt, md)
 }
 
@@ -209,8 +208,8 @@ fn a_script_kern_cannot_see_into_does_not_say_no_new_powers() {
         let rules = kern::rules::rules(&r, &base, &head).unwrap();
         let key = "test/app.test.js > ok";
         let tests = suite::compare(&passing(&[key]), &passing(&[key]), Some(&passing(&[key])));
-        let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
-        let md = receipt::markdown(&receipt, None);
+        let receipt = receipt::build(&drive_json(), &rules, &tests);
+        let md = receipt::markdown(&receipt);
         if receipt["decision"] == "clear" { cleared.push(format!("{what}, {path}: powers {} not checked {}\n{md}", rules["powers"], rules["not_checked"])); }
     }
     assert!(cleared.is_empty(),

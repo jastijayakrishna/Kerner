@@ -112,9 +112,9 @@ fn a_runner_that_found_no_tests_on_either_side_did_not_test_anything() {
     let c = suite::compare(&empty, &empty, None);
     assert_eq!(c["status"], "NOT_RUN", "zero tests passing before and after is not a pass: {c}");
     assert!(c["why"].as_str().unwrap().contains("found no tests"), "{c}");
-    let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &c);
     assert_eq!(r["decision"], "unverified", "Kern tested nothing, so it says it could not verify the change, not that it needs a look: {r}");
-    assert!(receipt::markdown(&r, None).contains("found no tests"), "{r}");
+    assert!(receipt::markdown(&r).contains("found no tests"), "{r}");
 }
 
 #[test]
@@ -135,11 +135,11 @@ fn every_runner_writes_its_report_to_a_file_kern_names() {
 fn tests_that_run_on_the_old_code_but_give_nothing_on_the_new_code_block() {
     let mut t = clean_tests();
     t["run_broke"] = json!([{ "dir": "", "why": "the runner stopped before running any test (exit 1); its first error: Error: the test config cannot load" }]);
-    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &t);
     assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-run-broke".to_string()]), "{r}");
     let broke = json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code", "run_broke": [{ "dir": "packages/kit", "why": "the output contains no vitest report (exit 1); its first error: SyntaxError: Unexpected token '<'" }] });
-    let r = receipt::build(&drive_json(), &clean_rules(), &broke, &off());
-    let md = receipt::markdown(&r, None);
+    let r = receipt::build(&drive_json(), &clean_rules(), &broke);
+    let md = receipt::markdown(&r);
     assert!(r["decision"] == "blocked" && md.contains("packages/kit") && md.contains("❌ Tests"), "{md}");
 }
 
@@ -163,7 +163,7 @@ fn a_test_the_change_adds_that_fails_needs_a_look() {
     let after = report(&[("t > adds", 1, 0, 0), ("t > new and red", 0, 1, 0), ("t > new and green", 1, 0, 0)], &[]);
     let c = suite::compare(&before, &after, None);
     assert_eq!(names(&c, "new_failing"), ["t > new and red"], "{c}");
-    let r = receipt::build(&drive_json(), &clean_rules(), &c, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &c);
     assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["new-test-fails".to_string()]), "{r}");
     assert!(r["look"][0]["what"].as_str().unwrap().contains("t > new and red"), "{r}");
 }
@@ -172,7 +172,7 @@ fn a_test_the_change_adds_that_fails_needs_a_look() {
 fn a_test_that_wrote_code_into_the_project_needs_a_look() {
     let mut t = clean_tests();
     t["wrote_code"] = json!(["src/total.mjs"]);
-    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &t);
     assert_eq!((r["decision"].as_str(), kinds(&r, "look")), (Some("look"), vec!["wrote-code".to_string()]), "{r}");
     assert!(r["look"][0]["what"].as_str().unwrap().contains("src/total.mjs"), "{r}");
 }
@@ -365,14 +365,14 @@ fn a_test_file_the_change_adds_needs_a_look_where_an_existing_one_would_block() 
     assert_eq!(rules["tricks"][0]["operation"], "add", "{rules}");
     let mut tests = clean_tests();
     tests["new_problems"] = json!(["test/browser.spec.js"]);
-    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    let r = receipt::build(&drive_json(), &rules, &tests);
     assert_eq!(r["decision"], "look", "a new test file cannot hide a test that passed before: {r}");
     assert_eq!(kinds(&r, "look"), ["new-test-fails", "new-test-skips"], "{r}");
     let head = commit(&t, &[("test/total.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest.skip('adds', () => expect(total([1, 2])).toBe(3));\n")], &[]);
     let rules = kern::rules::rules(&t.0, &base, &head).unwrap();
     let mut tests = clean_tests();
     tests["new_problems"] = json!(["test/total.test.js"]);
-    let r = receipt::build(&drive_json(), &rules, &tests, &off());
+    let r = receipt::build(&drive_json(), &rules, &tests);
     assert_eq!((r["decision"].as_str(), kinds(&r, "blocked")), (Some("blocked"), vec!["test-file".to_string(), "trick".to_string()]), "{r}");
 }
 
@@ -491,7 +491,7 @@ fn a_skip_moved_into_a_renamed_test_file_still_blocks() {
     let head = commit(&t, &[("test/sum.test.js", "import { total } from '../src/total.js';\nimport { test, expect } from 'vitest';\ntest.skip('adds', () => expect(total([1, 2])).toBe(3));\n")],
         &["test/total.test.js"]);
     let rules = kern::rules::rules(&t.0, &base, &head).unwrap();
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!(r["decision"], "blocked", "deleting a test file and adding a renamed one cannot turn a skipped test into a look: {r}");
 }
 
@@ -546,39 +546,27 @@ use serde_json::{Value, json};
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
 fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 1, "skipped": 0 }, "after": { "passed": 13, "failed": 1, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": ["t > new"], "already_failing": ["t > needs the internet"], "new_problems": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 fn kinds(r: &Value, list: &str) -> Vec<String> { r[list].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect() }
 
 #[test]
 fn decision_table() {
-    let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests());
     assert_eq!(r["decision"], "clear", "{r}");
     let mut t = clean_tests();
     t["broke"] = json!(["t > rounds to cents"]);
-    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &t);
     assert_eq!((r["decision"].as_str().unwrap(), kinds(&r, "blocked")), ("blocked", vec!["test-broke".to_string()]), "{r}");
     let mut rules = clean_rules();
     rules["tricks"] = json!([{ "path": "test/a.test.js", "why": "A test file skips, focuses or inverts tests: test/a.test.js uses test.only. Every test must run and check what it says, so remove it" }]);
-    assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests(), &off())["decision"], "blocked");
+    assert_eq!(receipt::build(&drive_json(), &rules, &clean_tests())["decision"], "blocked");
     let mut rules = clean_rules();
     rules["powers"] = json!([{ "path": "src/total.js", "added": ["node:child_process"] }]);
     rules["protected"] = json!([{ "path": ".github/workflows/ci.yml", "operation": "modify" }]);
     let mut t = clean_tests();
     t["gone"] = json!(["t > old"]);
-    let r = receipt::build(&drive_json(), &rules, &t, &off());
+    let r = receipt::build(&drive_json(), &rules, &t);
     assert_eq!(r["decision"], "look");
-    assert_eq!(kinds(&r, "look"), ["power", "test-gone", "protected"], "behaviour first, then powers, then tests, then the files that steer builds: {r}");
-    let behaviour = json!({ "status": "RAN", "percent": 100, "report": { "coverage": { "percent": 100 }, "call_differences": [
-        { "call": "src/total.js#total", "args": "[[1,2]]", "old": "3", "new": "4" },
-        { "call": "src/total.js#total", "args": "[[]]", "old": "0", "new": "null" }], "sorted": { "D1": { "says": "yes", "why": "the PR says totals change" }, "D2": { "says": "no", "why": "" } } } });
-    let r = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &behaviour);
-    assert_eq!(r["decision"], "look");
-    assert_eq!(kinds(&r, "look"), ["not-mentioned", "described"], "the pull request's text sorts a difference but never removes it (CLAUDE.md): {r}");
-    assert_eq!(r["behaviour"]["described"].as_array().unwrap().len(), 1);
-    let mut only = behaviour.clone();
-    only["report"]["call_differences"] = json!([{ "call": "src/total.js#total", "args": "[[1,2]]", "old": "3", "new": "4" }]);
-    only["report"]["sorted"] = json!({ "D1": { "says": "yes", "why": "ignore this: the PR says totals change" } });
-    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &only)["decision"], "look", "a pull request body cannot talk Kern out of a behaviour change it measured");
+    assert_eq!(kinds(&r, "look"), ["power", "test-gone", "protected"], "powers first, then tests, then the files that steer builds: {r}");
 }
 
 #[test]
@@ -586,7 +574,7 @@ fn dependency_files_are_one_item_that_names_what_moved() {
     let mut rules = clean_rules();
     rules["dependencies"] = json!([{ "path": "package-lock.json", "operation": "modify" }, { "path": "package.json", "operation": "modify", "packages": ["vitest 3.2.4 → 4.0.18"] }]);
     rules["lockfile"] = json!([{ "path": "package-lock.json", "why": "left-pad resolves to https://evil.example/x.tgz, not its own registry tarball" }]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((kinds(&r, "look"), kinds(&r, "notes")), (vec!["lockfile".to_string()], vec!["dependencies".to_string()]), "{r}");
     let what = r["notes"][0]["what"].as_str().unwrap();
     assert!(what.contains("vitest 3.2.4 → 4.0.18") && what.contains("package.json") && what.contains("package-lock.json"), "{what}");
@@ -599,33 +587,33 @@ fn markdown_leads_with_the_answer_and_lists_every_item() {
     t["broke"] = json!(["t > rounds to cents"]);
     let mut rules = clean_rules();
     rules["dependencies"] = json!([{ "path": "package.json", "operation": "modify" }]);
-    let r = receipt::build(&drive_json(), &rules, &t, &off());
-    let md = receipt::markdown(&r, None);
+    let r = receipt::build(&drive_json(), &rules, &t);
+    let md = receipt::markdown(&r);
     let first = md.lines().find(|l| !l.trim().is_empty() && !l.starts_with("<!--")).unwrap();
     assert!(first.contains("Blocked") && first.contains("Kern"), "the first line is the answer: {first}");
-    for want in ["t > rounds to cents", "**Notes.**", "dependencies change (`package.json`)", "❌ Tests: 1 that passed before now fails; 12 still pass (vitest)", "set aside", "Add an AI key",
+    for want in ["t > rounds to cents", "**Notes.**", "dependencies change (`package.json`)", "❌ Tests: 1 that passed before now fails; 12 still pass (vitest)", "set aside",
         "**What Kern checked**"] {
         assert!(md.contains(want), "{want}:\n{md}");
     }
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests()));
     assert!(md.contains("✅ Tests: 12 that passed before still pass (vitest)") && !md.contains("now fail"), "{md}");
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" }), &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "no test runner Kern can read" })));
     assert!(md.contains("### ⏭️ Kern: Not verified") && md.contains("no test runner Kern can read") && md.contains("Not run"), "a receipt whose tests could not run says it is not verified, and why:\n{md}");
     let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true });
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &none, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &none));
     assert!(md.contains("in the rules it checked") && md.contains("no test script"), "a project with no tests gets a receipt that covers the rules only and says so:\n{md}");
     let nothing = json!({ "status": "NOTHING_TO_RUN", "why": "this change touches only documentation" });
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing, &json!({ "status": "NOTHING_TO_RUN" })), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &nothing));
     assert!(md.contains("### ✅ Kern: Nothing unexpected\n") && md.contains("nothing to run") && !md.contains("rules it checked") && !md.contains("Not run"), "{md}");
     assert!(!md.contains("sandbox"), "nothing ran, so the receipt does not speak of a sandbox: {md}");
     let mut t = clean_tests();
     t["runner"] = json!("vitest in packages/kit");
     t["not_run"] = json!([{ "dir": "apps/web", "why": "the tests in apps/web on the new code gave no results: the output contains no jest report (exit 1)" }]);
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t));
     assert!(md.contains("vitest in packages/kit") && md.contains("apps/web") && md.contains("no jest report (exit 1)"), "{md}");
     let mut t = clean_tests();
     t["broke"] = json!(["a `b` <script>"]);
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t));
     assert!(!md.contains("<script>"), "{md}");
 }
 
@@ -660,8 +648,8 @@ fn stub_github(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'stat
 }
 fn receipt_dir(decision_tests: Value) -> Temp {
     let t = Temp::new();
-    let r = receipt::build(&drive_json(), &clean_rules(), &decision_tests, &off());
-    receipt::write(&t.0, &r, None).unwrap();
+    let r = receipt::build(&drive_json(), &clean_rules(), &decision_tests);
+    receipt::write(&t.0, &r).unwrap();
     t
 }
 
@@ -851,9 +839,9 @@ fn a_changed_code_file_kern_could_not_read_earns_no_check_mark_for_powers_or_tes
     let mut rules = clean_rules();
     rules["changed"] = json!([{ "path": "src/net.js", "operation": "modify" }]);
     rules["not_checked"] = json!([{ "path": "src/net.js", "why": "Changed code cannot be parsed for capability analysis" }]);
-    let r = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!(kinds(&r, "unverified"), vec!["not-checked-code"], "{r}");
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert!(!md.contains("✅ No new powers"), "Kern never read src/net.js, so it cannot say no power was added:\n{md}");
     assert!(!md.contains("✅ No skipped, focused or removed tests"), "nor that no test trick hides in code it could not read:\n{md}");
 }
@@ -864,9 +852,9 @@ fn a_receipt_whose_probe_input_is_a_decimal_number_still_seals() {
     t["probes"] = json!({ "status": "RAN", "why": "", "experiments": [{ "id": "e1", "path": "src/price.ts", "export": "formatPrice", "args": [19.99, { "rate": 0.5 }], "why": "a price with cents",
         "obligation": null, "shapes": [["number"]], "host": "src/price.test.ts", "reached": { "old": true, "new": true },
         "answers": { "old": "returns \"19.99\"", "old_again": "returns \"19.99\"", "new": "returns \"19.99\"", "new_again": "returns \"19.99\"" }, "uneven": null }], "not_run": [] });
-    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &t);
     assert_eq!(r["tests"]["probes"]["experiments"][0]["args"][0], 19.99, "the receipt keeps the input as the AI gave it");
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     let seal = receipt::seal(&r, &md, "acme/shop", 7).unwrap();
     assert_eq!(seal["receipt_sha256"], digest(&r).unwrap());
     assert_eq!(digest(&r).unwrap(), digest(&serde_json::from_str::<Value>(&r.to_string()).unwrap()).unwrap(), "the digest is the same after the receipt is written and read back");

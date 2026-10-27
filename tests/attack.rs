@@ -171,8 +171,7 @@ fn the_receipt_does_not_let_a_hostile_runner_name_inject_lines() {
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = json!({ "status": "RAN", "runner": "vitest in packages/x\n### FORGEDMARKER", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 },
         "kept": 1, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
-    let behaviour = json!({ "status": "OFF", "why": "no AI key" });
-    let md = receipt::markdown(&receipt::build(&d, &rules, &tests, &behaviour), None);
+    let md = receipt::markdown(&receipt::build(&d, &rules, &tests));
     assert!(!md.contains("\n### FORGEDMARKER"), "a package directory name reaches the receipt through the unescaped runner line, so a newline forges its own Markdown line:\n{md}");
 }
 
@@ -240,7 +239,7 @@ test('is a number', () => expect(total([1])).toBeDefined());\n")], &[]);
     assert_eq!(r["weakened"], json!([{ "path": "test/total.test.js", "removed": 2, "missing": ["adds nothing", "adds one"], "emptied": ["adds"], "loosened": ["is a number"] }]), "{r}");
     let d = json!({ "base": base, "head": head, "skipped": [], "unmeasured": [] });
     let not_run = json!({ "status": "NOT_RUN", "why": "the tests need a database" });
-    let built = receipt::build(&d, &r, &not_run, &json!({ "status": "OFF", "why": "no AI key" }));
+    let built = receipt::build(&d, &r, &not_run);
     let kinds: Vec<&str> = built["look"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
     for k in ["tests-removed", "tests-emptied", "tests-loosened"] { assert!(kinds.contains(&k), "{k}: {kinds:?}"); }
     assert_eq!(built["decision"], "look");
@@ -261,7 +260,7 @@ fn code_that_starts_using_a_node_feature_newer_than_its_package_supports_needs_a
     assert!(names.contains(&"node:sqlite") && found[0]["features"].as_array().unwrap().iter().all(|f| f["since"] == "22.13.0"),
         "workers-sdk#11805 broke workerd's CI on Node 20 by importing node:sqlite in a package that supports Node 20: {r}");
     let d = json!({ "base": base, "head": head, "skipped": [], "unmeasured": [] });
-    let built = receipt::build(&d, &r, &json!({ "status": "NOT_RUN", "why": "e2e tests are not run" }), &json!({ "status": "OFF", "why": "no AI key" }));
+    let built = receipt::build(&d, &r, &json!({ "status": "NOT_RUN", "why": "e2e tests are not run" }));
     assert!(built["look"].as_array().unwrap().iter().any(|x| x["kind"] == "node-version"), "{built}");
     let again = commit(&t, &[(worker, &sqlite.replace("a = 1", "a = 2"))], &[]);
     assert_eq!(rules(&t, &head, &again)["node_versions"], json!([]), "a feature the code already used is not new");

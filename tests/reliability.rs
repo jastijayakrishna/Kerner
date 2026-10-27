@@ -59,7 +59,6 @@ fn report(tests: &[(&str, u32, u32, u32)], problems: &[&str]) -> Report {
 fn drive_json() -> Value { json!({ "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222", "skipped": [], "unmeasured": [] }) }
 fn clean_rules() -> Value { json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] }) }
 fn clean_tests() -> Value { json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 12, "failed": 0, "skipped": 0 }, "after": { "passed": 12, "failed": 0, "skipped": 0 }, "kept": 12, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] }) }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
 
 const PACKAGE: &str = r#"{"name":"shop","devDependencies":{"vitest":"3.2.0"}}"#;
 const MATH: &str = "export function sum(items) {\n  return items.reduce((a, b) => a + b, 0);\n}\nexport function product(items) {\n  return items.reduce((a, b) => a * b, 1);\n}\n";
@@ -79,7 +78,7 @@ fn a_change_to_an_import_line_still_runs_the_tests() {
     let t = Temp::new();
     let (r, base) = repo(&t, &[("package.json", PACKAGE), ("src/math.js", MATH), ("src/total.js", TOTAL), ("test/total.test.js", TOTAL_TEST)]);
     let head = commit(&r, &[("src/total.js", &TOTAL.replace("import { sum }", "import { product as sum }"))]);
-    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap();
     assert_ne!(out["tests"], "NOTHING_TO_RUN", "total() now multiplies, and the test that passed before would fail: {out}");
 }
 
@@ -93,7 +92,7 @@ fn a_submodule_change_is_named_in_the_receipt() {
     git(&r, &["update-index", "--cacheinfo", "160000,2222222222222222222222222222222222222222,vendor/payments"]);
     git(&r, &["commit", "-q", "-m", "move submodule"]);
     let head = git(&r, &["rev-parse", "HEAD"]);
-    check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+    check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap();
     let md = std::fs::read_to_string(t.0.join("out").join("receipt.md")).unwrap();
     assert!(md.contains("vendor/payments"), "the change points the project at other code, yet the receipt never names it:\n{md}");
 }
@@ -108,7 +107,7 @@ fn a_package_whose_tests_kern_runs_gets_its_dependencies_installed() {
     let has = |d: &str| d == "packages/kit";
     assert_eq!(suite::packages(&["packages/kit/test/pad.test.js"], has), ["packages/kit"], "Kern runs the tests of packages/kit");
     let out = t.0.join("out");
-    drive::prepare(&r, &base, &head, &out, None).unwrap();
+    drive::prepare(&r, &base, &head, &out).unwrap();
     assert!(drive::setup(&out, &operator(), u64::MAX).is_err(), "no Docker here, so setup stops after it writes its plan");
     let plan = read_json(out.join("sandbox").join("setup-new").join("drive-setup.json")).or_else(|_| read_json(out.join("sandbox").join("setup-old").join("drive-setup.json"))).unwrap();
     let dirs: Vec<String> = plan["dirs"].as_array().unwrap().iter().map(|d| d.as_str().unwrap().to_string()).collect();
@@ -122,7 +121,7 @@ fn only_the_setup_of_a_project_whose_tests_drive_a_browser_looks_for_the_playwri
         let (r, base) = repo(&t, files);
         let head = commit(&r, &[("src/page.js", "export const title = (name) => name;\n")]);
         let out = t.0.join("out");
-        drive::prepare(&r, &base, &head, &out, None).unwrap();
+        drive::prepare(&r, &base, &head, &out).unwrap();
         assert!(drive::setup(&out, &operator(), u64::MAX).is_err(), "no Docker here, so setup stops after it writes its plan");
         read_json(out.join("sandbox").join("setup-new").join("drive-setup.json")).or_else(|_| read_json(out.join("sandbox").join("setup-old").join("drive-setup.json"))).unwrap()
     };
@@ -137,8 +136,8 @@ fn a_receipt_whose_package_tests_did_not_run_does_not_say_nothing_unexpected() {
     let mut t = clean_tests();
     t["runner"] = json!("vitest in packages/kit");
     t["not_run"] = json!([{ "dir": "apps/web", "why": "Kern runs the tests of at most 5 packages per change" }]);
-    let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
-    let md = receipt::markdown(&r, None);
+    let r = receipt::build(&drive_json(), &clean_rules(), &t);
+    let md = receipt::markdown(&r);
     assert!(!md.contains("### ✅ Kern: Nothing unexpected\n"), "the tests of apps/web never ran, yet the receipt opens with an unqualified pass:\n{md}");
 }
 
@@ -151,7 +150,7 @@ fn a_change_that_adds_large_text_fixtures_is_still_checked() {
     let files: Vec<(String, String)> = (0..70).map(|i| (format!("test/fixtures/case{i:02}.txt"), format!("{i}\n{fixture}"))).collect();
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
     let head = commit(&r, &refs);
-    let out = drive::prepare(&r, &base, &head, &t.0.join("out"), None);
+    let out = drive::prepare(&r, &base, &head, &t.0.join("out"));
     assert!(out.is_ok(), "70 text fixtures of 1 MB each are an ordinary change: {:?}", out.err().map(|e| e.0));
 }
 
@@ -186,7 +185,7 @@ fn stub_github(route: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'stat
 }
 fn posted_status(tests: Value) -> String {
     let t = Temp::new();
-    receipt::write(&t.0, &receipt::build(&drive_json(), &clean_rules(), &tests, &off()), None).unwrap();
+    receipt::write(&t.0, &receipt::build(&drive_json(), &clean_rules(), &tests)).unwrap();
     let (url, seen) = stub_github(|m, p| match (m, p) {
         ("GET", p) if p.starts_with("/repos/acme/shop/pulls/7") => (200, r#"{"head":{"sha":"2222222222222222222222222222222222222222"}}"#.into()),
         ("GET", p) if p.starts_with("/repos/acme/shop/issues/7/comments") => (200, "[]".into()),
@@ -235,7 +234,7 @@ fn decide(base: &[(&str, &str)], head: &[(&str, &str)]) -> Value {
     let t = Temp::new();
     let (r, b) = repo(&t, base);
     let h = commit(&r, head);
-    check::check(&r, &b, &h, &t.0.join("out"), &operator(), None, None).unwrap()["decision"].clone()
+    check::check(&r, &b, &h, &t.0.join("out"), &operator(), None).unwrap()["decision"].clone()
 }
 
 #[test]
@@ -252,7 +251,7 @@ fn changed_files_the_rules_cannot_read_do_not_pass_as_clear() {
         bytes.extend(code(&padded(3), reach).as_bytes());
         std::fs::write(r.join("src/rows.js"), bytes).unwrap();
         let head = commit(&r, &[]);
-        check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap()["decision"].clone()
+        check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap()["decision"].clone()
     };
     assert_eq!((skip(100), power(100)), (json!("blocked"), json!("look")), "in ordinary files a new skip blocks and a new power needs a look");
     assert_eq!((skip(20_000), power(20_000), stray_byte), (json!("blocked"), json!("look"), json!("look")),
@@ -266,7 +265,7 @@ fn a_receipt_never_says_no_tests_were_removed_when_a_test_file_was_deleted() {
     let (r, base) = repo(&t, &[("package.json", package), ("src/math.js", MATH), ("test/math.test.js", "import test from 'ava';\nimport { sum } from '../src/math.js';\ntest('sums', (t) => t.is(sum([2, 3]), 5));\n")]);
     std::fs::remove_file(r.join("test/math.test.js")).unwrap();
     let head = commit(&r, &[]);
-    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+    let out = check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap();
     let md = std::fs::read_to_string(t.0.join("out").join("receipt.md")).unwrap();
     assert!(!md.contains("No skipped, focused or removed tests"), "the change deletes test/math.test.js and the tests did not run ({}), yet the receipt says:\n{md}", out["tests"]);
 }
@@ -275,7 +274,7 @@ fn a_receipt_never_says_no_tests_were_removed_when_a_test_file_was_deleted() {
 fn github_hiccups_are_retried_and_a_receipt_comment_is_never_doubled() {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     let t = Temp::new();
-    receipt::write(&t.0, &receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None).unwrap();
+    receipt::write(&t.0, &receipt::build(&drive_json(), &clean_rules(), &clean_tests())).unwrap();
     let (pulls, created, statuses) = (std::sync::Arc::new(AtomicUsize::new(0)), std::sync::Arc::new(AtomicUsize::new(0)), std::sync::Arc::new(AtomicUsize::new(0)));
     let (p, c, s) = (pulls.clone(), created.clone(), statuses.clone());
     let (url, seen) = stub_github(move |m, path| match (m, path) {
@@ -345,7 +344,7 @@ fn a_text_file_the_code_reads_is_not_documentation() {
         let t = Temp::new();
         let (r, b) = repo(&t, files);
         let h = commit(&r, change);
-        check::check(&r, &b, &h, &t.0.join("out"), &operator(), None, None).unwrap()["tests"].clone()
+        check::check(&r, &b, &h, &t.0.join("out"), &operator(), None).unwrap()["tests"].clone()
     };
     let files = [("package.json", PACKAGE), ("src/allow.js", allow), ("src/allowlist.txt", "example.com\n"), ("README.md", "# shop\n")];
     assert_ne!(tests_after(&files, &[("src/allowlist.txt", "example.com\nevil.example\n")]), json!("NOTHING_TO_RUN"),
@@ -366,7 +365,7 @@ fn a_blocked_test_file_says_why_it_no_longer_runs() {
     let before = kern::proof::read_report(policy::Runner::Vitest, &report("")).unwrap();
     let after = kern::proof::read_report(policy::Runner::Vitest, &report("\u{1b}[31mError: Cannot find module '../src/cart.js'\u{1b}[39m\n  imported from test/cart.test.js\n    at resolve (node:internal)")).unwrap();
     let tests = suite::compare(&before, &after, Some(&after));
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &tests, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &tests));
     assert!(md.contains("test/cart.test.js") && md.contains("Cannot find module") && !md.contains("\u{1b}"), "a block names the error, without terminal colours:\n{md}");
 }
 
@@ -395,7 +394,7 @@ fn a_package_json_change_says_what_changed_in_it() {
         let (r, b) = repo(&t, &[("package.json", base), ("src/math.js", MATH)]);
         let h = commit(&r, &[("package.json", head)]);
         let rules = kern::rules::rules(&r, &b, &h).unwrap();
-        let built = receipt::build(&drive_json(), &rules, &clean_tests(), &off());
+        let built = receipt::build(&drive_json(), &rules, &clean_tests());
         let whats = |list: &str, kind: &str| built[list].as_array().unwrap().iter().filter(|x| x["kind"] == kind).map(|x| x["what"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         (whats("look", "install"), whats("notes", "dependencies"))
     };
@@ -477,7 +476,7 @@ fn a_receipt_never_says_tests_still_pass_when_no_test_could_load_on_the_old_code
     assert_eq!(c["status"], "NOT_RUN", "nothing loaded on the old code, so there was nothing to compare: {c}");
     assert!(c["why"].as_str().unwrap().contains("could load"), "{c}");
     assert_eq!(c["new_failing"], json!(["app/new.test.ts"]), "a test file the change adds that does not run is still listed: {c}");
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &c, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &c));
     assert!(!md.contains("still pass"), "{md}");
 }
 
@@ -610,7 +609,7 @@ fn a_new_test_that_fails_the_way_old_tests_already_fail_here_is_set_aside() {
     let c = suite::compare(&before, &after, Some(&after));
     assert_eq!(c["same_failure"], json!(["test/price.test.js > formats a price"]), "a new test that fails the way old tests already fail here (sqlite's native part is missing) is the sandbox, not the change: {c}");
     assert_eq!(c["new_failing"], json!(["test/total.test.js > totals"]), "a new test that fails some other way still needs a look: {c}");
-    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [] }), &c, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &json!({ "changed": [] }), &c));
     assert!(md.contains("1 new fail here the same way tests already failing on the old code do"), "{md}");
 }
 
@@ -619,7 +618,7 @@ fn many_items_in_one_test_file_are_one_line() {
     let names: Vec<String> = (1..=5).map(|i| format!("test/price.test.js > formats case {i}")).collect();
     let mut tests = suite::compare(&report(&[("test/a.test.js > adds", 1, 0, 0)], &[]), &report(&[("test/a.test.js > adds", 1, 0, 0)], &[]), None);
     tests["new_failing"] = json!(names.iter().chain(["test/other.test.js > one".to_string()].iter()).collect::<Vec<_>>());
-    let r = receipt::build(&drive_json(), &json!({ "changed": [] }), &tests, &off());
+    let r = receipt::build(&drive_json(), &json!({ "changed": [] }), &tests);
     let what: Vec<&str> = r["look"].as_array().unwrap().iter().filter(|x| x["kind"] == "new-test-fails").map(|x| x["what"].as_str().unwrap()).collect();
     assert_eq!(what.len(), 2, "five failing tests in one file are one item, the one in another file its own: {what:#?}");
     assert!(what[0].starts_with("5 tests this change adds fail on the new code in `test/price.test.js`") && what[0].ends_with(", …"), "{what:#?}");
@@ -886,7 +885,7 @@ fn failures_on_sides_set_up_differently_or_without_proof_are_not_verified_never_
         "kept": 1, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [],
         "uneven": ["test/a.test.ts > adds"], "uneven_why": ["the old code's dependencies were installed and the new code's were installed from package.json"],
         "unproven": ["test/b.test.ts"] });
-    let r = receipt::build(&d, &rules, &tests, &json!({ "status": "OFF", "why": "no AI key" }));
+    let r = receipt::build(&d, &rules, &tests);
     let kinds: Vec<&str> = r["unverified"].as_array().unwrap().iter().filter_map(|x| x["kind"].as_str()).collect();
     assert!(kinds.contains(&"test-uneven") && kinds.contains(&"test-unproven"), "{kinds:?}");
     assert_eq!(r["decision"], "unverified", "{r}");
@@ -1048,7 +1047,7 @@ fn mastra_18872_an_edited_test_file_that_loads_on_neither_side_is_not_verified_n
         "on #18872 the edited builder.test.ts loaded on neither side; with planted faults dropped for time, the receipt would have said the tests still pass; a test file the change fixes so it loads, a new file and a file outside this suite are not this case");
     let mut d = clean_tests();
     d["edited_unchecked"] = json!([{ "path": edited, "why": "it did not load on the old code or the new code: Cannot find package '@internal/core/storage'" }]);
-    let r = receipt::build(&drive_json(), &clean_rules(), &d, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &d);
     assert_eq!(r["decision"], "unverified", "{r}");
 }
 
@@ -1075,11 +1074,10 @@ fn removing_or_adding_a_dependency_is_a_note_that_names_it() {
     let rules = |packages: serde_json::Value| json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
         "dependencies": [{ "path": "package.json", "operation": "modify", "packages": packages, "fields": [] }] });
     let tests = json!({ "status": "NOTHING_TO_RUN", "why": "x" });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
-    let removed = kern::receipt::build(&d, &rules(json!(["babel-plugin-styled-components (removed)"])), &tests, &off);
+    let removed = kern::receipt::build(&d, &rules(json!(["babel-plugin-styled-components (removed)"])), &tests);
     assert!(removed["look"].as_array().unwrap().is_empty() && removed["notes"][0]["what"].as_str().unwrap().contains("babel-plugin-styled-components (removed)"), "ETH-Taipei#322 removed a babel plugin: {removed}");
-    assert!(kern::receipt::markdown(&removed, None).contains("**Notes.**"), "the move is listed where a person scans it");
-    let added = kern::receipt::build(&d, &rules(json!(["react-native-purchases 9.5.4 (new)"])), &tests, &off);
+    assert!(kern::receipt::markdown(&removed).contains("**Notes.**"), "the move is listed where a person scans it");
+    let added = kern::receipt::build(&d, &rules(json!(["react-native-purchases 9.5.4 (new)"])), &tests);
     assert!(added["look"].as_array().unwrap().is_empty() && added["notes"][0]["what"].as_str().unwrap().contains("react-native-purchases 9.5.4 (new)"), "a new package is named; nothing Kern measures says more about it: {added}");
 }
 
@@ -1127,7 +1125,7 @@ fn a_lockfile_only_change_lists_what_moved_and_leaves_the_workspaces_own_package
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "lockfile": [], "agent_notes": [], "not_checked": [],
         "dependencies": [{ "path": "package-lock.json", "operation": "modify", "packages": moves.iter().map(kern::deps::shown).collect::<Vec<_>>() }] });
-    let calm = kern::receipt::build(&d, &rules, &json!({ "status": "NOTHING_TO_RUN", "why": "x" }), &json!({ "status": "OFF", "why": "no AI key" }));
+    let calm = kern::receipt::build(&d, &rules, &json!({ "status": "NOTHING_TO_RUN", "why": "x" }));
     assert_eq!(calm["decision"], "clear", "Azure/AppConfiguration-JavaScriptProvider#330 only refreshed package-lock.json: {calm}");
     assert!(calm["notes"][0]["what"].as_str().unwrap().contains("c 3.1.0 (new)"), "a new package deep in the tree is named: {}", calm["notes"]);
 }
@@ -1194,12 +1192,11 @@ fn runc_is_accepted_only_on_a_machine_its_policy_calls_throwaway() {
 fn the_receipt_says_how_the_code_ran() {
     let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
         "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
-    let mut r = receipt::build(&drive_json(), &clean_rules(), &tests, &off);
+    let mut r = receipt::build(&drive_json(), &clean_rules(), &tests);
     assert_eq!(r["sandbox"], "gvisor");
-    assert!(receipt::markdown(&r, None).contains("ran the code only in a sealed sandbox with the network off"));
+    assert!(receipt::markdown(&r).contains("ran the code only in a sealed sandbox with the network off"));
     r["sandbox"] = json!("throwaway");
-    assert!(receipt::markdown(&r, None).contains("ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran"));
+    assert!(receipt::markdown(&r).contains("ran the code only in locked containers on a throwaway machine that held no keys, with the network off while the tests ran"));
 }
 
 #[test]
@@ -1207,8 +1204,8 @@ fn the_signing_job_renders_the_comment_itself_from_the_receipt_of_this_exact_com
     let t = Temp::new();
     let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
         "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "not_run": [] });
-    let r = receipt::build(&drive_json(), &clean_rules(), &tests, &json!({ "status": "OFF", "why": "no AI key" }));
-    receipt::write(&t.0, &r, None).unwrap();
+    let r = receipt::build(&drive_json(), &clean_rules(), &tests);
+    receipt::write(&t.0, &r).unwrap();
     std::fs::write(t.0.join("receipt.md"), "### ✅ Kern: Nothing unexpected\n\n[claim your prize](https://evil.example)\n").unwrap();
     std::fs::write(t.0.join("seal.json"), "{}").unwrap();
     let head = "2222222222222222222222222222222222222222";
@@ -1224,15 +1221,15 @@ fn h3_the_self_test_must_come_out_exactly_as_known() {
     let mut tests = clean_tests();
     tests["broke"] = json!(["test/math.test.js > adds"]);
     tests["kept"] = json!(1);
-    let blocked = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    let blocked = receipt::build(&drive_json(), &clean_rules(), &tests);
     assert!(check::canary_held(&blocked).is_ok(), "{blocked}");
-    let clear = receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off());
+    let clear = receipt::build(&drive_json(), &clean_rules(), &clean_tests());
     assert!(check::canary_held(&clear).unwrap_err().contains("clear"), "a machine that misses the known break cannot judge");
-    let not_run = receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "Kern could not run the tests: docker failed" }), &off());
+    let not_run = receipt::build(&drive_json(), &clean_rules(), &json!({ "status": "NOT_RUN", "why": "Kern could not run the tests: docker failed" }));
     assert!(check::canary_held(&not_run).is_err());
     let mut two = tests.clone();
     two["broke"] = json!(["test/math.test.js > adds", "test/math.test.js > says hello"]);
-    assert!(check::canary_held(&receipt::build(&drive_json(), &clean_rules(), &two, &off())).is_err(), "a machine that also blocks the untouched test cannot judge");
+    assert!(check::canary_held(&receipt::build(&drive_json(), &clean_rules(), &two)).is_err(), "a machine that also blocks the untouched test cannot judge");
 }
 
 #[test]
@@ -1240,7 +1237,7 @@ fn h3_a_machine_whose_self_test_failed_judges_no_test() {
     let t = Temp::new();
     let (r, base) = repo(&t, &[("package.json", PACKAGE), ("src/math.js", MATH), ("test/math.test.js", "import { test } from 'vitest';\ntest('x', () => {});\n")]);
     let head = commit(&r, &[("src/math.js", &MATH.replace("a + b", "a - b"))]);
-    let out = check::judge(&r, (&base, &head), &t.0.join("out"), &operator(), None, None, &|| Err("the self-test gave clear instead of one block".to_string())).unwrap();
+    let out = check::judge(&r, (&base, &head), &t.0.join("out"), &operator(), None, &|| Err("the self-test gave clear instead of one block".to_string())).unwrap();
     let receipt = read_json(t.0.join("out").join("receipt.json")).unwrap();
     assert_eq!((out["tests"].as_str(), out["canary"].as_str()), (Some("NOT_RUN"), Some("failed: the self-test gave clear instead of one block")), "{out}");
     assert_eq!(receipt["decision"], "unverified", "{receipt}");
@@ -1252,7 +1249,7 @@ fn review_2_c_the_signing_job_rebuilds_the_answer_from_the_facts_and_refuses_fie
     let head = "2222222222222222222222222222222222222222";
     let mut tests = clean_tests();
     tests["broke"] = json!(["t > rounds to cents"]);
-    let honest = receipt::build(&drive_json(), &clean_rules(), &tests, &off());
+    let honest = receipt::build(&drive_json(), &clean_rules(), &tests);
     assert_eq!(honest["decision"], "blocked");
     let t = Temp::new();
     let mut forged = honest.clone();
@@ -1271,13 +1268,6 @@ fn review_2_c_the_signing_job_rebuilds_the_answer_from_the_facts_and_refuses_fie
         std::fs::write(t.0.join("receipt.json"), x.to_string()).unwrap();
         assert!(receipt::render(&t.0, head).is_err(), "a receipt whose {field} Kern cannot trust is refused");
     }
-    let mut ai = honest.clone();
-    ai["behaviour"]["status"] = json!("RAN");
-    std::fs::write(t.0.join("receipt.json"), ai.to_string()).unwrap();
-    std::fs::write(t.0.join("comment.md"), "### What this change does\n\n</details><!-- the rest is hidden\n- totals now round down\n").unwrap();
-    receipt::render(&t.0, head).unwrap();
-    let md = std::fs::read_to_string(t.0.join("receipt.md")).unwrap();
-    assert!(!md.contains("</details><!--") && md.contains("totals now round down"), "the AI section cannot close Kern's own block or hide the text after it:\n{md}");
 }
 
 #[test]
@@ -1295,9 +1285,9 @@ fn review_2_c_a_receipt_comment_whose_text_changed_after_signing_does_not_verify
 fn review_2_a11_no_check_mark_line_says_more_than_kern_checked() {
     let mut rules = clean_rules();
     rules["weakened"] = json!([{ "path": "test/total.test.js", "removed": ["test/total.test.js > rounds to cents"] }]);
-    let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests(), &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests()));
     assert!(!md.contains("✅ No skipped, focused or removed tests"), "a test removed inside its file is listed as a look, so the line cannot say none was removed:\n{md}");
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests(), &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &clean_tests()));
     assert!(md.contains("✅ No new powers") && md.contains("secret environment variables") && !md.contains("reads secrets"), "Kern sees secret environment variables, not every secret:\n{md}");
 }
 
@@ -1329,7 +1319,7 @@ fn review_2_a9_a_lockfile_with_more_moves_than_kern_lists_says_how_many() {
     let rules = kern::rules::rules(&r, &base, &head).unwrap();
     let lock = rules["dependencies"].as_array().unwrap().iter().find(|d| d["path"] == "package-lock.json").cloned().unwrap();
     assert_eq!((lock["count"].clone(), lock["packages"].clone()), (json!(201), Value::Null), "201 versions move and Kern lists at most 200, so it says how many instead: {lock}");
-    let note = receipt::build(&drive_json(), &rules, &clean_tests(), &off())["notes"][0]["what"].as_str().unwrap().to_string();
+    let note = receipt::build(&drive_json(), &rules, &clean_tests())["notes"][0]["what"].as_str().unwrap().to_string();
     assert!(note.contains("201 versions move in `package-lock.json`"), "{note}");
 }
 
@@ -1365,7 +1355,7 @@ fn h4_when_time_runs_short_planted_faults_go_first_then_the_type_check_and_dropp
     let mut t = clean_tests();
     t["dropped"] = json!(["planted faults"]);
     t["types"] = json!({ "status": "NOT_RUN", "why": "Kern's time ran out before it could check the TypeScript types" });
-    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t, &off()), None);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t));
     assert!(md.contains("⏭️ Planted faults: not checked") && md.contains("⏭️ Types: not checked") && md.contains("time ran out"), "{md}");
     assert!(!md.contains("✅ Types") && !md.contains("✅ Planted faults"), "{md}");
 }
@@ -1376,7 +1366,7 @@ fn a_project_with_no_test_script_is_said_plainly_and_one_kern_cannot_run_is_not_
         let t = Temp::new();
         let (r, base) = repo(&t, &[("package.json", package), ("src/total.js", "export const total = 1;\n")]);
         let head = commit(&r, &[("src/total.js", "export const total = 2;\n")]);
-        check::check(&r, &base, &head, &t.0.join("out"), &operator(), None, None).unwrap();
+        check::check(&r, &base, &head, &t.0.join("out"), &operator(), None).unwrap();
         read_json(t.0.join("out").join("receipt.json")).unwrap()
     };
     for package in [r#"{"name":"shop"}"#, r#"{"name":"shop","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#] {
@@ -1393,17 +1383,17 @@ fn review_2_a5_tests_that_could_not_run_on_changed_code_never_give_a_green_check
     for why in ["Kern could not run the tests: Sandbox unavailable: docker failed", "the tests could not run on the old code: installing its dependencies with pnpm failed: Error: Cannot find module '/home/kern/corepack/v1/pnpm/12.14.0/bin/pnpm.cjs'",
         suite::LATE, "the tests on the old code gave no results: the output contains no mocha report (exit 1); the last lines it printed: Error: No test files found"] {
         let t = json!({ "status": "NOT_RUN", "why": why, "not_run": [] });
-        let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
+        let r = receipt::build(&drive_json(), &clean_rules(), &t);
         assert_eq!(r["decision"], "unverified", "farm 16 ended 9 such checks with a green check though no test ran ({why}): {r}");
         assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["kind"] == "tests-not-run"), "{r}");
     }
     let mut t = clean_tests();
     t["not_run"] = json!([{ "dir": "apps/web", "why": "Kern runs the tests of at most 5 packages per change" }]);
-    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &t, &off())["decision"], "unverified", "a changed package whose tests did not run");
+    assert_eq!(receipt::build(&drive_json(), &clean_rules(), &t)["decision"], "unverified", "a changed package whose tests did not run");
     let none = json!({ "status": "NOT_RUN", "why": "the project has no test script, so no test checks this change", "no_tests": true, "not_run": [] });
-    let r = receipt::build(&drive_json(), &clean_rules(), &none, &off());
+    let r = receipt::build(&drive_json(), &clean_rules(), &none);
     assert_eq!(r["decision"], "clear", "a project with no tests at all would need a look on every pull request, which tells nobody anything: {r}");
-    assert!(!receipt::markdown(&r, None).contains("✅ Tests"), "{}", receipt::markdown(&r, None));
+    assert!(!receipt::markdown(&r).contains("✅ Tests"), "{}", receipt::markdown(&r));
 }
 
 #[test]
@@ -1481,8 +1471,8 @@ fn a_receipt_never_shows_a_tests_check_mark_next_to_failures_it_could_not_prove(
     for kind in ["unsteady", "uneven", "unproven", "sandbox"] {
         let mut t = clean_tests();
         t[kind] = json!(["src/total.test.ts > adds"]);
-        let r = receipt::build(&drive_json(), &clean_rules(), &t, &off());
-        let md = receipt::markdown(&r, None);
+        let r = receipt::build(&drive_json(), &clean_rules(), &t);
+        let md = receipt::markdown(&r);
         assert_eq!(r["decision"], "unverified", "{kind}: {r}");
         assert!(!md.contains("- ✅ Tests:"), "{kind}: a test fails on the new code and Kern could not prove why, so the Tests line cannot carry a check mark:\n{md}");
     }

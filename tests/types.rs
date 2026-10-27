@@ -71,28 +71,27 @@ fn errors_on_a_project_that_was_clean_block_when_the_project_runs_tsc_and_need_a
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
     let tests = |projects: serde_json::Value| json!({ "status": "NOT_RUN", "why": "no test runner", "types": { "status": "CHECKED", "projects": projects } });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
 
     let enforced_run = judge("tsconfig.json", &clean, &broken, true, None);
-    let r = receipt::build(&d, &rules, &tests(json!([enforced_run])), &off);
+    let r = receipt::build(&d, &rules, &tests(json!([enforced_run])));
     assert_eq!(r["decision"], "blocked", "{r}");
     assert!(r["blocked"][0]["what"].as_str().unwrap().contains("src/total.ts:4 TS2322"), "{r}");
-    assert!(receipt::markdown(&r, None).contains("1 new TypeScript error in `tsconfig.json`, which had none on the old code"));
+    assert!(receipt::markdown(&r).contains("1 new TypeScript error in `tsconfig.json`, which had none on the old code"));
 
-    let loose = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &broken, false, None)])), &off);
+    let loose = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &broken, false, None)])));
     assert_eq!(loose["decision"], "look");
     assert!(loose["look"].as_array().into_iter().flatten().any(|x| x["kind"] == "types-new"));
-    let uneven = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &broken, true, Some("the project has no lockfile".into()))])), &off);
+    let uneven = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &broken, true, Some("the project has no lockfile".into()))])));
     assert_eq!(uneven["decision"], "unverified", "two sides set up differently cannot be compared fairly, so Kern says it could not verify: {uneven}");
 
     let dirty = json!({ "status": "errors", "errors": 7, "list": [] });
     let not = judge("tsconfig.json", &dirty, &broken, true, None);
     assert_eq!(not["result"], "not-compared");
-    let r = receipt::build(&d, &rules, &tests(json!([not])), &off);
+    let r = receipt::build(&d, &rules, &tests(json!([not])));
     assert_ne!(r["decision"], "blocked");
-    assert!(receipt::markdown(&r, None).contains("not compared — it already had 7 TypeScript errors here on the old code"));
-    let same = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &clean, true, None)])), &off);
-    assert!(receipt::markdown(&same, None).contains("no new TypeScript errors in `tsconfig.json` (tsc on the old and the new code, TypeScript 5.6.3)"));
+    assert!(receipt::markdown(&r).contains("not compared — it already had 7 TypeScript errors here on the old code"));
+    let same = receipt::build(&d, &rules, &tests(json!([judge("tsconfig.json", &clean, &clean, true, None)])));
+    assert!(receipt::markdown(&same).contains("no new TypeScript errors in `tsconfig.json` (tsc on the old and the new code, TypeScript 5.6.3)"));
 }
 
 #[test]
@@ -114,7 +113,7 @@ fn a_new_error_about_a_module_or_an_export_is_not_verified_because_a_build_step_
     assert_eq!(p["generated"], true);
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
-    let r = receipt::build(&d, &rules, &json!({ "status": "NOT_RUN", "why": "x", "types": { "status": "CHECKED", "projects": [p] } }), &json!({ "status": "OFF", "why": "no AI key" }));
+    let r = receipt::build(&d, &rules, &json!({ "status": "NOT_RUN", "why": "x", "types": { "status": "CHECKED", "projects": [p] } }));
     assert_eq!(r["decision"], "unverified", "tuliren/turbo-template#29 imported PrismaClient, which prisma generate makes in the project's CI and Kern never ran: blocking it was wrong: {r}");
     assert!(r["unverified"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("a build step may generate")), "{r}");
 }

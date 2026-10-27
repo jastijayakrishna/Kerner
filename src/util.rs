@@ -139,12 +139,6 @@ pub fn fresh_dir(path: impl AsRef<Path>) -> R<PathBuf> {
 }
 
 pub fn b64(bytes: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(bytes) }
-pub fn unb64(s: &str) -> R<Vec<u8>> {
-    ensure!(s.len() <= 32 * 1048576, "Invalid base64");
-    let bytes = base64::engine::general_purpose::STANDARD.decode(s).map_err(|_| Denied("Invalid base64".into()))?;
-    ensure!(b64(&bytes) == s, "Noncanonical base64");
-    Ok(bytes)
-}
 
 pub struct Gate { free: std::sync::Mutex<usize>, ready: std::sync::Condvar }
 impl Gate {
@@ -160,7 +154,6 @@ impl Gate {
         out
     }
 }
-pub fn parallelism() -> usize { std::env::var("KERN_VERIFY_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(2) }
 
 pub fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
 pub fn within(until: u64, seconds: u64) -> u64 { seconds.min(until.saturating_sub(now_ms()) / 1000) }
@@ -199,7 +192,6 @@ pub fn uuid4() -> R<String> {
     let h = hex::encode(b);
     Ok(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
 }
-pub fn short_id() -> R<String> { Ok(hex::encode(random_bytes::<6>()?)) }
 pub fn is_uuid(s: &str) -> bool { s.len() == 36 && s.bytes().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { b == b'-' } else { matches!(b, b'0'..=b'9' | b'a'..=b'f') }) }
 
 pub fn safe_env(home: &Path) -> Vec<(String, String)> {

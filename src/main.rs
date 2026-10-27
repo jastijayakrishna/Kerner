@@ -1,19 +1,16 @@
-use kern::attest::{self, KeySource};
-use kern::flow::{self, Source};
-use kern::policy::{self, attenuate, contract, operator, require_role};
-use kern::promote::{self, GitHub};
+use kern::policy::{self, operator};
 use kern::util::*;
-use kern::{ensure, git, sandbox};
+use kern::{ensure, sandbox};
 use serde_json::{Value, json};
 use std::path::Path;
 
-const HELP: &str = "kern 0.3 - admission control for AI-written code
+const HELP: &str = "kern 0.3 - one receipt on every pull request
 
-Check (one receipt on every pull request; Kern's GitHub workflow, .github/workflows/kern.yml, runs these):
+Kern's GitHub workflow, .github/workflows/kern.yml, runs these:
   check <repo> <base> <head> <out-dir> <operator.json> [description.md]
                                   verifier side (--control verifier.json): the rules, the project's tests on the old and the
-                                  new code and, with an AI key, every changed line run both ways; writes receipt.json and
-                                  receipt.md (KERN_CHECK_AI=0 skips the AI part; it takes kern drive's agent settings)
+                                  new code, the type check, the build, planted faults and the inputs the AI step proposed;
+                                  writes receipt.json and receipt.md (KERN_INVESTIGATION names the investigation to wait for)
   investigate <repo> <base> <head> <pr.md> <out-dir>
                                   in Kern's investigate job, which holds ANTHROPIC_API_KEY (KERN_MODEL or claude-opus-5-5): the
                                   model states what the changed functions must keep doing from sources older than the change, and
@@ -29,92 +26,23 @@ Check (one receipt on every pull request; Kern's GitHub workflow, .github/workfl
                                   /kern approve: someone who can merge approves a signed \"needs a look\" receipt
   receipt verify <owner/repo> <pr-number> [receipt.json]
                                   check a receipt's signature with GitHub's keys, and receipt.json against its seal
+  drive clean <out-dir>           remove the check's sandbox volumes
   replay <dir>...                 judge every stored check under the folders again with today's rules: one JSON line per
                                   receipt with the answer before and after, then a summary (KERN_REPLAY_WORKERS: 1 to 4)
-Setup:
-  profile <operator-template.json> <public.pem>        verifier side: export a verifier profile
-  init <repo-dir> <profile.json|https://verifier> <owner/kern@sha> [task]
-Local box (the agent runs in a Linux container: Docker, Podman or Rancher Desktop; KERN_CONTAINER_CLI picks one):
-  doctor                          check that this machine can run the local box
-  box <box-job.json>              run one command inside the box
-  run <run-job.json> [--show]     box an agent, verify independently, promote (one command)
-Executor (--control executor.json):
-  doctor | plan <job> | task <job>
-Any agent sandbox (OpenShell, Claude Code, Codex, ...):
-  ingest <job> <agent-repo> <agent-commit>
-Verifier (--control verifier.json):
-  doctor | keygen <dir> | import <handoff-dir> <new-run-dir>
-  verify <run-dir> <contract> <operator> <new-out-dir> <private.pem>
-  verify-external <run-dir> <contract> <operator> <new-out-dir> <signer.json>
-  serve <service.json>            hosted verifier on loopback; put a TLS reverse proxy in front
-Promoter:
-  authorize <run-dir> <attestation> <contract> <operator> <expected> <public.pem>
-  promote-local <run-dir> <attestation> <contract> <operator> <expected> <public.pem> <target-git-dir>
-  promote-github <run-dir> <attestation> <contract> <operator> <expected> <public.pem> <token-file> <base-branch> <ledger-dir> <git-pin.json>
-GitHub required check:
-  check-pr <event.json> <checkout-dir> [config-path=.github/kern]
-Factory lock (deploy-time enforcement):
-  gate-artifact <checkout-dir> <commit> <attestation.json> <trusted-config-dir>
-Audit (set KERN_AUDIT_LOG=<file> to record every decision; kern run records to <output>/audit.jsonl):
-  audit <log> | report <log> <out.html>
-  audit-merges <checkout> <branch> <2026-Q3|from..until> <out-dir> [verifier.pub]
-                                  re-verify every change merged in a period (needs GITHUB_TOKEN)
-Drive (run every changed line on the old and the new code):
-  drive prepare <repo> <base> <head> <out-dir> [description.md]
-                                  the measured lines and the driver's task (out-dir/task); works anywhere
-  drive run <out-dir> <operator.json> <driver.mjs>
-                                  verifier side (--control verifier.json): one round in gVisor; writes feedback and comment.md
-  drive auto <repo> <base> <head> <out-dir> <operator.json> [description.md]
-                                  verifier side: prepare, then the agent writes the driver and Kern runs it, up to 3 rounds
-                                  (default: Claude Code in restricted mode, KERN_DRIVE_MODEL or sonnet; KERN_DRIVE_AGENT:
-                                  another agent command as a JSON array, {prompt} for the question; KERN_DRIVE_ROUNDS: 1 to 5)
-  drive sort <out-dir> [verdicts.json]
-                                  sort the best round's differences by what the pull request says: without verdicts, write
-                                  task/differences.md for an agent (auto asks its own); with its verdicts.json, sort comment.md
-  drive post <out-dir> <owner/repo> <pr-number> [update-only]
-                                  post comment.md on the pull request, or edit Kern's earlier one (GITHUB_TOKEN);
-                                  update-only: only edit an earlier one (for a change with nothing to run)
-  drive clean <out-dir>           remove the task's sandbox volumes
-Twin runtime (twin/: a new version proves itself on real requests before it serves):
-  twin plan <repo> <base> <head> <out.json>
-                                  the changed lines of code, each with the commit and pull request that changed it
-Utilities:
-  contract <contract> [narrower-contract] | pin-check <id> <file>";
-const AUDITED: [&str; 12] = ["box", "plan", "task", "ingest", "import", "verify", "verify-external", "authorize", "promote-local", "promote-github", "check-pr", "gate-artifact"];
-fn record(log: &Path, event: &Value) {
-    if let Err(e) = kern::audit::append(log, event) { eprintln!("{}", json!({ "warning": format!("Audit log not written: {e}") })); }
-}
+Verifier side (--control verifier.json):
+  doctor                          check that this machine can run the sandbox
+  pin-check <id> <file>           the hash of a pinned file, for operator.json";
 
 fn count(args: &[String], n: usize) -> R<()> {
     ensure!(args.len() == n, "Expected {n} arguments; see kern --help");
     Ok(())
 }
-fn promotion(a: &[String]) -> R<(std::path::PathBuf, Value, kern::policy::Contract, kern::policy::Operator, Value, String)> {
-    Ok((Path::new(&a[0]).join("objects.git"), read_json(&a[1])?, contract(&read_json(&a[2])?)?, operator(&read_json(&a[3])?)?, read_json(&a[4])?, std::fs::read_to_string(&a[5])?))
-}
-fn drive_agent() -> R<(Vec<String>, usize)> {
-    let agent: Vec<String> = match std::env::var("KERN_DRIVE_AGENT") {
-        Ok(v) => serde_json::from_str(&v).map_err(|_| Denied("KERN_DRIVE_AGENT must be a JSON array of strings".into()))?,
-        Err(_) => kern::drive::default_agent(&std::env::var("KERN_DRIVE_MODEL").ok().filter(|m| !m.is_empty()).unwrap_or_else(|| "sonnet".into()))?,
-    };
-    let rounds = std::env::var("KERN_DRIVE_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=5).contains(n)).unwrap_or(3);
-    Ok((agent, rounds))
-}
 fn cli() -> R<(Option<Value>, i32)> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("__runner") => return sandbox::runner().map(|_| (None, 0)),
-        Some("__setup") => return sandbox::setup().map(|_| (None, 0)),
-        Some("__exec") => return sandbox::exec(&args[1..]).map(|_| (None, 0)),
-        Some("__mutate") => return sandbox::mutate().map(|_| (None, 0)),
-        Some("__drive") => return sandbox::drive().map(|_| (None, 0)),
         Some("__drive_setup") => return sandbox::drive_setup().map(|_| (None, 0)),
         Some("__drive_test") => return sandbox::drive_test().map(|_| (None, 0)),
         Some("__drive_seal") => return sandbox::drive_seal().map(|_| (None, 0)),
-        Some("__reap") => {
-            ensure!(args.len() == 3, "Expected an engine and a container");
-            return kern::container::reap(Path::new(&args[1]), &args[2]).map(|_| (None, 0));
-        }
         Some("--control") => {
             ensure!(args.len() >= 3, "Expected control JSON and a command");
             policy::configure(&read_json(&args[1])?)?;
@@ -123,83 +51,16 @@ fn cli() -> R<(Option<Value>, i32)> {
         _ => {}
     }
     let (cmd, a) = args.split_first().map_or(("help", &[][..]), |(c, r)| (c.as_str(), r));
-    let now = now_ms();
     Ok(match cmd {
         "help" | "--help" | "-h" => { say(HELP); (None, 0) }
         "--version" => (Some(json!({ "kern": env!("CARGO_PKG_VERSION"), "implementation_sha256": policy::implementation_digest()? })), 0),
-        "box" => { count(a, 1)?; let r = kern::local::run_box_job(&kern::local::box_job(&read_json(&a[0])?)?)?; let code = r["exit_code"].as_i64().unwrap_or(1) as i32; (Some(r), code) }
-        "run" => {
-            ensure!(a.len() == 1 || (a.len() == 2 && a[1] == "--show"), "Expected a run job and optional --show");
-            let job = kern::local::run_job(Path::new(&a[0]))?;
-            let outcome = kern::local::local_run(&job);
-            record(&std::env::var_os("KERN_AUDIT_LOG").map_or_else(|| job.output.join("audit.jsonl"), std::path::PathBuf::from), &kern::audit::event("run", &outcome));
-            let r = outcome?;
-            kern::local::print_run(&r);
-            let code = i32::from(r["status"] == "BLOCKED");
-            (if a.get(1).map(String::as_str) == Some("--show") { Some(r) } else { None }, code)
-        }
         "doctor" => {
             count(a, 0)?;
-            let (ready, report) = if policy::control().is_ok() { let d = sandbox::doctor(); (d.ready, d.report) } else { kern::container::doctor() };
-            (Some(report), if ready { 0 } else { 2 })
-        }
-        "plan" => { count(a, 1)?; let r = flow::preflight(&policy::job(Path::new(&a[0]))?, true); let code = i32::from(r["status"] != "READY"); (Some(r), code) }
-        "task" => { count(a, 1)?; let r = flow::task(&policy::job(Path::new(&a[0]))?, Source::Agent)?; let code = i32::from(r["status"] != "CANDIDATE"); (Some(r), code) }
-        "ingest" => { count(a, 3)?; let r = flow::task(&policy::job(Path::new(&a[0]))?, Source::Ingest(Path::new(&a[1]), &a[2]))?; let code = i32::from(r["status"] != "CANDIDATE"); (Some(r), code) }
-        "contract" => {
-            ensure!(a.len() == 1 || a.len() == 2, "Expected a contract and an optional narrower contract");
-            let c = if a.len() == 2 { attenuate(&read_json(&a[0])?, &read_json(&a[1])?)? } else { contract(&read_json(&a[0])?)? };
-            (Some(json!({ "contract": c.value, "sha256": policy::contract_digest(&c)? })), 0)
-        }
-        "keygen" => {
-            count(a, 1)?;
-            require_role("verifier")?;
-            let dir = fresh_dir(&a[0])?;
-            let (private, public) = attest::keypair()?;
-            create_new(dir.join("private.pem"), private.as_bytes(), 0o600)?;
-            create_new(dir.join("public.pem"), public.as_bytes(), 0o644)?;
-            (Some(json!({ "public_key": dir.join("public.pem"), "private_key": dir.join("private.pem"), "key_id": attest::key_id(&attest::public_key(&public)?)? })), 0)
+            policy::control()?;
+            let d = sandbox::doctor();
+            (Some(d.report), if d.ready { 0 } else { 2 })
         }
         "pin-check" => { count(a, 2)?; (Some(json!({ "id": a[0], "file": std::path::absolute(&a[1])?, "sha256": sha256(std::fs::read(&a[1])?) })), 0) }
-        "import" => { count(a, 2)?; require_role("verifier")?; (Some(git::import_handoff(Path::new(&a[0]), Path::new(&a[1]))?), 0) }
-        "verify" | "verify-external" => {
-            count(a, 5)?;
-            let signer = if cmd == "verify" { KeySource::file(&std::fs::read_to_string(&a[4])?)? } else { KeySource::external(Path::new(&a[4]))? };
-            let envelope = flow::verify(Path::new(&a[0]), &contract(&read_json(&a[1])?)?, &operator(&read_json(&a[2])?)?, Path::new(&a[3]), &signer)?;
-            (Some(json!({ "status": "VERIFIED", "attestation": Path::new(&a[3]).join("attestation.json"), "attestation_sha256": digest(&envelope)? })), 0)
-        }
-        "authorize" | "promote-local" => {
-            count(a, if cmd == "authorize" { 6 } else { 7 })?;
-            let (store, envelope, c, op, expected, key) = promotion(a)?;
-            let d = promote::authorize(&store, &envelope, &key, &c, &op, &expected, now)?;
-            if cmd == "authorize" { (Some(json!({ "status": "AUTHORIZED", "repository": d.repository, "branch": d.branch, "base": d.base, "commit": d.commit })), 0) }
-            else { (Some(promote::promote_local(&store, &d, &key, Path::new(&a[6]), None)?), 0) }
-        }
-        "promote-github" => {
-            count(a, 10)?;
-            let git_pin = promote::git_pin(Path::new(&a[9]))?;
-            let (store, envelope, c, op, expected, key) = promotion(a)?;
-            let d = promote::authorize(&store, &envelope, &key, &c, &op, &expected, now)?;
-            let token = std::fs::read_to_string(&a[6])?;
-            let evidence = read_json(Path::new(&a[1]).with_file_name("compare.json")).ok().filter(|e| kern::compare::attested(&envelope, e));
-            (Some(promote::promote_github(&store, &d, &c, &envelope, &key, GitHub { token: token.trim(), base_branch: &a[7], ledger: Path::new(&a[8]), git: git_pin, evidence: evidence.as_ref() })?), 0)
-        }
-        "profile" => { count(a, 2)?; (Some(kern::init::profile(&read_json(&a[0])?, &std::fs::read_to_string(&a[1])?)?), 0) }
-        "init" => {
-            ensure!(a.len() == 3 || a.len() == 4, "Expected a repository, a verifier profile, the Kern action and an optional task");
-            (Some(kern::init::init(Path::new(&a[0]), &kern::init::load_profile(&a[1])?, a.get(3).map_or("agent", String::as_str), &a[2])?), 0)
-        }
-        "serve" => { count(a, 1)?; kern::serve::serve(Path::new(&a[0]))?; (None, 0) }
-        "audit" => { count(a, 1)?; (Some(kern::audit::verify(Path::new(&a[0]))?), 0) }
-        "audit-merges" => {
-            ensure!(a.len() == 4 || a.len() == 5, "Expected a checkout, a branch, a period (2026-Q3 or 2026-07-01..2026-09-30), an output directory and an optional verifier key");
-            let key = a.get(4).map(std::fs::read_to_string).transpose()?;
-            let report = kern::merges::audit(Path::new(&a[0]), &a[1], &a[2], key.as_deref(), now)?;
-            let files = kern::merges::write(Path::new(&a[3]), &report)?;
-            let code = if report["summary"]["status"] == "COVERED" { 0 } else { 2 };
-            (Some(json!({ "status": report["summary"]["status"], "summary": report["summary"], "files": files })), code)
-        }
-        "report" => { count(a, 2)?; std::fs::write(&a[1], kern::audit::report(Path::new(&a[0]))?)?; (Some(json!({ "report": std::path::absolute(&a[1])? })), 0) }
         "replay" => {
             ensure!(!a.is_empty(), "Expected one or more folders of stored checks; see kern --help");
             let workers = std::env::var("KERN_REPLAY_WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(kern::replay::WORKERS_COUNT_MAX);
@@ -209,11 +70,7 @@ fn cli() -> R<(Option<Value>, i32)> {
         "check" => {
             ensure!(a.len() == 5 || a.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
             let pr = a.get(5).map(std::fs::read_to_string).transpose()?;
-            let (agent, rounds) = drive_agent()?;
-            let wanted = std::env::var("KERN_CHECK_AI").ok();
-            let ai_on = wanted.as_deref() != Some("0") && (wanted.as_deref() == Some("1") || ["KERN_DRIVE_AGENT", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())));
-            let ai = kern::check::Ai { agent: &agent, rounds };
-            (Some(kern::check::check(Path::new(&a[0]), &a[1], &a[2], Path::new(&a[3]), &operator(&read_json(&a[4])?)?, pr.as_deref(), ai_on.then_some(&ai))?), 0)
+            (Some(kern::check::check(Path::new(&a[0]), &a[1], &a[2], Path::new(&a[3]), &operator(&read_json(&a[4])?)?, pr.as_deref())?), 0)
         }
         "investigate" => {
             count(a, 5)?;
@@ -258,63 +115,14 @@ fn cli() -> R<(Option<Value>, i32)> {
             }
         }
         "drive" => {
-            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected drive prepare, run, auto, sort, post or clean; see kern --help".into()))?;
-            match sub.as_str() {
-                "prepare" => {
-                    ensure!(rest.len() == 4 || rest.len() == 5, "Expected a repository, the base and the head commit, an output directory and an optional description file");
-                    let pr = rest.get(4).map(std::fs::read_to_string).transpose()?;
-                    (Some(kern::drive::prepare(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), pr.as_deref())?), 0)
-                }
-                "run" => { count(rest, 3)?; (Some(kern::drive::run(Path::new(&rest[0]), &operator(&read_json(&rest[1])?)?, Path::new(&rest[2]), u64::MAX)?), 0) }
-                "clean" => { count(rest, 1)?; (Some(kern::drive::clean(Path::new(&rest[0]))?), 0) }
-                "sort" => {
-                    ensure!(rest.len() == 1 || rest.len() == 2, "Expected an output directory and optionally the agent's verdicts.json");
-                    (Some(kern::drive::sort(Path::new(&rest[0]), rest.get(1).map(Path::new))?), 0)
-                }
-                "auto" => {
-                    ensure!(rest.len() == 5 || rest.len() == 6, "Expected a repository, the base and the head commit, an output directory, the operator and an optional description file");
-                    let pr = rest.get(5).map(std::fs::read_to_string).transpose()?;
-                    let (agent, rounds) = drive_agent()?;
-                    (Some(kern::drive::auto(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]), &operator(&read_json(&rest[4])?)?, pr.as_deref(), &agent, rounds, u64::MAX)?), 0)
-                }
-                "post" => {
-                    ensure!(rest.len() == 3 || (rest.len() == 4 && rest[3] == "update-only"), "Expected an output directory, owner/repo, a pull request number and optionally update-only");
-                    let number = rest[2].parse::<u64>().map_err(|_| Denied("Expected a pull request number".into()))?;
-                    (Some(kern::drive::post(Path::new(&rest[0]), &rest[1], number, rest.len() == 4)?), 0)
-                }
-                _ => kern::deny!("Expected drive prepare, run, auto, sort, post or clean; see kern --help"),
-            }
-        }
-        "twin" => {
-            let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected twin plan; see kern --help".into()))?;
-            match sub.as_str() {
-                "plan" => { count(rest, 4)?; (Some(kern::twin::plan(Path::new(&rest[0]), &rest[1], &rest[2], Path::new(&rest[3]))?), 0) }
-                _ => kern::deny!("Expected twin plan; see kern --help"),
-            }
-        }
-        "gate-artifact" => { count(a, 4)?; (Some(promote::gate_artifact(Path::new(&a[0]), &a[1], &read_json(&a[2])?, Path::new(&a[3]), now)?), 0) }
-        "check-pr" => {
-            ensure!(a.len() == 2 || a.len() == 3, "Expected event JSON, checkout and optional config path");
-            let event = read_json(&a[0])?;
-            let result = promote::check_pr(&event, Path::new(&a[1]), a.get(2).map_or(".github/kern", String::as_str), now);
-            let notes = kern::feedback::publish(&event, &result);
-            if let Ok(summary) = std::env::var("GITHUB_STEP_SUMMARY") {
-                let line = format!("{}\n{notes}", promote::step_summary(&result));
-                let _ = std::fs::OpenOptions::new().append(true).create(true).open(summary).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-            }
-            (Some(result?), 0)
+            ensure!(a.len() == 2 && a[0] == "clean", "Expected drive clean <out-dir>; see kern --help");
+            (Some(kern::drive::clean(Path::new(&a[1]))?), 0)
         }
         _ => kern::deny!("Unknown command; see kern --help"),
     })
 }
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.get(if args.first().map(String::as_str) == Some("--control") { 2 } else { 0 }).cloned().unwrap_or_default();
-    let outcome = cli();
-    if AUDITED.contains(&cmd.as_str()) && let Some(log) = std::env::var_os("KERN_AUDIT_LOG") {
-        record(Path::new(&log), &kern::audit::event(&cmd, &outcome.as_ref().map(|(v, _)| v.clone().unwrap_or(Value::Null)).map_err(|e| Denied(e.0.clone()))));
-    }
-    let code = match outcome {
+    let code = match cli() {
         Ok((value, code)) => {
             if let Some(v) = value { say(&serde_json::to_string_pretty(&v).unwrap_or_default()); }
             code

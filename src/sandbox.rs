@@ -53,7 +53,6 @@ pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
     out.into_iter().take(20).collect()
 }
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
-pub const DRIVE_PARTS: [&str; 5] = ["output", "errors", "coverage", "calls", "behavior"];
 pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
 pub const TRACE_BYTES_MAX: usize = 8 << 20;
 pub const INSTALL_SCRATCH: [&str; 1] = ["/workspace/.kern-install"];
@@ -81,7 +80,6 @@ pub fn runner_in(cwd: &str, command: &str, exists: impl Fn(&str) -> bool) -> Str
         dir = dir.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
     }
 }
-pub fn drive_parts(stdout: &[u8]) -> R<std::collections::BTreeMap<String, Vec<u8>>> { parts(stdout, &DRIVE_PARTS) }
 pub fn parts(stdout: &[u8], names: &[&str]) -> R<std::collections::BTreeMap<String, Vec<u8>>> {
     let (mut parts, mut at) = (std::collections::BTreeMap::new(), 0usize);
     for name in names {
@@ -97,7 +95,6 @@ pub fn parts(stdout: &[u8], names: &[&str]) -> R<std::collections::BTreeMap<Stri
     ensure!(at == stdout.len(), "The run's report has unexpected data");
     Ok(parts)
 }
-pub const BEHAVIOR: &str = "\n\u{1e}kern-behavior\u{1e}\n";
 fn with_docker<T>(args: &[&str], command: &[&str], f: impl FnOnce(&Path, &[String], Vec<(String, String)>, &Path) -> R<T>) -> R<T> {
     let c = control()?;
     let dir = fresh_dir(std::env::temp_dir().join(format!("kern-docker-{}", uuid4()?)))?;
@@ -116,21 +113,6 @@ fn docker_with(args: &[&str], command: &[&str], timeout: Duration, max_output: u
 }
 fn docker_full(args: &[&str], timeout: Duration, max_output: usize) -> R<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
     with_docker(args, &[], |b, full, env, dir| run_full(b, full, Run { cwd: Some(dir), env, input: None, timeout, max_output }))
-}
-pub fn split_behavior(stdout: &[u8]) -> (&[u8], Option<std::collections::BTreeSet<String>>) {
-    let mark = BEHAVIOR.as_bytes();
-    match stdout.windows(mark.len()).rposition(|w| w == mark) {
-        Some(i) => (&stdout[..i], Some(String::from_utf8_lossy(&stdout[i + mark.len()..]).lines().filter(|l| !l.is_empty() && !l.starts_with("count ")).map(str::to_string).collect())),
-        None => (stdout, None),
-    }
-}
-pub fn behavior_counts(stdout: &[u8]) -> std::collections::BTreeMap<String, u64> {
-    let mark = BEHAVIOR.as_bytes();
-    let mut counts = std::collections::BTreeMap::new();
-    if let Some(i) = stdout.windows(mark.len()).rposition(|w| w == mark) {
-        for key in String::from_utf8_lossy(&stdout[i + mark.len()..]).lines().filter_map(|l| l.strip_prefix("count ")) { *counts.entry(key.to_string()).or_insert(0) += 1; }
-    }
-    counts
 }
 fn docker_json(args: &[&str]) -> R<Value> { Ok(serde_json::from_slice(&docker(args, Duration::from_secs(60), 16 * 1048576)?)?) }
 
@@ -196,7 +178,6 @@ impl Volume {
 impl Drop for Volume {
     fn drop(&mut self) { if !self.1 { remove_volume(&self.0); } }
 }
-pub fn volume_exists(name: &str) -> bool { docker(&["volume", "inspect", name], Duration::from_secs(60), 1 << 20).is_ok() }
 const YARN_SETTINGS: [&str; 92] = ["approvedGitRepositories", "cacheFolder", "cacheMigrationMode", "changesetBaseRefs", "changesetIgnorePatterns", "checksumBehavior",
     "cloneConcurrency", "compressionLevel", "constraintsPath", "defaultLanguageName", "defaultProtocol", "defaultSemverRangePrefix", "deferredVersionFolder", "enableColors",
     "enableConstraintsChecks", "enableGlobalCache", "enableHardenedMode", "enableHyperlinks", "enableImmutableCache", "enableImmutableInstalls", "enableInlineBuilds",
@@ -553,7 +534,7 @@ fn own_cpus(count: usize) -> Option<String> {
 pub fn container_args(spec: &Spec, name: &str) -> R<Vec<String>> { container_args_for(spec, name, runtime_name()) }
 pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<String>> {
     ensure!(matches!(runtime, "runsc" | "runc"), "Unknown container runtime");
-    let (drive, drive_setup) = (spec.entry.first().is_some_and(|e| e == "__drive"), spec.entry.first().is_some_and(|e| e == "__drive_setup"));
+    let drive_setup = spec.entry.first().is_some_and(|e| e == "__drive_setup");
     let drive_test = spec.entry.first().is_some_and(|e| e == "__drive_test");
     let drive_seal = spec.entry.first().is_some_and(|e| e == "__drive_seal");
     ensure!(spec.network == "none" || (spec.network == "bridge" && spec.root && spec.writable.is_empty()), "Only dependency setup may use a network");
@@ -565,18 +546,16 @@ pub fn container_args_for(spec: &Spec, name: &str, runtime: &str) -> R<Vec<Strin
         ensure!(spec.workspace.is_some() && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch && spec.volumes.is_empty(),
             "A test run uses one installed tree, as an unprivileged user without a network or another volume");
     }
-    ensure!(spec.volumes.iter().all(|(v, t, ro)| v.starts_with("kern-deps-") && (*t == "/workspace/node_modules" || (*t == "/kern-tools/node_modules" && *ro && drive))), "Unexpected volume");
-    if drive { ensure!(matches!(spec.workspace, Some((_, true))) && spec.network == "none" && !spec.root && spec.writable.is_empty() && !spec.scratch, "A drive run reads an installed tree read-only, as an unprivileged user without a network"); }
+    ensure!(spec.volumes.iter().all(|(v, t, _)| v.starts_with("kern-deps-") && *t == "/workspace/node_modules"), "Unexpected volume");
     if drive_setup { ensure!(matches!(spec.workspace, Some((_, false))) && spec.network == "bridge" && spec.root && spec.volumes.is_empty() && spec.writable.is_empty() && !spec.scratch, "A drive setup installs into its own tree volume as root with a network, and mounts nothing else"); }
-    ensure!(spec.workspace.is_none_or(|(v, _)| (drive || drive_setup || drive_test || drive_seal) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive || drive_setup || drive_test || drive_seal)),
-        "Only drive runs, their test runs and their setup mount a tree volume, and only one Kern made");
+    ensure!(spec.workspace.is_none_or(|(v, _)| (drive_setup || drive_test || drive_seal) && v.starts_with("kern-deps-")) && (spec.workspace.is_some() || !(drive_setup || drive_test || drive_seal)),
+        "Only test runs, seals and setups mount a tree volume, and only one Kern made");
     ensure!(spec.entry.first().is_some_and(|e| e.starts_with("__")), "Sandbox entry must be a Kern entry point");
     ensure!(!spec.scratch || (spec.writable.is_empty() && !spec.root && spec.network == "none"), "A scratch workspace is only for an unprivileged run without write grants or network");
-    ensure!(spec.scratch || !matches!(spec.entry[0].as_str(), "__exec" | "__mutate"), "Tests run only on a throwaway copy of the workspace");
     let l = spec.limits;
     let user = if spec.root { "0:0" } else { "1000:1000" };
     let cpus = cpus(spec);
-    let files = if drive || drive_setup || drive_test { "nofile=65536:65536" } else { "nofile=1024:1024" };
+    let files = if drive_setup || drive_test { "nofile=65536:65536" } else { "nofile=1024:1024" };
     let mut a: Vec<String> = [
         "create", "--name", name, "--pull=never", &format!("--runtime={runtime}"), &format!("--network={}", spec.network), "--read-only", &format!("--user={user}"), "--cap-drop=ALL",
         "--security-opt=no-new-privileges:true", "--pids-limit", &l.pids.to_string(), "--memory", &format!("{}m", l.memory_mb), "--memory-swap", &format!("{}m", l.memory_mb), &format!("--cpus={cpus}"),
@@ -669,7 +648,6 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     create_new(dir.join("fault.cjs"), FAULT.as_bytes(), 0o444)?;
     create_new(dir.join("node-report.mjs"), NODE_REPORT.as_bytes(), 0o444)?;
     create_new(dir.join("trace.cjs"), TRACE.as_bytes(), 0o444)?;
-    create_new(dir.join("probe.cjs"), crate::compare::PROBE.as_bytes(), 0o444)?;
     create_new(dir.join("map.cjs"), crate::map::RUNNER.as_bytes(), 0o444)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
@@ -772,24 +750,6 @@ mod inside {
         }
         Ok(())
     }
-    pub fn runner() -> R<()> {
-        let c = config("config.json")?;
-        let write = strings(&c, "write", 64)?;
-        let command = argv(&c["command"])?;
-        let l = &c["limits"];
-        for grant in &write {
-            copy_tree(&Path::new("/input").join(grant.trim_end_matches('/')), &Path::new("/workspace").join(grant.trim_end_matches('/')))?;
-        }
-        let child = Command::new(&command[0]).args(&command[1..]).current_dir("/workspace").env_clear().envs(ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-        ensure!(wait(child, Duration::from_secs(int(l, "timeout_seconds", 1, 3600)?))?, "Agent command failed or timed out");
-        quiesce()?;
-        let mut state = (0u64, 0u64, Vec::new());
-        for grant in &write {
-            walk(&Path::new("/workspace").join(grant.trim_end_matches('/')), grant, 0, (int(l, "file_bytes", 1, u64::MAX)?, int(l, "total_bytes", 1, u64::MAX)?), &mut state)?;
-        }
-        println!("{}", json!({ "version": 1, "files": state.2 }));
-        Ok(())
-    }
     fn tree_digest(dir: &Path, prefix: &str, out: &mut Vec<Value>, totals: &mut (u64, u64)) -> R<()> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
         entries.sort_by_key(|e| e.file_name());
@@ -808,18 +768,6 @@ mod inside {
         }
         Ok(())
     }
-    pub fn setup() -> R<()> {
-        let c = config("setup.json")?;
-        let registry = text(&c, "registry")?;
-        let args = ["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier", &format!("--registry=https://{registry}/"), "--replace-registry-host=always", "--cache=/home/kern/.npm"];
-        let child = Command::new("/usr/local/bin/node").args(args).current_dir("/workspace").env_clear().envs([("PATH", "/usr/local/bin:/usr/bin:/bin"), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("npm_config_loglevel", "error")]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn()?;
-        ensure!(wait(child, Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?))?, "npm ci failed or timed out");
-        let (mut entries, mut totals) = (Vec::new(), (0u64, 0u64));
-        tree_digest(Path::new("/workspace/node_modules"), "", &mut entries, &mut totals)?;
-        for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
-        println!("{}", json!({ "version": 1, "entries": totals.0, "bytes": totals.1, "sha256": digest(&json!(entries))? }));
-        Ok(())
-    }
     fn copy_entry(from: &Path, to: &Path) -> R<()> {
         let meta = std::fs::symlink_metadata(from)?;
         if meta.is_dir() { return copy_tree(from, to); }
@@ -834,98 +782,6 @@ mod inside {
             Ok(_) => Ok(std::fs::remove_file(path)?),
             Err(_) => Ok(()),
         }
-    }
-    pub fn mutate() -> R<()> {
-        let plan = config("mutate.json")?;
-        exact(&plan, &["version", "command", "tests_paths", "budget_seconds", "old_files", "runner", "known", "mutants"], "planting plan")?;
-        ensure!(plan["version"] == 1, "Unsupported planting plan");
-        let command = argv(&plan["command"])?;
-        let runner = crate::policy::Runner::parse(text(&plan, "runner")?).ok_or_else(|| Denied("Unsupported planting plan".into()))?;
-        let known: std::collections::BTreeSet<String> = strings(&plan, "known", 100_000)?.into_iter().collect();
-        let paths = strings(&plan, "tests_paths", 16)?;
-        for p in &paths { capability(p)?; }
-        let budget = Duration::from_secs(int(&plan, "budget_seconds", 1, 3600)?);
-        let old_files = strings(&plan, "old_files", 10000)?;
-        for f in &old_files { file_path(f)?; }
-        let mutants = plan["mutants"].as_array().cloned().unwrap_or_default();
-        ensure!(mutants.len() <= 200, "Too many planted bugs");
-        let started = std::time::Instant::now();
-        let work = Path::new("/workspace");
-        let reset = |old: bool| -> R<()> {
-            for e in std::fs::read_dir(work)? { let e = e?; if e.file_name() != "node_modules" { remove(&e.path())?; } }
-            for e in std::fs::read_dir("/tmp")? { remove(&e?.path())?; }
-            for e in std::fs::read_dir("/input")? { let e = e?; if e.file_name() != "node_modules" { copy_entry(&e.path(), &work.join(e.file_name()))?; } }
-            if old {
-                for p in &paths {
-                    let rel = p.trim_end_matches('/');
-                    remove(&work.join(rel))?;
-                    let source = Path::new("/kern/old").join(rel);
-                    if source.exists() {
-                        if let Some(parent) = work.join(rel).parent() { std::fs::create_dir_all(parent)?; }
-                        copy_entry(&source, &work.join(rel))?;
-                    }
-                }
-            }
-            Ok(())
-        };
-        let errors = Path::new("/tmp/.kern-baseline-errors");
-        let run = |old: bool, mutant: Option<&Value>, files: &[String], limit: Option<Duration>| -> R<Option<bool>> {
-            let Some(timeout) = crate::proof::run_limit(budget.saturating_sub(started.elapsed()), limit) else { return Ok(None) };
-            reset(old)?;
-            if let Some(m) = mutant {
-                let path = text(m, "path")?;
-                file_path(path)?;
-                let (start, end) = (int(m, "start", 0, u32::MAX.into())? as usize, int(m, "end", 0, u32::MAX.into())? as usize);
-                let target = work.join(path);
-                let mut bytes = std::fs::read(&target)?;
-                ensure!(start <= end && bytes.get(start..end) == Some(text(m, "original")?.as_bytes()), "A planted bug does not match its file");
-                bytes.splice(start..end, text(m, "replacement")?.bytes());
-                std::fs::write(&target, bytes)?;
-            }
-            let stderr = if mutant.is_none() { Stdio::from(std::fs::File::create(errors)?) } else { Stdio::null() };
-            let stdout = if known.is_empty() { Stdio::null() } else { Stdio::piped() };
-            let mut child = Command::new(&command[0]).args(&command[1..]).args(files).current_dir(work).env_clear().envs(TEST_ENV).stdin(Stdio::null()).stdout(stdout).stderr(stderr).spawn()?;
-            let reader = child.stdout.take().map(|out| std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut std::io::Read::take(out, 64 << 20), &mut buf);
-                buf
-            }));
-            let passed = wait(child, timeout)?;
-            quiesce()?;
-            let report = reader.map(|r| r.join().unwrap_or_default()).unwrap_or_default();
-            Ok(Some(crate::proof::caught(runner, &known, &report, passed)))
-        };
-        let timed = |old: bool, files: &[String]| -> R<(bool, Duration, String)> {
-            let at = std::time::Instant::now();
-            let ok = run(old, None, files, None)? == Some(false);
-            let error = if ok { String::new() } else { std::fs::read(errors).map(|b| String::from_utf8_lossy(&b[b.len().saturating_sub(2000)..]).to_string()).unwrap_or_default() };
-            Ok((ok, at.elapsed(), error))
-        };
-        let (mut old_args, mut old_base) = (old_files.clone(), timed(true, &old_files)?);
-        if !old_base.0 && !old_files.is_empty() { (old_args, old_base) = (Vec::new(), timed(true, &[])?); }
-        let ((old_ok, old_time, old_error), (new_ok, new_time, new_error)) = (old_base, timed(false, &[])?);
-        let mut results = Vec::new();
-        if old_ok && new_ok {
-            let (old_limit, new_limit) = (old_time * 3 + Duration::from_secs(5), new_time * 3 + Duration::from_secs(5));
-            let usable: std::cell::RefCell<std::collections::HashMap<Vec<String>, bool>> = Default::default();
-            for m in &mutants {
-                let focus = strings(m, "tests", 10000)?;
-                for f in &focus { file_path(f)?; }
-                let result = crate::proof::decide(&mut |suite| match suite {
-                    crate::proof::Suite::Old => run(true, Some(m), &old_args, Some(old_limit)),
-                    crate::proof::Suite::NewFull => run(false, Some(m), &[], Some(new_limit)),
-                    crate::proof::Suite::NewFocused => {
-                        let known = usable.borrow().get(&focus).copied();
-                        let fine = match known { Some(fine) => fine, None => { let fine = run(false, None, &focus, Some(new_limit))? == Some(false); usable.borrow_mut().insert(focus.clone(), fine); fine } };
-                        if fine { run(false, Some(m), &focus, Some(new_limit)) } else { Ok(Some(false)) }
-                    }
-                }, !focus.is_empty())?;
-                results.push(json!({ "id": m["id"], "result": result }));
-            }
-        }
-        println!("{}", json!({ "version": 1, "baseline": { "old": old_ok, "new": new_ok, "old_error": old_error, "new_error": new_error },
-            "milliseconds": { "old": old_time.as_millis() as u64, "new": new_time.as_millis() as u64, "total": started.elapsed().as_millis() as u64 }, "mutants": results }));
-        Ok(())
     }
     fn lock_down(path: &Path) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
@@ -1117,39 +973,6 @@ mod inside {
         }
         Ok(())
     }
-    pub fn drive() -> R<()> {
-        let c = config("drive-run.json")?;
-        exact(&c, &["version", "timeout_seconds"], "drive run")?;
-        ensure!(c["version"] == 1, "Unsupported drive run");
-        let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
-        std::fs::create_dir_all("/tmp/.kern-v8")?;
-        let child = Command::new("/usr/local/bin/node").args(["--import", "/kern/drive-loader.mjs", "/kern/drive-run.mjs"])
-            .current_dir("/workspace").env_clear().envs(TEST_ENV).env("TZ", "UTC").env("NODE_V8_COVERAGE", "/tmp/.kern-v8")
-            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", "/tmp/.kern-behavior").env("KERN_DRIVE_CALLS", "/tmp/.kern-calls").env("TSX_TSCONFIG_PATH", "/kern/tsconfig.json")
-            .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-err")?)).spawn()?;
-        let finished = wait(child, timeout)?;
-        quiesce()?;
-        let mut errors = some_of("/tmp/.kern-err", 64 << 10, true);
-        if !finished { errors.extend_from_slice(b"\nkern: the driver did not finish in time and was stopped\n"); }
-        files_only(Path::new("/tmp/.kern-v8"))?;
-        let report = Command::new("/usr/local/bin/node")
-            .args(["--import", "/kern/drive-c8.mjs", "/kern-tools/node_modules/c8/bin/c8.js", "report", "--reporter=json", "--temp-directory=/tmp/.kern-v8", "--report-dir=/tmp/.kern-coverage",
-                "--exclude=**/node_modules/**", "--extension=.js", "--extension=.cjs", "--extension=.mjs", "--extension=.jsx", "--extension=.ts", "--extension=.cts",
-                "--extension=.mts", "--extension=.tsx"])
-            .current_dir("/workspace").env_clear().envs(TEST_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-c8-err")?)).spawn()?;
-        if !wait(report, Duration::from_secs(120))? {
-            errors.extend_from_slice(b"\nkern: line coverage could not be read: ");
-            errors.extend(some_of("/tmp/.kern-c8-err", 4096, true));
-        }
-        quiesce()?;
-        part("output", &some_of("/tmp/.kern-out", 4 << 20, false))?;
-        part("errors", &errors)?;
-        part("coverage", &some_of("/tmp/.kern-coverage/coverage-final.json", 64 << 20, false))?;
-        part("calls", &some_of("/tmp/.kern-calls", 8 << 20, false))?;
-        part("behavior", &some_of("/tmp/.kern-behavior", 4 << 20, false))?;
-        std::io::Write::flush(&mut std::io::stdout())?;
-        Ok(())
-    }
     fn seal(path: &Path, inside: bool, roots: &mut Vec<PathBuf>, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for e in entries.flatten() {
@@ -1326,31 +1149,14 @@ mod inside {
         std::io::Write::flush(&mut std::io::stdout())?;
         Ok(())
     }
-    pub fn exec(command: &[String]) -> R<()> {
-        let c = argv(&json!(command))?;
-        for e in std::fs::read_dir("/input")? { let e = e?; if e.file_name() != "node_modules" { copy_entry(&e.path(), &Path::new("/workspace").join(e.file_name()))?; } }
-        let log = Path::new("/tmp/.kern-behavior");
-        let status = Command::new(&c[0]).args(&c[1..]).current_dir("/workspace").env_clear().envs(TEST_ENV)
-            .env("NODE_OPTIONS", "--require=/kern/monitor.cjs").env("KERN_MONITOR", log).stdin(Stdio::null()).status()?;
-        quiesce()?;
-        print!("{BEHAVIOR}{}", std::fs::read_to_string(log).unwrap_or_default());
-        std::io::Write::flush(&mut std::io::stdout())?;
-        ensure!(status.success(), "Check command failed: {status}");
-        Ok(())
-    }
 }
 #[cfg(not(unix))]
 mod inside {
     use super::*;
-    pub fn runner() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
-    pub fn setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
-    pub fn exec(_: &[String]) -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
-    pub fn mutate() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
-    pub fn drive() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive_setup() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive_test() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
     pub fn drive_seal() -> R<()> { deny!("Sandbox entry points run only inside a Linux sandbox") }
 }
-pub use inside::{drive, drive_seal, drive_setup, drive_test, exec, mutate, runner, setup};
+pub use inside::{drive_seal, drive_setup, drive_test};
 #[cfg(unix)]
 pub use inside::read_only_tree;

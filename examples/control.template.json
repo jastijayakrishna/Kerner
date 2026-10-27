@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "role": "executor",
-  "docker": {"file": "/usr/bin/docker", "sha256": "<reviewed-Docker-binary-SHA256>", "endpoint": "unix:///var/run/docker.sock"},
-  "git": {"file": "/usr/bin/git", "sha256": "<reviewed-Git-binary-SHA256>"},
-  "runtime": {"file": "/usr/local/bin/runsc", "sha256": "<reviewed-runsc-binary-SHA256>", "version": "<exact-runsc-version-output>", "arguments": []},
-  "host_policy": {"file": "/operator/host-policy.json", "sha256": "<reviewed-host-policy-SHA256>"}
-}

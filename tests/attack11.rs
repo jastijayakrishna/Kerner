@@ -17,8 +17,7 @@ fn rules_for(changed: &[(&str, &str)]) -> Value {
     json!({ "changed": changed.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect::<Vec<_>>(), "powers": [], "tricks": [], "settings": [], "protected": [],
         "dependencies": [], "agent_notes": [], "not_checked": [] })
 }
-fn off() -> Value { json!({ "status": "OFF", "why": "no AI key" }) }
-fn receipt_for(tests: &Value, changed: &[(&str, &str)]) -> Value { receipt::build(&drive_json(), &rules_for(changed), tests, &off()) }
+fn receipt_for(tests: &Value, changed: &[(&str, &str)]) -> Value { receipt::build(&drive_json(), &rules_for(changed), tests) }
 fn decision(tests: &Value, changed: &[(&str, &str)]) -> String { receipt_for(tests, changed)["decision"].as_str().unwrap_or("").to_string() }
 
 fn test_point(n: usize, name: &str) -> String { format!("# Subtest: {name}\nok {n} - {name}\n  ---\n  duration_ms: 0.5\n  type: 'test'\n  ...\n") }
@@ -127,7 +126,7 @@ fn a_node_test_file_that_no_longer_loads_blocks_as_a_jest_one_does() {
     let after = tap(&[file_point(1, "test/cart.test.js"), test_point(2, "adds")]);
     let c = suite::judged(&before, &after, Some(&after), None);
     let r = receipt_for(&c, &[("src/cart.js", "modify")]);
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert_eq!(r["decision"], "blocked",
         "the change makes test/cart.test.js throw when it loads, on every run. Under jest that blocks as a test file that no longer runs; node --test reports the file as a failing test named after its path, so its old test is merely gone and the file is filed as a new failing test, a look an approval clears:\n{md}");
     assert!(!md.contains("A test this change adds fails on the new code: `test/cart.test.js`"), "the change adds no test file, yet the receipt says it does:\n{md}");
@@ -139,7 +138,7 @@ fn a_test_that_passed_before_and_fails_after_its_file_is_moved_still_blocks() {
     let after = report(&[("src/cart.test.ts > cart > adds an item", 0, 1, 0), ("src/cart.test.ts > cart > removes an item", 1, 0, 0)], &[]);
     let c = suite::judged(&before, &after, None, None);
     let changed = [("src/__tests__/cart.test.ts", "delete"), ("src/cart.test.ts", "add"), ("src/cart.ts", "modify")];
-    let md = receipt::markdown(&receipt_for(&c, &changed), None);
+    let md = receipt::markdown(&receipt_for(&c, &changed));
     assert_eq!(decision(&c, &changed), "blocked",
         "the change breaks adding an item to the cart and moves the cart tests next to the code; the same test, by the same name, passed before and fails now. Kept in place it blocks; moved, its old name is gone, run() finds no suspect file present in the new run so nothing runs again, and the failure is filed as a test the change adds, a look an approval clears, though a test file the change deletes was meant never to turn a failing test into a look:\n{md}");
 }
@@ -150,7 +149,7 @@ fn a_test_file_kern_never_ran_on_the_old_code_does_not_block_as_one_that_no_long
     after.why.insert("test/api.test.js".into(), "Cannot find module '../dist/index.js' from 'test/api.test.js'".into());
     let c = suite::judged(&Report::default(), &after, Some(&after), None);
     let changed = [("package.json", "modify"), ("test/api.test.js", "modify"), ("test/math.test.js", "modify")];
-    let md = receipt::markdown(&receipt_for(&c, &changed), None);
+    let md = receipt::markdown(&receipt_for(&c, &changed));
     assert_ne!(decision(&c, &changed), "blocked",
         "the change moves the project from ava, which Kern cannot read, to vitest, so the old code has no run to compare and run() passes an empty old report; a test file that needs a build cannot load in the sandbox. A failing test of that suite is a new failing test (a look), but a file that cannot load blocks as one that 'no longer runs', though it never ran:\n{md}");
 }
@@ -161,7 +160,7 @@ fn renaming_a_test_file_that_could_not_load_before_does_not_block() {
     let after = report(&[("test/math.test.ts > adds", 1, 0, 0)], &["test/legacy-api.test.ts"]);
     let c = suite::judged(&before, &after, Some(&after), None);
     let changed = [("test/legacy.test.ts", "delete"), ("test/legacy-api.test.ts", "add")];
-    let md = receipt::markdown(&receipt_for(&c, &changed), None);
+    let md = receipt::markdown(&receipt_for(&c, &changed));
     assert_ne!(decision(&c, &changed), "blocked",
         "test/legacy.test.ts cannot load in the sandbox on the old code (it is set aside as already failing); the change only renames it, and it still cannot load. Problems are matched by exact path, so the renamed file's failure is new, and because a test file is deleted the receipt will not treat the added file as new: it blocks as a file that 'no longer runs':\n{md}");
 }
@@ -172,7 +171,7 @@ fn a_receipt_blocked_because_a_test_file_no_longer_runs_does_not_tick_the_tests_
     let after = report(&[("test/total.test.js > adds", 1, 0, 0)], &["test/cart.test.js"]);
     let c = suite::compare(&before, &after, Some(&after));
     let r = receipt_for(&c, &[("src/cart.js", "modify")]);
-    let md = receipt::markdown(&r, None);
+    let md = receipt::markdown(&r);
     assert_eq!(r["decision"], "blocked", "{md}");
     assert!(!md.contains("- ✅ Tests:") && !md.contains("✅ No skipped, focused or removed tests"),
         "a test that passed before no longer runs because its file no longer loads, and the receipt is blocked for it; yet under What Kern checked it ticks the tests and says no test was removed:\n{md}");
@@ -186,7 +185,7 @@ fn a_test_that_fails_on_every_run_of_the_new_code_is_not_said_to_pass() {
     let alone_new = report(&[(key, 0, 1, 0)], &[]);
     let alone_old = report(&[(key, 0, 1, 0)], &[]);
     let c = suite::judged(&before, &after, Some(&alone_new), Some(&alone_old));
-    let md = receipt::markdown(&receipt_for(&c, &[("src/session.ts", "modify")]), None);
+    let md = receipt::markdown(&receipt_for(&c, &[("src/session.ts", "modify")]));
     assert!(!md.contains("2 that passed before still pass") && !md.contains("by chance"),
         "the test fails on the whole run and alone on the new code, every time; it is set aside because the old code alone fails it too. The receipt counts it among the tests that 'still pass' and says it 'failed once and passed when run again', neither of which happened:\n{md}");
 }

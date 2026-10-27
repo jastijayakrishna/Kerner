@@ -3,11 +3,10 @@ name = "kern"
 version = "0.3.0"
 edition = "2024"
 publish = false
-description = "Admission control for AI-written code: exact-commit verification, capability diffs and signed in-toto attestations"
+description = "One receipt on every pull request: the project's own tests on the old and the new code, static rules, a type check and planted faults"
 
 [dependencies]
 base64 = "0.23.1"
-ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem"] }
 getrandom = "0.4.3"
 hex = "0.4.3"
 libc = "0.2.190"

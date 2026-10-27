@@ -88,4 +88,4 @@ jobs:
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "Kern $TAG" --notes "Install on Linux or macOS: \`curl -fsSL $url/install.sh | sh\`
           Install on Windows (PowerShell): \`irm $url/install.ps1 | iex\`
 
-          Every file is listed in SHA256SUMS and has a GitHub build-provenance attestation: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`. Pin the GitHub Action to these binaries with \`scripts/pin-release.sh $TAG\`."
+          Every file is listed in SHA256SUMS and has a GitHub build-provenance attestation: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`."

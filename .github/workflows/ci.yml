@@ -45,36 +45,6 @@ jobs:
           name: kern-linux-x64
           path: target/x86_64-unknown-linux-musl/release/kern
           if-no-files-found: error
-  twin:
-    needs: linux
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: kern-linux-x64
-          path: bin
-      - name: Twin runtime
-        timeout-minutes: 15
-        run: sh twin/scripts/test-linux.sh
-      - name: Twin real stacks
-        timeout-minutes: 15
-        run: sh twin/scripts/test-stacks.sh
-      - name: Twin sandbox
-        timeout-minutes: 15
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          sh twin/scripts/test-sandbox.sh
-      - name: Twin shop (Phase 4 acceptance)
-        timeout-minutes: 15
-        run: sh twin/examples/shop/run.sh
-      - name: Twin plan end to end
-        run: |
-          chmod +x bin/kern
-          docker run --rm -v "$PWD:/kern" -w /kern docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 \
-            sh -c 'apt-get update -qq && apt-get install -y -qq git >/dev/null && node twin/scripts/e2e-plan.mjs --kern /kern/bin/kern'
   gvisor:
     needs: linux
     runs-on: ubuntu-24.04
@@ -86,12 +56,8 @@ jobs:
         with:
           name: kern-linux-x64
           path: bin
-      - name: End to end on gVisor
-        run: chmod +x bin/kern && KERN_BIN="$PWD/bin/kern" sh scripts/e2e-gvisor.sh
-      - name: Drive end to end on gVisor
-        run: KERN_BIN="$PWD/bin/kern" sh scripts/e2e-drive.sh
       - name: Check end to end on gVisor
-        run: KERN_BIN="$PWD/bin/kern" sh scripts/e2e-check.sh
+        run: chmod +x bin/kern && KERN_BIN="$PWD/bin/kern" sh scripts/e2e-check.sh
       - name: Installer
         run: |
           mkdir -p release && cp bin/kern release/kern-linux-x64 && (cd release && sha256sum kern-linux-x64 > SHA256SUMS)

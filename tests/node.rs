@@ -61,11 +61,10 @@ fn kern_runs_the_node_version_the_project_asks_for() {
 fn the_receipt_says_which_node_ran() {
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "lockfile": [], "agent_notes": [], "not_checked": [] });
-    let off = json!({ "status": "OFF", "why": "no AI key" });
     let tests = |old: serde_json::Value, new: serde_json::Value| json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 },
         "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1, "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [],
         "not_run": [], "node": { "old": old, "new": new } });
-    let md = |t: serde_json::Value| receipt::markdown(&receipt::build(&d, &rules, &t, &off), None);
+    let md = |t: serde_json::Value| receipt::markdown(&receipt::build(&d, &rules, &t));
     assert!(md(tests(json!({ "major": 20, "from": ".nvmrc says 20" }), json!({ "major": 20, "from": ".nvmrc says 20" }))).contains("✅ Node: 20 on both sides, as the project asks (.nvmrc says 20)"));
     assert!(md(tests(json!({ "major": 20, "from": ".nvmrc says 20" }), json!({ "major": 22, "from": ".nvmrc says 22" }))).contains("moves the project from Node 20 to Node 22"));
     assert!(md(tests(json!({ "major": 22, "wanted": 26, "from": ".nvmrc says node", "why": "no network" }), json!({ "major": 22, "wanted": 26, "from": ".nvmrc says node", "why": "no network" })))

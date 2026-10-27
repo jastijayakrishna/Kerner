@@ -248,26 +248,6 @@ pub fn contract(input: &Value) -> R<Contract> {
     }
     Ok(Contract { value, task, read, write, dependencies, approved, limits, checks, behaviors, tests, compare, delta, app })
 }
-pub fn attenuate(original: &Value, requested: &Value) -> R<Contract> {
-    let (a, b) = (contract(original)?, contract(requested)?);
-    ensure!(a.task == b.task, "Task identity cannot change");
-    ensure!(b.read.iter().all(|g| allowed(&a.read, g)), "Cannot widen read authority");
-    ensure!(b.write.iter().all(|g| allowed(&a.write, g)), "Cannot widen write authority");
-    let (x, y) = (&a.limits, &b.limits);
-    for (key, lo, hi) in [("files_changed", y.files_changed, x.files_changed), ("lines_changed", y.lines_changed, x.lines_changed), ("file_bytes", y.file_bytes, x.file_bytes), ("total_bytes", y.total_bytes, x.total_bytes), ("timeout_seconds", y.timeout_seconds, x.timeout_seconds), ("memory_mb", y.memory_mb, x.memory_mb), ("pids", y.pids, x.pids)] {
-        ensure!(lo <= hi, "Cannot increase {key}");
-    }
-    ensure!(a.checks.iter().all(|c| b.checks.contains(c)), "Cannot remove a required check");
-    ensure!(!b.dependencies || a.dependencies, "Cannot add dependency installation");
-    ensure!(b.approved.iter().all(|x| a.approved.contains(x)), "Cannot approve new dependencies");
-    ensure!(b.behaviors.iter().all(|x| a.behaviors.contains(x)), "Cannot allow new runtime behavior");
-    ensure!(a.tests.is_none() || a.tests == b.tests, "Cannot change or remove the test proof");
-    ensure!(!a.compare || b.compare, "Cannot drop the comparison of the old and the new code");
-    ensure!(a.delta.is_none() || a.delta == b.delta, "Cannot change or remove the stated change");
-    ensure!(a.app.is_none() || a.app == b.app, "Cannot change or remove the app recipe");
-    Ok(b)
-}
-pub fn contract_digest(c: &Contract) -> R<String> { digest(&c.value) }
 
 #[derive(Clone, Debug)]
 pub struct CheckSpec { pub id: String, pub file: PathBuf, pub sha256: String }
@@ -325,13 +305,6 @@ pub fn implementation_digest() -> R<String> {
     if let Some(d) = DIGEST.get() { return Ok(d.clone()); }
     let d = sha256(std::fs::read(std::env::current_exe()?)?);
     Ok(DIGEST.get_or_init(|| d).clone())
-}
-pub fn verifier_digest(op: &Operator) -> R<String> {
-    let checks: Vec<Value> = op.checks.iter().map(|c| json!({ "id": c.id, "sha256": c.sha256 })).collect();
-    digest(&json!({
-        "version": 4, "builders": op.value["builders"], "image": op.image, "checks": checks,
-        "deployment": op.value["deployment"], "executors": op.executors, "registry": op.registry, "permissions": op.permissions, "capability_policy": crate::capability::POLICY,
-    }))
 }
 
 #[derive(Clone, Debug)]
@@ -409,10 +382,6 @@ pub fn configure_git(p: Pin) -> R<()> {
     GIT.set(p).map_err(|_| Denied("Git pin cannot change during a process".into()))
 }
 pub fn control() -> R<&'static Control> { CONTROL.get().ok_or_else(|| Denied("Supply --control <operator-owned-control.json>; ambient Docker configuration is disabled".into())) }
-pub fn require_role(role: &str) -> R<()> {
-    ensure!(control()?.role == role, "This operation requires a separate {role} controller");
-    Ok(())
-}
 pub fn git_exe() -> R<PathBuf> {
     match GIT.get() {
         Some(p) => pinned(p),
