@@ -797,7 +797,7 @@ git add -A && git commit -qm base && bun_base=$(git rev-parse HEAD)
 printf '%s\n' 'export const twice = (n) => n * 2;' >> packages/lib/index.js
 git commit -qam "Twice" && git rev-parse HEAD > "$W/bun.head"
 cd "$W"
-check bun "$bun_base" bunrepo
+KERN_KEEP=1 check bun "$bun_base" bunrepo
 jq -e '[.old.installs[0], .new.installs[0]] | all(.manager == "bun" and .result == "installed")' bun/setup.json > /dev/null \
   || { jq . bun/setup.json 2>/dev/null | head -60; fail "bun: a Bun workspace did not install with Kern's own Bun from its lockfile"; }
 jq -e '.tests.status == "RAN" and .tests.kept == 3' bun/receipt.json > /dev/null \
