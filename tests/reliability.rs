@@ -967,6 +967,18 @@ fn the_first_error_is_the_thrown_one_never_a_line_of_minified_code() {
 }
 
 #[test]
+fn ci_watch_vitest_kerns_tool_installs_give_npm_two_distinct_empty_config_files_never_the_same_one_twice() {
+    let t = Temp::new();
+    let args = kern::sandbox::tool_npm_args(&t.0).unwrap();
+    assert_eq!(args[0], "--workspaces=false");
+    let files: Vec<String> = args[1..].iter().map(|a| a.split_once('=').unwrap().1.to_string()).collect();
+    assert_eq!(files.len(), 2);
+    assert_ne!(files[0], files[1], "npm refuses one file loaded as both user and global config ('double-loading'), which /dev/null was; every tool install then failed silently and the map's indexer was missing");
+    for f in &files { assert_eq!(std::fs::read(f).unwrap(), b"", "an empty regular file Kern wrote, so no project, user or global .npmrc steers the install"); }
+    assert!(args[1].starts_with("--userconfig=") && args[2].starts_with("--globalconfig="));
+}
+
+#[test]
 fn the_versions_digest_names_every_installed_package_and_nothing_else() {
     let t = Temp::new();
     let put = |root: &str, pkg: &str, version: &str| write(&t.0, &format!("{root}/node_modules/{pkg}/package.json"), &format!("{{\"name\":\"{}\",\"version\":\"{version}\"}}", pkg.rsplit('/').next().unwrap()));

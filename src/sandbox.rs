@@ -427,7 +427,15 @@ pub fn some_of(path: impl AsRef<Path>, max: usize, end: bool) -> Vec<u8> {
     out
 }
 pub const TOOLS: &str = "/workspace/.kern-tools";
-pub const TOOL_NPM_ARGS: [&str; 3] = ["--workspaces=false", "--userconfig=/dev/null", "--globalconfig=/dev/null"];
+pub fn tool_npm_args(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut args = vec!["--workspaces=false".to_string()];
+    for (flag, name) in [("--userconfig", ".kern-npmrc-user"), ("--globalconfig", ".kern-npmrc-global")] {
+        let file = dir.join(name);
+        std::fs::write(&file, "")?;
+        args.push(format!("{flag}={}", file.to_string_lossy()));
+    }
+    Ok(args)
+}
 const IMAGE_COREPACK: &str = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
 fn own_corepack() -> String { format!("{TOOLS}/corepack/node_modules/corepack/dist/corepack.js") }
 pub const BUN: &str = "1.4.2";
@@ -911,16 +919,16 @@ mod inside {
         let dir = Path::new(super::TOOLS).join("bun");
         let written = super::remake_dir(&dir).and_then(|_| std::fs::write(dir.join("package.json"), manifest)).and_then(|_| std::fs::write(dir.join("package-lock.json"), lock));
         let child = written.and_then(|_| Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier"])
-            .args(super::TOOL_NPM_ARGS).current_dir(&dir).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn());
+            .args(super::tool_npm_args(&dir).unwrap_or_default()).current_dir(&dir).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn());
         let ran = child.ok().is_some_and(|c| wait(c, budget.saturating_sub(started.elapsed())).unwrap_or(false));
         if !ran || std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).is_err() { return Err(format!("Kern could not install its own Bun {} with npm", super::BUN)); }
         made.insert("bun");
         Ok(bun)
     }
     fn npm_into(prefix: &Path, package: &str) {
-        if super::remake_dir(prefix).is_err() { return; }
+        let Ok(args) = super::remake_dir(prefix).and_then(|_| super::tool_npm_args(Path::new("/tmp"))) else { return };
         let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &prefix.to_string_lossy(), package, "--ignore-scripts",
-            "--no-audit", "--no-fund", "--no-update-notifier"]).args(super::TOOL_NPM_ARGS).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            "--no-audit", "--no-fund", "--no-update-notifier"]).args(args).current_dir("/tmp").env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
     fn install_dir(d: &str, dir: &Path, scripts: bool, (budget, started): (Duration, std::time::Instant), keep: &[PathBuf],
         (dirty, made): (&mut bool, &mut std::collections::BTreeSet<&'static str>)) -> R<(Value, Option<Vec<String>>)> {
