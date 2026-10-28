@@ -690,3 +690,11 @@ fn every_kern_variable_the_box_sets_or_kerns_own_files_read_is_in_the_one_list_t
     let listed: std::collections::BTreeSet<String> = kern::sandbox::BOX_NAMES.iter().map(|s| s.to_string()).collect();
     assert!(named.is_subset(&listed), "names Kern uses in the box that the rules would not see: {:?}", named.difference(&listed).collect::<Vec<_>>());
 }
+
+#[test]
+fn review_sec_s3_a_prisma_schema_or_a_tsconfig_an_install_hook_reads_is_not_a_file_it_runs() {
+    let manifest = r#"{"name":"app","scripts":{"test":"vitest run","postinstall":"prisma generate --schema=./prisma/schema.prisma && node scripts/fix","prepare":"tsc -p ./tsconfig.build.json"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let base = [("package.json", manifest), ("prisma/schema.prisma", "model User { id Int @id }\n"), ("tsconfig.build.json", "{}\n"), ("scripts/fix.js", "console.log(1);\n")];
+    let rules = rules_for(&base, &[("prisma/schema.prisma", "model User { id Int @id\n name String }\n"), ("tsconfig.build.json", "{\"compilerOptions\":{}}\n"), ("scripts/fix.js", "console.log(2);\n")], &[]);
+    assert_eq!(paths(&rules, "install_files"), ["scripts/fix.js"], "prisma reads its schema and tsc its config; neither runs them, so a look saying the change runs code on install would be untrue: {}", rules["install_files"]);
+}

@@ -96,7 +96,8 @@ const RESOLVED_EXTENSIONS: [&str; 5] = ["", ".js", ".mjs", ".cjs", ".ts"];
 fn install_runs(dir: &str, v: &Value, out: &mut BTreeMap<String, String>) {
     for (name, script) in v["scripts"].as_object().into_iter().flatten().filter(|(n, _)| INSTALL_HOOKS.contains(&n.as_str()) || pnpm_hook(n)) {
         let words = script.as_str().unwrap_or("").split(|c: char| c.is_whitespace() || "&|;()<>'\"`".contains(c)).map(|w| w.rsplit('=').next().unwrap_or(w));
-        for word in words.filter(|w| w.contains('/') || w.rsplit_once('.').is_some_and(|(s, e)| !s.is_empty() && SCRIPT_EXTENSIONS.contains(&e))) {
+        let extension = |w: &str| w.rsplit('/').next().and_then(|last| last.rsplit_once('.')).filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e.to_string());
+        for word in words.filter(|w| extension(w).map_or(w.contains('/'), |e| SCRIPT_EXTENSIONS.contains(&e.as_str()))) {
             for p in RESOLVED_EXTENSIONS.iter().filter_map(|e| joined(dir, &format!("{word}{e}"))) { out.entry(p).or_insert_with(|| format!("scripts.{name}")); }
         }
     }
