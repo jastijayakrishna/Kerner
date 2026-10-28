@@ -1,6 +1,6 @@
 use crate::policy::Runner;
 use serde_json::Value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,10 +25,11 @@ struct Word { text: String, expands: bool, glob: bool }
 
 enum Takes { Nothing, Value, Number, Maybe }
 
-struct Reader<'a> { scripts: &'a Value, steps: Cell<u32> }
+struct Reader<'a> { scripts: &'a Value, steps: Cell<u32>, counting: bool, runs: RefCell<Vec<Invocation>> }
 
+fn reader(package: &Value, counting: bool) -> Reader<'_> { Reader { scripts: &package["scripts"], steps: Cell::new(STEPS), counting, runs: RefCell::new(Vec::new()) } }
 pub fn found(package: &Value) -> Found {
-    let r = Reader { scripts: &package["scripts"], steps: Cell::new(STEPS) };
+    let r = reader(package, false);
     let mut packages = false;
     for name in NAMES {
         if r.scripts[name].as_str().is_none() { continue; }
@@ -42,6 +43,76 @@ pub fn found(package: &Value) -> Found {
     if packages { Found::Packages } else { Found::Nothing }
 }
 
+fn counted(package: &Value) -> Option<(String, Vec<Invocation>)> {
+    let r = reader(package, true);
+    for name in NAMES {
+        if r.scripts[name].as_str().is_none() { continue; }
+        r.runs.borrow_mut().clear();
+        match r.script(name, &[], 0) {
+            Found::Run(_) => return Some((name.to_string(), r.runs.take())),
+            Found::Packages if name == "test" => return None,
+            _ => {}
+        }
+    }
+    None
+}
+pub fn chained(package: &Value) -> Option<String> {
+    counted(package).filter(|(_, runs)| runs.len() > 1 && runs.iter().all(|i| i.runner != Runner::Node)).map(|(name, _)| name)
+}
+pub fn runs(package: &Value) -> Vec<Invocation> { counted(package).map(|(_, runs)| runs).unwrap_or_default() }
+pub fn test_scripts(package: &Value) -> Vec<String> {
+    NAMES.iter().filter(|n| package["scripts"][**n].as_str().is_some_and(|s| !placeholder(s))).map(|n| n.to_string()).collect()
+}
+const RUNNER_WORDS: [&str; 3] = ["vitest", "jest", "mocha"];
+const REACHED_COUNT_MAX: usize = 16;
+const LAUNCHERS: [&str; 9] = ["node", "tsx", "ts-node", "bun", "deno", "sh", "bash", "zx", "babel-node"];
+pub fn names_runner(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    RUNNER_WORDS.iter().any(|w| text.match_indices(w).any(|(i, _)| !word(i.checked_sub(1).and_then(|j| bytes.get(j))) && !word(bytes.get(i + w.len()))))
+}
+pub fn reached(package: &Value, name: &str) -> Vec<String> {
+    let scripts = &package["scripts"];
+    let (mut names, mut texts) = (vec![name.to_string()], Vec::new());
+    let mut at = 0;
+    while at < names.len() && texts.len() < REACHED_COUNT_MAX {
+        if let Some(text) = scripts[names[at].as_str()].as_str() {
+            for w in split(text).into_iter().flatten() { if scripts[&w.text].is_string() && !names.contains(&w.text) { names.push(w.text); } }
+            texts.push(text.to_string());
+        }
+        at += 1;
+    }
+    texts
+}
+pub fn program_files(text: &str) -> Vec<String> {
+    split(text).iter().filter_map(|c| {
+        let at = c.iter().position(|w| assignment(w).is_none())?;
+        let program = &c[at].text;
+        if program.contains('/') && !program.contains("node_modules/") { return Some(program.clone()); }
+        if !LAUNCHERS.contains(&base(program)) { return None; }
+        let mut rest = c[at + 1..].iter();
+        while let Some(w) = rest.next() {
+            if !w.text.starts_with('-') { return Some(w.text.clone()); }
+            if !w.text.contains('=') && NODE_VALUED.contains(&w.text.as_str()) { rest.next(); }
+        }
+        None
+    }).collect()
+}
+pub const PROGRAMS_COUNT_MAX: usize = 8;
+pub fn started_programs(package: &Value) -> Vec<String> {
+    if matches!(found(package), Found::Run(_)) && chained(package).is_none() { return Vec::new(); }
+    let mut out: Vec<String> = Vec::new();
+    for f in test_scripts(package).iter().flat_map(|n| reached(package, n)).flat_map(|t| program_files(&t)).filter(|f| !f.contains("node_modules/")) {
+        if out.len() >= PROGRAMS_COUNT_MAX { break; }
+        if !out.contains(&f) { out.push(f); }
+    }
+    out
+}
+pub fn leaf(runner: Runner, argv: &[String], env: BTreeMap<String, String>) -> Option<Invocation> {
+    let words: Vec<Word> = argv.iter().map(|a| Word { text: a.clone(), expands: false, glob: false }).collect();
+    match invocation(runner, None, &words, env) { Found::Run(i) => Some(i), _ => None }
+}
+
 const PRINTS_ONLY: [&str; 6] = ["echo", "printf", "exit", "true", "false", ":"];
 pub fn placeholder(script: &str) -> bool {
     let commands = split(script);
@@ -52,7 +123,8 @@ pub fn same_tests(a: &Value, b: &Value) -> bool {
     let words = |p: &Value| -> Vec<(String, Value)> {
         p["scripts"].as_object().into_iter().flatten().filter(|(k, _)| NAMES.contains(&k.as_str()) || k.contains("test")).map(|(k, v)| (k.clone(), v.clone())).collect()
     };
-    x == y && (matches!(x, Found::Run(_)) || words(a) == words(b))
+    let chain = chained(a).is_some() || chained(b).is_some();
+    x == y && (matches!(x, Found::Run(_)) && !chain || words(a) == words(b) && runs(a) == runs(b))
 }
 pub fn files(i: &Invocation) -> Vec<String> {
     let mut words: Vec<&str> = i.command.iter().skip(1).map(String::as_str).collect();
@@ -94,16 +166,17 @@ pub fn env_name(name: &str) -> bool {
         && !RESERVED.contains(&name) && !name.starts_with("KERN_") && !name.starts_with("LD_") && !name.starts_with("DYLD_")
 }
 
-fn either(results: impl Iterator<Item = Found>) -> Found {
-    let mut packages = false;
+fn either(results: impl Iterator<Item = Found>, counting: bool) -> Found {
+    let (mut packages, mut first) = (false, None);
     for r in results {
         match r {
-            Found::Run(i) => return Found::Run(i),
+            Found::Run(i) if first.is_none() => { first = Some(i); if !counting { break; } }
+            Found::Run(_) => {}
             Found::Packages => packages = true,
             Found::Nothing => {}
         }
     }
-    if packages { Found::Packages } else { Found::Nothing }
+    match first { Some(i) => Found::Run(i), None if packages => Found::Packages, None => Found::Nothing }
 }
 
 impl Reader<'_> {
@@ -120,15 +193,22 @@ impl Reader<'_> {
         let mut commands = split(text);
         if let Some(last) = commands.last_mut() { last.extend(extra.iter().cloned()); }
         let mut before: Vec<String> = Some(format!("pre{name}")).filter(|p| self.scripts[p].is_string()).into_iter().collect();
-        let mut packages = false;
+        let (mut packages, mut first) = (false, None);
         for c in &commands {
             match self.command(c, depth) {
-                Found::Run(mut i) => { before.append(&mut i.before); i.before = before; return Found::Run(i); }
+                Found::Run(mut i) if first.is_none() => {
+                    before.append(&mut i.before);
+                    i.before = std::mem::take(&mut before);
+                    first = Some(i);
+                    if !self.counting { break; }
+                }
+                Found::Run(_) => {}
                 Found::Packages => packages = true,
-                Found::Nothing => before.extend(self.named(c)),
+                Found::Nothing if first.is_none() => before.extend(self.named(c)),
+                Found::Nothing => {}
             }
         }
-        if packages { Found::Packages } else { Found::Nothing }
+        match first { Some(i) => Found::Run(i), None if packages => Found::Packages, None => Found::Nothing }
     }
 
     fn named(&self, words: &[Word]) -> Option<String> {
@@ -166,15 +246,26 @@ impl Reader<'_> {
         }
         let rest = &words[i..];
         let program = rest[0].text.as_str();
-        if let Some(runner) = runner_named(program) { return invocation(runner, None, &rest[1..], env); }
-        match program {
-            "node" => node(&rest[1..], env),
-            "tsx" if rest[1..].iter().any(|w| w.text == "--test") => invocation(Runner::Node, Some("/workspace/node_modules/.bin/tsx"), &rest[1..], env),
-            p if ORCHESTRATORS.contains(&p) => Found::Packages,
-            p if RUN_ALL.contains(&p) => self.run_all(&rest[1..], depth),
-            "npm" | "pnpm" | "yarn" | "bun" => self.manager(program, &rest[1..], depth, env),
-            _ => Found::Nothing,
+        let started = match (runner_named(program), program) {
+            (Some(runner), _) => invocation(runner, None, &rest[1..], env),
+            (None, "node") => node(&rest[1..], env),
+            (None, "tsx") if rest[1..].iter().any(|w| w.text == "--test") => invocation(Runner::Node, Some("/workspace/node_modules/.bin/tsx"), &rest[1..], env),
+            (None, p) if ORCHESTRATORS.contains(&p) => return Found::Packages,
+            (None, p) if RUN_ALL.contains(&p) => return self.around(&env, || self.run_all(&rest[1..], depth)),
+            (None, "npm" | "pnpm" | "yarn" | "bun") => return self.around(&env.clone(), || self.manager(program, &rest[1..], depth, env)),
+            _ => return Found::Nothing,
+        };
+        if let Found::Run(i) = &started { self.runs.borrow_mut().push(i.clone()); }
+        started
+    }
+
+    fn around(&self, env: &BTreeMap<String, String>, read: impl FnOnce() -> Found) -> Found {
+        let start = self.runs.borrow().len();
+        let found = read();
+        for i in self.runs.borrow_mut().iter_mut().skip(start) {
+            for (key, value) in env { i.env.entry(key.clone()).or_insert_with(|| value.clone()); }
         }
+        found
     }
 
     fn run_all(&self, args: &[Word], depth: u32) -> Found {
@@ -183,7 +274,7 @@ impl Reader<'_> {
             Some(prefix) => self.scripts.as_object().map(|o| o.keys().filter(|k| k.starts_with(prefix)).cloned().collect()).unwrap_or_default(),
             None => vec![w.text.clone()],
         }).collect();
-        either(names.iter().map(|name| self.script(name, &[], depth + 1)))
+        either(names.iter().map(|name| self.script(name, &[], depth + 1)), self.counting)
     }
 
     fn manager(&self, program: &str, args: &[Word], depth: u32, env: BTreeMap<String, String>) -> Found {

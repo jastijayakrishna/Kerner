@@ -48,12 +48,14 @@ pub fn host_cpus() -> u64 { std::thread::available_parallelism().map_or(1, |n| n
 
 fn runner(package: Option<&[u8]>) -> Option<(&'static str, Vec<String>)> {
     let pkg: Value = serde_json::from_slice(package?).ok()?;
-    let has = |name: &str| ["devDependencies", "dependencies"].iter().any(|k| pkg[*k].get(name).is_some());
+    let has = |name: &str| depends(&pkg, name);
     let bin = |name: &str| format!("/workspace/node_modules/.bin/{name}");
     if has("vitest") { return Some(("vitest", vec![bin("vitest"), "run".into()])); }
     if let Some(name) = ["jest", "mocha"].into_iter().find(|n| has(n)) { return Some((name, vec![bin(name)])); }
     pkg["scripts"]["test"].as_str().filter(|t| t.contains("node --test")).map(|_| ("node", vec!["/usr/local/bin/node".into(), "--test".into()]))
 }
+fn depends(pkg: &Value, name: &str) -> bool { ["devDependencies", "dependencies"].iter().any(|k| pkg[*k].get(name).is_some()) }
+pub fn records_runner(package: &Value) -> bool { crate::leaf::RUNNERS.iter().any(|n| depends(package, n)) }
 pub fn detect(package: Option<&[u8]>) -> Option<Tests> {
     let (name, command) = runner(package)?;
     Some(Tests { paths: Vec::new(), kind: Kind::Feature, runner: Runner::parse(name)?, command, edits: Edits::Checked })
@@ -272,13 +274,18 @@ fn positionals(args: &[String]) -> bool {
     false
 }
 
+const RELATED_JEST: [&str; 2] = ["--passWithNoTests", "--findRelatedTests"];
+pub fn passes_with_none(tests: &Tests) -> bool {
+    let kerns = |k: usize| tests.command.get(k + 2..).is_some_and(|rest| !rest.is_empty() && rest.iter().all(|a| a.starts_with("/workspace/")));
+    tests.runner == Runner::Jest && tests.command.windows(2).rposition(|w| w[0] == RELATED_JEST[0] && w[1] == RELATED_JEST[1]).is_some_and(kerns)
+}
 pub fn related(tests: &Tests, files: &BTreeSet<String>, dir: &str) -> Option<Tests> {
     if files.is_empty() || files.len() > FOCUS { return None; }
     let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
     let mut t = tests.clone();
     match tests.runner {
         Runner::Jest => {
-            t.command.push("--findRelatedTests".into());
+            t.command.extend(RELATED_JEST.iter().map(|a| a.to_string()));
             t.command.extend(files.iter().map(|f| format!("/workspace/{f}")));
         }
         Runner::Vitest => {
@@ -990,6 +997,12 @@ pub fn kerns_install(side: Side, declared: bool) -> Side {
         side => side,
     }
 }
+pub fn repeated_runner(side: Side) -> Side {
+    match side {
+        Side::Nothing(why) if why.contains(RUNNER_MISSING) => Side::Cut(format!("{why}; the project's own test script started this run, so Kern's repeat of it, not the change, lost the runner")),
+        side => side,
+    }
+}
 pub fn capped(ending: &str) -> Option<String> { ending.strip_prefix("cut: ").map(str::to_string) }
 pub fn broke_run(first: &Side, again: &Side, old_again: Option<&Side>, uneven: bool) -> bool {
     matches!((first, again), (Side::Nothing(_), Side::Nothing(_))) && !uneven && matches!(old_again, Some(Side::Ran(r, _)) if r.sum().passed > 0)
@@ -1027,7 +1040,9 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     let seconds = within(until, limit);
     if seconds < RUN_SECS_MIN { return Ok(Side::Late); }
     let (cut, early) = (seconds < limit, early_secs(limit, seconds));
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early_secs": early, "faults": [], "serve": {}, "steps": [] });
+    let sized = sized_env(tests.runner, env);
+    if !crate::sandbox::box_env_fits(&sized) { return Ok(Side::Cut(crate::leaf::box_env_why())); }
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized, "files": files, "early_secs": early, "faults": [], "serve": {}, "steps": [] });
     let run = match in_test_box(out, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
@@ -1047,7 +1062,7 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     if parts["ending"] == b"exit -1" { return Ok(Side::Cut("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
-        Ok(r) if r.tests.is_empty() && r.problems.is_empty() && (failed_exit(&parts["ending"]) || stopped_early(&parts["ending"], &parts["errors"], &parts["output"])) =>
+        Ok(r) if r.tests.is_empty() && r.problems.is_empty() && (failed_exit(&parts["ending"]) || !passes_with_none(tests) && stopped_early(&parts["ending"], &parts["errors"], &parts["output"])) =>
             without_results("the runner stopped before running any test", &parts["ending"], &parts["errors"], &parts["output"]),
         Ok(r) => Side::Ran(r, created),
         Err(why) => without_results(&why, &parts["ending"], &parts["errors"], &parts["output"]),
@@ -1478,44 +1493,182 @@ pub fn types_fit(left_secs: u64) -> bool { left_secs >= TYPES_SECS_MIN }
 pub fn fault_seconds(left_secs: u64) -> u64 { left_secs.saturating_sub(TYPES_SECS_RESERVE).min(FAULTS_SECS_MAX) }
 pub fn faults_fit(left_secs: u64) -> bool { fault_seconds(left_secs) >= FAULTS_SECS_MIN }
 
+pub struct Check<'a> { pub out: &'a Path, pub repo: &'a Path, pub base: &'a str, pub head: &'a str, pub changes: &'a [(String, &'static str)], pub head_paths: Option<&'a [String]>, pub volumes: (&'a str, &'a str), pub until: u64 }
+pub struct Planting<'a, F: FnMut(String, u64)> { pub merged: &'a mut serde_json::Map<String, Value>, pub dropped: &'a mut BTreeSet<&'static str>, pub near: &'a mut Option<(Vec<(String, usize)>, Value)>, pub timed: &'a mut F }
+fn plant_and_watch<F: FnMut(String, u64)>(at: &Check, state: &mut Planting<F>, (suite, new, label): (&Suite, &Report, &str), owned: &dyn Fn(&str) -> bool) {
+    let Check { out, repo, base, head, changes, head_paths, volumes: (old_volume, new_volume), until } = *at;
+    let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
+    let product: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && owned(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p)).map(|(p, _)| p).collect();
+    let files: Vec<(String, String, String)> = product.iter().take(FAULT_FILES_COUNT_MAX).filter_map(|p| Some((p.to_string(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
+    let (near, map_status) = state.near.get_or_insert_with(|| if files.is_empty() { (Vec::new(), json!({ "status": "NONE" })) } else { mapped(out, new_volume, (repo, head), head_paths, &files, until) });
+    state.merged.insert("map".into(), map_status.clone());
+    let neighbours: Vec<(String, String, String)> = near.iter().filter_map(|(p, _)| { let s = shown(head, p)?; Some((p.clone(), s.clone(), s)) }).collect();
+    let mut missing: Vec<Value> = product.iter().skip(FAULT_FILES_COUNT_MAX).map(|p| json!({ "path": p, "why": format!("Kern puts faults in at most {FAULT_FILES_COUNT_MAX} changed files per check") })).collect();
+    let mut found = Vec::new();
+    let left = within(until, FAULTS_SECS_MAX + TYPES_SECS_RESERVE);
+    let (plant, watch) = after_tests(left);
+    if files.is_empty() {}
+    else if !matches!(suite.new.0.runner, Runner::Jest | Runner::Vitest) { missing.extend(files.iter().map(|(p, _, _)| json!({ "path": p, "why": NO_FAULT_RUNNER }))); }
+    else if !plant && !watch { state.dropped.insert("planted faults"); state.dropped.insert("untouched tests"); }
+    else {
+        if !plant { state.dropped.insert("planted faults"); }
+        let at = now_ms();
+        let (planted, lacking, related) = planted_faults(out, new_volume, suite, new, &files, label, (if plant { fault_seconds(left) } else { CONTROL_SECS_MAX.min(left.saturating_sub(TYPES_SECS_RESERVE)) }, plant));
+        (state.timed)(format!("faults{label}"), at);
+        found = planted;
+        missing.extend(lacking);
+        let left = within(until, BYSTANDER_SECS_MAX + TYPES_SECS_RESERVE);
+        if !related.is_empty() && !bystanders_fit(left) { state.dropped.insert("untouched tests"); }
+        if !related.is_empty() && bystanders_fit(left) {
+            let at = now_ms();
+            let touched: BTreeSet<String> = changes.iter().filter(|(p, _)| is_test_path(p)).map(|(p, _)| p.clone()).collect();
+            let seen = bystanders(out, (old_volume, new_volume), suite, &[files.clone(), neighbours.clone()].concat(), &related, &touched, label, left.saturating_sub(TYPES_SECS_RESERVE));
+            (state.timed)(format!("trace{label}"), at);
+            state.merged["bystanders"] = crate::trace::merged(&state.merged["bystanders"], &seen);
+        }
+    }
+    if let Some(a) = state.merged["faults"].as_array_mut() { a.extend(found); }
+    if let Some(a) = state.merged["faults_missing"].as_array_mut() { a.extend(missing); }
+}
+fn placed(dir: &str, leaf: Option<&crate::leaf::Leaf>) -> String {
+    let within = if dir.is_empty() { String::new() } else { format!(" in {dir}") };
+    match leaf { Some(l) => format!(" of `{}`{within}", l.name), None => within }
+}
+fn chain_leaves(out: &Path, setup: &Value, (dir, scripts): (&str, &[String]), changes: &[(String, &'static str)], (until, spent): (u64, &mut u64), timed: &mut impl FnMut(String, u64)) -> crate::leaf::Expansion {
+    let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
+    let volume = |side: &str| setup[side]["volume"].as_str().unwrap_or("").to_string();
+    let command = |script: &str| vec!["/usr/local/bin/npm".to_string(), "run".to_string(), script.to_string()];
+    let mut found = crate::leaf::Expansion::default();
+    for (n, script) in scripts.iter().enumerate() {
+        let tag = format!("{}{}", label(dir), if n == 0 { String::new() } else { format!("-{n}") });
+        let Some(side_secs) = crate::leaf::recording_secs(*spent) else { found.not_run = vec![crate::leaf::out_of_time(dir)]; break; };
+        let mut record = |side: &str| {
+            let at = now_ms();
+            let r = crate::leaf::discover(out, &volume(side), (dir, &command(script)), &format!("{side}{tag}"), (until, side_secs));
+            timed(format!("leaves-{side}{tag}"), at);
+            *spent += secs_since(at);
+            r
+        };
+        let new = record("new");
+        let old = new.is_ok().then(|| record("old"));
+        let uneven = found.uneven.take().or_else(|| crate::leaf::uneven_recording(dir, script, old.as_ref(), &new));
+        let owns = |r: &Result<crate::leaf::Recorded, String>| r.as_ref().is_ok_and(|r| r.leaves.iter().any(|l| !crate::leaf::informational(l) && paths.iter().any(|p| crate::leaf::owns(l.dir.as_deref(), p))));
+        let none = Ok(crate::leaf::Recorded::default());
+        let old = old.unwrap_or(none);
+        if old.is_ok() && !owns(&new) && !owns(&old) && n + 1 < scripts.len() { found.uneven = uneven; continue; }
+        found = crate::leaf::expand(dir, old.as_ref().map_err(Clone::clone), new.as_ref().map_err(Clone::clone), &paths);
+        found.uneven = uneven;
+        break;
+    }
+    found
+}
+type Planned = (Suite, Option<crate::leaf::Leaf>);
+type Chain = (String, Vec<String>);
+fn product_file((p, op): &(String, &'static str)) -> bool { *op != "delete" && crate::capability::is_code(p) && !is_test_path(p) && product_code(p) }
+#[derive(Default)]
+struct Chained { planned: Vec<Planned>, not_run: Vec<Value>, unconfirmed: Vec<Value>, unheld: Vec<Value>, uneven: Option<String> }
+fn chained_suites(out: &Path, setup: &Value, chains: &[Chain], changes: &[(String, &'static str)], (until, ran, taken): (u64, usize, &mut BTreeSet<String>),
+    timed: &mut impl FnMut(String, u64)) -> Chained {
+    let mut c = Chained::default();
+    let Chained { planned, not_run, unconfirmed, unheld, uneven } = &mut c;
+    let mut spent = 0u64;
+    for (dir, scripts) in chains {
+        if let Some(why) = install_failure(setup, "old", dir) { not_run.push(json!({ "dir": dir, "why": format!("the tests{} could not run on the old code: {why}", placed(dir, None)) })); continue; }
+        if let Some(why) = install_failure(setup, "new", dir) {
+            unconfirmed.push(json!({ "dir": dir, "why": format!("the tests{} could not run on the new code, where {why} (it worked on the old code)", placed(dir, None)) }));
+            continue;
+        }
+        let found = chain_leaves(out, setup, (dir, scripts), changes, (until, &mut spent), timed);
+        if uneven.is_none() { *uneven = found.uneven; }
+        not_run.extend(found.not_run);
+        unheld.extend(changes.iter().filter(|c| product_file(c) && found.unheld.contains(&c.0)).map(|(p, _)| json!({ "path": p, "why": crate::leaf::unheld_why(dir) })));
+        let several = found.leaves.len() > 1;
+        for p in found.leaves {
+            if ran + planned.len() >= SUITES_COUNT_MAX { not_run.push(json!({ "dir": p.dir, "why": format!("Kern runs at most {SUITES_COUNT_MAX} test runs per check, and `{}` was over that", p.name) })); continue; }
+            let label = crate::leaf::label(&p.dir, taken);
+            taken.insert(label.clone());
+            let leaf = crate::leaf::Leaf { label, prefix: several.then(|| p.name.clone()), name: p.name };
+            planned.push((Suite { dir: p.dir, old: p.old, new: p.new, uneven: None }, Some(leaf)));
+        }
+    }
+    c
+}
+const MANIFEST_BYTES_MAX: usize = 64 << 20;
+const PROGRAM_BYTES_MAX: usize = 1 << 20;
+pub type Read<'a> = &'a dyn Fn(&str, &str, usize) -> Option<Vec<u8>>;
+pub struct Tree<'a> { pub read: Read<'a>, pub has: &'a dyn Fn(&str, &str) -> bool, pub base: &'a str, pub head: &'a str }
+impl Tree<'_> {
+    pub fn manifest(&self, commit: &str, dir: &str) -> Option<Vec<u8>> { (self.read)(commit, &if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") }, MANIFEST_BYTES_MAX) }
+    pub fn parsed(&self, commit: &str, dir: &str) -> Option<Value> { self.manifest(commit, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()) }
+    fn planned(&self, commit: &str, dir: &str) -> Option<(Tests, Env)> {
+        ready(plan(self.manifest(commit, dir).as_deref())).or_else(|| {
+            let scripted = self.parsed(commit, dir).is_some_and(|v| v["scripts"]["test"].is_string());
+            if dir.is_empty() || scripted { None } else { by_config(|f| (self.has)(commit, &format!("{dir}/{f}"))) }
+        })
+    }
+    fn chain(&self, dir: &str) -> Option<String> {
+        let chained = [self.head, self.base].iter().find_map(|c| self.parsed(c, dir).as_ref().and_then(crate::script::chained));
+        chained.filter(|_| self.parsed(self.head, dir).as_ref().is_some_and(follows_script))
+    }
+    fn names_runner(&self, dir: &str, script: &str) -> bool {
+        let texts = self.parsed(self.head, dir).map(|p| crate::script::reached(&p, script)).unwrap_or_default();
+        let program = |f: &String| crate::rules::under(dir, f).and_then(|path| (self.read)(self.head, &path, PROGRAM_BYTES_MAX)).is_some_and(|b| crate::script::names_runner(&String::from_utf8_lossy(&b)));
+        texts.iter().any(|t| crate::script::names_runner(t)) || texts.iter().flat_map(|t| crate::script::program_files(t)).take(crate::script::PROGRAMS_COUNT_MAX).any(|f| program(&f))
+    }
+    fn recordable(&self, dir: &str, script: &str) -> bool { [dir, ""].iter().any(|d| self.parsed(self.head, d).as_ref().is_some_and(records_runner)) && self.names_runner(dir, script) }
+}
+#[derive(Default)]
+pub struct Plans { pub suites: Vec<Suite>, pub chains: Vec<Chain>, pub not_run: Vec<Value>, pub testless: Vec<String> }
+pub fn plans(tree: &Tree, paths: &[&str]) -> Plans {
+    let mut p = Plans::default();
+    match (plan(tree.manifest(tree.head, "").as_deref()), tree.chain("")) {
+        (Plan::Run(..), Some(script)) => p.chains.push((String::new(), vec![script])),
+        (Plan::Run(t, env), None) => p.suites.push(Suite { dir: String::new(), old: ready(plan(tree.manifest(tree.base, "").as_deref())), new: (t, env), uneven: None }),
+        (Plan::Packages | Plan::Nothing, _) => package_plans(tree, paths, &mut p),
+    }
+    p
+}
+fn package_plans(tree: &Tree, paths: &[&str], p: &mut Plans) {
+    let (base, head) = (tree.base, tree.head);
+    let project = |dir: &str| !dir.is_empty() && [head, base].iter().any(|c| (tree.has)(c, &format!("{dir}/project.json")));
+    let has_manifest = |dir: &str| tree.manifest(head, dir).is_some() || tree.manifest(base, dir).is_some() || project(dir);
+    let full = |p: &Plans| p.suites.len() + p.chains.len() >= MAX_PACKAGES;
+    let over = |dir: &str| json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") });
+    for dir in packages(paths, has_manifest) {
+        if let Some(script) = tree.chain(&dir) {
+            if full(p) { p.not_run.push(over(&dir)); } else { p.chains.push((dir, vec![script])); }
+            continue;
+        }
+        let Some(new) = tree.planned(head, &dir) else {
+            match tree.parsed(head, &dir).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string)) {
+                Some(s) if crate::script::placeholder(&s) => p.testless.push(dir.clone()),
+                Some(s) if !tree.recordable(&dir, "test") => p.not_run.push(json!({ "dir": dir, "why": format!("Kern cannot run this package's test script: {s}") })),
+                Some(_) if full(p) => p.not_run.push(over(&dir)),
+                Some(_) => p.chains.push((dir.clone(), vec!["test".to_string()])),
+                None => {}
+            }
+            continue;
+        };
+        if full(p) { p.not_run.push(over(&dir)); continue; }
+        p.suites.push(Suite { old: tree.planned(base, &dir), dir, new, uneven: None });
+    }
+    let outside = paths.iter().any(|path| crate::capability::is_code(path) && packages(&[*path], has_manifest).is_empty());
+    let mut scripts = tree.parsed(head, "").as_ref().map(crate::script::test_scripts).unwrap_or_default();
+    scripts.retain(|s| tree.recordable("", s));
+    if p.suites.is_empty() && p.chains.is_empty() && p.not_run.is_empty() && p.testless.is_empty() && outside && !scripts.is_empty() { p.chains.push((String::new(), scripts)); }
+}
 pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let d = read_json(out.join("drive.json"))?;
     let repo = Path::new(d["repo"].as_str().unwrap_or(""));
     let (base, head) = (d["base"].as_str().unwrap_or(""), d["head"].as_str().unwrap_or(""));
-    let manifest = |commit: &str, dir: &str| -> Option<Vec<u8>> {
-        let path = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
-        crate::git::git(repo, &["show", &format!("{commit}:{path}")], None).ok()
-    };
-    let has = |commit: &str, path: String| crate::git::git(repo, &["cat-file", "-e", &format!("{commit}:{path}")], None).is_ok();
-    let planned = |commit: &str, dir: &str| ready(plan(manifest(commit, dir).as_deref())).or_else(|| {
-        let scripted = manifest(commit, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).is_some_and(|v| v["scripts"]["test"].is_string());
-        if dir.is_empty() || scripted { None } else { by_config(|f| has(commit, format!("{dir}/{f}"))) }
-    });
-    let (mut not_run, mut testless) = (Vec::new(), Vec::new());
-    let suites: Vec<Suite> = match plan(manifest(head, "").as_deref()) {
-        Plan::Run(t, env) => vec![Suite { dir: String::new(), old: ready(plan(manifest(base, "").as_deref())), new: (t, env), uneven: None }],
-        Plan::Packages | Plan::Nothing => {
-            let changed = crate::rules::changed(repo, base, head)?;
-            let paths: Vec<&str> = changed.iter().map(|(p, _)| p.as_str()).collect();
-            let mut list = Vec::new();
-            let project = |dir: &str| !dir.is_empty() && [head, base].iter().any(|c| has(c, format!("{dir}/project.json")));
-            for dir in packages(&paths, |dir| manifest(head, dir).is_some() || manifest(base, dir).is_some() || project(dir)) {
-                let Some(new) = planned(head, &dir) else {
-                    let script = manifest(head, &dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string));
-                    match script {
-                        Some(s) if crate::script::placeholder(&s) => testless.push(dir.clone()),
-                        Some(s) => not_run.push(json!({ "dir": dir, "why": format!("Kern cannot run this package's test script: {s}") })),
-                        None => {}
-                    }
-                    continue;
-                };
-                if list.len() == MAX_PACKAGES { not_run.push(json!({ "dir": dir, "why": format!("Kern runs the tests of at most {MAX_PACKAGES} packages per change") })); continue; }
-                list.push(Suite { old: planned(base, &dir), dir, new, uneven: None });
-            }
-            list
-        }
-    };
-    if suites.is_empty() {
+    let read = |commit: &str, path: &str, bytes_max: usize| crate::git::git_with(repo, &["show", &format!("{commit}:{path}")], None, bytes_max).ok();
+    let has = |commit: &str, path: &str| crate::git::git(repo, &["cat-file", "-e", &format!("{commit}:{path}")], None).is_ok();
+    let tree = Tree { read: &read, has: &has, base, head };
+    let manifest = |commit: &str, dir: &str| tree.manifest(commit, dir);
+    let changes = crate::rules::changed(repo, base, head)?;
+    let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
+    let Plans { suites, chains, mut not_run, mut testless } = plans(&tree, &paths);
+    if suites.is_empty() && chains.is_empty() {
         let script = manifest(head, "").and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string)).filter(|s| !crate::script::placeholder(s));
         return Ok(match (not_run.first().map(|n| n["why"].clone()), script) {
             (Some(why), _) => json!({ "status": "NOT_RUN", "why": why, "not_run": not_run, "no_tests_in": testless }),
@@ -1556,30 +1709,38 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let (mut ran, mut all_new, mut wrote_code, mut run_broke, mut run_unconfirmed) = (Vec::new(), Vec::new(), BTreeSet::new(), Vec::new(), Vec::new());
     let (mut late, mut dropped, mut tested) = (false, BTreeSet::new(), Vec::new());
     let (mut old_created, mut edited_files, mut edited_unchecked, mut test_data) = (BTreeSet::new(), 0usize, Vec::new(), Vec::new());
-    let changes = crate::rules::changed(repo, base, head)?;
     let followed = |dir: &str| manifest(base, dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().is_some_and(follows_script);
     let head_paths: Option<Vec<String>> = crate::drive::listing(repo, head).ok().map(|items| items.into_iter().map(|i| i.path).collect());
     let testless_here = |dir: &str| followed(dir) && head_paths.as_ref().is_some_and(|p| !repo_has_tests(p, dir));
     let mut near_once: Option<(Vec<(String, usize)>, Value)> = None;
-    for (nth, suite) in suites.iter().enumerate() {
+    let (old_volume, new_volume) = (volume("old"), volume("new"));
+    let at_check = Check { out, repo, base, head, changes: &changes, head_paths: head_paths.as_deref(), volumes: (&old_volume, &new_volume), until };
+    let mut planned: Vec<Planned> = suites.into_iter().map(|suite| (suite, None)).collect();
+    let mut taken: BTreeSet<String> = planned.iter().map(|(suite, _)| label(&suite.dir)).collect();
+    let Chained { planned: leaves, not_run: skipped, unconfirmed, unheld, uneven } = chained_suites(out, &s, &chains, &changes, (until, planned.len(), &mut taken), &mut timed);
+    let mut uneven_build = uneven;
+    planned.extend(leaves);
+    not_run.extend(skipped);
+    run_unconfirmed.extend(unconfirmed);
+    let mut later: Vec<(usize, Report, String)> = Vec::new();
+    let mut leaves_json = Vec::new();
+    for (index, (suite, leaf)) in planned.iter().enumerate() {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-        let last = nth + 1 == suites.len();
+        let last = index + 1 == planned.len();
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
-            let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
-            not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the old code: {why}") }));
+            not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{} could not run on the old code: {why}", placed(&suite.dir, leaf.as_ref())) }));
             continue;
         }
         if let Some(why) = install_failure(&s, "new", &suite.dir) {
-            let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
-            run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the new code, where {why} (it worked on the old code)") }));
+            run_unconfirmed.push(json!({ "dir": suite.dir, "why": format!("the tests{} could not run on the new code, where {why} (it worked on the old code)", placed(&suite.dir, leaf.as_ref())) }));
             continue;
         }
-        let label = label(&suite.dir);
-        let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
+        let label = leaf.as_ref().map_or_else(|| label(&suite.dir), |l| l.label.clone());
+        let place = placed(&suite.dir, leaf.as_ref());
         let inside = |p: &str| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir));
         let changed_code = |skip: &str| -> BTreeSet<String> { changes.iter().filter(|(p, o)| *o != skip && inside(p) && crate::capability::is_code(p)).map(|(p, _)| p.clone()).collect() };
         let (mut narrowed, mut old_seconds, mut whole_why) = (None, 0u64, String::new());
-        let mut uneven_why = setup_differs(&s, &suite.dir);
+        let mut uneven_why = setup_differs(&s, &suite.dir).or_else(|| uneven_build.clone());
         let (mut built, mut tried, mut old_tests, mut unbuilt) = (Vec::new(), String::new(), None, Vec::new());
         let old_run = match &suite.old {
             None => None,
@@ -1628,13 +1789,15 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                             (Err(e), _) => {
                                 tried = format!(" (Kern tried running {} first, but could not: {})", names.join(", "), e.0);
                                 uneven_why = Some(format!("Kern's build of {} did not finish on the old code ({}), so the two sides may hold different builds", names.join(", "), e.0));
+                                uneven_build.clone_from(&uneven_why);
                             }
                             (Ok(_), Err(e)) => {
                                 tried = format!(" (Kern ran {} on the old code first, but could not on the new code: {})", names.join(", "), e.0);
                                 uneven_why = Some(format!("Kern built {} on the old code but not on the new code ({})", names.join(", "), e.0));
+                                uneven_build.clone_from(&uneven_why);
                             }
                             (Ok(lo), Ok(ln)) => {
-                                if let Some(u) = uneven_steps(&lo, &ln) { uneven_why = Some(u); }
+                                if let Some(u) = uneven_steps(&lo, &ln) { uneven_why = Some(u); uneven_build.clone_from(&uneven_why); }
                                 pending_failed = failed_steps(&lo);
                                 pending = names;
                                 phase = phase.replacen("old", "old-built", 1);
@@ -1657,7 +1820,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         };
         match &old_run {
             Some(Side::Late) => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
-            Some(Side::Nothing(why)) if no_test_files(why) && tried.is_empty() && built.is_empty() && testless_here(&suite.dir) => { testless.push(suite.dir.clone()); continue; }
+            Some(Side::Nothing(why)) if leaf.is_none() && no_test_files(why) && tried.is_empty() && built.is_empty() && testless_here(&suite.dir) => { testless.push(suite.dir.clone()); continue; }
             Some(Side::Nothing(why) | Side::Cut(why)) => {
                 let skipped = if unbuilt.is_empty() { String::new() } else { format!(" (Kern did not run {} first: its time ran short)", unbuilt.join(", ")) };
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{tried}{skipped}") }));
@@ -1669,7 +1832,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 continue;
             }
             Some(Side::Ran(r, _)) if narrowed.is_some() && r.tests.is_empty() && r.problems.is_empty() => {
-                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} were not run: {whole_why}, and no test is related to the changed files") }));
+                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} were not run: {whole_why}, and {} found none of its tests related to the changed files", suite.new.0.runner.name()) }));
                 continue;
             }
             Some(Side::Ran(r, _)) if r.tests.values().all(|c| c.passed == 0) && (!r.tests.is_empty() || !r.problems.is_empty()) => {
@@ -1685,8 +1848,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let at = now_ms();
         let declared = std::iter::successors(Some(suite.dir.as_str()), |d| (!d.is_empty()).then(|| d.rsplit_once('/').map_or("", |(p, _)| p)))
             .any(|d| runner_declared(manifest(head, d).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref(), suite.new.0.runner));
+        let own_runner = |s: Side| if leaf.is_some() { repeated_runner(s) } else { kerns_install(s, declared) };
         let first = match run_for(out, (&volume("new"), budget), whole_new, &suite.dir, &format!("{name}{label}"), until) {
-            Ok(s) => kerns_install(s, declared),
+            Ok(s) => own_runner(s),
             Err(e) => { not_run.push(json!({ "dir": suite.dir, "why": format!("Kern could not run the tests{place}: {}", e.0) })); continue; }
         };
         timed(format!("{name}{label}"), at);
@@ -1709,7 +1873,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
             first => {
                 let at = now_ms();
-                let again = run_for(out, (&volume("new"), again_secs), whole_new, &suite.dir, &format!("new-again{label}"), until).map(|s| kerns_install(s, declared));
+                let again = run_for(out, (&volume("new"), again_secs), whole_new, &suite.dir, &format!("new-again{label}"), until).map(own_runner);
                 timed(format!("new-again{label}"), at);
                 let cut = |why: &str| json!({ "dir": suite.dir, "why": format!("the tests{place} gave no results on the new code once, where the old code's tests ran, and {why}") });
                 match again {
@@ -1738,7 +1902,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         };
         let old = match old_run {
             Some(Side::Ran(r, created)) => { old_created.extend(created); r }
-            _ => { all_new.push(if suite.dir.is_empty() { ".".to_string() } else { suite.dir.clone() }); Report::default() }
+            _ => { all_new.push(match leaf { Some(l) => format!("`{}`", l.name), None if suite.dir.is_empty() => ".".to_string(), None => suite.dir.clone() }); Report::default() }
         };
         let suspect = suspects(&old, &new);
         let present = |r: &Report, f: &String| r.problems.iter().any(|p| file_of(p) == f.as_str()) || r.tests.keys().any(|k| file_of(k) == f.as_str());
@@ -1795,9 +1959,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         if !plan.is_empty() && alone_new.is_none() && whole.is_none() { unconfirmed = true; }
         let mut c = verdict(&old, &new, alone_new.as_ref(), whole.as_ref(), second_old.as_ref(), unconfirmed, uneven_why.is_some());
         let runner = suite.new.0.runner;
-        let named = |k: &str| in_suite(runner, &suite.dir, k);
+        let named = |k: &str| crate::leaf::named(leaf.as_ref().and_then(|l| l.prefix.as_deref()), runner, &suite.dir, k);
         let list = |v: &Value| -> Vec<Value> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| json!(named(x))).collect() };
-        if c["status"] != "RAN" && c["why"] == FOUND_NONE && narrowed.is_none() && testless_here(&suite.dir) { testless.push(suite.dir.clone()); continue; }
+        if c["status"] != "RAN" && c["why"] == FOUND_NONE && narrowed.is_none() && leaf.is_none() && testless_here(&suite.dir) { testless.push(suite.dir.clone()); continue; }
         if c["status"] != "RAN" {
             not_run.push(json!({ "dir": suite.dir, "why": c["why"] }));
             if let Some(a) = merged["new_failing"].as_array_mut() { a.extend(list(&c["new_failing"])); }
@@ -1834,56 +1998,47 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             sums[i] += c[*side][*field].as_u64().unwrap_or(0);
         }
         kept += c["kept"].as_u64().unwrap_or(0);
-        if std::env::var("KERN_FAULTS").as_deref() != Ok("0") {
-            let shown = |commit: &str, p: &str| crate::git::git(repo, &["show", &format!("{commit}:{p}")], None).ok().map(|b| String::from_utf8_lossy(&b).to_string());
-            let product: Vec<&String> = changes.iter().filter(|(p, op)| *op != "delete" && inside(p) && crate::capability::is_code(p) && !is_test_path(p) && product_code(p)).map(|(p, _)| p).collect();
-            let files: Vec<(String, String, String)> = product.iter().take(FAULT_FILES_COUNT_MAX).filter_map(|p| Some((p.to_string(), shown(base, p).unwrap_or_default(), shown(head, p)?))).collect();
-            let (near, map_status) = near_once.get_or_insert_with(|| if files.is_empty() { (Vec::new(), json!({ "status": "NONE" })) } else { mapped(out, &volume("new"), (repo, head), head_paths.as_deref(), &files, until) });
-            merged.insert("map".into(), map_status.clone());
-            let neighbours: Vec<(String, String, String)> = near.iter().filter_map(|(p, _)| { let s = shown(head, p)?; Some((p.clone(), s.clone(), s)) }).collect();
-            let mut missing: Vec<Value> = product.iter().skip(FAULT_FILES_COUNT_MAX).map(|p| json!({ "path": p, "why": format!("Kern puts faults in at most {FAULT_FILES_COUNT_MAX} changed files per check") })).collect();
-            let mut found = Vec::new();
-            let left = within(until, FAULTS_SECS_MAX + TYPES_SECS_RESERVE);
-            let (plant, watch) = after_tests(left);
-            if files.is_empty() {}
-            else if !matches!(runner, Runner::Jest | Runner::Vitest) { missing.extend(files.iter().map(|(p, _, _)| json!({ "path": p, "why": NO_FAULT_RUNNER }))); }
-            else if !plant && !watch { dropped.insert("planted faults"); dropped.insert("untouched tests"); }
-            else {
-                if !plant { dropped.insert("planted faults"); }
-                let at = now_ms();
-                let (planted, lacking, related) = planted_faults(out, &volume("new"), suite, &new, &files, &label, (if plant { fault_seconds(left) } else { CONTROL_SECS_MAX.min(left.saturating_sub(TYPES_SECS_RESERVE)) }, plant));
-                timed(format!("faults{label}"), at);
-                found = planted;
-                missing.extend(lacking);
-                let left = within(until, BYSTANDER_SECS_MAX + TYPES_SECS_RESERVE);
-                if !related.is_empty() && !bystanders_fit(left) { dropped.insert("untouched tests"); }
-                if !related.is_empty() && bystanders_fit(left) {
-                    let at = now_ms();
-                    let touched: BTreeSet<String> = changes.iter().filter(|(p, _)| is_test_path(p)).map(|(p, _)| p.clone()).collect();
-                    let seen = bystanders(out, (&volume("old"), &volume("new")), suite, &[files.clone(), neighbours.clone()].concat(), &related, &touched, &label, left.saturating_sub(TYPES_SECS_RESERVE));
-                    timed(format!("trace{label}"), at);
-                    merged["bystanders"] = crate::trace::merged(&merged["bystanders"], &seen);
-                }
-            }
-            if let Some(a) = merged["faults"].as_array_mut() { a.extend(found); }
-            if let Some(a) = merged["faults_missing"].as_array_mut() { a.extend(missing); }
+        if leaf.is_some() { later.push((index, new.clone(), label.clone())); }
+        else if std::env::var("KERN_FAULTS").as_deref() != Ok("0") {
+            let mut state = Planting { merged: &mut merged, dropped: &mut dropped, near: &mut near_once, timed: &mut timed };
+            plant_and_watch(&at_check, &mut state, (suite, &new, &label), &inside);
         }
         let only = if narrowed.is_some() { format!(", only the tests related to the change: {whole_why}") } else { String::new() };
         let only = if built.is_empty() { only } else { format!("{only}, after Kern ran {}", built.join(", ")) };
         let only = if unbuilt.is_empty() { only } else { format!("{only}, without first running {}: Kern kept its time for the new code's run", unbuilt.join(", ")) };
-        let only = match manifest(head, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed) {
+        let only = match manifest(head, &suite.dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed).filter(|_| leaf.is_none()) {
             Some(script) => format!("{only}, run directly: the project's test script, `{script}`, is not one Kern can follow"),
             None => only,
         };
-        ran.push(if suite.dir.is_empty() { format!("{}{only}", runner.name()) } else { format!("{} in {}{only}", runner.name(), suite.dir) });
-        tested.push(Suite { dir: suite.dir.clone(), old: suite.old.clone(), new: suite.new.clone(), uneven: uneven_why.clone() }.json());
+        let from = leaf.as_ref().map_or_else(String::new, |l| format!(" (`{}`, from the project's test script)", l.name));
+        ran.push(if suite.dir.is_empty() { format!("{}{from}{only}", runner.name()) } else { format!("{} in {}{from}{only}", runner.name(), suite.dir) });
+        let record = Suite { dir: suite.dir.clone(), old: suite.old.clone(), new: suite.new.clone(), uneven: uneven_why.clone() }.json();
+        match leaf {
+            Some(l) => leaves_json.push(json!({ "label": l.label, "name": l.name, "prefix": l.prefix, "suite": record })),
+            None => tested.push(record),
+        }
+    }
+    if std::env::var("KERN_FAULTS").as_deref() != Ok("0") && !later.is_empty() {
+        let owners: Vec<(usize, &str, &Report)> = later.iter().map(|(i, r, _)| (*i, planned[*i].0.dir.as_str(), r)).collect();
+        let product: Vec<String> = changes.iter().filter(|c| product_file(c)).map(|(p, _)| p.clone()).collect();
+        let assigned = crate::leaf::assigned(&product, &owners);
+        for (index, new, label) in &later {
+            let Some(files) = assigned.get(index) else { continue };
+            let mut state = Planting { merged: &mut merged, dropped: &mut dropped, near: &mut near_once, timed: &mut timed };
+            plant_and_watch(&at_check, &mut state, (&planned[*index].0, new, label), &|p: &str| files.iter().any(|f| f == p));
+        }
+    }
+    if std::env::var("KERN_FAULTS").as_deref() != Ok("0") && let Some(a) = merged["faults_missing"].as_array_mut() {
+        let tested_in = |p: &str| planned.iter().any(|(suite, _)| suite.dir.is_empty() || p.starts_with(&format!("{}/", suite.dir)));
+        a.extend(unheld.into_iter().filter(|m| !tested_in(m["path"].as_str().unwrap_or(""))));
     }
     let _ = std::fs::write(out.join("suites.json"), serde_json::to_vec(&tested).unwrap_or_default());
+    if !leaves_json.is_empty() { let _ = std::fs::write(out.join("leaves.json"), serde_json::to_vec(&leaves_json).unwrap_or_default()); }
     let old_shapes: BTreeSet<String> = old_created.iter().map(|f: &String| path_shape(f)).collect();
     wrote_code.retain(|f| !old_shapes.contains(&path_shape(f)));
     for n in not_run.iter_mut() {
         let dir = n["dir"].as_str().unwrap_or("").to_string();
-        let Some(suite) = suites.iter().find(|s| s.dir == dir) else { continue };
+        let Some((suite, _)) = planned.iter().find(|(s, leaf)| s.dir == dir && leaf.is_none()) else { continue };
         if let Some(script) = manifest(head, &dir).and_then(|m| serde_json::from_slice::<Value>(&m).ok()).as_ref().and_then(guessed) {
             let why = format!("{} (the project's test script, `{script}`, is not one Kern can follow, so Kern ran {} directly)", n["why"].as_str().unwrap_or(""), suite.new.0.runner.name());
             n["why"] = json!(why);
@@ -1897,11 +2052,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));
     }
     if ran.is_empty() && not_run.is_empty() && run_unconfirmed.is_empty() && !testless.is_empty() {
-        return Ok(with(json!({ "status": "NOT_RUN", "runner": suites[0].new.0.runner.name(), "why": NO_TESTS, "no_tests": true })));
+        return Ok(with(json!({ "status": "NOT_RUN", "runner": planned.first().map(|(suite, _)| suite.new.0.runner.name()), "why": NO_TESTS, "no_tests": true })));
     }
     if ran.is_empty() {
         let why = not_run.first().and_then(|n| n["why"].as_str()).or_else(|| run_unconfirmed.first().and_then(|n| n["why"].as_str())).unwrap_or("no test run gave results").to_string();
-        return Ok(with(json!({ "status": "NOT_RUN", "runner": suites[0].new.0.runner.name(), "why": why })));
+        return Ok(with(json!({ "status": "NOT_RUN", "runner": planned.first().map(|(suite, _)| suite.new.0.runner.name()), "why": why })));
     }
     let mut c = Value::Object(merged);
     c["status"] = json!("RAN");

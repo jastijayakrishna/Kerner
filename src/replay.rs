@@ -11,7 +11,23 @@ const REPORT_BYTES_MAX: u64 = 64 << 20;
 const ENTRIES_COUNT_MAX: usize = 10_000;
 const SUITES_COUNT_MAX: usize = 16;
 
-struct Judged { verdict: Value, runner: Runner, suite_dir: String }
+struct Judged { verdict: Value, runner: Runner, suite_dir: String, prefix: Option<String> }
+const LEAVES_JSON_BYTES_MAX: u64 = 1 << 20;
+struct Part { runner: Runner, dir: String, prefix: Option<String> }
+fn leaves(dir: &Path) -> Option<std::collections::BTreeMap<String, Part>> {
+    let path = dir.join("leaves.json");
+    if !path.is_file() { return Some(std::collections::BTreeMap::new()); }
+    if std::fs::metadata(&path).ok()?.len() > LEAVES_JSON_BYTES_MAX { return None; }
+    let v: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    v.as_array()?.iter().take(SUITES_COUNT_MAX).map(|l| {
+        let part = Part { runner: Runner::parse(l["suite"]["new"]["runner"].as_str()?)?, dir: l["suite"]["dir"].as_str()?.to_string(), prefix: l["prefix"].as_str().map(str::to_string) };
+        Some((l["label"].as_str()?.to_string(), part))
+    }).collect()
+}
+fn part(label: &str, suites: &[(Runner, String)], leaves: &std::collections::BTreeMap<String, Part>) -> Option<Part> {
+    if let Some(p) = leaves.get(label) { return Some(Part { runner: p.runner, dir: p.dir.clone(), prefix: p.prefix.clone() }); }
+    suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-')).map(|(runner, d)| Part { runner: *runner, dir: d.clone(), prefix: None })
+}
 fn role(stem: &str) -> Option<(&'static str, &str)> {
     ROLES.iter().find_map(|r| stem.strip_prefix(r).filter(|rest| rest.is_empty() || rest.starts_with('-')).map(|rest| (*r, rest)))
 }
@@ -65,17 +81,18 @@ fn faults(dir: &Path, suites: &[(Runner, String)], stored: &Value) -> Option<Vec
 }
 const VALUES_BYTES_MAX: u64 = 4 << 20;
 const TRACE_BYTES_MAX: u64 = 16 << 20;
-fn readings(dir: &Path, suites: &[(Runner, String)], labels: &BTreeSet<String>, wanted: &BTreeSet<String>) -> serde_json::Map<String, Value> {
+fn readings(dir: &Path, parts: &[(String, Part)], wanted: &BTreeSet<String>) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
-    for label in labels {
-        let Some((runner, _)) = suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-')) else { continue };
+    for (label, Part { runner, prefix, .. }) in parts {
         let read = |kind: &str, max: u64| -> Vec<u8> {
             let path = dir.join(format!("tests-new-kept{label}.{kind}"));
             if std::fs::metadata(&path).map_or(true, |m| m.len() > max) { return Vec::new(); }
             std::fs::read(path).unwrap_or_default()
         };
         let found = crate::proof::failures(*runner, &read("out", REPORT_BYTES_MAX), &read("values", VALUES_BYTES_MAX));
-        out.extend(crate::suite::polarity(&found, &crate::suite::kept_back, wanted));
+        let own: BTreeSet<String> = wanted.iter().filter_map(|k| match prefix { Some(p) => k.strip_prefix(&format!("{p}: ")).map(str::to_string), None => Some(k.clone()) }).collect();
+        let named = |k: String| match prefix { Some(p) => format!("{p}: {k}"), None => k };
+        out.extend(crate::suite::polarity(&found, &crate::suite::kept_back, &own).into_iter().map(|(k, v)| (named(k), v)));
     }
     out
 }
@@ -83,6 +100,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     let stored = read_json(dir.join("receipt.json"))?;
     let mut tests = stored["tests"].clone();
     let suites = runners(tests["runner"].as_str().unwrap_or(""));
+    let recorded = leaves(dir);
     let mut labels = BTreeSet::new();
     for e in std::fs::read_dir(dir)?.flatten().take(ENTRIES_COUNT_MAX) {
         let name = e.file_name().to_string_lossy().to_string();
@@ -91,24 +109,24 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     }
     let stored_uneven = tests["uneven_why"].as_array().is_some_and(|a| !a.is_empty());
     let setup = read_json(dir.join("setup.json")).ok();
-    let judgeable = tests["status"] == "RAN" && !labels.is_empty() && labels.len() <= SUITES_COUNT_MAX;
+    let parts: Vec<(String, Part)> = labels.iter().filter_map(|l| Some((l.clone(), part(l, &suites, recorded.as_ref()?)?))).collect();
+    let judgeable = tests["status"] == "RAN" && !labels.is_empty() && labels.len() <= SUITES_COUNT_MAX && parts.len() == labels.len();
     let changed: Vec<(&str, &str)> = stored["rules"]["changed"].as_array().into_iter().flatten().filter_map(|c| Some((c["path"].as_str()?, c["operation"].as_str()?))).collect();
-    let judged: Option<Vec<Judged>> = judgeable.then(|| labels.iter().map(|label| {
-        let (runner, suite_dir) = suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-'))?.clone();
-        let unconfirmed = tests["unconfirmed"].as_array().into_iter().flatten().filter_map(Value::as_str)
-            .any(|k| suite_dir.is_empty() || k.starts_with(&format!("{suite_dir}/")) || k.starts_with(&format!("{suite_dir}: ")));
-        let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, &suite_dir).is_some());
-        suite(dir, label, runner, (unconfirmed, uneven), &changed).map(|verdict| Judged { verdict, runner, suite_dir })
+    let judged: Option<Vec<Judged>> = judgeable.then(|| parts.iter().map(|(label, Part { runner, dir: suite_dir, prefix })| {
+        let mine = |k: &str| match prefix { Some(p) => k.starts_with(&format!("{p}: ")), None => suite_dir.is_empty() || k.starts_with(&format!("{suite_dir}/")) || k.starts_with(&format!("{suite_dir}: ")) };
+        let unconfirmed = tests["unconfirmed"].as_array().into_iter().flatten().filter_map(Value::as_str).any(mine);
+        let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, suite_dir).is_some());
+        suite(dir, label, *runner, (unconfirmed, uneven), &changed).map(|verdict| Judged { verdict, runner: *runner, suite_dir: suite_dir.clone(), prefix: prefix.clone() })
     }).collect()).flatten();
     if let Some(judged) = &judged {
         let mut merged: serde_json::Map<String, Value> = crate::suite::LISTS.iter().map(|l| (l.to_string(), json!([]))).collect();
         merged.insert("problem_why".into(), json!({}));
-        for j in judged { crate::suite::fold(&mut merged, &j.verdict, &|k| crate::suite::in_suite(j.runner, &j.suite_dir, k)); }
+        for j in judged { crate::suite::fold(&mut merged, &j.verdict, &|k| crate::leaf::named(j.prefix.as_deref(), j.runner, &j.suite_dir, k)); }
         let kept_runs = labels.iter().any(|label| dir.join(format!("tests-new-kept{label}.out")).is_file());
         for l in crate::suite::LISTS.iter().filter(|l| **l != "rewritten" && !(kept_runs && **l == "gone")) { tests[*l] = merged[*l].clone(); }
         tests["problem_why"] = merged["problem_why"].clone();
     }
-    if let Some(f) = faults(dir, &suites, &tests["faults"]) { tests["faults"] = json!(f); }
+    if let Some(f) = faults(dir, &suites, &tests["faults"]).filter(|_| recorded.as_ref().is_some_and(|r| r.is_empty())) { tests["faults"] = json!(f); }
     let mut seen = json!({});
     for label in &labels {
         let read = |side: &str| std::fs::metadata(dir.join(format!("trace-{side}{label}.jsonl"))).ok().filter(|m| m.len() <= TRACE_BYTES_MAX)
@@ -122,7 +140,7 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     }
     if seen["status"] == "RAN" { tests["bystanders"] = seen; }
     let wanted: BTreeSet<String> = tests["rewritten"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-    if !wanted.is_empty() { tests["polarity"] = Value::Object(readings(dir, &suites, &labels, &wanted)); }
+    if !wanted.is_empty() && recorded.is_some() { tests["polarity"] = Value::Object(readings(dir, &parts, &wanted)); }
     if tests["builds"]["status"] == "CHECKED" { tests["builds"] = crate::build::rejudge(dir, &tests["builds"], setup.as_ref()); }
     if tests["probes"]["status"] == "RAN" { tests["probes"] = crate::probe::replayed(dir, &tests["probes"], setup.as_ref(), &crate::suite::ran_suites(dir).unwrap_or_default()); }
     let d = json!({ "base": stored["base"], "head": stored["head"], "skipped": [], "unmeasured": [] });

@@ -84,7 +84,17 @@ What Kern checks on every pull request:
 
 1. **Your own tests, on the old and the new code.** Kern installs both versions and runs the project's tests the way its own `test`
    script does (the runner, its config, the test files and the variables it sets; in a monorepo whose script hands the tests to each
-   package, each changed package's own script), on the Node version the project asks for (the CI workflow that runs its tests, the
+   package, each changed package's own script; a script that starts more than one vitest, jest or mocha run on either side, such as
+   `run-s` over two jest configs, or one Kern cannot read whose own words, or the program file it starts, name vitest, jest or mocha, is
+   run whole once on each side through `npm run`, with its pre and post scripts and any build, lint or type step in it, in the test box
+   with the network off and each runner replaced by a recorder that notes its folder, arguments, node flags and variables; each recorded
+   run then runs as its own suite, those whose folder holds the change first and the nearest first, at most 8 per script, its tests
+   named by the script that started it, and two runs that differ only by their variables are two runs; a step that fails while Kern
+   records the script, a run only the old code starts or whose variables changed, an old side that started no run Kern could see, a
+   changed file in no recorded run's folder, and a run Kern cannot repeat each make the answer not verified; a recording that ended
+   differently on the two sides, or ran on one side only, leaves every later suite of the check not verified, since it may have left the
+   two trees different; a change to a program file the recorded script starts is the "test script changes" look; and the recordings
+   share at most 10 minutes per check), on the Node version the project asks for (the CI workflow that runs its tests, the
    version file that workflow reads, `.nvmrc`, `.node-version`, `.tool-versions`, `volta` or `engines.node`), with the package manager it
    pins (through corepack, which checks the `packageManager` hash; pnpm 12 and later through Kern's own pinned corepack, because the one
    in older Node images cannot start them; a project that pins nothing gets corepack's own fixed version, never whatever is newest that
@@ -276,14 +286,21 @@ Then add the workflow file at the top of this page to a repository, pointing `us
 - The AI step can miss a regression, and it can cite a requirement Kern cannot confirm. Kern never blocks on the AI's word: a block
   needs the quote confirmed, a call that now throws or no longer throws against it, and the break repeated on both runs. A changed
   value is a look or a note, never a block, because no mechanical check says which inputs a "stays the same" requirement covers.
-- Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. When a change's tests cannot
+- Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. Inside a script Kern records,
+  it sees a runner started through its command only; one started through its JavaScript API, `node --test`, `bun test`, and the package
+  tasks of turbo's strict environment mode, which may not pass Kern's recorder on, are not seen. Such a run still runs for real while
+  Kern records the script, and Kern judges it only by the script's exit code: a failing script makes the answer not verified, and a
+  passing one adds nothing, so when Kern saw some runs and not others the receipt lists only the ones it saw. A `jest --clearCache` step
+  and a `vitest bench` run check no behaviour and are left out; a `vitest typecheck` run is one Kern cannot repeat, so it is named and
+  the answer is not verified. When a script started no run Kern could see, the receipt says so and the answer is not verified. When a
+  change's tests cannot
   run (another runner, a failed install, no results, Kern's own environment failing), the answer is not verified and says why, never ✅;
   the rules that need no test run still apply, so a look they find is still a look. A
   project with no test script, whose own test script finds no test files, or whose test script only prints a message, is not verified:
   no test checks the change, and the receipt says so; changed code in other languages, and compiled code (a `.node` addon, `.wasm`, a
   shared library, a `.jar`), is listed as "not checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
-  runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it, or when the test
+  runs on the next one Kern has. Outside a script it records whole, it runs a build step or `pretest` script only when the tests cannot load without it, or when the test
   script runs files from build output (`out/`, `dist/`) that are not in the repository; when the runner names a missing workspace package
   only after another is built, Kern builds it on a further pass, up to three passes. Tests that still cannot load cannot be checked,
   and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to a fresh folder on disk outside the project,

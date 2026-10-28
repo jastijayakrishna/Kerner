@@ -333,7 +333,7 @@ fn leaves(v: &Value, out: &mut Vec<String>) {
         _ => {}
     }
 }
-fn under(dir: &str, path: &str) -> Option<String> {
+pub(crate) fn under(dir: &str, path: &str) -> Option<String> {
     if path.starts_with('/') || path.contains('\\') { return None; }
     let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
     for c in path.split('/') {
@@ -505,13 +505,17 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     for m in &manifests {
         let dir = m.strip_suffix("package.json").unwrap_or("");
         for files in [&old, &new] {
-            if let Some(v) = json_of(files, m) && let crate::script::Found::Run(i) = crate::script::found(&v) { named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f))); }
+            for i in json_of(files, m).as_ref().map(crate::script::runs).unwrap_or_default() { named.extend(crate::script::files(&i).iter().filter_map(|f| joined(dir, f))); }
         }
     }
     let scripted: BTreeSet<String> = named.iter().filter(|p| !wanted.contains(*p) && (is_code(p) || p.ends_with(".json"))).cloned().collect();
     fill(repo, &mut old, &base_listing, &scripted, &mut lock_bytes_left)?;
     fill(repo, &mut new, &head_listing, &scripted, &mut lock_bytes_left)?;
     configs.extend(named.iter().filter(|p| is_code(p) || p.ends_with(".json")).cloned());
+    let programs: BTreeSet<String> = manifests.iter().flat_map(|m| {
+        let dir = m.strip_suffix("package.json").unwrap_or("");
+        [&old, &new].into_iter().filter_map(|files| json_of(files, m)).flat_map(|v| crate::script::started_programs(&v)).filter_map(|f| joined(dir, &f)).collect::<Vec<_>>()
+    }).collect();
     let (mut moved_to, mut based) = (BTreeSet::new(), BTreeSet::new());
     for (from, to, _) in &moved {
         if crate::suite::is_test_path(from) == crate::suite::is_test_path(to) && let Some(e) = old.get(from).cloned() && !old.contains_key(to) {
@@ -704,6 +708,11 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     }
     let globs = workspace_globs(&[&old, &new]);
     dependencies.retain(|d| !test_data(d["path"].as_str().unwrap_or(""), &globs));
+    for (p, op) in &changes {
+        if programs.contains(p) && !settings.iter().any(|s| s["path"] == p.as_str()) {
+            settings.push(json!({ "path": p, "operation": op, "why": "the test script starts this program, which decides which test runs start" }));
+        }
+    }
     let mut lockfile = Vec::new();
     for d in dependencies.iter_mut() {
         let p = d["path"].as_str().unwrap_or("").to_string();

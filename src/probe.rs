@@ -46,6 +46,7 @@ const VERBS: [&str; 4] = ["returns ", "resolves ", "throws ", "rejects "];
 pub const HUNG: &str = "hangs: gave no answer before the run ended";
 const OFF: &str = "the AI step is off";
 const UNTESTED: &str = "Kern tries the AI step's inputs through the project's own tests, and they did not run here";
+const LEAVES: &str = "Kern does not yet try the AI step's inputs through the test runs it learned from the project's test script";
 const LATE: &str = "Kern's time ran out before it could try the AI step's inputs";
 const NONE_TRIED: &str = "Kern could not try any input the AI step chose";
 const NO_FOLDER: &str = "Kern ran no tests in its folder";
@@ -494,7 +495,7 @@ fn arrived(file: &Path, wait_secs: u64) -> bool {
 pub fn run(out: &Path, investigation: Option<&Path>, until: u64) -> Value {
     let Some(file) = investigation else { return status("NONE", OFF) };
     let suites = crate::suite::ran_suites(out).unwrap_or_default();
-    if suites.is_empty() { return status("NOT_RUN", UNTESTED); }
+    if suites.is_empty() { return status("NOT_RUN", if out.join("leaves.json").is_file() { LEAVES } else { UNTESTED }); }
     if !suites.iter().any(|s| s.old.as_ref().is_some_and(|o| hostable(o.0.runner)) && hostable(s.new.0.runner)) { return status("NOT_RUN", RUNNERS); }
     let wait_secs = within(until, INVESTIGATION_WAIT_SECS_MAX + PROBE_SECS_MIN).saturating_sub(PROBE_SECS_MIN);
     if !arrived(file, wait_secs) { return status("NOT_RUN", &format!("the AI step's findings did not arrive within {wait_secs} seconds")); }

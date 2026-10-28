@@ -392,6 +392,20 @@ for runner in vitest jest; do
     || { jq .tests "early-$runner/receipt.json"; fail "early-$runner: the run was not stopped early, so its progress was not read"; }
 done
 
+say "A slow jest suite whose only test related to the change is deleted needs the test-deleted look, never one saying the tests give no results on the new code"
+cd early-jest-repo
+git checkout -q -b deleted "$early_base"
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
+git rm -q test/total.test.js
+git commit -qam "Shorter names, without their test" && git rev-parse HEAD > "$W/early-deleted.head"
+cd "$W"
+export KERN_TEST_MINUTES=1
+check early-deleted "$early_base" early-jest-repo
+unset KERN_TEST_MINUTES
+decision early-deleted look
+[ "$(kinds early-deleted test-deleted look)" = 1 ] || { jq '.look, .tests' early-deleted/receipt.json; fail "early-deleted: the deleted test was not named"; }
+[ "$(kinds early-deleted test-run-broke look)" = 0 ] || { cat early-deleted/receipt.md; fail "early-deleted: a narrowing with no related test left was read as tests that give no results"; }
+
 say "A suite whose config stops at its first failure is still run whole, so a test the change breaks is found"
 git init -q bailrepo && cd bailrepo
 git config user.email e2e@example.invalid && git config user.name e2e
@@ -428,6 +442,18 @@ git commit -qam "Longer names" && git rev-parse HEAD > "$W/mirror.head"
 cd "$W"
 check mirror "$mirror_base" mirrorrepo
 jq -e '.decision != "blocked" and (.tests.runner | test("vitest in packages/b"))' mirror/receipt.json > /dev/null || { jq '{decision, tests}' mirror/receipt.json; fail "mirror: a build run for packages/a on the old side only made packages/b look broken on the new side"; }
+
+say "A workspace build that works on the old code only leaves every later package on those trees not verified, never blocked"
+cd mirrorrepo
+git checkout -q -b uneven "$mirror_base"
+sed -i "s/'a'/'aa'/" packages/a/src/name.js && sed -i "s/'b'/'bb'/" packages/b/src/name.js
+printf '%s\n' "throw new Error('the build is broken');" > packages/lib/build.mjs
+git commit -qam "Longer names, and a lib build that throws" && git rev-parse HEAD > "$W/uneven.head"
+cd "$W"
+check uneven "$mirror_base" mirrorrepo
+[ "$(jq -r .decision uneven.json)" != blocked ] || { cat uneven/receipt.md; fail "uneven: a build Kern made on the old side only blocked a later package"; }
+jq -e '[.tests.uneven_why[] | select(test("worked on one side only|on the old code but not on the new code"))] | length >= 1' uneven/receipt.json > /dev/null \
+  || { jq '{decision, tests}' uneven/receipt.json; fail "uneven: a build that worked on one side only was not named"; }
 
 say "Tests that exist only after the test script's own build step are built first, on both sides"
 git init -q compiledrepo && cd compiledrepo
@@ -838,6 +864,116 @@ decision nvm clear
 jq -e '.tests.status == "RAN" and .tests.kept == 2 and .tests.node.old.major == 20 and .tests.node.new.major == 20' nvm/receipt.json > /dev/null \
   || { jq '.tests | {status, kept, already_failing, node}' nvm/receipt.json; fail "nvm: the project's .nvmrc asked for Node 20 and its tests did not run on Node 20"; }
 grep -q 'Node: 20 on both sides, as the project asks' nvm/receipt.md || { cat nvm/receipt.md; fail "nvm: the receipt does not say which Node ran"; }
+
+say "A test script that runs two jest configs with run-s is run through the jest runs it starts, so a test only the second config sees is found, as wp-calypso#114128 needed"
+git init -q runsrepo && cd runsrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p test/app test/lib app/test lib/test
+printf '%s\n' '{"name":"runs","version":"1.0.0","private":true,"scripts":{"test":"run-s test-app test-lib","test-app":"TZ=UTC jest -c=test/app/jest.config.js","test-lib":"jest -c=test/lib/jest.config.js"},"devDependencies":{"jest":"29.7.0","npm-run-all":"4.1.5"}}' > package.json
+printf '%s\n' "module.exports = { rootDir: '../../app' };" > test/app/jest.config.js
+printf '%s\n' "module.exports = { rootDir: '../../lib' };" > test/lib/jest.config.js
+printf '%s\n' 'module.exports = { name: () => "app" };' > app/name.js
+printf '%s\n' 'const { name } = require("../name.js");' '' 'test("adds", () => expect(name()).toBe("app"));' > app/test/name.test.js
+printf '%s\n' 'module.exports = { total: (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0) };' > lib/total.js
+printf '%s\n' 'const { total } = require("../total.js");' '' 'test("adds", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > lib/test/total.test.js
+git add -A && git commit -qm base && runs_base=$(git rev-parse HEAD)
+git checkout -q -b runs-breaks
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' lib/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/runs-breaks.head"
+git checkout -q "$runs_base" && git checkout -q -b runs-harmless
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' lib/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/runs-harmless.head"
+cd "$W"
+check runs-breaks "$runs_base" runsrepo
+decision runs-breaks blocked
+jq -e '.tests.status == "RAN" and .tests.broke == ["test-lib: lib/test/total.test.js > adds"] and (.tests.runner | test("test-app")) and (.tests.runner | test("test-lib"))' runs-breaks/receipt.json > /dev/null \
+  || { jq .tests runs-breaks/receipt.json; fail "runs-breaks: the second jest config's broken test was not found and named by the run that sees it"; }
+check runs-harmless "$runs_base" runsrepo
+decision runs-harmless clear
+jq -e '.tests.status == "RAN" and .tests.kept == 2' runs-harmless/receipt.json > /dev/null || { jq .tests runs-harmless/receipt.json; fail "runs-harmless: the tests of both configs did not run and pass on both sides"; }
+
+say "A test script that runs vitest twice, with cross-env setting variables for each run, repeats each run with its own variables"
+git init -q crossrepo && cd crossrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test
+printf '%s\n' '{"name":"cross","version":"1.0.0","private":true,"type":"module","scripts":{"test":"cross-env SUITE=unit vitest run --project unit && cross-env SUITE=int NODE_OPTIONS=--max-old-space-size=1536 vitest run --project int"},"devDependencies":{"vitest":"3.2.4","cross-env":"7.0.3"}}' > package.json
+printf '%s\n' "export default { test: { projects: [{ test: { name: 'unit', include: ['test/unit.test.js'] } }, { test: { name: 'int', include: ['test/int.test.js'] } }] } };" > vitest.config.js
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("sees its own variable", () => expect(process.env.SUITE).toBe("unit"));' 'test("adds", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > test/unit.test.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("sees its own variable and node options", () => { expect(process.env.SUITE).toBe("int"); expect(process.env.NODE_OPTIONS).toContain("--max-old-space-size=1536"); });' 'test("adds", () => expect(total([{ price: 1, qty: 4 }])).toBe(4));' > test/int.test.js
+git add -A && git commit -qm base && cross_base=$(git rev-parse HEAD)
+git checkout -q -b cross-breaks
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/cross-breaks.head"
+git checkout -q "$cross_base" && git checkout -q -b cross-harmless
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' src/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/cross-harmless.head"
+cd "$W"
+check cross-harmless "$cross_base" crossrepo
+decision cross-harmless clear
+jq -e '.tests.status == "RAN" and .tests.kept == 4' cross-harmless/receipt.json > /dev/null || { jq .tests cross-harmless/receipt.json; fail "cross-harmless: each vitest run did not get its own variables, so its tests did not pass on both sides"; }
+check cross-breaks "$cross_base" crossrepo
+decision cross-breaks blocked
+jq -e '(.tests.broke | sort) == ["test (--project int): test/int.test.js > adds", "test (--project unit): test/unit.test.js > adds"]' cross-breaks/receipt.json > /dev/null \
+  || { jq .tests cross-breaks/receipt.json; fail "cross-breaks: the break was not found in both vitest runs, each named by what it runs"; }
+
+say "A package whose test script is its own program that starts vitest is tested through the run the program starts, and one whose program starts no runner Kern sees is not verified, as MCPJam/inspector#4342 needed"
+git init -q programrepo && cd programrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/cli/src packages/cli/test packages/cli/scripts packages/plain/src packages/plain/scripts
+printf '%s\n' '{"name":"program","private":true,"type":"module","workspaces":["packages/*"],"scripts":{"test":"npm run test --workspaces"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' '{"name":"@p/cli","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node scripts/run-tests.mjs"}}' > packages/cli/package.json
+printf '%s\n' "import { spawnSync } from 'node:child_process';" "const r = spawnSync('vitest', ['run', 'test'], { stdio: 'inherit' });" 'process.exit(r.status ?? 1);' > packages/cli/scripts/run-tests.mjs
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > packages/cli/src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("adds", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > packages/cli/test/total.test.js
+printf '%s\n' '{"name":"@p/plain","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node scripts/check.mjs"}}' > packages/plain/package.json
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > packages/plain/src/total.js
+printf '%s\n' "import assert from 'node:assert';" "import { total } from '../src/total.js';" 'assert.equal(total([{ price: 2, qty: 3 }]), 6);' > packages/plain/scripts/check.mjs
+git add -A && git commit -qm base && program_base=$(git rev-parse HEAD)
+git checkout -q -b program-breaks
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' packages/cli/src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/program-breaks.head"
+git checkout -q "$program_base" && git checkout -q -b program-plain
+sed -i 's/(sum, item) => sum + item.price \* item.qty/(acc, it) => acc + it.price * it.qty/' packages/plain/src/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/program-plain.head"
+cd "$W"
+check program-breaks "$program_base" programrepo
+decision program-breaks blocked
+jq -e '.tests.status == "RAN" and .tests.broke == ["packages/cli/test/total.test.js > adds"] and (.tests.runner | test("vitest in packages/cli"))' program-breaks/receipt.json > /dev/null \
+  || { jq .tests program-breaks/receipt.json; fail "program-breaks: the vitest run the package's own program starts was not found and run"; }
+check program-plain "$program_base" programrepo
+decision program-plain unverified
+jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("Kern cannot run this package.s test script: node scripts/check.mjs"))' program-plain/receipt.json > /dev/null \
+  || { jq .tests program-plain/receipt.json; fail "program-plain: a program that names no vitest, jest or mocha was recorded, or its script was not named"; }
+
+say "A recorded script whose build step fails on the new code only leaves every later package on those trees not verified, never blocked, and the rewritten build program is a look"
+git init -q lopsidedrepo && cd lopsidedrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/chain/src packages/chain/test packages/plain/src packages/plain/test
+printf '%s\n' '{"name":"lopsided","private":true,"workspaces":["packages/*"],"scripts":{"test":"npm run test --workspaces"},"devDependencies":{"jest":"29.7.0"}}' > package.json
+printf '%s\n' '{"name":"@l/chain","version":"1.0.0","private":true,"scripts":{"build":"node build.js","test":"npm run build && jest -c a.config.js && jest -c b.config.js"}}' > packages/chain/package.json
+printf '%s\n' "require('fs').writeFileSync(require('path').join(__dirname, '..', 'plain', 'generated.js'), 'module.exports = { value: 1 };\n');" > packages/chain/build.js
+printf '%s\n' "module.exports = { testMatch: ['<rootDir>/test/a.test.js'] };" > packages/chain/a.config.js
+printf '%s\n' "module.exports = { testMatch: ['<rootDir>/test/b.test.js'] };" > packages/chain/b.config.js
+printf '%s\n' "module.exports = { name: () => 'chain' };" > packages/chain/src/name.js
+printf '%s\n' "const { name } = require('../src/name.js');" '' "test('a', () => expect(name()).toMatch(/chain/));" > packages/chain/test/a.test.js
+printf '%s\n' "const { name } = require('../src/name.js');" '' "test('b', () => expect(name().length).toBeGreaterThan(0));" > packages/chain/test/b.test.js
+printf '%s\n' '{"name":"@l/plain","version":"1.0.0","private":true,"scripts":{"test":"jest"}}' > packages/plain/package.json
+printf '%s\n' "module.exports = { name: () => 'plain' };" > packages/plain/src/name.js
+printf '%s\n' "const { name } = require('../src/name.js');" '' "test('reads what the build wrote', () => { expect(require('../generated.js').value).toBe(1); expect(name()).toMatch(/plain/); });" > packages/plain/test/gen.test.js
+printf 'generated.js\nnode_modules/\n' > .gitignore
+git add -A && git commit -qm base && lopsided_base=$(git rev-parse HEAD)
+git checkout -q -b lopsided
+sed -i "s/'chain'/'chains'/" packages/chain/src/name.js && sed -i "s/'plain'/'plains'/" packages/plain/src/name.js
+printf '%s\n' "throw new Error('the build is broken');" > packages/chain/build.js
+git commit -qam "Longer names, and a build that throws" && git rev-parse HEAD > "$W/lopsided.head"
+cd "$W"
+check lopsided "$lopsided_base" lopsidedrepo
+[ "$(jq -r .decision lopsided.json)" != blocked ] || { cat lopsided/receipt.md; fail "lopsided: a build the recording made on the old tree only blocked a later package"; }
+jq -e '[.tests.uneven_why[] | select(test("ended differently on the two sides"))] | length >= 1' lopsided/receipt.json > /dev/null \
+  || { jq '{decision, tests}' lopsided/receipt.json; fail "lopsided: a recording that ended differently on the two sides did not leave the later package not verified"; }
+jq -e '[.rules.settings[] | select(.path == "packages/chain/build.js")] | length == 1' lopsided/receipt.json > /dev/null \
+  || { jq .rules.settings lopsided/receipt.json; fail "lopsided: the rewritten program the recorded script starts was not named"; }
 
 if [ "${E2E_RUNTIME:-runsc}" = runc ]; then
 say "A project whose tests drive a browser gets the browser its Playwright expects, on its own Node"

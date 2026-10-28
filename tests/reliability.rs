@@ -485,7 +485,7 @@ fn a_suite_too_big_for_the_time_limit_runs_only_the_tests_related_to_the_change(
     let files: std::collections::BTreeSet<String> = ["packages/web/src/cart.ts".to_string(), "packages/web/src/total.ts".to_string()].into();
     let tests = |runner: policy::Runner, command: &[&str]| policy::Tests { paths: Vec::new(), kind: policy::Kind::Feature, runner, command: command.iter().map(|s| s.to_string()).collect(), edits: policy::Edits::Checked };
     let jest = suite::related(&tests(policy::Runner::Jest, &["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js"]), &files, "packages/web").unwrap();
-    assert_eq!(jest.command, ["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js", "--findRelatedTests", "/workspace/packages/web/src/cart.ts", "/workspace/packages/web/src/total.ts"]);
+    assert_eq!(jest.command, ["/workspace/node_modules/.bin/jest", "--config", "jest.unit.js", "--passWithNoTests", "--findRelatedTests", "/workspace/packages/web/src/cart.ts", "/workspace/packages/web/src/total.ts"]);
     let vitest = suite::related(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "--project", "unit"]), &files, "packages/web").unwrap();
     assert_eq!(vitest.command, ["/workspace/node_modules/.bin/vitest", "related", "src/cart.ts", "src/total.ts", "--run", "--project", "unit"]);
     assert!(suite::related(&tests(policy::Runner::Vitest, &["/workspace/node_modules/.bin/vitest", "run", "tests/unit"]), &files, "packages/web").is_none(), "a script that already filters files is not narrowed");

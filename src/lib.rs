@@ -12,6 +12,7 @@ pub mod lock;
 pub mod drive;
 pub mod script;
 pub mod suite;
+pub mod leaf;
 pub mod rules;
 pub mod receipt;
 pub mod check;

@@ -12,6 +12,8 @@ pub const VITEST_PROGRESS: &str = include_str!("vitest-progress.mjs");
 pub const FAULT: &str = include_str!("fault.cjs");
 pub const NODE_REPORT: &str = include_str!("node-report.mjs");
 pub const TRACE: &str = include_str!("trace.cjs");
+pub const LEAF: &str = include_str!("leaf.cjs");
+pub const NODE_SHIM: &str = "#!/bin/sh\nexec /usr/local/bin/node --require=/kern/leaf.cjs \"$@\"\n";
 pub const NODE_REPORTER: &str = "--test-reporter=/kern/node-report.mjs";
 const INSTALL_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 pub const INSTALL_ENV: [(&str, &str); 24] = [("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0"),("HUSKY", "0"), ("HUSKY_SKIP_INSTALL", "1"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("PATH", INSTALL_PATH), ("HOME", "/home/kern"), ("LANG", "C.UTF-8"), ("CI", "true"),
@@ -23,6 +25,13 @@ pub const INSTALL_ENV: [(&str, &str); 24] = [("COREPACK_ENABLE_AUTO_PIN", "0"), 
 pub const TEST_ENV: [(&str, &str); 10] = [("PATH", "/workspace/.kern-tools/bin:/usr/local/bin:/usr/bin:/bin"), ("HOME", "/tmp"), ("LANG", "C.UTF-8"), ("CI", "true"),
     ("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"), ("PUPPETEER_CACHE_DIR", "/workspace/node_modules/.cache/puppeteer"), ("COREPACK_HOME", "/workspace/.kern-tools/corepack-home"),
     ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"), ("COREPACK_ENABLE_AUTO_PIN", "0"), ("COREPACK_DEFAULT_TO_LATEST", "0")];
+pub const BOX_ENV_COUNT_MAX: usize = 32;
+pub const BOX_ENV_VALUE_BYTES_MAX: usize = 4096;
+pub fn box_env_fits(env: &std::collections::BTreeMap<String, String>) -> bool {
+    env.len() <= BOX_ENV_COUNT_MAX && env.iter().all(|(k, v)| crate::script::env_name(k) && v.len() <= BOX_ENV_VALUE_BYTES_MAX && !v.contains('\0'))
+}
+pub const LEAVES_ENV: [(&str, &str); 6] = [("TURBO_FORCE", "true"), ("TURBO_TELEMETRY_DISABLED", "1"), ("NX_SKIP_NX_CACHE", "true"), ("NX_DAEMON", "false"), ("NX_NO_CLOUD", "true"),
+    ("npm_config_update_notifier", "false")];
 pub type Invocation = (PathBuf, Vec<String>, Vec<(String, String)>);
 pub fn docker_invocation(c: &Control, args: &[&str], command: &[&str], dir: &Path) -> R<Invocation> {
     ensure!(!args.iter().any(|a| ["--config", "--context", "--host", "--tls"].iter().any(|f| a == f || a.starts_with(&format!("{f}="))) || a.starts_with("-H") || a.starts_with("-c")), "Docker connection overrides are forbidden");
@@ -681,6 +690,9 @@ pub fn control_dir(dir: &Path, config: Option<(&str, &Value)>) -> R<()> {
     create_new(dir.join("node-report.mjs"), NODE_REPORT.as_bytes(), 0o444)?;
     create_new(dir.join("trace.cjs"), TRACE.as_bytes(), 0o444)?;
     create_new(dir.join("map.cjs"), crate::map::RUNNER.as_bytes(), 0o444)?;
+    create_new(dir.join("leaf.cjs"), LEAF.as_bytes(), 0o444)?;
+    std::fs::create_dir(dir.join("bin"))?;
+    create_new(dir.join("bin").join("node"), NODE_SHIM.as_bytes(), 0o555)?;
     if let Some((name, value)) = config { create_new(dir.join(name), format!("{}\n", canonical(value)?).as_bytes(), 0o444)?; }
     Ok(())
 }
@@ -1043,10 +1055,10 @@ mod inside {
         let early = int(&c, "early_secs", 0, TEST_SECS_MAX)?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
-        ensure!(vars.len() <= 32, "Invalid test run environment");
+        ensure!(vars.len() <= super::BOX_ENV_COUNT_MAX, "Invalid test run environment");
         let mut env = Vec::new();
         for (k, v) in vars {
-            let v = v.as_str().filter(|v| v.len() <= 4096 && !v.contains('\0')).ok_or_else(|| Denied("Invalid test run environment".into()))?;
+            let v = v.as_str().filter(|v| v.len() <= super::BOX_ENV_VALUE_BYTES_MAX && !v.contains('\0')).ok_or_else(|| Denied("Invalid test run environment".into()))?;
             ensure!(crate::script::env_name(k), "Invalid test run environment");
             env.push((k.clone(), v.to_string()));
         }
