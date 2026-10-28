@@ -658,3 +658,35 @@ fn eslint_plugin_ember_2853_a_package_manager_version_move_is_a_note_and_create_
     let added = rules_for(&[("package.json", VITEST)], &[("template-nextjs/package.json", r#"{"name":"template-nextjs","private":true,"dependencies":{"next":"15.0.0"}}"#)], &[]);
     assert_eq!((added["dependencies"][0]["fields"].clone(), look_kinds(&receipt::build(&drive_json(), &added, &clean_tests()))), (Value::Null, vec![]), "a new package has a name; nothing is renamed: {}", added["dependencies"]);
 }
+
+#[test]
+fn review_sec_s1_s2_n1_only_the_names_kern_sets_in_the_box_are_its_machinery_and_a_flood_of_other_marks_never_hides_one() {
+    let base = [("package.json", VITEST), ("src/total.js", "export const total = (xs) => xs.reduce((a, b) => a + b, 0);\n"), ("test/a.test.js", "import { test } from 'vitest';\ntest('a', () => {});\n")];
+    let flood = format!("import {{ test }} from 'vitest';\n// {}\ntest('a', () => {{ if (process.env.KERN_FAULT_SERVED) throw new Error('x'); }});\n", "aKERN_ ".repeat(1000));
+    assert_eq!(rules_for(&base, &[("test/a.test.js", &flood)], &[])["machinery"], json!([{ "path": "test/a.test.js", "names": ["KERN_FAULT_SERVED"] }]),
+        "a thousand marks that are not Kern's names never use up the scan before the real one");
+    let font = rules_for(&base, &[("src/gpos.js", "export const KERN_PAIR_TABLE = 1;\nexport const KERN_FORMAT_0 = 0;\n")], &[]);
+    assert_eq!(font["machinery"], json!([]), "kern is an OpenType font table (opentype.js, fontkit, pdfkit); Kern sets neither name in the box");
+    let shell = rules_for(&base, &[("test/a.test.js", "import { execSync } from 'node:child_process';\nimport { test } from 'vitest';\ntest('a', () => { execSync('cat $KERN_FAULT_SOURCE'); });\n")], &[]);
+    assert_eq!(shell["machinery"], json!([{ "path": "test/a.test.js", "names": ["KERN_FAULT_SOURCE"] }]), "$NAME is how a shell reads the variable");
+    let many: String = (0..1500).map(|i| format!("export const p{i} = '/kern/f{i}.cjs';\n")).collect();
+    let more = format!("{many}export const q = '/kern/fault.cjs';\n");
+    let capped = rules_for(&[("package.json", VITEST), ("src/paths.js", &many)], &[("src/paths.js", &more)], &[]);
+    assert!(capped["machinery"][0]["names"].as_array().is_some_and(|n| !n.is_empty()), "a file with more of Kern's names than Kern reads is a look, never nothing: {}", capped["machinery"]);
+}
+
+#[test]
+fn every_kern_variable_the_box_sets_or_kerns_own_files_read_is_in_the_one_list_the_rules_match() {
+    let names_after = |text: &str, mark: &str| -> Vec<String> {
+        text.match_indices(mark).map(|(i, _)| text[i + mark.len() - 5..].chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_').collect()).collect()
+    };
+    let mut named: std::collections::BTreeSet<String> = names_after(&std::fs::read_to_string("src/sandbox.rs").unwrap(), "\"KERN_").into_iter().collect();
+    for entry in std::fs::read_dir("src").unwrap() {
+        let path = entry.unwrap().path();
+        if !path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["cjs", "mjs", "js"].contains(&e)) { continue; }
+        named.extend(names_after(&std::fs::read_to_string(&path).unwrap(), "process.env.KERN_"));
+    }
+    assert!(named.contains("KERN_FAULT_SOURCE") && named.contains("KERN_PROGRESS") && named.contains("KERN_MAP_CHUNK_BYTES"), "{named:?}");
+    let listed: std::collections::BTreeSet<String> = kern::sandbox::BOX_NAMES.iter().map(|s| s.to_string()).collect();
+    assert!(named.is_subset(&listed), "names Kern uses in the box that the rules would not see: {:?}", named.difference(&listed).collect::<Vec<_>>());
+}

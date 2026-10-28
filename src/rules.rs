@@ -196,40 +196,52 @@ fn action_moves(old: &str, new: &str, owner: Option<&str>) -> Option<Vec<Value>>
     Some(moves.into_iter().map(|(action, from, to, release)| json!({ "action": action, "from": from, "to": to, "release": release })).collect())
 }
 const KERN_NAMES_COUNT_MAX: usize = 5;
-const KERN_MARKS_COUNT_MAX: usize = 1000;
+const KERN_FOUND_COUNT_MAX: usize = 1000;
 const TOKEN_CHARS_MAX: usize = 200;
 fn path_char(c: char) -> bool { c.is_ascii_alphanumeric() || "._-/".contains(c) }
 fn token_end(text: &str, from: usize, keep: fn(char) -> bool) -> usize {
     let rest = &text[from..];
-    let stop = rest.char_indices().nth(TOKEN_CHARS_MAX).map_or(rest.len(), |(j, _)| j);
-    rest[..stop].char_indices().find(|(_, c)| !keep(*c)).map_or(from + stop, |(j, _)| from + j)
+    rest.char_indices().take(TOKEN_CHARS_MAX).find(|(_, c)| !keep(*c))
+        .map_or_else(|| from + rest.char_indices().nth(TOKEN_CHARS_MAX).map_or(rest.len(), |(j, _)| j), |(j, _)| from + j)
 }
-fn token_start(text: &str, to: usize) -> usize {
-    let mut lo = to.saturating_sub(TOKEN_CHARS_MAX);
+fn token_start(text: &str, (floor, to): (usize, usize)) -> usize {
+    let mut lo = to.saturating_sub(TOKEN_CHARS_MAX).max(floor);
     while !text.is_char_boundary(lo) { lo -= 1; }
     text[lo..to].char_indices().rev().find(|(_, c)| !path_char(*c)).map_or(lo, |(j, c)| lo + j + c.len_utf8())
 }
-fn kern_names(text: &str) -> BTreeSet<String> {
+fn name_char(c: char) -> bool { c.is_ascii_alphanumeric() || c == '_' }
+fn kern_names(text: &str) -> (BTreeSet<String>, bool) {
     let mut found = BTreeSet::new();
     let before = |i: usize| text[..i].chars().next_back();
-    for (i, _) in text.match_indices("KERN_").take(KERN_MARKS_COUNT_MAX) {
-        let end = token_end(text, i, |c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-        if end > i + 5 && !before(i).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') { found.insert(text[i..end].to_string()); }
+    for (i, _) in text.match_indices("KERN_") {
+        if before(i).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') { continue; }
+        let name = &text[i..token_end(text, i, name_char)];
+        if crate::sandbox::BOX_NAMES.contains(&name) { found.insert(name.to_string()); }
     }
-    for (i, _) in text.match_indices("/kern/").take(KERN_MARKS_COUNT_MAX) {
-        if !before(i).is_some_and(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) { found.insert(text[i..token_end(text, i + 6, path_char)].to_string()); }
+    let mut seen = 0;
+    for (i, _) in text.match_indices("/kern/") {
+        if i < seen || before(i).is_some_and(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) { continue; }
+        seen = token_end(text, i + 6, path_char);
+        found.insert(text[i..seen].to_string());
+        if found.len() >= KERN_FOUND_COUNT_MAX { return (found, false); }
     }
-    for (i, _) in text.match_indices(".kern-").take(KERN_MARKS_COUNT_MAX) {
-        let (start, end) = (token_start(text, i), token_end(text, i + 6, path_char));
-        if end > i + 6 { found.insert(text[start..end].to_string()); }
+    seen = 0;
+    for (i, _) in text.match_indices(".kern-") {
+        if i < seen { continue; }
+        let start = token_start(text, (seen, i));
+        seen = token_end(text, i + 6, path_char);
+        if seen > i + 6 { found.insert(text[start..seen].to_string()); }
+        if found.len() >= KERN_FOUND_COUNT_MAX { return (found, false); }
     }
-    found
+    (found, true)
 }
 fn machinery(changes: &[(String, &'static str)], (old, new): (&Files, &Files)) -> Vec<Value> {
-    let names = |files: &Files, p: &str| files.get(p).and_then(|e| e.bytes.as_deref()).map(|b| kern_names(&String::from_utf8_lossy(b))).unwrap_or_default();
+    let names = |files: &Files, p: &str| files.get(p).and_then(|e| e.bytes.as_deref()).map_or_else(|| (BTreeSet::new(), true), |b| kern_names(&String::from_utf8_lossy(b)));
     changes.iter().filter(|(_, op)| *op != "delete").filter_map(|(p, _)| {
         if crate::drive::kern_owned(p) { return Some(json!({ "path": p })); }
-        let fresh: Vec<String> = if is_code(p) { names(new, p).difference(&names(old, p)).take(KERN_NAMES_COUNT_MAX).cloned().collect() } else { Vec::new() };
+        if !is_code(p) { return None; }
+        let ((now, read_all), (before, _)) = (names(new, p), names(old, p));
+        let fresh: Vec<String> = if read_all { now.difference(&before).take(KERN_NAMES_COUNT_MAX).cloned().collect() } else { now.into_iter().take(KERN_NAMES_COUNT_MAX).collect() };
         (!fresh.is_empty()).then(|| json!({ "path": p, "names": fresh }))
     }).collect()
 }

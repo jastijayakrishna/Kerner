@@ -489,6 +489,8 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
         (loose, "installed from package.json (the project has no lockfile, and npm's peer dependency checks were relaxed)")])
 }
 pub const WITH_WORKSPACE: &str = "installed with the workspace";
+pub const BOX_NAMES: [&str; 13] = ["KERN_REPORT", "KERN_FAULT_FILE", "KERN_FAULT_SOURCE", "KERN_FAULT_SERVED", "KERN_VALUES", "KERN_SERVE", "KERN_TRACE", "KERN_MONITOR",
+    "KERN_PROGRESS", "KERN_LEAVES", "KERN_MAP_CHUNK_BYTES", "KERN_WORKSPACE", "KERN_INPUT"];
 pub fn image_major(image: &str) -> Option<u64> {
     let info = docker_json(&["image", "inspect", image]).ok()?;
     info[0]["Config"]["Env"].as_array()?.iter().filter_map(Value::as_str).find_map(|e| e.strip_prefix("NODE_VERSION="))?.split('.').next()?.trim_start_matches('v').parse().ok()
