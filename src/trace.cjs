@@ -126,8 +126,19 @@ function exported(file, value) {
   }
   return value;
 }
+function typed(k, v) {
+  const raw = this[k];
+  if (typeof raw === 'number') return Number.isFinite(raw) && !Object.is(raw, -0) ? raw : { $num: Object.is(raw, -0) ? '-0' : String(raw) };
+  if (typeof raw === 'bigint') return { $bigint: String(raw) };
+  if (raw === undefined) return { $undefined: true };
+  const tag = Object.prototype.toString.call(raw);
+  if (tag === '[object Map]') return { $map: [...raw] };
+  if (tag === '[object Set]') return { $set: [...raw] };
+  if (tag === '[object Date]') return { $date: isNaN(raw.getTime()) ? 'Invalid' : raw.toISOString() };
+  return v;
+}
 function json(value) {
-  try { const t = JSON.stringify(value); return typeof t === 'string' && t.length <= VALUE_CHARS_MAX ? t : undefined; } catch { return undefined; }
+  try { const t = JSON.stringify(value, typed); return typeof t === 'string' && t.length <= VALUE_CHARS_MAX ? t : undefined; } catch { return undefined; }
 }
 function bytes(value) {
   const keys = Object.keys(value);

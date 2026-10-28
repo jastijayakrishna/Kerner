@@ -69,6 +69,8 @@ fn an_alias_points_at_a_file_only_inside_the_package_that_owns_it() {
     assert!(!at("apps/shop/test/money.test.ts", "src/utils/money", "apps/admin/src/utils/money.ts"), "a base-folder path stays inside the package that owns the folder");
     assert!(at("apps/admin/test/money.test.ts", "src/utils/money", "apps/admin/src/utils/money.ts"));
     assert!(!at("test/a.test.ts", "lodash", "src/lodash.ts"), "a package name is not a path");
+    assert!(!at("test/a.test.ts", "lodash/get", "src/lodash/get.ts"), "audit F43: an npm import is never a repository file under some folder; a bare path resolves only from the importer's own package folder");
+    assert!(!at("apps/web/tests/a.test.ts", "lib/utils", "apps/web/src/lib/utils.ts"), "a bare path does not resolve from a folder below the package");
     assert!(!at("test/a.test.ts", "@scope/sql", "packages/sql/src/index.ts"), "a workspace package is loaded through its build, not its source");
     assert!(!at("test/a.test.ts", "./sql", "test/sql.ts"), "a relative path is resolved, not guessed");
     let files = ["apps/web/src/lib/utils.ts"];

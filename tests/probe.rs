@@ -133,6 +133,9 @@ fn lightdash_12942_an_answer_that_keeps_every_old_value_and_only_adds_fields_bre
     assert_eq!(judged(was, ("returns {\"meta\":{\"total\":2},\"rows\":[1,2,3]}", Some(r#"{"rows":[1,2,3],"meta":{"total":2}}"#))), (scope, json!("differs")), "a list with another item is a different answer");
     assert_eq!(judged(was, ("returns Map{}", None)), (Verdict::Look(Missing { values: true, scope: true, ..Missing::default() }), json!("missing")),
         "without a value Kern can read on both sides, a changed answer is a look that says so, never a block");
+    assert_eq!(judged(("returns Map{1=>2}", Some(r#"{"$map":[[1,2]]}"#)), ("returns Map{1=>3}", Some(r#"{"$map":[[1,3]]}"#))), (scope, json!("differs")),
+        "audit F42: a Map, a Set, NaN, -0 and undefined are recorded as typed values, so a changed Map is a changed answer, not the same empty object");
+    assert_eq!(judged(("returns NaN", Some(r#"{"$num":"NaN"}"#)), ("returns 0", Some("0"))), (scope, json!("differs")));
     let renamed = ("returns {\"get\":[function request]}", Some(r#"{}"#));
     assert_eq!(judged(("returns {\"get\":[function get]}", Some(r#"{}"#)), renamed), (Verdict::Note, json!("same")), "a function renamed inside the answer prints differently but is the same data: a note, never a break");
     assert_eq!(judged(("throws TypeError: Cannot read properties of undefined (reading 'kind')", None), ("returns []", Some("[]"))), (Verdict::Note, json!("missing")),
@@ -457,6 +460,10 @@ fn lightdash_12942_each_input_is_answered_once_per_run_by_the_real_function_or_i
         "not json\n".to_string(), line(json!({ "p": "e2", "o": "maybe 1" })), line(json!({ "p": "e3", "o": format!("returns {}", "x".repeat(5000)) })), line(json!({ "p": "e4", "o": HUNG })),
         line(json!({ "p": "e5", "s": 1, "k": key }))].concat();
     let new = [line(json!({ "p": "e1", "s": 1 })), line(json!({ "p": "e1", "o": CUT, "k": "src/other.ts#removeComments" })), line(json!({ "p": "e5", "s": 1 })), line(json!({ "p": "e5", "o": CUT, "k": key }))].concat();
+    let aliased = [line(json!({ "p": "e1", "s": 1, "k": format!("{SQL}#stripComments") })), line(json!({ "p": "e1", "o": CUT, "k": format!("{SQL}#stripComments") }))].concat();
+    let mut x = tried([None; 4], obligation("verified"));
+    probe::recorded(&mut x, &[Some(probe::seen(&old)), None, Some(probe::seen(&aliased)), None]);
+    assert_eq!(x["reached"], json!({ "old": true, "new": true }), "audit F42: an export aliased twice carries the tag of the first name, and it is still the served file's real function");
     let mut x = tried([None; 4], obligation("verified"));
     probe::recorded(&mut x, &[Some(probe::seen(&old)), None, Some(probe::seen(&new)), None]);
     assert_eq!(x["answers"], json!({ "old": KEPT, "old_again": null, "new": CUT, "new_again": null }), "a run that did not happen has no answer");
@@ -650,12 +657,14 @@ fn lightdash_12942_the_probe_runtime_records_one_answer_per_input_and_never_thro
     std::fs::write(&runtime, kern::sandbox::TRACE).unwrap();
     let script = format!("const t = require({:?});\n\
         const mod = {{ strip(s) {{ return s.split('//')[0]; }}, async later(x) {{ return x * 2; }}, boom() {{ throw new TypeError('no'); }}, async refuse() {{ throw new Error('nope'); }}, self() {{ return this === mod; }},\n\
-          bytes(b) {{ return Buffer.isBuffer(b) ? b.readUInt16BE(0) : 'not a buffer'; }}, own(o) {{ return Object.getOwnPropertyNames(o).join(','); }} }};\n\
+          bytes(b) {{ return Buffer.isBuffer(b) ? b.readUInt16BE(0) : 'not a buffer'; }}, own(o) {{ return Object.getOwnPropertyNames(o).join(','); }},\n\
+          nan() {{ return NaN; }}, neg() {{ return -0; }}, map() {{ return new Map([[1, {{ s: new Set([2]) }}]]); }}, none() {{ return undefined; }}, when() {{ return {{ at: new Date(0), n: 10n }}; }} }};\n\
         function slug(s) {{ return s.toLowerCase(); }}\n\
         (async () => {{\n\
           const said = await Promise.all([t.probe('e1', mod, 'strip', ['a//b']), t.probe('e2', mod, 'later', [21]), t.probe('e3', mod, 'boom', []), t.probe('e4', mod, 'refuse', []),\n\
             t.probe('e5', mod, 'self', []), t.probe('e6', slug, 'default', ['A B']), t.probe('e7', {{ default: slug }}, 'default', ['C']), t.probe('e8', null, 'gone', []), t.probe('e9', mod, 'missing', []),\n\
-            t.probe('e10', mod, 'bytes', [{{ type: 'Buffer', data: [1, 2] }}]), t.probe('e11', mod, 'own', [JSON.parse('{{\"__proto__\": {{\"polluted\": 1}}, \"a\": 1}}')])]);\n\
+            t.probe('e10', mod, 'bytes', [{{ type: 'Buffer', data: [1, 2] }}]), t.probe('e11', mod, 'own', [JSON.parse('{{\"__proto__\": {{\"polluted\": 1}}, \"a\": 1}}')]),\n\
+            t.probe('e12', mod, 'nan', []), t.probe('e13', mod, 'neg', []), t.probe('e14', mod, 'map', []), t.probe('e15', mod, 'none', []), t.probe('e16', mod, 'when', [])]);\n\
           if (said.some((x) => x !== undefined) || ({{}}).polluted !== undefined) process.exit(4);\n\
         }})().then(() => process.exit(0), () => process.exit(3));\n", runtime.to_string_lossy());
     let trace = t.0.join("trace.jsonl");
@@ -675,4 +684,8 @@ fn lightdash_12942_the_probe_runtime_records_one_answer_per_input_and_never_thro
     assert_eq!(answer("e10"), "returns 258", "a Buffer in Node's own JSON form arrives as a Buffer, as the code under test expects");
     assert_eq!(answer("e11"), "returns \"__proto__,a\"", "a __proto__ key in an input stays a plain key and changes no prototype");
     assert_eq!((seen.values.get("e1"), seen.values.get("e2"), seen.values.get("e3")), (Some(&json!("a")), Some(&json!(42)), None), "a plain answer keeps its value for the kernel to compare");
+    let value = |id: &str| seen.values.get(id).cloned().unwrap_or(Value::Null);
+    assert_eq!((value("e12"), value("e13"), value("e14"), value("e15")), (json!({ "$num": "NaN" }), json!({ "$num": "-0" }), json!({ "$map": [[1, { "s": { "$set": [2] } }]] }), json!({ "$undefined": true })),
+        "audit F42: values JSON would flatten are recorded with their type, so the kernel compares typed values, not JSON text");
+    assert_eq!(value("e16"), json!({ "at": { "$date": "1970-01-01T00:00:00.000Z" }, "n": { "$bigint": "10" } }));
 }

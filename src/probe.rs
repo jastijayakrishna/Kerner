@@ -438,9 +438,9 @@ fn compared(old: Option<&Value>, new: Option<&Value>) -> Data {
 }
 pub fn recorded(x: &mut Value, traces: &[Option<Seen>; 4]) {
     let id = x["id"].as_str().unwrap_or("").to_string();
-    let key = format!("{}#{}", x["path"].as_str().unwrap_or(""), x["export"].as_str().unwrap_or(""));
     let answer = |t: &Option<Seen>| match t { Some(s) => s.answers.get(&id).and_then(|a| a.first()).map_or_else(|| if s.started.contains(&id) { json!(HUNG) } else { Value::Null }, |a| json!(a)), None => Value::Null };
-    let reached = |t: &Option<Seen>| t.as_ref().is_some_and(|s| s.reached.get(&id) == Some(&key));
+    let file = format!("{}#", x["path"].as_str().unwrap_or(""));
+    let reached = |t: &Option<Seen>| t.as_ref().is_some_and(|s| s.reached.get(&id).is_some_and(|k| k.starts_with(&file)));
     let (old, new) = (traces[0].as_ref().and_then(|s| s.values.get(&id)), traces[2].as_ref().and_then(|s| s.values.get(&id)));
     x["reached"] = json!({ "old": reached(&traces[0]), "new": reached(&traces[2]) });
     x["answers"] = json!({ "old": answer(&traces[0]), "old_again": answer(&traces[1]), "new": answer(&traces[2]), "new_again": answer(&traces[3]) });

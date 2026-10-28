@@ -94,7 +94,7 @@ pub fn aliased(importer: &str, spec: &str, target: &str, exists: &dyn Fn(&str) -
         root.is_some_and(|r| {
             let root = r.trim_end_matches('/');
             let scope = package_dir(root, exists).unwrap_or_else(|| if c == rest && marked { root.rsplit_once('/').map_or("", |(parent, _)| parent).to_string() } else { root.to_string() });
-            within(importer, &scope)
+            within(importer, &scope) && (marked || package_of(importer, exists).unwrap_or_default() == root)
         })
     }))
 }
