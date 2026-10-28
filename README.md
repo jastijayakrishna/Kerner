@@ -191,7 +191,10 @@ What Kern checks on every pull request:
    it is a note. The files that instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) are listed under Notes.
 8. **Dependencies.** The receipt lists what moved under Notes (`vitest 3.2.4 → 4.0.18`), never as a look: nothing Kern measures says
    whether a version is right, and it does not look up release dates. What needs a look is what runs code or decides what gets
-   installed: a `package.json` change to install scripts, `overrides`, `packageManager` and the like; a deleted lockfile; and a
+   installed: a `package.json` change to install scripts (`pnpm:devPreinstall` included), `overrides`, `patchedDependencies`, `devEngines`,
+   a `packageManager` that is anything but the same manager at a plain version, and the like; a patch an install applies (a `.patch` file
+   under `patches/`, anything under `.yarn/patches/`, or a file `patchedDependencies` or a `patch:` version names); a changed file an
+   install script runs; a deleted lockfile; and a
    lockfile entry that downloads a package from somewhere other than its own registry tarball, swaps one package for another or changes
    a checksum without a version. A lockfile Kern does not read (yarn, pnpm, Bun) is listed as not checked.
 9. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot

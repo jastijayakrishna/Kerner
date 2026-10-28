@@ -583,6 +583,13 @@ fn steering_items(f: &mut Found, rules: &Value) {
     }
     let noted: Vec<&Value> = deps.iter().copied().filter(|d| d["packages"].is_array() || d["count"].is_u64() || (strings(&d["fields"]).is_empty() && d["operation"] != "delete")).collect();
     if !noted.is_empty() { f.notes.push(item("dependencies", dependency_note(&noted))); }
+    for x in rules["install_files"].as_array().into_iter().flatten() {
+        f.look.push(item("install", match (x["kind"].as_str(), x["operation"].as_str()) {
+            (Some("patch"), Some("delete")) => format!("{} is a patch an install applied, and the change deletes it, so the package it patched installs without it", path_of(x)),
+            (Some("patch"), _) => format!("{} is a patch an install applies, so it changes the code of an installed package, and Kern does not read patches", path_of(x)),
+            _ => format!("{} runs when dependencies install ({}), so the change runs code on every machine that installs, before any test", path_of(x), code(x["script"].as_str().unwrap_or(""), 80)),
+        }));
+    }
     for x in rules["lockfile"].as_array().into_iter().flatten() { f.look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""), 400)))); }
     for x in rules["agent_notes"].as_array().into_iter().flatten() { f.notes.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
 }

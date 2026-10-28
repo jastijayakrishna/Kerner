@@ -63,16 +63,65 @@ fn harmless_note(p: &str) -> bool {
     [".md", ".mdx", ".txt"].iter().any(|e| base.ends_with(e)) || (base.starts_with(".env") && [".example", ".sample", ".template", ".dist"].iter().any(|e| base.ends_with(e)))
         || lower.starts_with(".github/issue_template/")
 }
+fn pinned_manager(m: &str) -> Option<&str> {
+    let (name, version) = m.split_once('@')?;
+    let (version, hash) = version.split_once('+').map_or((version, None), |(v, h)| (v, Some(h)));
+    let hex = |h: &str| h.split_once('.').is_some_and(|(kind, hex)| !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_alphanumeric()) && !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    (!name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') && crate::sandbox::plain_version(version) && hash.is_none_or(hex)).then_some(name)
+}
 fn manager_move(a: &Value, b: &Value) -> Option<String> {
     let (x, y) = (a["packageManager"].as_str()?, b["packageManager"].as_str()?);
-    let name = |m: &str| m.split_once('@').map_or(m, |(n, _)| n).to_string();
-    (x != y && name(x) == name(y)).then(|| format!("packageManager {x} → {y}"))
+    (x != y && pinned_manager(x).is_some() && pinned_manager(x) == pinned_manager(y)).then(|| format!("packageManager {x} → {y}"))
 }
-const INSTALL_FIELDS: [&str; 14] = ["bin", "name", "overrides", "resolutions", "pnpm", "workspaces", "packageManager", "publishConfig", "bundleDependencies", "bundledDependencies",
-    "dependenciesMeta", "peerDependenciesMeta", "trustedDependencies", "installConfig"];
+const INSTALL_FIELDS: [&str; 18] = ["bin", "name", "overrides", "resolutions", "pnpm", "workspaces", "packageManager", "publishConfig", "bundleDependencies", "bundledDependencies",
+    "dependenciesMeta", "peerDependenciesMeta", "trustedDependencies", "installConfig", "patchedDependencies", "devEngines", "catalog", "catalogs"];
 const LIFECYCLE: [&str; 16] = ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish", "prepublishOnly", "publish", "postpublish", "prepack", "postpack",
     "dependencies", "preuninstall", "uninstall", "postuninstall"];
-fn steers_install(field: &str) -> bool { field.strip_prefix("scripts.").map_or_else(|| INSTALL_FIELDS.contains(&field), |s| LIFECYCLE.contains(&s)) }
+const INSTALL_HOOKS: [&str; 8] = ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish", "dependencies"];
+fn pnpm_hook(script: &str) -> bool { script.starts_with("pnpm:") }
+fn steers_install(field: &str) -> bool { field.strip_prefix("scripts.").map_or_else(|| INSTALL_FIELDS.contains(&field), |s| LIFECYCLE.contains(&s) || pnpm_hook(s)) }
+const PATCH_SECTIONS: [&str; 6] = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "resolutions", "overrides"];
+fn patches_named(dir: &str, v: &Value, out: &mut BTreeSet<String>) {
+    for list in [&v["patchedDependencies"], &v["pnpm"]["patchedDependencies"]] {
+        out.extend(list.as_object().into_iter().flatten().filter_map(|(_, f)| f.as_str()).filter_map(|f| joined(dir, f)));
+    }
+    let mut specs = Vec::new();
+    for s in PATCH_SECTIONS { leaves(&v[s], &mut specs); }
+    for f in specs.iter().filter_map(|s| s.strip_prefix("patch:")).filter_map(|s| s.split_once('#')).map(|(_, f)| f.split("::").next().unwrap_or(f)) {
+        out.extend(f.strip_prefix("~/").map_or_else(|| joined(dir, f), |root| joined("", root)));
+    }
+}
+const SCRIPT_EXTENSIONS: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "sh", "bash", "py"];
+const RESOLVED_EXTENSIONS: [&str; 5] = ["", ".js", ".mjs", ".cjs", ".ts"];
+fn install_runs(dir: &str, v: &Value, out: &mut BTreeMap<String, String>) {
+    for (name, script) in v["scripts"].as_object().into_iter().flatten().filter(|(n, _)| INSTALL_HOOKS.contains(&n.as_str()) || pnpm_hook(n)) {
+        let words = script.as_str().unwrap_or("").split(|c: char| c.is_whitespace() || "&|;()<>'\"`".contains(c)).map(|w| w.rsplit('=').next().unwrap_or(w));
+        for word in words.filter(|w| w.contains('/') || w.rsplit_once('.').is_some_and(|(s, e)| !s.is_empty() && SCRIPT_EXTENSIONS.contains(&e))) {
+            for p in RESOLVED_EXTENSIONS.iter().filter_map(|e| joined(dir, &format!("{word}{e}"))) { out.entry(p).or_insert_with(|| format!("scripts.{name}")); }
+        }
+    }
+}
+fn patch_file(p: &str, named: &BTreeSet<String>) -> bool {
+    let lower = p.to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    let yarn = parts.windows(2).any(|w| w == [".yarn", "patches"]);
+    named.contains(p) || (!harmless_note(p) && (yarn || (parts.contains(&"patches") && (lower.ends_with(".patch") || lower.ends_with(".diff")))))
+}
+fn install_files(changes: &[(String, &'static str)], manifests: &BTreeSet<String>, (old, new): (&Files, &Files)) -> Vec<Value> {
+    let (mut patched, mut runs) = (BTreeSet::new(), BTreeMap::new());
+    for m in manifests {
+        let dir = m.strip_suffix("package.json").unwrap_or("");
+        for files in [old, new] {
+            let Some(v) = files.get(m).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) else { continue };
+            patches_named(dir, &v, &mut patched);
+            install_runs(dir, &v, &mut runs);
+        }
+    }
+    changes.iter().filter(|(p, _)| !dependency_file(p)).filter_map(|(p, op)| {
+        if patch_file(p, &patched) { return Some(json!({ "path": p, "operation": op, "kind": "patch" })); }
+        runs.get(p).filter(|_| *op != "delete").map(|script| json!({ "path": p, "operation": op, "kind": "script", "script": script }))
+    }).collect()
+}
 const IMAGES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "avif"];
 const GITHUB_NOTES: [&str; 3] = ["funding.yml", "funding.yaml", "release.yml"];
 const STEERING_KEYS: [&str; 23] = ["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PATH", "BASH_ENV", "ENV", "PYTHONSTARTUP", "PYTHONPATH",
@@ -568,6 +617,6 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if let Some(adds) = text(&old, &p).zip(text(&new, &p)).and_then(|(a, b)| crate::capability::added_strings(&p, &PATTERN_KEYS, &a, &b)) { x["adds"] = json!(adds); }
     }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
-    Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies, "machinery": machinery(&changes, (&old, &new)),
+    Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies, "machinery": machinery(&changes, (&old, &new)), "install_files": install_files(&changes, &manifests, (&old, &new)),
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))
 }
