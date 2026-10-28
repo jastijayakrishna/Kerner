@@ -573,7 +573,7 @@ check buildfine "$build_base" buildrepo
 decision buildfine clear
 grep -q '✅ Build: `npm run build` works on the old and the new code' buildfine/receipt.md || { cat buildfine/receipt.md; fail "buildfine: a build that still works has no check mark"; }
 
-say "Inputs the AI step proposed run through the project's own runner on the old and the new code: a call that now throws against a verified requirement that it must not is blocked with the input and both answers; an answer that changed against a requirement that it must not change is a look, as civitai#3102 needed; inputs whose answers stay the same get their check mark"
+say "Inputs the AI step proposed run through the project's own runner on the old and the new code: a call that now throws against a verified requirement that it must not is blocked with the input and both answers; an answer that changed against a requirement that it must not change is a look, as civitai#3102 needed; inputs whose answers stay the same are counted without a check mark, since the AI step chose them"
 git init -q proberepo && cd proberepo
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p src test
@@ -635,8 +635,8 @@ done
 [ "$(jq -r .decision probelost.json)" = look ] && [ "$(kinds probelost probe-concern look)" = 1 ] && grep -qF 'removeComments("SELECT $$https://example.com/a//b$$ AS address")' probelost/receipt.md \
   && grep -qF '"SELECT $$https:"' probelost/receipt.md && grep -qF 'covers the inputs its source names' probelost/receipt.md \
   || { cat probelost/receipt.md; jq .tests.probes probelost/receipt.json; cat probelost/trace-probe-*.err 2>/dev/null | tail -n 40; fail "probelost: the input that truncates a dollar-quoted string was not a look with the input, both answers and why it is no block"; }
-[ "$(jq -r .decision probekept.json)" = clear ] && grep -q '✅ Probes: 2 inputs the AI step chose, for 1 function, got the same answers on the old and the new code$' probekept/receipt.md \
-  || { cat probekept/receipt.md; jq .tests.probes probekept/receipt.json; cat probekept/trace-probe-*.err 2>/dev/null | tail -n 40; fail "probekept: inputs whose answers stay the same have no check mark"; }
+[ "$(jq -r .decision probekept.json)" = clear ] && grep -q '⏭️ Probes: 2 inputs the AI step chose, for 1 function, got the same answers on the old and the new code; inputs the AI step did not choose were not compared$' probekept/receipt.md \
+  || { cat probekept/receipt.md; jq .tests.probes probekept/receipt.json; cat probekept/trace-probe-*.err 2>/dev/null | tail -n 40; fail "probekept: inputs whose answers stay the same are counted, and the line earns no check mark"; }
 
 say "Kern undoes each changed function and plants small faults in the changed lines: a same-behaviour rewrite the tests guard counts as checked, and a change no test checks becomes a task for the agent, with vitest and with jest"
 for runner in vitest jest; do

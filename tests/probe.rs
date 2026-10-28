@@ -291,18 +291,19 @@ fn lightdash_12942_inputs_kern_could_not_compare_are_not_checked_and_never_earn_
 }
 
 #[test]
-fn lightdash_12942_inputs_that_answer_the_same_on_both_sides_earn_a_check_mark_that_counts_them() {
+fn audit_f23_inputs_that_answer_the_same_on_both_sides_are_counted_but_earn_no_check_mark() {
     let mut second = tried([Some("returns \"SELECT 1 \""), None, Some("returns \"SELECT 1 \""), None], obligation("verified"));
     second["id"] = json!("e2");
     second["args"] = json!(["SELECT 1 -- note"]);
     let r = receipt(ran(vec![tried([Some(KEPT), None, Some(KEPT), None], obligation("verified")), second.clone()], json!([])));
     assert_eq!(r["decision"], "clear", "{r}");
-    assert_eq!(probes_lines(&r), ["- ✅ Probes: 2 inputs the AI step chose, for 1 function, got the same answers on the old and the new code"]);
+    assert_eq!(probes_lines(&r), ["- ⏭️ Probes: 2 inputs the AI step chose, for 1 function, got the same answers on the old and the new code; inputs the AI step did not choose were not compared"],
+        "the AI step chose the inputs, and new code it read could have steered it to harmless ones, so the line never earns a check mark");
     assert!(r["notes"].as_array().unwrap().is_empty());
     let mut thrown = tried([Some("throws TypeError: db is not set"), None, Some("throws TypeError: db is not set"), None], obligation("verified"));
     thrown["id"] = json!("e3");
     let r = receipt(ran(vec![tried([Some(KEPT), None, Some(KEPT), None], obligation("verified")), second, thrown], json!([])));
-    assert_eq!(probes_lines(&r), ["- ✅ Probes: 3 inputs the AI step chose, for 1 function, got the same answers on the old and the new code (1 of them an error on both)"],
+    assert_eq!(probes_lines(&r), ["- ⏭️ Probes: 3 inputs the AI step chose, for 1 function, got the same answers on the old and the new code (1 of them an error on both); inputs the AI step did not choose were not compared"],
         "an input that only shows the same error on both sides says less, and the line says how many did");
 }
 

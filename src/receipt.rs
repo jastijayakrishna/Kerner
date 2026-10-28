@@ -496,7 +496,7 @@ fn probe_summary(p: &Value) -> String {
     let same = format!("{inputs} the AI step chose, for {of}, got the same answers on the old and the new code{}", if thrown > 0 { format!(" ({thrown} of them an error on both)") } else { String::new() });
     let mut md = if found > 0 { format!("- ⚠️ Probes: {found} of {inputs} the AI step chose, for {of}, got another answer on the new code (see above)\n") }
         else if !unchecked.is_empty() { String::new() }
-        else if p["not_run"].as_array().is_none_or(Vec::is_empty) { format!("- ✅ Probes: {same}\n") }
+        else if p["not_run"].as_array().is_none_or(Vec::is_empty) { format!("- ⏭️ Probes: {same}; inputs the AI step did not choose were not compared\n") }
         else { format!("- ⏭️ Probes: {same}, but Kern could not try them all (see below)\n") };
     let reasons = [(Unchecked::Unreached, "never reached the real function (the run gave no record, the test file did not load, or a mock or another file answered)"), (Unchecked::Unanswered, "gave no answer on one side"),
         (Unchecked::Sandbox, "needed something the sandbox does not have (the network, a service or a program)"), (Unchecked::Chance, "answered differently between two runs of the same code, so Kern sets them aside"),
