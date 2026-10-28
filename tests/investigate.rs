@@ -165,15 +165,16 @@ fn reply(answer: &Value) -> Value {
         "usage": { "input_tokens": 1200, "output_tokens": 300 } })
 }
 fn both(oracle: &Value, hunter: &Value) -> Model { Model::new(vec![("oracle", reply(oracle)), ("hunter", reply(hunter))]) }
-fn run_with(r: &Repo, out: &Path, model: Option<&Model>, pr: &str) -> Value {
-    let ask = |p: &Prompt| model.expect("a model").ask(p);
-    let ask: Option<investigate::Ask> = if model.is_some() { Some(&ask) } else { None };
-    let summary = investigate::investigate(&r.dir, (&r.base, &r.head), pr, out, ask).unwrap();
+fn run_as(r: &Repo, out: &Path, model: Option<&Model>, pr: &str, name: &str) -> Value {
+    let ask = |p: &Prompt, secs: u64| { assert!(secs > 0 && secs <= investigate::INVESTIGATE_SECS_MAX, "each prompt gets the time left of one total cap: {secs}"); model.expect("a model").ask(p) };
+    let ask: Option<investigate::Caller> = if model.is_some() { Some(&ask) } else { None };
+    let summary = investigate::investigate(&r.dir, (&r.base, &r.head), pr, out, ask, name).unwrap();
     let record = read_json(out.join("investigation.json")).unwrap();
     assert_eq!(summary["status"], record["status"]);
     assert_eq!((record["version"].as_u64(), record["base"].as_str(), record["head"].as_str()), (Some(1), Some(r.base.as_str()), Some(r.head.as_str())));
     record
 }
+fn run_with(r: &Repo, out: &Path, model: Option<&Model>, pr: &str) -> Value { run_as(r, out, model, pr, investigate::MODEL) }
 fn run(r: &Repo, out: &Path, model: Option<&Model>) -> Value { run_with(r, out, model, PR) }
 fn dropped(record: &Value) -> Vec<String> {
     record["dropped"].as_array().unwrap().iter().map(|d| format!("{}: {}", d["what"].as_str().unwrap(), d["why"].as_str().unwrap())).collect()
@@ -623,37 +624,66 @@ fn a_failing_refusing_or_cut_off_model_gives_failed_with_a_plain_why() {
     }
 }
 
+fn findings(record: &Value) -> Value { let mut r = record.clone(); for f in ["usage", "cached", "model", "fallback"] { r.as_object_mut().unwrap().remove(f); } r }
+
 #[test]
 fn a_rerun_of_the_same_pull_request_asks_the_model_nothing_and_writes_the_same_investigation() {
     let t = Temp::new();
     let r = lightdash(&t);
     let out = t.out("out");
     let first = both(&oracle_answer(), &hunter_answer());
-    run(&r, &out, Some(&first));
+    let written = run(&r, &out, Some(&first));
     assert_eq!(first.names(), ["oracle", "hunter"]);
-    let written = std::fs::read(out.join("investigation.json")).unwrap();
+    assert_eq!((written["usage"].clone(), written["cached"].clone()), (json!({ "input_tokens": 2400, "output_tokens": 600 }), json!([])));
     let again = Model::new(Vec::new());
-    run(&r, &out, Some(&again));
+    let record = run(&r, &out, Some(&again));
     assert!(again.names().is_empty(), "the cached answers are reused");
-    assert_eq!(std::fs::read(out.join("investigation.json")).unwrap(), written, "the same pull request gets the same investigation");
-    run(&r, &out, None);
-    assert_eq!(std::fs::read(out.join("investigation.json")).unwrap(), written, "cached answers need no key");
+    assert_eq!(findings(&record), findings(&written), "the same pull request gets the same investigation");
+    assert_eq!((record["usage"].clone(), record["cached"].clone()), (json!({ "input_tokens": 0, "output_tokens": 0 }), json!(["oracle", "hunter"])),
+        "audit F26: a cached answer cost nothing this time, and the record says which answers came from the cache");
+    assert_eq!(findings(&run(&r, &out, None)), findings(&written), "cached answers need no key");
     let file = out.join("hunter.answer.json");
     let mut stored = read_json(&file).unwrap();
-    stored["prompt_sha256"] = json!("0".repeat(64));
+    stored["request_sha256"] = json!("0".repeat(64));
     std::fs::write(&file, stored.to_string()).unwrap();
     let hunter_only = Model::new(vec![("hunter", reply(&hunter_answer()))]);
-    run(&r, &out, Some(&hunter_only));
-    assert_eq!(hunter_only.names(), ["hunter"], "a Hunter answer to a different prompt is never reused");
-    assert_eq!(std::fs::read(out.join("investigation.json")).unwrap(), written);
+    let record = run(&r, &out, Some(&hunter_only));
+    assert_eq!(hunter_only.names(), ["hunter"], "a Hunter answer to a different request is never reused");
+    assert_eq!((findings(&record), record["cached"].clone()), (findings(&written), json!(["oracle"])));
     let file = out.join("oracle.answer.json");
     let mut stored = read_json(&file).unwrap();
-    stored["prompt_sha256"] = json!("0".repeat(64));
+    stored["request_sha256"] = json!("0".repeat(64));
     std::fs::write(&file, stored.to_string()).unwrap();
     let asked = both(&oracle_answer(), &hunter_answer());
-    run(&r, &out, Some(&asked));
-    assert_eq!(asked.names(), ["oracle"], "an Oracle answer to a different prompt, from another version of Kern, is never reused; the Hunter's still matches its prompt");
-    assert_eq!(std::fs::read(out.join("investigation.json")).unwrap(), written);
+    let record = run(&r, &out, Some(&asked));
+    assert_eq!(asked.names(), ["oracle"], "an Oracle answer to a different request, from another version of Kern, is never reused; the Hunter's still matches its request");
+    assert_eq!(findings(&record), findings(&written));
+}
+
+#[test]
+fn audit_f26_the_cache_key_holds_the_model_and_a_fallback_answer_is_named_and_counted_as_spent() {
+    let t = Temp::new();
+    let r = lightdash(&t);
+    let out = t.out("out");
+    let first = both(&oracle_answer(), &hunter_answer());
+    let written = run(&r, &out, Some(&first));
+    let stored = read_json(out.join("oracle.answer.json")).unwrap();
+    let body = investigate::request(investigate::MODEL, &first.prompt("oracle"));
+    assert_eq!(stored["request_sha256"], json!(sha256(body.to_string())), "the key is the whole request: model, parameters, system, message and schema");
+    assert!(stored.get("prompt_sha256").is_none());
+    let other = both(&oracle_answer(), &hunter_answer());
+    let record = run_as(&r, &out, Some(&other), PR, "claude-opus-4-8");
+    assert_eq!(other.names(), ["oracle", "hunter"], "an answer the default model gave is never reused for another model");
+    assert_eq!((record["model"].as_str(), record["fallback"].as_bool(), record["cached"].clone()), (Some("claude-opus-5-5"), Some(true), json!([])),
+        "the model that answered is recorded, and it is not the one asked for");
+    let mut fell = reply(&oracle_answer());
+    fell["model"] = json!("claude-opus-4-8");
+    let fallback = Model::new(vec![("oracle", fell), ("hunter", reply(&hunter_answer()))]);
+    let record = run(&r, &t.out("fallback"), Some(&fallback));
+    assert_eq!((record["model"].as_str(), record["fallback"].as_bool()), (Some("claude-opus-4-8, claude-opus-5-5"), Some(true)));
+    assert_eq!(record["usage"], json!({ "input_tokens": 2400, "output_tokens": 600 }), "a server-side fallback answer was a live call, so its tokens were spent");
+    assert_eq!(findings(&record), findings(&written), "the findings are the same whichever model answered the same way");
+    assert_eq!((written["fallback"].as_bool(), written["model"].as_str()), (Some(false), Some("claude-opus-5-5")));
 }
 
 fn strict(schema: &Value) {
@@ -718,9 +748,16 @@ fn kern_reads_only_a_finished_json_answer_from_the_model() {
 
 #[test]
 fn kern_retries_overload_rate_limits_and_server_errors_and_waits_at_most_a_minute() {
-    assert_eq!(investigate::retry_wait(429, Some("7"), 1), Some(Duration::from_secs(7)));
-    assert_eq!(investigate::retry_wait(429, Some("600"), 1), Some(Duration::from_secs(60)));
-    for status in [429, 500, 502, 503, 504, 529] { assert!(investigate::retry_wait(status, None, 2).is_some_and(|w| w > Duration::ZERO && w <= Duration::from_secs(60)), "{status}"); }
-    for status in [400, 401, 403, 404, 413] { assert_eq!(investigate::retry_wait(status, Some("1"), 1), None, "{status} is not retried"); }
-    assert_eq!(investigate::retry_wait(529, Some("1"), 3), None, "three attempts at most");
+    let left = investigate::INVESTIGATE_SECS_MAX;
+    assert_eq!(investigate::retry_wait(429, Some("7"), 1, left), Some(Duration::from_secs(7)));
+    assert_eq!(investigate::retry_wait(429, Some("600"), 1, left), Some(Duration::from_secs(60)));
+    for status in [429, 500, 502, 503, 504, 529] { assert!(investigate::retry_wait(status, None, 2, left).is_some_and(|w| w > Duration::ZERO && w <= Duration::from_secs(60)), "{status}"); }
+    for status in [400, 401, 403, 404, 413] { assert_eq!(investigate::retry_wait(status, Some("1"), 1, left), None, "{status} is not retried"); }
+    assert_eq!(investigate::retry_wait(529, Some("1"), 3, left), None, "three attempts at most");
+    assert_eq!(investigate::retry_wait(429, Some("7"), 1, 8), None, "audit F30: a wait that would pass Kern's time cap is not taken");
+    assert_eq!(investigate::retry_wait(529, None, 1, 2), None);
+    assert_eq!(investigate::retry_wait(429, Some("7"), 1, 9), Some(Duration::from_secs(7)));
+    let out = investigate::call("not-a-key", &json!({}), 0).unwrap_err().0;
+    assert!(out.contains("Kern's time for the AI step ran out"), "with no time left no request is sent: {out}");
+    assert!(investigate::INVESTIGATE_SECS_MAX < 30 * 60, "the cap stays under the investigate job's 30-minute timeout");
 }

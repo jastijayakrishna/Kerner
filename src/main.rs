@@ -80,9 +80,9 @@ fn cli() -> R<(Option<Value>, i32)> {
             count(a, 5)?;
             let pr = kern::investigate::read_pr(Path::new(&a[3]))?;
             let (key, model) = (kern::github::env("ANTHROPIC_API_KEY"), kern::investigate::model());
-            let call = |p: &kern::investigate::Prompt| kern::investigate::call(key.as_deref().unwrap_or_default(), &kern::investigate::request(&model, p));
-            let ask: Option<kern::investigate::Ask> = if key.is_some() { Some(&call) } else { None };
-            (Some(kern::investigate::investigate(Path::new(&a[0]), (&a[1], &a[2]), &pr, Path::new(&a[4]), ask)?), 0)
+            let call = |p: &kern::investigate::Prompt, secs: u64| kern::investigate::call(key.as_deref().unwrap_or_default(), &kern::investigate::request(&model, p), secs);
+            let ask: Option<kern::investigate::Caller> = if key.is_some() { Some(&call) } else { None };
+            (Some(kern::investigate::investigate(Path::new(&a[0]), (&a[1], &a[2]), &pr, Path::new(&a[4]), ask, &model)?), 0)
         }
         "receipt" => {
             let (sub, rest) = a.split_first().ok_or_else(|| Denied("Expected receipt render, sign, post, approve or verify; see kern --help".into()))?;

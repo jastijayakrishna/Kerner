@@ -31,6 +31,7 @@ const EXCERPT_BYTES_MAX: usize = 6000;
 const NOTE_BYTES_MAX: usize = 160;
 const ANSWER_TOKENS_MAX: u64 = 20_000;
 const ANSWER_BYTES_MAX: u64 = 4 << 20;
+pub const INVESTIGATE_SECS_MAX: u64 = 1200;
 const ATTEMPTS_COUNT_MAX: u32 = 3;
 const ATTEMPT_SECS_MAX: u64 = 600;
 const RETRY_AFTER_SECS_MAX: u64 = 60;
@@ -72,9 +73,9 @@ pub struct Prompt { pub name: &'static str, pub system: &'static str, pub user: 
 impl Prompt {
     pub fn message(&self) -> String { format!("{}{}", self.user, self.untrusted) }
     pub fn text(&self) -> String { format!("# System\n\n{}\n\n# User\n\n{}\n", self.system, self.message()) }
-    fn sha256(&self) -> String { sha256(format!("{}\n{}\n{}", self.system, self.message(), self.schema)) }
 }
 pub type Ask<'a> = &'a dyn Fn(&Prompt) -> R<Value>;
+pub type Caller<'a> = &'a dyn Fn(&Prompt, u64) -> R<Value>;
 
 #[derive(Clone, Copy)]
 enum Text<'t> { Missing, Unreadable, Here(&'t str) }
@@ -501,19 +502,26 @@ pub fn request(model: &str, prompt: &Prompt) -> Value {
     json!({ "model": model, "max_tokens": ANSWER_TOKENS_MAX, "system": prompt.system, "messages": [{ "role": "user", "content": prompt.message() }],
         "output_config": { "effort": "high", "format": { "type": "json_schema", "schema": prompt.schema } }, "fallbacks": "default" })
 }
-fn backoff(attempt: u32) -> Duration { Duration::from_secs(1 << attempt.min(5)) }
-pub fn retry_wait(status: u16, retry_after: Option<&str>, attempt: u32) -> Option<Duration> {
-    if !RETRIED.contains(&status) || attempt >= ATTEMPTS_COUNT_MAX { return None; }
-    Some(retry_after.and_then(|v| v.trim().parse::<u64>().ok()).map_or_else(|| backoff(attempt), |secs| Duration::from_secs(secs.min(RETRY_AFTER_SECS_MAX))))
+fn backoff(attempt: u32, secs_left: u64) -> Option<Duration> {
+    (attempt < ATTEMPTS_COUNT_MAX).then(|| Duration::from_secs(1 << attempt.min(5))).filter(|w| w.as_secs() + 1 < secs_left)
 }
+pub fn retry_wait(status: u16, retry_after: Option<&str>, attempt: u32, secs_left: u64) -> Option<Duration> {
+    if !RETRIED.contains(&status) { return None; }
+    let asked = retry_after.and_then(|v| v.trim().parse::<u64>().ok()).map(|secs| Duration::from_secs(secs.min(RETRY_AFTER_SECS_MAX)));
+    match asked { Some(w) => Some(w).filter(|w| attempt < ATTEMPTS_COUNT_MAX && w.as_secs() + 1 < secs_left), None => backoff(attempt, secs_left) }
+}
+const RAN_OUT: &str = "Kern's time for the AI step ran out";
 fn api_error(text: &str) -> String {
     serde_json::from_str::<Value>(text).ok().and_then(|v| v["error"]["message"].as_str().map(|m| format!(": {}", clip(m, WHY_CHARS_MAX)))).unwrap_or_default()
 }
-pub fn call(key: &str, body: &Value) -> R<Value> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(Duration::from_secs(ATTEMPT_SECS_MAX))).build().into();
+pub fn call(key: &str, body: &Value, secs_max: u64) -> R<Value> {
+    let until = now_ms().saturating_add(secs_max.saturating_mul(1000));
     let sent = body.to_string();
-    let mut why = String::new();
+    let mut why = RAN_OUT.to_string();
     for attempt in 1..=ATTEMPTS_COUNT_MAX {
+        let left = within(until, ATTEMPT_SECS_MAX);
+        if left == 0 { why = RAN_OUT.to_string(); break; }
+        let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(Duration::from_secs(left))).build().into();
         let request = HEADERS.iter().fold(agent.post(URL).header("x-api-key", key), |r, (name, value)| r.header(*name, *value));
         let wait = match request.send(sent.as_str()) {
             Ok(mut r) => {
@@ -523,17 +531,17 @@ pub fn call(key: &str, body: &Value) -> R<Value> {
                     (200, Ok(text)) => return serde_json::from_str(&text).map_err(|_| Denied("the model API's answer is not JSON".into())),
                     (200, Err(e)) => {
                         why = format!("Kern could not read the model API's answer: {e}");
-                        (!matches!(e, ureq::Error::Timeout(_)) && attempt < ATTEMPTS_COUNT_MAX).then(|| backoff(attempt))
+                        if matches!(e, ureq::Error::Timeout(_)) { None } else { backoff(attempt, within(until, ATTEMPT_SECS_MAX)) }
                     }
                     (_, text) => {
                         why = format!("the model API answered {status}{}", text.map(|t| api_error(&t)).unwrap_or_default());
-                        retry_wait(status, after.as_deref(), attempt)
+                        retry_wait(status, after.as_deref(), attempt, within(until, ATTEMPT_SECS_MAX))
                     }
                 }
             }
             Err(e) => {
                 why = format!("the model API could not be reached: {e}");
-                (!matches!(e, ureq::Error::Timeout(_)) && attempt < ATTEMPTS_COUNT_MAX).then(|| backoff(attempt))
+                if matches!(e, ureq::Error::Timeout(_)) { None } else { backoff(attempt, within(until, ATTEMPT_SECS_MAX)) }
             }
         };
         let Some(wait) = wait else { break };
@@ -798,7 +806,7 @@ fn recorded_targets(targets: &[Target], examples: &[Examples], sources: &[Source
 }
 
 enum Outcome { Nothing(String), Investigated(Vec<Value>, Vec<Value>, Vec<Value>) }
-struct Run<'a> { repo: &'a Path, out: &'a Path, ask: Option<Ask<'a>>, tokens: [u64; 2], models: BTreeSet<String>, dropped: Vec<Value> }
+struct Run<'a> { repo: &'a Path, out: &'a Path, ask: Option<Caller<'a>>, model: &'a str, until: u64, tokens: [u64; 2], models: BTreeSet<String>, cached: Vec<&'static str>, dropped: Vec<Value> }
 fn stored(file: &Path) -> Option<Value> {
     if std::fs::metadata(file).ok()?.len() > ANSWER_BYTES_MAX { return None; }
     serde_json::from_slice::<Value>(&std::fs::read(file).ok()?).ok().filter(|v| v["response"].is_object())
@@ -807,17 +815,18 @@ impl Run<'_> {
     fn answer(&mut self, prompt: &Prompt) -> R<Option<Value>> {
         std::fs::write(self.out.join(format!("{}.prompt.md", prompt.name)), prompt.text())?;
         let file = self.out.join(format!("{}.answer.json", prompt.name));
-        let sha = prompt.sha256();
-        let reusable = stored(&file).filter(|s| s["prompt_sha256"].as_str() == Some(sha.as_str()));
+        let sha = sha256(request(self.model, prompt).to_string());
+        let reusable = stored(&file).filter(|s| s["request_sha256"].as_str() == Some(sha.as_str()));
         let (response, live) = match (reusable, self.ask) {
             (Some(s), _) => (s["response"].clone(), false),
-            (None, Some(ask)) => (ask(prompt)?, true),
+            (None, Some(ask)) => match within(self.until, INVESTIGATE_SECS_MAX) { 0 => deny!("{RAN_OUT} ({INVESTIGATE_SECS_MAX} seconds in all)"), left => (ask(prompt, left)?, true) },
             (None, None) => return Ok(None),
         };
-        for (n, field) in ["input_tokens", "output_tokens"].into_iter().enumerate() { self.tokens[n] = self.tokens[n].saturating_add(response["usage"][field].as_u64().unwrap_or(0)); }
+        if live { for (n, field) in ["input_tokens", "output_tokens"].into_iter().enumerate() { self.tokens[n] = self.tokens[n].saturating_add(response["usage"][field].as_u64().unwrap_or(0)); } }
+        else { self.cached.push(prompt.name); }
         let said = answer_of(&response, &prompt.schema)?;
         if let Some(m) = response["model"].as_str().filter(|m| !m.is_empty()) { self.models.insert(clip(m, WHY_CHARS_MAX)); }
-        if live { std::fs::write(&file, json!({ "prompt_sha256": sha, "response": response }).to_string())?; }
+        if live { std::fs::write(&file, json!({ "request_sha256": sha, "response": response }).to_string())?; }
         Ok(Some(said))
     }
     fn examine(&mut self, (base, head): (&str, &str), pr: &str) -> R<Outcome> {
@@ -845,8 +854,9 @@ impl Run<'_> {
             Ok(Outcome::Nothing(why)) => ("NONE", why, Default::default()),
             Err(e) => ("FAILED", e.0, Default::default()),
         };
-        json!({ "version": 1, "base": base, "head": head, "status": status, "why": why, "model": self.models.into_iter().collect::<Vec<_>>().join(", "),
-            "usage": { "input_tokens": self.tokens[0], "output_tokens": self.tokens[1] }, "targets": targets, "obligations": obligations, "experiments": experiments, "dropped": self.dropped })
+        let fallback = self.models.iter().any(|m| m != self.model);
+        json!({ "version": 1, "base": base, "head": head, "status": status, "why": why, "model": self.models.into_iter().collect::<Vec<_>>().join(", "), "fallback": fallback,
+            "usage": { "input_tokens": self.tokens[0], "output_tokens": self.tokens[1] }, "cached": self.cached, "targets": targets, "obligations": obligations, "experiments": experiments, "dropped": self.dropped })
     }
 }
 fn summary(record: &Value, file: &Path) -> Value {
@@ -855,9 +865,10 @@ fn summary(record: &Value, file: &Path) -> Value {
     json!({ "status": record["status"], "why": record["why"], "targets": count("targets"), "obligations": count("obligations"), "verified": verified,
         "experiments": count("experiments"), "dropped": count("dropped"), "usage": record["usage"], "investigation": file.display().to_string() })
 }
-pub fn investigate(repo: &Path, (base, head): (&str, &str), pr: &str, out: &Path, ask: Option<Ask>) -> R<Value> {
+pub fn investigate(repo: &Path, (base, head): (&str, &str), pr: &str, out: &Path, ask: Option<Caller>, model: &str) -> R<Value> {
     std::fs::create_dir_all(out)?;
-    let mut run = Run { repo, out, ask, tokens: [0, 0], models: BTreeSet::new(), dropped: Vec::new() };
+    let until = now_ms().saturating_add(INVESTIGATE_SECS_MAX * 1000);
+    let mut run = Run { repo, out, ask, model, until, tokens: [0, 0], models: BTreeSet::new(), cached: Vec::new(), dropped: Vec::new() };
     let found = run.examine((base, head), pr);
     let mut record = run.record((base, head), found);
     if let crate::probe::Parsed::Unusable(why) = crate::probe::parse(&record, (base, head)) && record["status"] == "INVESTIGATED" {
