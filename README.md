@@ -193,9 +193,10 @@ What Kern checks on every pull request:
 8. **Dependencies.** The receipt lists what moved under Notes (`vitest 3.2.4 → 4.0.18`), never as a look: nothing Kern measures says
    whether a version is right, and it does not look up release dates. What needs a look is what runs code or decides what gets
    installed: a `package.json` change to install scripts (`pnpm:devPreinstall` included), `overrides`, `patchedDependencies`, `devEngines`,
-   a `packageManager` that is anything but the same manager at a plain version, and the like; a patch an install applies (a `.patch` file
-   under `patches/`, anything under `.yarn/patches/`, or a file `patchedDependencies` or a `patch:` version names); a changed file an
-   install script runs; a deleted lockfile; and a
+   a `packageManager` that is anything but the same manager at a plain version, and the like; a patch an install applies (a file
+   `patchedDependencies` or a `patch:` version names, anything under `.yarn/patches/`, or a `.patch` file under `patches/` in a project
+   that uses patch-package or pnpm); a changed script or extensionless file an install script runs (not a schema or config it reads);
+   a deleted lockfile; and a
    lockfile entry that downloads a package from somewhere other than its own registry tarball, swaps one package for another or changes
    a checksum without a version. A lockfile Kern does not read (yarn, pnpm, Bun) is listed as not checked.
 9. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
@@ -276,7 +277,7 @@ Then add the workflow file at the top of this page to a repository, pointing `us
   and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to a fresh folder on disk outside the project,
   as on the project's own CI. A flood of output from tests, build steps or planted-fault runs is cut to its start and end, and Kern reads
   at most what it keeps of each file the tests write, never through a link. The temporary folder itself has no size limit: a test that
-  writes many gigabytes there can fill the machine's disk, which ends the check with an error, never with an answer.
+  writes many gigabytes there can fill the machine's disk; what Kern answers then is not tested yet.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so
@@ -286,7 +287,8 @@ Then add the workflow file at the top of this page to a repository, pointing `us
   could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code. A test that notices Kern's
   planted faults and fails on purpose fails in the control run too, so it catches nothing; two records that disagree about one test's
   values are both ignored. A test written to hash its own source files can still tell a planted fault apart; changed code that names
-  Kern's own machinery to do it (a `KERN_` variable, `/kern/`, a `.kern-` file) needs a look, but that is a tripwire, not a proof.
+  Kern's own machinery to do it (a `KERN_` variable Kern sets in the sandbox, such as `KERN_FAULT_SOURCE`, a `/kern/` path or a `.kern-`
+  file) needs a look, but that is a tripwire, not a proof.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, and the answer is not verified, never passed or failed.
   Kern's own limits (time, memory, disk space, open files, the process limit, a killed process, a broken report, its own reporter failing
   to load) never block.
