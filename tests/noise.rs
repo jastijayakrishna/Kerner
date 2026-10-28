@@ -300,6 +300,11 @@ fn review_stage1_r9_code_that_newly_names_kerns_own_channels_is_a_look_because_i
     assert!(r["look"][1]["what"].as_str().unwrap().contains("KERN_FAULT_SOURCE"), "{}", r["look"]);
     let plain = rules_for(&base, &[("src/total.js", "export const KERNEL_VERSION = 6;\nexport const kerning = (s) => s;\nexport const docs = 'https://example.com/kern/guide';\nconst dir = 'src/kern/x';\nexport const KERN = 1;\nexport const total = (xs) => xs.reduce((a, b) => a + b, 0);\n")], &[]);
     assert_eq!(plain["machinery"], json!([]), "a kernel version, kerning, a web page about kern and a folder named kern are not Kern's");
+    let flood = format!("export const s = '{}';\n", "a.kern-".repeat(1 << 20));
+    let started = std::time::Instant::now();
+    let rules = rules_for(&base, &[("src/flood.js", &flood)], &[]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(60) && rules["machinery"][0]["names"].as_array().is_some_and(|n| !n.is_empty() && n.len() <= 5),
+        "a 7 MiB run of Kern-like names is read in bounded time and named at most five times: {:?}", started.elapsed());
 }
 
 #[test]

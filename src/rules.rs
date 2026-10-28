@@ -196,20 +196,31 @@ fn action_moves(old: &str, new: &str, owner: Option<&str>) -> Option<Vec<Value>>
     Some(moves.into_iter().map(|(action, from, to, release)| json!({ "action": action, "from": from, "to": to, "release": release })).collect())
 }
 const KERN_NAMES_COUNT_MAX: usize = 5;
+const KERN_MARKS_COUNT_MAX: usize = 1000;
+const TOKEN_CHARS_MAX: usize = 200;
 fn path_char(c: char) -> bool { c.is_ascii_alphanumeric() || "._-/".contains(c) }
-fn token_end(text: &str, from: usize, keep: fn(char) -> bool) -> usize { text[from..].char_indices().find(|(_, c)| !keep(*c)).map_or(text.len(), |(j, _)| from + j) }
+fn token_end(text: &str, from: usize, keep: fn(char) -> bool) -> usize {
+    let rest = &text[from..];
+    let stop = rest.char_indices().nth(TOKEN_CHARS_MAX).map_or(rest.len(), |(j, _)| j);
+    rest[..stop].char_indices().find(|(_, c)| !keep(*c)).map_or(from + stop, |(j, _)| from + j)
+}
+fn token_start(text: &str, to: usize) -> usize {
+    let mut lo = to.saturating_sub(TOKEN_CHARS_MAX);
+    while !text.is_char_boundary(lo) { lo -= 1; }
+    text[lo..to].char_indices().rev().find(|(_, c)| !path_char(*c)).map_or(lo, |(j, c)| lo + j + c.len_utf8())
+}
 fn kern_names(text: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let before = |i: usize| text[..i].chars().next_back();
-    for (i, _) in text.match_indices("KERN_") {
+    for (i, _) in text.match_indices("KERN_").take(KERN_MARKS_COUNT_MAX) {
         let end = token_end(text, i, |c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
         if end > i + 5 && !before(i).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') { found.insert(text[i..end].to_string()); }
     }
-    for (i, _) in text.match_indices("/kern/") {
+    for (i, _) in text.match_indices("/kern/").take(KERN_MARKS_COUNT_MAX) {
         if !before(i).is_some_and(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) { found.insert(text[i..token_end(text, i + 6, path_char)].to_string()); }
     }
-    for (i, _) in text.match_indices(".kern-") {
-        let (start, end) = (text[..i].char_indices().rev().find(|(_, c)| !path_char(*c)).map_or(0, |(j, c)| j + c.len_utf8()), token_end(text, i + 6, path_char));
+    for (i, _) in text.match_indices(".kern-").take(KERN_MARKS_COUNT_MAX) {
+        let (start, end) = (token_start(text, i), token_end(text, i + 6, path_char));
         if end > i + 6 { found.insert(text[start..end].to_string()); }
     }
     found
