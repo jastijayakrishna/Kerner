@@ -150,7 +150,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> Value {
         let old = build_side(out, &volume("old"), dir, until, &format!("old-{i}"));
         let new = if old["status"] == "built" { build_side(out, &volume("new"), dir, until, &format!("new-{i}")) } else { json!({ "status": "skipped" }) };
         let again = (new["status"] == "failed").then(|| build_side(out, &volume("new"), dir, until, &format!("new-again-{i}")));
-        let even = crate::suite::setup_differs(&s, dir).or_else(|| crate::suite::unlocked(&s, dir));
+        let even = crate::suite::setup_differs(&s, dir);
         builds.push(judge(dir, &old, &new, again.as_ref(), even));
     }
     json!({ "status": "CHECKED", "builds": builds })
@@ -162,7 +162,7 @@ pub fn rejudge(dir: &Path, stored: &Value, setup: Option<&Value>) -> Value {
         let folder = b["dir"].as_str().unwrap_or("");
         match (read(&format!("old-{i}")), read(&format!("new-{i}"))) {
             (Some(old), Some(new)) => judge(folder, &old, &new, read(&format!("new-again-{i}")).as_ref(),
-                setup.and_then(|s| crate::suite::setup_differs(s, folder).or_else(|| crate::suite::unlocked(s, folder)))),
+                setup.and_then(|s| crate::suite::setup_differs(s, folder))),
             _ => b.clone(),
         }
     }).collect();

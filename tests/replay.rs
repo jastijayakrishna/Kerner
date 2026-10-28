@@ -54,6 +54,23 @@ fn a_stored_check_is_judged_again_from_its_own_runs_with_todays_rules() {
 }
 
 #[test]
+fn x_gis_372_a_stored_break_on_two_installs_that_each_resolved_their_own_versions_is_not_verified_in_the_replay_too() {
+    let t = Temp::new("unlocked");
+    let dir = t.0.join("receipt-X-GIS__X-GIS__372");
+    stored(&dir, "vitest", json!({}), &[
+        ("old", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+        ("new", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "failed")])),
+        ("new-alone", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "failed")])),
+        ("old-alone", vitest(&[(ADDS, "adds", "passed"), (ADDS, "discounts", "passed")])),
+    ]);
+    let side = json!({ "installs": [{ "dir": ".", "manager": "npm", "result": "installed from package.json (Kern does not read Bun's lockfile)", "parts": [] }], "scripts": true, "node": { "major": 22 } });
+    std::fs::write(dir.join("setup.json"), json!({ "version": 1, "old": side, "new": side }).to_string()).unwrap();
+    let r = kern::replay::rejudge(&dir).unwrap();
+    assert_eq!(r["receipt"]["decision"], "unverified", "each side resolved its own versions, so the replay judges it as the live check does: {r}");
+    assert_eq!(r["receipt"]["tests"]["uneven"], json!([format!("{ADDS} > discounts")]));
+}
+
+#[test]
 fn a_failure_that_does_not_repeat_when_its_file_runs_alone_stays_flaky() {
     let t = Temp::new("flaky");
     let dir = t.0.join("receipt-acme__shop__2");

@@ -484,8 +484,10 @@ pub fn install_plan(dir: &Path) -> (&'static str, Vec<(Vec<String>, &'static str
     if declared == "bun" {
         return ("bun", vec![(bun(&["install", "--no-save", "--ignore-scripts"]), "installed from package.json (the project has no lockfile)")]);
     }
-    ("npm", vec![(npm(&["install", "--ignore-scripts", "--no-package-lock"]), "installed"), (loose, "installed from package.json (npm's peer dependency checks were relaxed)")])
+    ("npm", vec![(npm(&["install", "--ignore-scripts", "--no-package-lock"]), "installed from package.json (the project has no lockfile)"),
+        (loose, "installed from package.json (the project has no lockfile, and npm's peer dependency checks were relaxed)")])
 }
+pub const WITH_WORKSPACE: &str = "installed with the workspace";
 pub fn image_major(image: &str) -> Option<u64> {
     let info = docker_json(&["image", "inspect", image]).ok()?;
     info[0]["Config"]["Env"].as_array()?.iter().filter_map(Value::as_str).find_map(|e| e.strip_prefix("NODE_VERSION="))?.split('.').next()?.trim_start_matches('v').parse().ok()
@@ -827,7 +829,7 @@ mod inside {
         for d in &dirs {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
-            if super::with_workspace(d, dir.join("node_modules").exists(), &records) { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
+            if super::with_workspace(d, dir.join("node_modules").exists(), &records) { records.push(json!({ "dir": d, "manager": null, "result": super::WITH_WORKSPACE })); continue; }
             let keep: Vec<PathBuf> = super::INSTALL_SCRATCH.iter().chain([&super::PNPM_STORE, &super::TOOLS]).map(PathBuf::from)
                 .chain(records.iter().filter_map(|r| r["dir"].as_str()).filter(|r| *r != ".").map(|r| Path::new("/workspace").join(r))).collect();
             let (record, launcher) = install_dir(d, &dir, scripts, (budget, started), &keep, (&mut dirty, &mut made))?;

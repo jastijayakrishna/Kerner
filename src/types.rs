@@ -8,7 +8,6 @@ pub const CHECK: &str = "const{spawnSync}=require('child_process'),path=require(
 const MAX_PROJECTS: usize = 2;
 const RESOLUTION: [&str; 15] = ["TS2307", "TS2305", "TS2724", "TS2614", "TS2694", "TS7016", "TS2792", "TS2306", "TS2688", "TS6053", "TS2503", "TS2709",
     "TS2304", "TS2552", "TS6305"];
-const LOCKS: [&str; 6] = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diag { pub file: String, pub line: usize, pub code: String, pub message: String }
@@ -246,17 +245,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> Value {
         let old = check_side(out, &volume("old"), config, until, &format!("old-{i}"));
         let new = if old["status"] == "clean" { check_side(out, &volume("new"), config, until, &format!("new-{i}")) } else { json!({ "status": "skipped" }) };
         let scripts: Vec<Value> = manifests(head, config).iter().chain(manifests(base, config).iter()).map(|m| m["scripts"].clone()).collect();
-        let locked = |all: &BTreeSet<String>| {
-            let mut at = dir.to_string();
-            loop {
-                if LOCKS.iter().any(|l| all.contains(&if at.is_empty() { l.to_string() } else { format!("{at}/{l}") })) { return true; }
-                if at.is_empty() { return false; }
-                at = parent(&at).to_string();
-            }
-        };
-        let even = crate::suite::setup_differs(&s, dir).or_else(|| crate::suite::unlocked(&s, dir))
-            .or_else(|| (!locked(&head_files) || !locked(&base_files)).then(|| "the project has no lockfile, so each side's dependencies were resolved on their own".to_string()));
-        let mut p = judge(config, &old, &new, enforced(&scripts), even);
+        let mut p = judge(config, &old, &new, enforced(&scripts), crate::suite::setup_differs(&s, dir));
         if p["result"] == "new-errors" && p["enforced"] == true && p["uneven"].is_null() && p["generated"] != true {
             confirm(&mut p, &new, &check_side(out, &volume("new"), config, until, &format!("new-again-{i}")));
         }

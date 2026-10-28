@@ -967,6 +967,25 @@ fn the_first_error_is_the_thrown_one_never_a_line_of_minified_code() {
 }
 
 #[test]
+fn x_gis_372_two_installs_that_each_resolved_their_own_versions_are_never_the_same_setup() {
+    let side = |result: &str| json!({ "installs": [{ "dir": ".", "manager": "bun", "result": result, "parts": [] }], "scripts": true, "node": { "major": 22 } });
+    let both = |result: &str| json!({ "version": 1, "old": side(result), "new": side(result) });
+    for result in ["installed from package.json (Kern does not read Bun's lockfile)", "installed from package.json (the lockfile is out of date)", "installed from package.json (the project has no lockfile)"] {
+        assert!(suite::setup_differs(&both(result), "").is_some_and(|w| w.contains("from package.json")), "{result}: each side resolved its own versions, minutes apart");
+    }
+    assert_eq!(suite::setup_differs(&both("installed"), ""), None, "both sides installed from the same lockfile");
+    let member = |root: &str| json!({ "installs": [{ "dir": ".", "manager": "pnpm", "result": root, "parts": [] }, { "dir": "packages/a", "manager": null, "result": "installed with the workspace" }] });
+    let mono = |root: &str| json!({ "version": 1, "old": member(root), "new": member(root) });
+    assert!(suite::setup_differs(&mono("installed from package.json (the lockfile is out of date)"), "packages/a").is_some(), "a workspace member's dependencies are its root's install");
+    assert_eq!(suite::setup_differs(&mono("installed"), "packages/a"), None);
+    let t = Temp::new();
+    write(&t.0, "package.json", r#"{"name":"site","devDependencies":{"vitest":"3.2.0"}}"#);
+    let (manager, attempts) = kern::sandbox::install_plan(&t.0);
+    assert_eq!(manager, "npm");
+    assert!(attempts.iter().all(|(_, said)| said.starts_with("installed from package.json")), "npm with no lockfile resolves every version on its own too: {attempts:?}");
+}
+
+#[test]
 fn a_project_with_no_lockfile_is_installed_with_the_package_manager_it_declares() {
     let t = Temp::new();
     write(&t.0, "package.json", r#"{"name":"lobehub","packageManager":"pnpm@10.18.0","dependencies":{"@lobechat/types":"workspace:*"}}"#);

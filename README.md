@@ -97,7 +97,8 @@ What Kern checks on every pull request:
    that never repeats is called flaky and set aside. A test that stops running, or is newly skipped, needs a look, checked the same way.
    Tests that already failed before the change are set aside, and so is a new test that fails here with the same error as they do (the
    sandbox lacks something, not the change). A block needs proof from both sides: a test file with no record of passing on the old
-   code, or a failure on sides Kern could not set up the same way (installs, Linux parts, a build step), is not verified instead. Tests that
+   code, or a failure on sides Kern could not set up the same way (installs, Linux parts, a build step, or an install that resolved its own
+   versions because the lockfile was missing or out of date), is not verified instead. Tests that
    run on the old code but give no results on the new code, twice, while the old code's tests still give results when run again, need a
    look that quotes the first error; a run with no results is never a block, and when the old code's tests give no results again either,
    or the sides were set up differently, it is not verified. A project setting that stops

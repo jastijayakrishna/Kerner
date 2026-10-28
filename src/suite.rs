@@ -872,14 +872,17 @@ fn install_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Val
     let applies = |d: &str| d == "." || d == dir || dir.starts_with(&format!("{d}/"));
     setup[side]["installs"].as_array()?.iter().filter(|i| i["dir"].as_str().is_some_and(applies)).max_by_key(|i| i["dir"].as_str().map_or(0, |d| if d == "." { 0 } else { d.len() }))
 }
-pub fn unlocked(setup: &Value, dir: &str) -> Option<String> {
+fn setup_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Value> {
+    install_record(setup, side, dir).and_then(|r| if r["result"] == crate::sandbox::WITH_WORKSPACE { install_record(setup, side, ".") } else { Some(r) })
+}
+fn unlocked(setup: &Value, dir: &str) -> Option<String> {
     ["old", "new"].iter().find_map(|side| {
-        let result = install_record(setup, side, dir)?["result"].as_str()?;
-        result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}", result.chars().take(120).collect::<String>()))
+        let result = setup_record(setup, side, dir)?["result"].as_str()?;
+        result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}, so each side resolved its own versions", result.chars().take(120).collect::<String>()))
     })
 }
 pub fn setup_differs(setup: &Value, dir: &str) -> Option<String> {
-    let (old, new) = (install_record(setup, "old", dir)?, install_record(setup, "new", dir)?);
+    let (old, new) = (setup_record(setup, "old", dir)?, setup_record(setup, "new", dir)?);
     let said = |r: &Value| r["result"].as_str().unwrap_or("").chars().take(120).collect::<String>();
     if old["result"] != new["result"] { return Some(format!("the old code's dependencies were {} and the new code's were {}", said(old), said(new))); }
     let parts = |r: &Value| -> BTreeSet<String> { r["parts"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() };
@@ -893,7 +896,8 @@ pub fn setup_differs(setup: &Value, dir: &str) -> Option<String> {
     if o["node"]["major"] == n["node"]["major"] && o["image"].is_string() && n["image"].is_string() && o["image"] != n["image"] && o["browser"] == n["browser"] {
         return Some("the two sides ran different builds of the same Node image".to_string());
     }
-    (o["browser"]["error"].is_string() != n["browser"]["error"].is_string()).then(|| "Kern could set up the browser the tests need on one side only".to_string())
+    if o["browser"]["error"].is_string() != n["browser"]["error"].is_string() { return Some("Kern could set up the browser the tests need on one side only".to_string()); }
+    unlocked(setup, dir)
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step { pub name: String, pub exit: Option<i64>, pub errors: String }

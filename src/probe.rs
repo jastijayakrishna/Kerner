@@ -440,7 +440,7 @@ pub fn recorded(x: &mut Value, traces: &[Option<Seen>; 4]) {
     x["chance"] = json!(traces.iter().flatten().any(|s| s.answers.get(&id).is_some_and(|a| a.len() > 1)));
     x["network"] = json!(traces.iter().flatten().any(|s| s.network));
 }
-fn uneven(setup: &Value, dir: &str, suite: Option<&str>) -> Value { json!(crate::suite::setup_differs(setup, dir).or_else(|| crate::suite::unlocked(setup, dir)).or_else(|| suite.map(str::to_string))) }
+fn uneven(setup: &Value, dir: &str, suite: Option<&str>) -> Value { json!(crate::suite::setup_differs(setup, dir).or_else(|| suite.map(str::to_string))) }
 fn trace(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, (files, serve): (&Texts, &Texts), name: &str, seconds: u64) -> Option<Seen> {
     if seconds < PROBE_RUN_SECS_MIN { return None; }
     let traced = crate::suite::traced_run(out, volume, (tests, env), dir, (files, serve), name, seconds)?;
