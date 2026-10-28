@@ -834,9 +834,10 @@ mod inside {
         for e in entries.flatten() {
             let p = e.path();
             let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+            if KERN_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) { continue; }
             if meta.uid() == TEST_USER {
                 let _ = if meta.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
-            } else if meta.is_dir() && !KERN_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) {
+            } else if meta.is_dir() {
                 clear_added(&p);
             }
         }
