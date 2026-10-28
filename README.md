@@ -133,6 +133,15 @@ What Kern checks on every pull request:
    mock that no old test names needs a look. A test file the change only adds tests to needs no such run:
    its old tests are still in it, unchanged, and ran on the new code. A new test that fails only for want of something the sandbox does
    not have (the network, a program or a native module) is listed as not checked.
+   When the repository's own CI job is one a machine can follow (`actions/setup-node`, an install from a fixed list, the test command,
+   with a build or `tsc` step before it, and no container, service or secret), `kern learn` on main reads it into one typed plan, runs
+   that plan twice on the same commit, and keeps it only when every step before the tests exits 0 both times, a runner reports, a test
+   passes, and both runs agree test by test. A pull request whose base has such a plan is checked through it: the installs through
+   Kern's install box as above, every other step as one `bash -e` line in the test box with the network off, the same plan in the same
+   order on both trees, and each test step under the recorder, so every vitest, jest or mocha it starts runs as its own suite on both
+   sides; the receipt says "Kern ran your CI job `ci.yml#test`". A step that fails, or does not finish in its 15 minutes, on one side
+   only makes the sides uneven, so nothing can be blocked. A CI job that needs a service or a secret is not supported here, said up
+   front before any install. Without an accepted plan, the project's test script runs as above.
 2. **Whether the tests check the change at all.** When the tests pass, Kern undoes the change to each changed function of the product code,
    one function at a time (and the rest of a file's change on its own), and runs the tests related to that file (jest and vitest); then it
    plants up to three small faults spread over the changed lines (`>` turned into `>=`, a condition turned around, a call left out). Each

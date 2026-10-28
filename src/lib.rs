@@ -34,3 +34,4 @@ pub mod plan;
 pub mod yaml;
 pub mod shell;
 pub mod ci;
+pub mod exec;

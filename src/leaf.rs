@@ -30,7 +30,8 @@ pub struct Record { pub runner: Runner, pub dir: Option<String>, pub argv: Vec<S
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Recorded { pub leaves: Vec<Record>, pub exit: Option<i64>, pub why: Option<String> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Leaf { pub name: String, pub label: String, pub prefix: Option<String> }
+pub struct Leaf { pub name: String, pub label: String, pub prefix: Option<String>, pub from: String }
+pub const FROM_SCRIPT: &str = "the project's test script";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Planned { pub dir: String, pub old: Option<(Tests, Env)>, pub new: (Tests, Env), pub name: String }
 

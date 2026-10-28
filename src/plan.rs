@@ -185,7 +185,7 @@ pub fn key(files: &[(&str, &[u8])]) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Unreadable { pub tier: char, pub why: String }
+pub struct Unreadable { pub tier: char, pub why: String, pub services: Vec<String> }
 const SETUP_FILES: [&str; 10] = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", ".nvmrc", ".node-version", "pnpm-workspace.yaml"];
 const COSMETIC_INSTALL_WORDS: [&str; 3] = ["--prefer-offline", "--progress=false", "--silent"];
 
@@ -310,9 +310,10 @@ fn github_env(text: &str) -> Option<(String, String)> {
 pub fn read(tree: &crate::ci::Tree) -> Result<Plan, Unreadable> {
     let m = crate::ci::measure(tree);
     let Some(job) = m.jobs.first().filter(|_| m.tier == 'A' || m.tier == 'B') else {
-        return Err(Unreadable { tier: m.tier, why: m.blocker.map_or("no test job".into(), |r| format!("{}: {}", r.code, r.detail)) });
+        let services = m.jobs.first().map(|j| j.view.services.iter().map(|(_, image)| image.clone()).collect()).unwrap_or_default();
+        return Err(Unreadable { tier: m.tier, why: m.blocker.map_or("no test job".into(), |r| format!("{}: {}", r.code, r.detail)), services });
     };
-    let unreadable = |why: String| Unreadable { tier: m.tier, why };
+    let unreadable = |why: String| Unreadable { tier: m.tier, why, services: Vec::new() };
     let view = &job.view;
     let mut needs: Vec<Need> = view.services.iter().map(|(_, image)| Need::Service(image.clone())).collect();
     let test_steps: Vec<&crate::ci::Step> = view.steps.iter().filter(|s| s.is_test).collect();

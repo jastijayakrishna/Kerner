@@ -879,6 +879,7 @@ fn install_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Val
     let applies = |d: &str| d == "." || d == dir || dir.starts_with(&format!("{d}/"));
     setup[side]["installs"].as_array()?.iter().filter(|i| i["dir"].as_str().is_some_and(applies)).max_by_key(|i| i["dir"].as_str().map_or(0, |d| if d == "." { 0 } else { d.len() }))
 }
+pub fn install_result(setup: &Value, side: &str, dir: &str) -> Option<String> { install_record(setup, side, dir)?["result"].as_str().map(str::to_string) }
 fn setup_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Value> {
     install_record(setup, side, dir).and_then(|r| if r["result"] == crate::sandbox::WITH_WORKSPACE { install_record(setup, side, ".") } else { Some(r) })
 }
@@ -1026,6 +1027,7 @@ fn unconfirmed_why(first: &Side, again: &Side, old_again: Option<&Result<Side, S
 fn run_for(out: &Path, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     run_with(out, (volume, &std::collections::BTreeMap::new(), limit), side, dir, label, until)
 }
+pub fn run_leaf(out: &Path, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> { run_for(out, (volume, limit), side, dir, label, until) }
 pub fn test_limits(seconds: u64) -> Limits {
     Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 64 << 20, timeout_seconds: seconds + 120, memory_mb: test_memory_mb(std::fs::read_to_string("/proc/meminfo").ok().as_deref()), pids: 4096 }
 }
@@ -1575,28 +1577,49 @@ struct Chained { planned: Vec<Planned>, not_run: Vec<Value>, unconfirmed: Vec<Va
 fn chained_suites(out: &Path, setup: &Value, chains: &[Chain], changes: &[(String, &'static str)], (until, ran, taken): (u64, usize, &mut BTreeSet<String>),
     timed: &mut impl FnMut(String, u64)) -> Chained {
     let mut c = Chained::default();
-    let Chained { planned, not_run, unconfirmed, unheld, uneven } = &mut c;
     let mut spent = 0u64;
     for (dir, scripts) in chains {
-        if let Some(why) = install_failure(setup, "old", dir) { not_run.push(json!({ "dir": dir, "why": format!("the tests{} could not run on the old code: {why}", placed(dir, None)) })); continue; }
+        if let Some(why) = install_failure(setup, "old", dir) { c.not_run.push(json!({ "dir": dir, "why": format!("the tests{} could not run on the old code: {why}", placed(dir, None)) })); continue; }
         if let Some(why) = install_failure(setup, "new", dir) {
-            unconfirmed.push(json!({ "dir": dir, "why": format!("the tests{} could not run on the new code, where {why} (it worked on the old code)", placed(dir, None)) }));
+            c.unconfirmed.push(json!({ "dir": dir, "why": format!("the tests{} could not run on the new code, where {why} (it worked on the old code)", placed(dir, None)) }));
             continue;
         }
         let found = chain_leaves(out, setup, (dir, scripts), changes, (until, &mut spent), timed);
-        if uneven.is_none() { *uneven = found.uneven; }
-        not_run.extend(found.not_run);
-        unheld.extend(changes.iter().filter(|c| product_file(c) && found.unheld.contains(&c.0)).map(|(p, _)| json!({ "path": p, "why": crate::leaf::unheld_why(dir) })));
-        let several = found.leaves.len() > 1;
-        for p in found.leaves {
-            if ran + planned.len() >= SUITES_COUNT_MAX { not_run.push(json!({ "dir": p.dir, "why": format!("Kern runs at most {SUITES_COUNT_MAX} test runs per check, and `{}` was over that", p.name) })); continue; }
-            let label = crate::leaf::label(&p.dir, taken);
-            taken.insert(label.clone());
-            let leaf = crate::leaf::Leaf { label, prefix: several.then(|| p.name.clone()), name: p.name };
-            planned.push((Suite { dir: p.dir, old: p.old, new: p.new, uneven: None }, Some(leaf)));
-        }
+        if c.uneven.is_none() { c.uneven.clone_from(&found.uneven); }
+        planned_leaves(&mut c, found, (dir, crate::leaf::FROM_SCRIPT), changes, (ran, taken));
     }
     c
+}
+fn planned_leaves(c: &mut Chained, found: crate::leaf::Expansion, (dir, from): (&str, &str), changes: &[(String, &'static str)], (ran, taken): (usize, &mut BTreeSet<String>)) {
+    c.not_run.extend(found.not_run);
+    c.unheld.extend(changes.iter().filter(|x| product_file(x) && found.unheld.contains(&x.0)).map(|(p, _)| json!({ "path": p, "why": crate::leaf::unheld_why(dir) })));
+    let several = found.leaves.len() > 1;
+    for p in found.leaves {
+        if ran + c.planned.len() >= SUITES_COUNT_MAX { c.not_run.push(json!({ "dir": p.dir, "why": format!("Kern runs at most {SUITES_COUNT_MAX} test runs per check, and `{}` was over that", p.name) })); continue; }
+        let label = crate::leaf::label(&p.dir, taken);
+        taken.insert(label.clone());
+        let leaf = crate::leaf::Leaf { label, prefix: several.then(|| p.name.clone()), name: p.name, from: from.to_string() };
+        c.planned.push((Suite { dir: p.dir, old: p.old, new: p.new, uneven: None }, Some(leaf)));
+    }
+}
+pub fn plan_from(plan: &crate::plan::Plan) -> String {
+    match &plan.source {
+        crate::plan::Source::Ci { file, job } => format!("your CI job `{}#{}`", plain(file, 120), plain(job, 80)),
+        crate::plan::Source::PackageJson => "the project's package.json".to_string(),
+        crate::plan::Source::Ai { .. } => "the plan Kern's setup engineer wrote on main".to_string(),
+    }
+}
+fn ci_suites(out: &Path, setup: &Value, plan: &crate::plan::Plan, changes: &[(String, &'static str)], (until, taken): (u64, &mut BTreeSet<String>), timed: &mut impl FnMut(String, u64)) -> R<Chained> {
+    let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
+    let volume = |side: &str| setup[side]["volume"].as_str().unwrap_or("").to_string();
+    let at = now_ms();
+    let (old, new) = crate::exec::pair(out, plan, setup, (&volume("old"), &volume("new")), until)?;
+    timed("plan".into(), at);
+    let mut c = Chained { uneven: crate::exec::uneven(&old.steps, &new.steps), ..Chained::default() };
+    let (old, new) = (crate::exec::recorded(&old), crate::exec::recorded(&new));
+    let found = crate::leaf::expand("", old.as_ref().map_err(Clone::clone), new.as_ref().map_err(Clone::clone), &paths);
+    planned_leaves(&mut c, found, ("", &plan_from(plan)), changes, (0, taken));
+    Ok(c)
 }
 const MANIFEST_BYTES_MAX: usize = 64 << 20;
 const PROGRAM_BYTES_MAX: usize = 1 << 20;
@@ -1673,7 +1696,12 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let changes = crate::rules::changed(repo, base, head)?;
     let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
     let Plans { suites, chains, mut not_run, mut testless } = plans(&tree, &paths);
-    if suites.is_empty() && chains.is_empty() {
+    let cached = std::env::var_os(crate::exec::PLANS_ENV).filter(|d| !d.is_empty()).map(std::path::PathBuf::from)
+        .and_then(|d| crate::exec::setup_key_at(repo, base).ok().and_then(|k| crate::exec::cached(&d, &k)));
+    if let Some(crate::exec::Cached::Unsupported(why)) = &cached { return Ok(json!({ "status": "NOT_RUN", "why": why })); }
+    let accepted = match &cached { Some(crate::exec::Cached::Accepted(a)) => Some(a), _ => None };
+    let (suites, chains) = if accepted.is_some() { (Vec::new(), Vec::new()) } else { (suites, chains) };
+    if suites.is_empty() && chains.is_empty() && accepted.is_none() {
         let script = manifest(head, "").and_then(|m| serde_json::from_slice::<Value>(&m).ok()).and_then(|v| v["scripts"]["test"].as_str().map(str::to_string)).filter(|s| !crate::script::placeholder(s));
         return Ok(match (not_run.first().map(|n| n["why"].clone()), script) {
             (Some(why), _) => json!({ "status": "NOT_RUN", "why": why, "not_run": not_run, "no_tests_in": testless }),
@@ -1722,7 +1750,10 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let at_check = Check { out, repo, base, head, changes: &changes, head_paths: head_paths.as_deref(), volumes: (&old_volume, &new_volume), until };
     let mut planned: Vec<Planned> = suites.into_iter().map(|suite| (suite, None)).collect();
     let mut taken: BTreeSet<String> = planned.iter().map(|(suite, _)| label(&suite.dir)).collect();
-    let Chained { planned: leaves, not_run: skipped, unconfirmed, unheld, uneven } = chained_suites(out, &s, &chains, &changes, (until, planned.len(), &mut taken), &mut timed);
+    let Chained { planned: leaves, not_run: skipped, unconfirmed, unheld, uneven } = match accepted {
+        Some(a) => ci_suites(out, &s, a.plan(), &changes, (until, &mut taken), &mut timed)?,
+        None => chained_suites(out, &s, &chains, &changes, (until, planned.len(), &mut taken), &mut timed),
+    };
     let mut uneven_build = uneven;
     planned.extend(leaves);
     not_run.extend(skipped);
@@ -2015,7 +2046,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             Some(script) => format!("{only}, run directly: the project's test script, `{script}`, is not one Kern can follow"),
             None => only,
         };
-        let from = leaf.as_ref().map_or_else(String::new, |l| format!(" (`{}`, from the project's test script)", l.name));
+        let from = leaf.as_ref().map_or_else(String::new, |l| format!(" (`{}`, from {})", l.name, l.from));
         ran.push(if suite.dir.is_empty() { format!("{}{from}{only}", runner.name()) } else { format!("{} in {}{from}{only}", runner.name(), suite.dir) });
         let record = Suite { dir: suite.dir.clone(), old: suite.old.clone(), new: suite.new.clone(), uneven: uneven_why.clone() }.json();
         match leaf {
@@ -2052,6 +2083,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let mut extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds, "dropped": dropped,
         "no_tests_in": testless, "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
     if !s["old"]["browser"].is_null() || !s["new"]["browser"].is_null() { extra["browser"] = json!({ "old": s["old"]["browser"], "new": s["new"]["browser"] }); }
+    if let Some(a) = accepted { extra["plan"] = json!({ "source": crate::exec::source_json(a.plan()), "from": plan_from(a.plan()), "tests_count": a.tests_count() }); }
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));
@@ -2061,6 +2093,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     }
     if ran.is_empty() {
         let why = not_run.first().and_then(|n| n["why"].as_str()).or_else(|| run_unconfirmed.first().and_then(|n| n["why"].as_str())).unwrap_or("no test run gave results").to_string();
+        let why = match &uneven_build { Some(u) => format!("the two sides were not set up the same way: {u}; {why}"), None => why };
         return Ok(with(json!({ "status": "NOT_RUN", "runner": planned.first().map(|(suite, _)| suite.new.0.runner.name()), "why": why })));
     }
     let mut c = Value::Object(merged);

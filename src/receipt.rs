@@ -277,6 +277,16 @@ fn agent_md(r: &Value) -> String {
     }
     md + "\n"
 }
+fn plan_line(tests: &Value) -> String {
+    let p = &tests["plan"];
+    let n = p["tests_count"].as_u64().unwrap_or(0);
+    match p["source"]["kind"].as_str() {
+        Some("ci") => format!("- 🧭 Setup: Kern ran your CI job {} ({n} tests)\n", code(&format!("{}#{}", p["source"]["file"].as_str().unwrap_or(""), p["source"]["job"].as_str().unwrap_or("")), 200)),
+        Some("ai") => format!("- 🧭 Setup: Kern's setup engineer wrote this project's plan on main (accepted: reproduced the base's tests twice, {n} tests)\n"),
+        Some(_) => format!("- 🧭 Setup: Kern ran {} ({n} tests)\n", plain(p["from"].as_str().unwrap_or("the project's plan"), 300)),
+        None => String::new(),
+    }
+}
 fn planted_line(tests: &Value) -> String {
     let planted: Vec<&Value> = tests["faults"].as_array().into_iter().flatten().filter(|f| f["kind"] != "undo").collect();
     if planted.is_empty() { return String::new(); }
@@ -761,6 +771,7 @@ pub fn markdown(r: &Value) -> String {
         md += &line;
         md += "\n";
         md += &checked_md(r, &proved, checked);
+        md += &plan_line(tests);
         md += &planted_line(tests);
         for (why, paths) in by_reason(&tests["faults_missing"]) { md += &format!("- ⏭️ No fault planted in {paths}: {why}\n"); }
         let seen = &tests["bystanders"];

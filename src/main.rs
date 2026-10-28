@@ -26,6 +26,10 @@ Kern's GitHub workflow, .github/workflows/kern.yml, runs these:
                                   /kern approve: someone who can merge approves a signed \"needs a look\" receipt
   receipt verify <owner/repo> <pr-number> [receipt.json]
                                   check a receipt's signature with GitHub's keys, and receipt.json against its seal
+  learn <repo> <commit> <out-dir> <operator.json>
+                                  on main only, never in a pull request check: read the commit's CI job into one typed
+                                  plan, run it twice on that commit and keep it only when both runs agree test by test;
+                                  writes plan-<setup key>.json, which a check reads from the folder KERN_PLANS names
   drive clean <out-dir>           remove the check's sandbox volumes
   replay <dir>...                 judge every stored check under the folders again with today's rules: one JSON line per
                                   receipt with the answer before and after, then a summary (KERN_REPLAY_WORKERS: 1 to 4)
@@ -113,6 +117,11 @@ fn cli() -> R<(Option<Value>, i32)> {
                 }
                 other => kern::deny!("Unknown receipt command {other}; see kern --help"),
             }
+        }
+        "learn" => {
+            count(a, 4)?;
+            let until = now_ms() + kern::check::minutes() * 60_000;
+            (Some(kern::exec::learn(Path::new(&a[0]), &a[1], Path::new(&a[2]), &operator(&read_json(&a[3])?)?, until)?), 0)
         }
         "drive" => {
             ensure!(a.len() == 2 && a[0] == "clean", "Expected drive clean <out-dir>; see kern --help");

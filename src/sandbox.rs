@@ -64,6 +64,8 @@ pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
 pub const STEPS_COUNT_MAX: usize = 32;
+pub const PLAN_STEP_SECS_MAX: u64 = 900;
+pub const PLAN_KINDS: [&str; 3] = ["run", "test", "check"];
 pub const TEST_SECS_MAX: u64 = 3600;
 pub const TRACE_BYTES_MAX: usize = 8 << 20;
 pub const INSTALL_SCRATCH: [&str; 1] = ["/workspace/.kern-install"];
@@ -1037,20 +1039,42 @@ mod inside {
         std::fs::write("/tmp/.kern-serve.json", serde_json::to_vec(&manifest)?)?;
         Ok(true)
     }
-    fn step_run(step: &Value, (env, options): (&[(String, String)], &str), wait: Duration) -> R<Value> {
-        let (dir, script) = (text(step, "dir")?, text(step, "script")?);
-        ensure!(!script.is_empty() && script.len() <= 100 && !script.starts_with('-') && !script.chars().any(char::is_control), "Invalid build step");
-        let cwd = super::test_dir(dir)?;
-        let name = format!("{} {script}", if dir.is_empty() { "." } else { dir });
+    fn step_ended(mut child: std::process::Child, wait: Duration) -> R<(bool, Option<i64>, String)> {
         let (out, err) = ("/tmp/.kern-step-out", "/tmp/.kern-step-err");
-        let mut child = Command::new("/usr/local/bin/npm").args(["run", script]).current_dir(&cwd).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
-            .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let readers = [capture(child.stdout.take(), out, ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX), capture(child.stderr.take(), err, ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX)];
         let (finished, exit) = ended(child, wait)?;
         quiesce()?;
         for r in readers { let _ = r.join(); }
         let tail = |p: &str| String::from_utf8_lossy(&some_of(p, 16 << 10, true)).to_string();
-        Ok(json!({ "name": name, "finished": finished, "exit": exit, "errors": format!("{}\n{}", tail(out), tail(err)) }))
+        Ok((finished, exit, format!("{}\n{}", tail(out), tail(err))))
+    }
+    fn step_run(step: &Value, (env, options): (&[(String, String)], &str), wait: Duration) -> R<Value> {
+        if step.get("line").is_some() { return plan_step(step, (env, options), wait); }
+        let (dir, script) = (text(step, "dir")?, text(step, "script")?);
+        ensure!(!script.is_empty() && script.len() <= 100 && !script.starts_with('-') && !script.chars().any(char::is_control), "Invalid build step");
+        let cwd = super::test_dir(dir)?;
+        let name = format!("{} {script}", if dir.is_empty() { "." } else { dir });
+        let child = Command::new("/usr/local/bin/npm").args(["run", script]).current_dir(&cwd).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+            .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let (finished, exit, errors) = step_ended(child, wait)?;
+        Ok(json!({ "name": name, "finished": finished, "exit": exit, "errors": errors }))
+    }
+    fn plan_step(step: &Value, (env, options): (&[(String, String)], &str), wait: Duration) -> R<Value> {
+        exact(step, &["id", "kind", "dir", "line"], "plan step")?;
+        let (id, kind, dir, line) = (text(step, "id")?, text(step, "kind")?, text(step, "dir")?, text(step, "line")?);
+        ensure!(!id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "Invalid plan step");
+        ensure!(super::PLAN_KINDS.contains(&kind) && !line.is_empty() && line.len() <= crate::plan::PLAN_LINE_BYTES_MAX && !line.contains(['\0', '\n', '\r']), "Invalid plan step");
+        let cwd = super::test_dir(dir)?;
+        let leaves = format!("/tmp/.kern-leaves-{id}");
+        let _ = std::fs::remove_file(&leaves);
+        let mut command = if kind == "test" { Command::new("/usr/local/bin/node") } else { Command::new("/bin/bash") };
+        if kind == "test" { command.args(["/kern/leaf.cjs", "/bin/bash"]); }
+        command.args(["-e", "-c", line]).current_dir(&cwd).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned()).env("NODE_OPTIONS", options.trim());
+        if kind == "test" { command.envs(super::LEAVES_ENV).env("KERN_REPORT", &leaves); }
+        let child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let (finished, exit, errors) = step_ended(child, wait.min(Duration::from_secs(super::PLAN_STEP_SECS_MAX)))?;
+        let record = (kind == "test").then(|| String::from_utf8_lossy(&some_of(&leaves, crate::leaf::LEAF_RECORD_BYTES_MAX + 1, false)).to_string());
+        Ok(json!({ "name": id, "kind": kind, "finished": finished, "exit": exit, "errors": errors, "leaves": record }))
     }
     fn run_steps(steps: &[Value], (env, options): (&[(String, String)], &str), timeout: Duration) -> R<()> {
         ensure!(steps.len() <= super::STEPS_COUNT_MAX, "Too many build steps");

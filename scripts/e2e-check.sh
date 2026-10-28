@@ -975,6 +975,137 @@ jq -e '[.tests.uneven_why[] | select(test("ended differently on the two sides"))
 jq -e '[.rules.settings[] | select(.path == "packages/chain/build.js")] | length == 1' lopsided/receipt.json > /dev/null \
   || { jq .rules.settings lopsided/receipt.json; fail "lopsided: the rewritten program the recorded script starts was not named"; }
 
+say "A repository whose CI job is tier A (setup-node, npm ci, npm test) is learned on main into one plan, and a pull request is checked through that plan"
+git init -q planrepo && cd planrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test .github/workflows
+printf '%s\n' '{"name":"plan","version":"1.0.0","private":true,"type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' 'export const discount = (amount) => (amount >= 100 ? amount * 0.9 : amount);' > src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { discount } from "../src/total.js";' '' 'test("discount from 100", () => expect(discount(100)).toBe(90));' 'test("no discount below 100", () => expect(discount(99)).toBe(99));' > test/total.test.js
+cat > .github/workflows/ci.yml <<'EOF'
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+EOF
+npm install --package-lock-only --ignore-scripts --no-audit --no-fund > /dev/null
+git add -A && git commit -qm base && plan_base=$(git rev-parse HEAD)
+git checkout -q -b plan-breaks
+sed -i 's/amount >= 100/amount > 100/' src/total.js
+git commit -qam "Discount above 100" && git rev-parse HEAD > "$W/plan-breaks.head"
+git checkout -q "$plan_base" && git checkout -q -b plan-harmless
+sed -i 's/(amount) => (amount >= 100 ? amount \* 0.9 : amount)/(a) => (a >= 100 ? a * 0.9 : a)/' src/total.js
+git commit -qam "Shorter names" && git rev-parse HEAD > "$W/plan-harmless.head"
+git checkout -q "$plan_base" && git checkout -q -b plan-uneven
+sed -i 's/"devDependencies":{"vitest":"3.2.4"}/"devDependencies":{"vitest":"3.2.4","kern-e2e-no-such-package-ever":"1.0.0"}/' package.json
+sed -i 's/amount >= 100/amount > 100/' src/total.js
+git commit -qam "A dependency that does not exist, and a break" && git rev-parse HEAD > "$W/plan-uneven.head"
+cd "$W"
+"$K" --control verifier.json learn "$W/planrepo" "$plan_base" "$W/plan-learn" operator.json > plan-learn.json 2> plan-learn.err || { cat plan-learn.err; fail "plan-learn: kern learn failed"; }
+echo "plan-learn: $(jq -c '{status, why, source}' plan-learn.json)"
+jq -e '.status == "ACCEPTED" and .source.kind == "ci" and .source.job == "test"' plan-learn.json > /dev/null || { cat plan-learn.json; fail "plan-learn: the base's CI job was not accepted as the project's plan"; }
+[ -f "$(jq -r .file plan-learn.json)" ] || fail "plan-learn: the accepted plan was not written for the check to read"
+export KERN_PLANS="$W/plan-learn"
+check plan-breaks "$plan_base" planrepo
+decision plan-breaks blocked
+jq -e '.tests.status == "RAN" and .tests.broke == ["test/total.test.js > discount from 100"] and .tests.plan.source.kind == "ci" and (.tests.runner | test("from your CI job"))' plan-breaks/receipt.json > /dev/null \
+  || { jq '.tests | {status, why, broke, runner, plan, not_run, uneven_why}' plan-breaks/receipt.json; fail "plan-breaks: the break was not found and named through the project's own CI job"; }
+grep -q 'Setup: Kern ran your CI job `.github/workflows/ci.yml#test`' plan-breaks/receipt.md || { cat plan-breaks/receipt.md; fail "plan-breaks: the receipt does not say the tests came from the CI job"; }
+check plan-harmless "$plan_base" planrepo
+decision plan-harmless clear
+jq -e '.tests.status == "RAN" and .tests.kept == 2 and .tests.plan.source.kind == "ci"' plan-harmless/receipt.json > /dev/null || { jq .tests plan-harmless/receipt.json; fail "plan-harmless: the CI job's tests did not pass on both sides through the plan"; }
+say "A plan whose install fails on the new side only leaves the sides uneven: not verified, never blocked, even though the change also breaks a test"
+check plan-uneven "$plan_base" planrepo
+[ "$(jq -r .decision plan-uneven.json)" != blocked ] || { cat plan-uneven/receipt.md; fail "plan-uneven: an install that failed on the new side only was judged as the change"; }
+jq -e '(.tests.status == "NOT_RUN") and (.tests.why | test("installing its dependencies|not set up the same way|worked on one side only"))' plan-uneven/receipt.json > /dev/null \
+  || { jq '.tests | {status, why, uneven_why, run_unconfirmed, not_run}' plan-uneven/receipt.json; fail "plan-uneven: the receipt does not say the new side's install failed"; }
+unset KERN_PLANS
+
+say "A CI job that installs at the root and runs vitest inside a package (tier B: cd packages/x && npx vitest run) is checked through the run it starts in that package"
+git init -q planbrepo && cd planbrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p packages/x/src packages/x/test .github/workflows
+printf '%s\n' '{"name":"planb","private":true,"type":"module","workspaces":["packages/*"],"devDependencies":{"vitest":"3.2.4"}}' > package.json
+printf '%s\n' '{"name":"@planb/x","version":"1.0.0","private":true,"type":"module"}' > packages/x/package.json
+printf '%s\n' 'export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);' > packages/x/src/total.js
+printf '%s\n' 'import { test, expect } from "vitest";' 'import { total } from "../src/total.js";' '' 'test("adds", () => expect(total([{ price: 2, qty: 3 }])).toBe(6));' > packages/x/test/total.test.js
+cat > .github/workflows/ci.yml <<'EOF'
+name: ci
+on: [push, pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: cd packages/x && npx vitest run
+EOF
+npm install --package-lock-only --ignore-scripts --no-audit --no-fund > /dev/null
+git add -A && git commit -qm base && planb_base=$(git rev-parse HEAD)
+git checkout -q -b planb-breaks
+sed -i 's/sum + item.price \* item.qty/sum + item.price * item.qty + 1/' packages/x/src/total.js
+git commit -qam "Count one more" && git rev-parse HEAD > "$W/planb-breaks.head"
+cd "$W"
+"$K" --control verifier.json learn "$W/planbrepo" "$planb_base" "$W/planb-learn" operator.json > planb-learn.json 2> planb-learn.err || { cat planb-learn.err; fail "planb-learn: kern learn failed"; }
+echo "planb-learn: $(jq -c '{status, why, source}' planb-learn.json)"
+jq -e '.status == "ACCEPTED" and .source.job == "unit"' planb-learn.json > /dev/null || { cat planb-learn.json; fail "planb-learn: the tier-B job was not accepted as the project's plan"; }
+export KERN_PLANS="$W/planb-learn"
+check planb-breaks "$planb_base" planbrepo
+decision planb-breaks blocked
+jq -e '.tests.status == "RAN" and (.tests.broke | length == 1) and (.tests.broke[0] | test("adds")) and (.tests.runner | test("vitest in packages/x")) and .tests.plan.source.job == "unit"' planb-breaks/receipt.json > /dev/null \
+  || { jq '.tests | {status, why, broke, runner, plan, not_run}' planb-breaks/receipt.json; fail "planb-breaks: the vitest run the CI job starts inside packages/x was not found and run"; }
+unset KERN_PLANS
+
+say "A CI job that needs a service is not supported here, said up front before any install, and the check is not verified"
+git init -q planneedsrepo && cd planneedsrepo
+git config user.email e2e@example.invalid && git config user.name e2e
+mkdir -p src test .github/workflows
+cp "$W/planrepo/package.json" "$W/planrepo/package-lock.json" . && cp "$W/planrepo/src/total.js" src/ && cp "$W/planrepo/test/total.test.js" test/
+cat > .github/workflows/ci.yml <<'EOF'
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+EOF
+git add -A && git commit -qm base && needs_base=$(git rev-parse HEAD)
+git checkout -q -b plan-needs
+sed -i 's/amount >= 100/amount > 100/' src/total.js
+git commit -qam "Discount above 100" && git rev-parse HEAD > "$W/plan-needs.head"
+cd "$W"
+started=$(date +%s)
+"$K" --control verifier.json learn "$W/planneedsrepo" "$needs_base" "$W/needs-learn" operator.json > needs-learn.json 2> needs-learn.err || { cat needs-learn.err; fail "needs-learn: kern learn failed"; }
+echo "needs-learn: $(jq -c '{status, why}' needs-learn.json) in $(( $(date +%s) - started )) s"
+jq -e '.status == "UNSUPPORTED" and (.why | test("not supported here: needs postgres:16"))' needs-learn.json > /dev/null || { cat needs-learn.json; fail "needs-learn: a job with a service was not refused up front"; }
+[ ! -f "$W/needs-learn/setup.json" ] && [ ! -f "$W/needs-learn/setup-failed.txt" ] || fail "needs-learn: Kern installed a project whose plan it cannot run"
+export KERN_PLANS="$W/needs-learn"
+check plan-needs "$needs_base" planneedsrepo
+decision plan-needs unverified
+jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("not supported here: needs postgres:16"))' plan-needs/receipt.json > /dev/null || { jq .tests plan-needs/receipt.json; fail "plan-needs: the receipt does not say the service is not supported here"; }
+[ ! -f "$W/plan-needs/setup.json" ] || fail "plan-needs: Kern installed the project although its plan needs a service it cannot give"
+unset KERN_PLANS
+
 if [ "${E2E_RUNTIME:-runsc}" = runc ]; then
 say "A project whose tests drive a browser gets the browser its Playwright expects, on its own Node"
 git init -q browserrepo && cd browserrepo
