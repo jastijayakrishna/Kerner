@@ -166,7 +166,7 @@ fn renamed(r: &Report, map: &std::collections::BTreeMap<String, String>) -> Repo
     out
 }
 
-fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
+pub(crate) fn file_of(key: &str) -> &str { key.split(" > ").next().unwrap_or(key) }
 const RANDOM_RUN_CHARS_MIN: usize = 8;
 pub fn path_shape(path: &str) -> String {
     let chars: Vec<char> = path.chars().collect();
@@ -380,8 +380,8 @@ pub fn confirmed(before: &Report, after: &Report, alone: Option<&Report>, whole:
     c["unsteady"] = json!(unsteady);
     c
 }
-pub const LISTS: [&str; 19] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
-    "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable", "old_sandbox"];
+pub const LISTS: [&str; 20] = ["broke", "flaky", "gone", "newly_skipped", "added", "new_failing", "already_failing", "new_problems", "unconfirmed", "environmental", "together", "rewritten",
+    "same_failure", "uneven", "unproven", "unsteady", "sandbox", "unrunnable", "old_sandbox", "edit_fails"];
 pub fn in_suite(runner: Runner, dir: &str, k: &str) -> String { if runner == Runner::Node && !dir.is_empty() && !k.contains(" > ") { format!("{dir}: {k}") } else { k.to_string() } }
 pub fn fold(merged: &mut serde_json::Map<String, Value>, c: &Value, named: &dyn Fn(&str) -> String) {
     for l in LISTS {
@@ -666,10 +666,33 @@ pub fn kept_outcome(old: &Report, keep: &Kept, first: Result<Report, String>, se
     for o in keep.back.values().filter(|o| !loaded.contains(o.as_str())) {
         unchecked.push((o.clone(), first.why.get(o).cloned().unwrap_or_else(|| "its old version gave no test results on the new code".into())));
     }
+    Outcome { rewritten: rewritten(old, &first, second), checked: loaded.len(), unchecked, held: held(old, &first) }
+}
+pub fn held(old: &Report, kept_new: &Report) -> Vec<String> {
+    let loaded: BTreeSet<&str> = kept_new.tests.keys().map(|k| file_of(k)).collect();
     let base = Report { tests: old.tests.iter().filter(|(k, _)| loaded.contains(file_of(k))).map(|(k, c)| (k.clone(), *c)).collect(), ..Report::default() };
-    let now = settled(&base, &first);
-    let held = base.tests.iter().filter(|(k, b)| b.passed > 0 && seen(**b, count(&now, k)) == Seen::Same).map(|(k, _)| k.clone()).collect();
-    Outcome { rewritten: rewritten(old, &first, second), checked: loaded.len(), unchecked, held }
+    let now = settled(&base, kept_new);
+    base.tests.iter().filter(|(k, b)| b.passed > 0 && seen(**b, count(&now, k)) == Seen::Same).map(|(k, _)| k.clone()).collect()
+}
+pub fn tests_only<'a>(changes: impl IntoIterator<Item = (&'a str, &'a str)>, old: &Report) -> Vec<String> {
+    let mut edited = BTreeSet::new();
+    for (p, op) in changes {
+        if crate::check::documentation(p) { continue; }
+        let name = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
+        if !crate::capability::is_code(p) || !NAMES.iter().any(|m| name.contains(m)) { return Vec::new(); }
+        if op == "modify" { edited.insert(p); }
+    }
+    old.tests.iter().filter(|(k, c)| c.passed > 0 && c.failed == 0 && edited.contains(file_of(k))).map(|(k, _)| k.clone()).collect()
+}
+pub fn own_edits(c: &mut Value, held: &[String]) {
+    if c["status"] != "RAN" || held.is_empty() { return; }
+    let tests: BTreeSet<&str> = held.iter().map(String::as_str).collect();
+    let files: BTreeSet<&str> = held.iter().map(|k| file_of(k)).collect();
+    let (failing, broke): (Vec<String>, Vec<String>) = listed(c, "broke").into_iter().partition(|k| tests.contains(k.as_str()));
+    let (unloaded, problems): (Vec<String>, Vec<String>) = listed(c, "new_problems").into_iter().partition(|p| files.contains(file_of(p)));
+    c["edit_fails"] = json!(failing.into_iter().chain(unloaded).collect::<Vec<_>>());
+    c["broke"] = json!(broke);
+    c["new_problems"] = json!(problems);
 }
 pub fn rewritten(old: &Report, kept_new: &Report, kept_old: Option<&Report>) -> Vec<String> {
     let loaded: BTreeSet<&str> = kept_new.tests.keys().map(|k| file_of(k)).collect();
@@ -1763,6 +1786,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             g.retain(|x| x.as_str().is_none_or(|k| !held.contains(k)));
             kept += (was - g.len()) as u64;
         }
+        own_edits(&mut c, &outcome.held.iter().cloned().chain(tests_only(changes.iter().map(|(p, op)| (p.as_str(), *op)), &old)).collect::<Vec<_>>());
         edited_unchecked.extend(outcome.unchecked.iter().map(|(p, why)| json!({ "path": p, "why": why })));
         edited_unchecked.extend(unloaded_edits(&changes, &old, &new, &suite.dir).into_iter().filter(|(p, _)| !outcome.unchecked.iter().any(|(u, _)| u == p)).map(|(p, why)| json!({ "path": p, "why": why })));
         test_data.extend(keep.data.iter().map(|p| json!(p)));

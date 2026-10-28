@@ -580,6 +580,79 @@ fn a_test_renamed_in_an_edited_file_whose_old_version_still_passes_is_not_gone()
     assert!(outcome.rewritten.is_empty() && outcome.unchecked.is_empty());
 }
 
+const CALC: &str = "export const total = (items) => items.reduce((sum, item) => sum + item.price * item.qty, 0);\nexport const discount = (amount) => amount >= 100 ? amount * 0.9 : amount;\n";
+const CALC_KEYS: [&str; 3] = ["test/total.test.js > total adds price times quantity", "test/total.test.js > discount from 100", "test/total.test.js > no discount below 100"];
+fn calc_test(only: &str) -> String {
+    format!("import {{ test, expect }} from 'vitest';\nimport {{ total, discount }} from '../src/total.js';\n\ntest('total adds price times quantity', () => expect(total([{{ price: 2, qty: 3 }}])).toBe(6));\ntest{only}('discount from 100', () => expect(discount(100)).toBe(90));\ntest('no discount below 100', () => expect(discount(99)).toBe(99));\n")
+}
+fn focused_runs() -> (Report, Value) {
+    let old = report(&CALC_KEYS.iter().map(|k| (*k, 1, 0, 0)).collect::<Vec<_>>(), &[]);
+    let mut new = report(&[(CALC_KEYS[0], 0, 0, 1), (CALC_KEYS[1], 0, 1, 0), (CALC_KEYS[2], 0, 0, 1)], &[]);
+    new.why.insert(CALC_KEYS[1].into(), "Error: Unexpected .only modifier. Remove it or pass --allowOnly argument to bypass this error".into());
+    let c = suite::verdict(&old, &new, Some(&new), Some(&new), Some(&old), false, false);
+    assert_eq!(c["broke"], json!([CALC_KEYS[1]]), "vitest refuses .only when CI is set, so the focused test fails in every new run and passed in every old one: {c}");
+    (old, c)
+}
+
+#[test]
+fn e2e_only_a_test_the_change_focuses_fails_under_ci_while_the_code_it_checks_is_unchanged_so_it_needs_a_look_and_never_blocks() {
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"calc","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}"#), ("src/total.js", CALC), ("test/total.test.js", &calc_test(""))]);
+    let head = commit(&r, &[("test/total.test.js", &calc_test(".only"))]);
+    let changes = kern::rules::changed(&r, &base, &head).unwrap();
+    let (old, mut c) = focused_runs();
+    let held = suite::tests_only(changes.iter().map(|(p, op)| (p.as_str(), *op)), &old);
+    assert_eq!(held.iter().collect::<std::collections::BTreeSet<_>>(), CALC_KEYS.iter().map(|k| k.to_string()).collect::<Vec<_>>().iter().collect(), "the change touches only this test file, so its old version runs on exactly the code it passed on");
+    suite::own_edits(&mut c, &held);
+    assert_eq!(c["broke"], json!([]), "the code the focused test checks is unchanged, so the change broke no promise the old test made");
+    assert_eq!(c["edit_fails"], json!([CALC_KEYS[1]]), "the edit itself makes the test fail, and that is named");
+    assert_eq!(c["newly_skipped"], json!([CALC_KEYS[2], CALC_KEYS[0]]), "the tests the focus hides stay named");
+    let mut tests = clean_tests();
+    for l in ["broke", "edit_fails", "newly_skipped"] { tests[l] = c[l].clone(); }
+    tests["kept"] = c["kept"].clone();
+    let mut rules = clean_rules();
+    rules["changed"] = json!([{ "path": "test/total.test.js", "operation": "modify" }]);
+    rules["tricks"] = json!([{ "path": "test/total.test.js", "operation": "modify", "why": "A test file skips, focuses or inverts tests: test/total.test.js uses test.only('discount from 100'). Every test must run and check what it says, so remove it" }]);
+    let built = receipt::build(&drive_json(), &rules, &tests);
+    assert_eq!(built["decision"], "look", "a focused test is a look a maintainer can approve, never a block: {built}");
+    assert!(built["blocked"].as_array().unwrap().is_empty(), "{built}");
+    assert!(built["look"].as_array().unwrap().iter().any(|x| x["kind"] == "test-edit-fails" && x["what"].as_str().unwrap().contains("discount from 100")), "{built}");
+    assert!(built["look"].as_array().unwrap().iter().any(|x| x["kind"] == "trick"), "{built}");
+    let md = receipt::markdown(&built);
+    assert!(md.contains("⚠️ Tests:") && md.contains("1 test the change edits now fails") && !md.contains("❌ Tests:") && !md.contains("✅ Tests:"), "{md}");
+    for other in [vec![("test/total.test.js", "modify"), ("src/total.js", "modify")], vec![("test/total.test.js", "modify"), ("test/fixtures/prices.json", "modify")], vec![("test/total.test.js", "modify"), ("test/__snapshots__/total.test.js.snap", "modify")]] {
+        assert!(suite::tests_only(other.iter().copied(), &old).is_empty(), "a change that also touches code or data the tests read gives no such shortcut: {other:?}");
+    }
+}
+
+#[test]
+fn a_test_the_change_edits_that_fails_while_its_old_version_still_passes_on_the_new_code_needs_a_look_and_never_blocks() {
+    let t = Temp::new();
+    let (r, base) = repo(&t, &[("package.json", r#"{"name":"calc","type":"module","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.4"}}"#), ("src/total.js", CALC), ("test/total.test.js", &calc_test(""))]);
+    let head = commit(&r, &[("test/total.test.js", &calc_test(".only")), ("src/total.js", &CALC.replace("(sum, item) => sum + item.price * item.qty", "(acc, it) => acc + it.price * it.qty"))]);
+    let changes = kern::rules::changed(&r, &base, &head).unwrap();
+    let (old, mut c) = focused_runs();
+    assert!(suite::tests_only(changes.iter().map(|(p, op)| (p.as_str(), *op)), &old).is_empty(), "the change touches product code too");
+    let keep = suite::kept_plan(&r, (&base, &head), &changes, &old, "");
+    let copy = keep.run.iter().next().expect("the edited test file is put back").clone();
+    let mut ran = Report::default();
+    for k in CALC_KEYS { ran.tests.insert(k.replace("test/total.test.js", &copy), Count { passed: 1, failed: 0, skipped: 0 }); }
+    let outcome = suite::kept_outcome(&old, &keep, Ok(suite::unkept(&ran, &keep.back)), None);
+    suite::own_edits(&mut c, &outcome.held);
+    assert_eq!((c["broke"].clone(), c["edit_fails"].clone()), (json!([]), json!([CALC_KEYS[1]])), "its old version passes on the new code, so the edit, not the code change, makes it fail");
+    let mut c = suite::verdict(&report(&[("test/a.test.js > adds", 1, 0, 0), ("test/b.test.js > subtracts", 1, 0, 0)], &[]), &report(&[("test/b.test.js > subtracts", 1, 0, 0)], &["test/a.test.js"]),
+        Some(&report(&[("test/b.test.js > subtracts", 1, 0, 0)], &["test/a.test.js"])), Some(&report(&[("test/b.test.js > subtracts", 1, 0, 0)], &["test/a.test.js"])),
+        Some(&report(&[("test/a.test.js > adds", 1, 0, 0), ("test/b.test.js > subtracts", 1, 0, 0)], &[])), false, false);
+    assert_eq!(c["new_problems"], json!(["test/a.test.js"]), "{c}");
+    suite::own_edits(&mut c, &["test/a.test.js > adds".to_string()]);
+    assert_eq!((c["new_problems"].clone(), c["edit_fails"].clone()), (json!([]), json!(["test/a.test.js"])), "the old version of the file loads and passes on the new code, so the edit stops it loading");
+    let mut c = suite::verdict(&report(&[("test/a.test.js > adds", 1, 0, 0)], &[]), &report(&[("test/a.test.js > adds", 0, 1, 0)], &[]), Some(&report(&[("test/a.test.js > adds", 0, 1, 0)], &[])),
+        Some(&report(&[("test/a.test.js > adds", 0, 1, 0)], &[])), Some(&report(&[("test/a.test.js > adds", 1, 0, 0)], &[])), false, false);
+    suite::own_edits(&mut c, &[]);
+    assert_eq!(c["broke"], json!(["test/a.test.js > adds"]), "without an old version that still passes on the new code, a failing test is still a broken promise");
+    assert!(c["edit_fails"].as_array().is_none_or(|a| a.is_empty()));
+}
+
 #[test]
 fn changed_data_that_only_tests_kern_does_not_run_use_needs_no_look() {
     let t = Temp::new();

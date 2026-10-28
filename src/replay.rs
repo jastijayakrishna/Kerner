@@ -27,13 +27,19 @@ fn report(path: &Path, runner: Runner) -> Option<Report> {
     if std::fs::metadata(path).ok()?.len() > REPORT_BYTES_MAX { return None; }
     crate::proof::read_report(runner, &std::fs::read(path).ok()?).ok()
 }
-fn suite(dir: &Path, label: &str, runner: Runner, (unconfirmed, uneven): (bool, bool)) -> Option<Value> {
+fn suite(dir: &Path, label: &str, runner: Runner, (unconfirmed, uneven): (bool, bool), changed: &[(&str, &str)]) -> Option<Value> {
     let run = |r: &str| report(&dir.join(format!("tests-{r}{label}.out")), runner);
     let old_alone = run("old-alone").filter(|r| !r.tests.is_empty() || !r.problems.is_empty()).or_else(|| run("old-again"));
     let (alone, mut whole) = (run("new-alone"), run("new-again"));
     let old = OLD.iter().find(|r| dir.join(format!("tests-{r}{label}.out")).is_file()).and_then(|r| run(r))?;
     let new = run("new-related").or_else(|| run("new")).or_else(|| if alone.is_none() { whole.take() } else { None })?;
-    let c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed, uneven);
+    let mut c = crate::suite::verdict(&old, &new, alone.as_ref(), whole.as_ref(), old_alone.as_ref(), unconfirmed, uneven);
+    let mut held = crate::suite::tests_only(changed.iter().copied(), &old);
+    if let Some(kept) = run("new-kept") {
+        let back: std::collections::BTreeMap<String, String> = kept.tests.keys().map(|k| crate::suite::file_of(k)).filter_map(|f| Some((f.to_string(), crate::suite::kept_back(f)?))).collect();
+        held.extend(crate::suite::held(&old, &crate::suite::unkept(&kept, &back)));
+    }
+    crate::suite::own_edits(&mut c, &held);
     (c["status"] == "RAN").then_some(c)
 }
 const FAULTS_BYTES_MAX: u64 = 16 << 20;
@@ -86,12 +92,13 @@ pub fn rejudge(dir: &Path) -> R<Value> {
     let stored_uneven = tests["uneven_why"].as_array().is_some_and(|a| !a.is_empty());
     let setup = read_json(dir.join("setup.json")).ok();
     let judgeable = tests["status"] == "RAN" && !labels.is_empty() && labels.len() <= SUITES_COUNT_MAX;
+    let changed: Vec<(&str, &str)> = stored["rules"]["changed"].as_array().into_iter().flatten().filter_map(|c| Some((c["path"].as_str()?, c["operation"].as_str()?))).collect();
     let judged: Option<Vec<Judged>> = judgeable.then(|| labels.iter().map(|label| {
         let (runner, suite_dir) = suites.iter().find(|(_, d)| d.replace('/', "_") == label.trim_start_matches('-'))?.clone();
         let unconfirmed = tests["unconfirmed"].as_array().into_iter().flatten().filter_map(Value::as_str)
             .any(|k| suite_dir.is_empty() || k.starts_with(&format!("{suite_dir}/")) || k.starts_with(&format!("{suite_dir}: ")));
         let uneven = stored_uneven || setup.as_ref().is_some_and(|s| crate::suite::setup_differs(s, &suite_dir).is_some());
-        suite(dir, label, runner, (unconfirmed, uneven)).map(|verdict| Judged { verdict, runner, suite_dir })
+        suite(dir, label, runner, (unconfirmed, uneven), &changed).map(|verdict| Judged { verdict, runner, suite_dir })
     }).collect()).flatten();
     if let Some(judged) = &judged {
         let mut merged: serde_json::Map<String, Value> = crate::suite::LISTS.iter().map(|l| (l.to_string(), json!([]))).collect();

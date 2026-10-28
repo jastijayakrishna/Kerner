@@ -109,6 +109,8 @@ fn test_file_items(f: &mut Found, rules: &Value, tests: &Value) -> (Vec<Value>, 
     let added = |p: &str| !passing_lost && changed.iter().any(|c| c["path"] == p && c["operation"] == "add");
     let mut new_tests = Vec::new();
     f.blocked.extend(per_file("test-broke", strings(&tests["broke"]), "A test that passed before now fails", "tests that passed before now fail"));
+    f.look.extend(per_file("test-edit-fails", strings(&tests["edit_fails"]), "The change edits this test, and it now fails on the new code while its old version still passes there, so the edit makes it fail",
+        "tests the change edits now fail on the new code while their old versions still pass there, so the edits make them fail"));
     for x in tests["run_broke"].as_array().into_iter().flatten() {
         let place = x["dir"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" in {}", code(d, 160))).unwrap_or_default();
         let why = plain(x["why"].as_str().unwrap_or(""), 400);
@@ -695,11 +697,14 @@ pub fn markdown(r: &Value) -> String {
         let runner = plain(tests["runner"].as_str().unwrap_or("tests"), 400);
         let files = blocked.iter().filter(|x| x["kind"] == "test-file").count();
         let doubtful = unverified.iter().any(|x| ["test-unconfirmed", "test-together", "test-unsteady", "test-uneven", "test-unproven", "test-sandbox", "test-old-sandbox"].iter().any(|k| x["kind"] == *k));
+        let edits = tests["edit_fails"].as_array().map_or(0, Vec::len);
         let mut line = if broke > 0 || files > 0 {
             let mut what = Vec::new();
             if broke > 0 { what.push(format!("{broke} that passed before now {}", if broke == 1 { "fails" } else { "fail" })); }
             if files > 0 { what.push(format!("{files} test {} no longer {}", if files == 1 { "file" } else { "files" }, if files == 1 { "loads" } else { "load" })); }
             format!("- ❌ Tests: {}; {kept} still pass ({runner})", what.join(", "))
+        } else if edits > 0 {
+            format!("- ⚠️ Tests: {kept} that passed before still pass, but {} the change edits now {} (see above) ({runner})", plural(edits, "test", "tests"), if edits == 1 { "fails" } else { "fail" })
         } else if doubtful {
             format!("- ⚠️ Tests: {kept} that passed before still pass, but Kern could not prove or rule out some failures (see Not verified above) ({runner})")
         } else if unverified.iter().any(|x| x["kind"] == "untested-change") {
