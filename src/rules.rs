@@ -145,6 +145,9 @@ fn action_moves(old: &str, new: &str, owner: Option<&str>) -> Option<Vec<Value>>
     }
     Some(moves.into_iter().map(|(action, from, to, release)| json!({ "action": action, "from": from, "to": to, "release": release })).collect())
 }
+fn machinery(changes: &[(String, &'static str)]) -> Vec<Value> {
+    changes.iter().filter(|(p, op)| *op != "delete" && crate::drive::kern_owned(p)).map(|(p, _)| json!({ "path": p })).collect()
+}
 const PATTERN_KEYS: [&str; 2] = ["include", "testMatch"];
 fn agent_note(p: &str) -> bool {
     AGENT_NOTES.contains(&base_name(p)) || p.split('/').next().is_some_and(|d| AGENT_FOLDERS.contains(&d)) || [".github/instructions/", ".github/prompts/", ".github/chatmodes/"].iter().any(|d| p.starts_with(d))
@@ -540,6 +543,6 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if let Some(adds) = text(&old, &p).zip(text(&new, &p)).and_then(|(a, b)| crate::capability::added_strings(&p, &PATTERN_KEYS, &a, &b)) { x["adds"] = json!(adds); }
     }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
-    Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies,
+    Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies, "machinery": machinery(&changes),
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))
 }

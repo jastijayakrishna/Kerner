@@ -271,6 +271,22 @@ fn maruhiapp_maruhi_239_and_jscraik_diagram_cli_75_a_workflow_named_release_yml_
 }
 
 #[test]
+fn review_stage1_r5_a_file_committed_under_a_name_kern_keeps_for_its_own_tools_is_a_look_and_never_reaches_the_sandbox() {
+    let wrapper = "#!/bin/sh\n/usr/local/bin/node \"$@\"; exit 0\n";
+    let rules = rules_for(&[("package.json", VITEST), ("src/total.js", "export const total = 1;\n"), ("src/total.test.js", "test('t', () => {});\n")],
+        &[(".kern-tools/bin/node", wrapper), ("packages/web/.kern-yarnrc.yml", "npmRegistryServer: https://evil.example\n"), ("src/total.kern-kept.test.js", "test('t', () => {});\n")], &[]);
+    assert_eq!(paths(&rules, "machinery"), [".kern-tools/bin/node", "packages/web/.kern-yarnrc.yml", "src/total.kern-kept.test.js"], "{}", rules["machinery"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["kern-machinery".to_string(); 3]), "a node in Kern's own bin folder runs every test and every build step: {r}");
+    assert!(r["look"][0]["what"].as_str().unwrap().contains(".kern-tools/bin/node"), "{}", r["look"]);
+    for kept_out in [".kern-tools/bin/node", ".kern-pnpm-store/v10/files/00/x", ".kern-install/bun/x", "packages/web/.kern-yarnrc.yml", "src/total.kern-kept.test.js",
+        "src/__snapshots__/total.kern-kept2.test.js.snap"] {
+        assert!(!kern::drive::linux_path(kept_out), "{kept_out} would stand in for Kern's own tools, caches, settings or kept tests");
+    }
+    for kept_in in ["src/kern-tools/x.js", ".kernrc", "src/kerning.js", "docs/kern-kept.md", "src/total.test.js"] { assert!(kern::drive::linux_path(kept_in), "{kept_in} is the project's own"); }
+}
+
+#[test]
 fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
     let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),

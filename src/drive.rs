@@ -297,8 +297,9 @@ fn setup_limits() -> Limits {
     Limits { files_changed: 1, lines_changed: 1, file_bytes: 1 << 20, total_bytes: 1 << 20, timeout_seconds: 1800, memory_mb, pids: 1024 }
 }
 
+pub fn kern_owned(p: &str) -> bool { p.split('/').any(|c| c.starts_with(".kern-")) || crate::suite::kept_back(p).is_some() }
 pub fn linux_path(p: &str) -> bool {
-    !p.is_empty() && p.len() <= 4096 && !p.starts_with('/') && !p.contains('\0') && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c != ".git")
+    !p.is_empty() && p.len() <= 4096 && !p.starts_with('/') && !p.contains('\0') && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c != ".git") && !kern_owned(p)
 }
 fn materialize(repo: &Path, commit: &str, dest: &Path) -> R<BTreeSet<String>> {
     let items = listing(repo, commit)?;

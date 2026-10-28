@@ -338,6 +338,15 @@ pub fn restore(committed: &Path, tree: &Path, keep: &[PathBuf]) -> R<()> {
     if tree.is_dir() { clear(tree, keep)?; }
     copy(committed, tree, keep, &mut RESTORE_ENTRIES_COUNT_MAX.clone())
 }
+pub fn remake_dir(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path)?,
+        Ok(_) => std::fs::remove_file(path)?,
+        Err(_) => {}
+    }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    std::fs::create_dir(path)
+}
 pub fn with_workspace(dir: &str, has_node_modules: bool, records: &[Value]) -> bool {
     dir != "." && has_node_modules && records.iter().any(|r| r["dir"] == "." && r["result"].as_str().is_some_and(|s| s.starts_with("installed")))
 }
@@ -368,6 +377,7 @@ impl Capped {
     }
 }
 pub const TOOLS: &str = "/workspace/.kern-tools";
+pub const TOOL_NPM_ARGS: [&str; 3] = ["--workspaces=false", "--userconfig=/dev/null", "--globalconfig=/dev/null"];
 const IMAGE_COREPACK: &str = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
 fn own_corepack() -> String { format!("{TOOLS}/corepack/node_modules/corepack/dist/corepack.js") }
 pub const BUN: &str = "1.4.2";
@@ -759,12 +769,11 @@ mod inside {
     fn clear_added(path: &Path) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for e in entries.flatten() {
-            if KERN_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) { continue; }
             let p = e.path();
             let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
             if meta.uid() == TEST_USER {
                 let _ = if meta.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
-            } else if meta.is_dir() {
+            } else if meta.is_dir() && !KERN_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) {
                 clear_added(&p);
             }
         }
@@ -797,30 +806,32 @@ mod inside {
         let budget = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
         let started = std::time::Instant::now();
         super::restore(Path::new("/input"), Path::new("/workspace"), &[])?;
+        super::remake_dir(Path::new(super::TOOLS))?;
         let scratch = Path::new("/workspace/.kern-install");
         std::fs::create_dir_all(scratch.join("tmp"))?;
-        let (mut records, mut dirty, mut launchers) = (Vec::new(), false, std::collections::BTreeMap::new());
+        let (mut records, mut dirty, mut launchers, mut made) = (Vec::new(), false, std::collections::BTreeMap::new(), std::collections::BTreeSet::new());
         for d in &dirs {
             let dir = if d == "." { PathBuf::from("/workspace") } else { Path::new("/workspace").join(d) };
             if !dir.join("package.json").is_file() { continue; }
             if super::with_workspace(d, dir.join("node_modules").exists(), &records) { records.push(json!({ "dir": d, "manager": null, "result": "installed with the workspace" })); continue; }
             let keep: Vec<PathBuf> = super::INSTALL_SCRATCH.iter().chain([&super::PNPM_STORE, &super::TOOLS]).map(PathBuf::from)
                 .chain(records.iter().filter_map(|r| r["dir"].as_str()).filter(|r| *r != ".").map(|r| Path::new("/workspace").join(r))).collect();
-            let (record, launcher) = install_dir(d, &dir, scripts, (budget, started), &keep, &mut dirty)?;
+            let (record, launcher) = install_dir(d, &dir, scripts, (budget, started), &keep, (&mut dirty, &mut made))?;
             if let (Some(m), Some(l)) = (record["manager"].as_str(), launcher) { launchers.entry(m.to_string()).or_insert(l); }
             records.push(record);
         }
         for dir in super::INSTALL_SCRATCH.iter().map(PathBuf::from).chain(super::store_links_back(Path::new(super::PNPM_STORE))) { let _ = std::fs::remove_dir_all(dir); }
         let (tools, bin) = (Path::new(super::TOOLS), Path::new(super::TOOLS).join("bin"));
         if records.iter().any(|r| r["result"].as_str().is_some_and(|s| s.starts_with("installed"))) { npm_into(&tools.join("scip"), crate::map::INDEXER); }
+        super::remake_dir(&bin)?;
         for (manager, launcher) in &launchers {
-            std::fs::create_dir_all(&bin)?;
             std::fs::write(bin.join(manager), super::shim(launcher))?;
             std::fs::set_permissions(bin.join(manager), std::fs::Permissions::from_mode(0o755))?;
         }
-        let cache = Path::new("/home/kern/corepack");
-        if !launchers.is_empty() && cache.is_dir() { copy_entry(cache, &tools.join("corepack-home"))?; }
-        if tools.is_dir() { std::fs::write(tools.join("package.json"), "{\"type\":\"commonjs\"}\n")?; }
+        let (cache, home) = (Path::new("/home/kern/corepack"), tools.join("corepack-home"));
+        super::remake_dir(&home)?;
+        if !launchers.is_empty() && cache.is_dir() { copy_entry(cache, &home)?; }
+        std::fs::write(tools.join("package.json"), "{\"type\":\"commonjs\"}\n")?;
         let playwright = if browsers { super::installed_versions(Path::new("/workspace"), &["playwright", "playwright-core"]) } else { Vec::new() };
         for dir in CACHE_DIRS { std::fs::create_dir_all(Path::new("/workspace/node_modules").join(dir))?; }
         lock_down(Path::new("/workspace"));
@@ -828,35 +839,40 @@ mod inside {
         println!("{}", json!({ "version": 1, "installs": records, "browsers": playwright }));
         Ok(())
     }
-    fn pinned_bun((budget, started): (Duration, std::time::Instant)) -> Result<String, String> {
+    fn pinned_bun(made: &mut std::collections::BTreeSet<&'static str>, (budget, started): (Duration, std::time::Instant)) -> Result<String, String> {
         let bun = super::own_bun();
-        if Path::new(&bun).is_file() { return Ok(bun); }
+        if made.contains("bun") { return Ok(bun); }
         let arch = std::env::consts::ARCH;
         let (manifest, lock) = super::bun_tools(arch).ok_or_else(|| format!("Kern has no Bun {} for this machine's processor ({arch})", super::BUN))?;
         let dir = Path::new(super::TOOLS).join("bun");
-        let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("package.json"), manifest)).and_then(|_| std::fs::write(dir.join("package-lock.json"), lock));
+        let written = super::remake_dir(&dir).and_then(|_| std::fs::write(dir.join("package.json"), manifest)).and_then(|_| std::fs::write(dir.join("package-lock.json"), lock));
         let child = written.and_then(|_| Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--no-update-notifier"])
-            .current_dir(&dir).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn());
+            .args(super::TOOL_NPM_ARGS).current_dir(&dir).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn());
         let ran = child.ok().is_some_and(|c| wait(c, budget.saturating_sub(started.elapsed())).unwrap_or(false));
-        if ran && std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).is_ok() { Ok(bun) } else { Err(format!("Kern could not install its own Bun {} with npm", super::BUN)) }
+        if !ran || std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).is_err() { return Err(format!("Kern could not install its own Bun {} with npm", super::BUN)); }
+        made.insert("bun");
+        Ok(bun)
     }
     fn npm_into(prefix: &Path, package: &str) {
+        if super::remake_dir(prefix).is_err() { return; }
         let _ = Command::new("/usr/local/bin/node").args(["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "install", "--prefix", &prefix.to_string_lossy(), package, "--ignore-scripts",
-            "--no-audit", "--no-fund", "--no-update-notifier"]).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            "--no-audit", "--no-fund", "--no-update-notifier"]).args(super::TOOL_NPM_ARGS).env_clear().envs(super::INSTALL_ENV).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
-    fn install_dir(d: &str, dir: &Path, scripts: bool, (budget, started): (Duration, std::time::Instant), keep: &[PathBuf], dirty: &mut bool) -> R<(Value, Option<Vec<String>>)> {
+    fn install_dir(d: &str, dir: &Path, scripts: bool, (budget, started): (Duration, std::time::Instant), keep: &[PathBuf],
+        (dirty, made): (&mut bool, &mut std::collections::BTreeSet<&'static str>)) -> R<(Value, Option<Vec<String>>)> {
         let (manager, mut attempts) = super::install_plan_for(dir, scripts);
         let own = super::own_corepack();
         if !Path::new(super::IMAGE_COREPACK).exists() {
             for (argv, _) in attempts.iter_mut() { for a in argv.iter_mut() { if a == super::IMAGE_COREPACK { a.clone_from(&own); } } }
         }
-        if attempts.iter().any(|(argv, _)| argv.contains(&own)) && !Path::new(&own).exists() {
+        if attempts.iter().any(|(argv, _)| argv.contains(&own)) && !made.contains("corepack") {
             npm_into(&Path::new(super::TOOLS).join("corepack"), super::COREPACK);
             if !Path::new(&own).exists() {
                 return Ok((json!({ "dir": d, "manager": manager, "result": format!("failed: Kern could not install {} with npm", super::COREPACK), "parts": [] }), None));
             }
+            made.insert("corepack");
         }
-        if manager == "bun" && let Err(why) = pinned_bun((budget, started)) {
+        if manager == "bun" && let Err(why) = pinned_bun(made, (budget, started)) {
             return Ok((json!({ "dir": d, "manager": manager, "result": format!("failed: {why}"), "parts": [] }), None));
         }
         let launcher = super::launcher(manager, &attempts);

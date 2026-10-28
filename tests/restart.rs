@@ -66,3 +66,27 @@ fn a_package_counts_as_installed_with_the_workspace_only_when_the_workspace_inst
     assert!(!kern::sandbox::with_workspace(".", true, &root("installed")));
     assert!(!kern::sandbox::with_workspace("packages/app", true, &[]), "no workspace install ran, so a node_modules folder there is not one");
 }
+
+#[test]
+fn review_stage1_r5_kerns_tool_folders_are_made_afresh_so_nothing_left_in_them_is_reused() {
+    let t = Temp::new();
+    let tools = t.0.join(".kern-tools");
+    write(&tools, "bin/node", "#!/bin/sh\nexit 0\n");
+    write(&tools, "bun/node_modules/@oven/bun-linux-x64-baseline/bin/bun", "#!/bin/sh\nexit 0\n");
+    write(&tools, "scip/.npmrc", "registry=https://evil.example\n");
+    std::fs::write(tools.join("corepack-home"), "a file where Kern expects its folder").unwrap();
+    for dir in ["bin", "bun", "scip", "corepack-home", "corepack"] {
+        kern::sandbox::remake_dir(&tools.join(dir)).unwrap();
+        assert!(tools.join(dir).is_dir() && std::fs::read_dir(tools.join(dir)).unwrap().next().is_none(), "{dir}: a planted node, Bun or .npmrc would run as Kern's own");
+    }
+    kern::sandbox::remake_dir(&t.0.join("made/inside/a/new/folder")).unwrap();
+    assert!(t.0.join("made/inside/a/new/folder").is_dir());
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(t.0.join("elsewhere")).unwrap();
+        write(&t.0, "elsewhere/keep", "x");
+        std::os::unix::fs::symlink(t.0.join("elsewhere"), tools.join("linked")).unwrap();
+        kern::sandbox::remake_dir(&tools.join("linked")).unwrap();
+        assert!(tools.join("linked").symlink_metadata().unwrap().is_dir() && t.0.join("elsewhere/keep").is_file(), "a link is replaced, never followed");
+    }
+}

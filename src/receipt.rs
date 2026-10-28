@@ -346,6 +346,10 @@ fn rule_items(f: &mut Found, d: &Value, rules: &Value, tests: &Value) {
     for x in d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "a submodule") {
         f.look.push(item("submodule", format!("{}: a submodule this change points at other code", code(x["path"].as_str().unwrap_or(""), 160))));
     }
+    for x in rules["machinery"].as_array().into_iter().flatten() {
+        f.look.push(item("kern-machinery", format!("{} has a name Kern keeps for its own tools, caches and files (`.kern-`), where it could stand in for the programs Kern runs; Kern left it out of the sandbox, so the tests ran without it",
+            code(x["path"].as_str().unwrap_or(""), 160))));
+    }
     for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["code"] == "js" || x["path"].as_str().is_some_and(crate::capability::is_code)) {
         f.unverified.push(item("not-checked-code", format!("{}: Kern could not read this changed code, so its rules were not applied ({})", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400))));
     }
