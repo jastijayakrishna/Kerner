@@ -13,7 +13,7 @@ use std::time::Duration;
 pub const MODEL: &str = "claude-opus-5-5";
 pub const URL: &str = "https://api.anthropic.com/v1/messages";
 pub const HEADERS: [(&str, &str); 3] = [("anthropic-version", "2023-06-01"), ("anthropic-beta", "server-side-fallback-2026-07-01"), ("content-type", "application/json")];
-pub use crate::probe::{ARGS_BYTES_MAX, ARGS_COUNT_MAX, EXPERIMENTS_BYTES_MAX, EXPERIMENTS_COUNT_MAX, EXPERIMENTS_PER_TARGET_COUNT_MAX, OBLIGATIONS_COUNT_MAX, SHAPES_PER_TARGET_COUNT_MAX, TARGETS_COUNT_MAX};
+pub use crate::probe::{ARGS_BYTES_MAX, ARGS_COUNT_MAX, CALLS_PER_TARGET_COUNT_MAX, EXPERIMENTS_BYTES_MAX, EXPERIMENTS_COUNT_MAX, EXPERIMENTS_PER_TARGET_COUNT_MAX, OBLIGATIONS_COUNT_MAX, SHAPES_PER_TARGET_COUNT_MAX, TARGETS_COUNT_MAX};
 use crate::probe::{QUOTE_CHARS_MAX, STATEMENT_CHARS_MAX, WHY_CHARS_MAX};
 pub const CONTEXT_BYTES_MAX: usize = 49152;
 const QUOTE_CHARS_MIN: usize = 12;
@@ -21,7 +21,6 @@ const ANSWER_ITEMS_COUNT_MAX: usize = 256;
 const CHANGED_FILES_COUNT_MAX: usize = 200;
 const CONTEXT_FILES_COUNT_MAX: usize = 48;
 const CALLER_FILES_COUNT_MAX: usize = 16;
-const EXAMPLES_PER_TARGET_COUNT_MAX: usize = 16;
 const WINDOWS_PER_FILE_COUNT_MAX: usize = 8;
 const MARGIN_LINES_COUNT: usize = 4;
 const OCCURRENCES_COUNT_MAX: usize = 64;
@@ -293,6 +292,9 @@ fn mentioning(repo: &Path, side: &Side, targets: &[Target], keep: fn(&str) -> bo
     Ok(ranked.into_iter().filter_map(|(_, _, p)| texts.get(&p).cloned().map(|text| (p, text))).collect())
 }
 type Examples = Vec<Vec<Value>>;
+fn passed(found: &Examples) -> impl Iterator<Item = &Vec<Value>> {
+    found.iter().filter(|args| args.len() <= ARGS_COUNT_MAX && Value::Array((*args).clone()).to_string().len() <= ARGS_BYTES_MAX).take(CALLS_PER_TARGET_COUNT_MAX)
+}
 fn examples(files: &[(String, String)], targets: &[Target], old: &Side) -> Vec<Examples> {
     let exists = |p: &str| old.has(p);
     targets.iter().map(|t| {
@@ -426,7 +428,7 @@ fn requirements(shown: &[&Obligation], targets: &[Target]) -> Vec<Block> {
 fn calls_and_code(targets: &[Target], examples: &[Examples]) -> Vec<Block> {
     let mut out = Vec::new();
     for (i, (t, found)) in targets.iter().zip(examples).enumerate() {
-        let listed: Vec<String> = found.iter().map(|args| Value::Array(args.clone()).to_string()).filter(|s| s.len() <= ARGS_BYTES_MAX).take(EXAMPLES_PER_TARGET_COUNT_MAX).map(|s| format!("- {s}\n")).collect();
+        let listed: Vec<String> = passed(found).map(|args| format!("- {}\n", Value::Array(args.clone()))).collect();
         let calls = if listed.is_empty() { "Kern found no call with literal arguments in the old code's tests or callers.\n".to_string() } else { format!("Arguments the old code's tests and callers pass, as JSON:\n{}", listed.concat()) };
         out.push(Block { rank: (1, 0, i), section: 1, order: (i, 0), text: format!("### {}\n{calls}", key(t)) });
         let versions = if t.old == t.new { vec![("the same in both versions", &t.new, 3)] } else { vec![("old code", &t.old, 4), ("new code", &t.new, 3)] };
@@ -777,7 +779,7 @@ fn experiments(answer: &Value, targets: &[Target], both: &BTreeMap<String, BTree
     }
     kept
 }
-fn shapes(targets: &[Target], examples: &[Examples], sources: &[Source], dropped: &mut Vec<Value>) -> Vec<Value> {
+fn recorded_targets(targets: &[Target], examples: &[Examples], sources: &[Source], dropped: &mut Vec<Value>) -> Vec<Value> {
     targets.iter().zip(examples).map(|(t, found)| {
         let old = sources.iter().find(|s| s.path == t.path).map_or("", |s| s.old.as_str());
         let mut shapes: Vec<Vec<&str>> = Vec::new();
@@ -788,7 +790,7 @@ fn shapes(targets: &[Target], examples: &[Examples], sources: &[Source], dropped
             dropped.push(json!({ "what": format!("{} more argument shapes of {}", shapes.len() - SHAPES_PER_TARGET_COUNT_MAX, key(t)), "why": format!("Kern keeps at most {SHAPES_PER_TARGET_COUNT_MAX} shapes per function") }));
             shapes.truncate(SHAPES_PER_TARGET_COUNT_MAX);
         }
-        json!({ "path": t.path, "export": t.export, "shapes": shapes, "retested": t.retested })
+        json!({ "path": t.path, "export": t.export, "shapes": shapes, "calls": passed(found).collect::<Vec<_>>(), "retested": t.retested })
     }).collect()
 }
 
@@ -831,8 +833,8 @@ impl Run<'_> {
         let callers = mentioning(self.repo, &new, &targets, caller, CALLER_FILES_COUNT_MAX, "files of the new code that call the changed functions", &mut self.dropped)?;
         let Some(said) = self.answer(&hunter(&targets, &obligations, &examples, &sources, &callers, &new))? else { return Ok(Outcome::Nothing(NO_KEY.into())) };
         let experiments = experiments(&said, &targets, &both, &obligations, &mut self.dropped);
-        let shaped = shapes(&targets, &examples, &sources, &mut self.dropped);
-        Ok(Outcome::Investigated(shaped, obligations.iter().map(|o| o.json(&targets)).collect(), experiments))
+        let recorded = recorded_targets(&targets, &examples, &sources, &mut self.dropped);
+        Ok(Outcome::Investigated(recorded, obligations.iter().map(|o| o.json(&targets)).collect(), experiments))
     }
     fn record(self, (base, head): (&str, &str), found: R<Outcome>) -> Value {
         let (status, why, (targets, obligations, experiments)) = match found {

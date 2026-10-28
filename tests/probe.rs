@@ -39,14 +39,14 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
     let n = answers.len();
     let (mut blocked, mut combinations) = (0, 0);
     for requirement in requirements {
-        for bits in 0..128u8 {
+        for bits in 0..256u16 {
             let (shape_seen, reached_old, reached_new, uneven) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
-            let (chance, network, retested) = (bits & 16 != 0, bits & 32 != 0, bits & 64 != 0);
+            let (chance, network, retested, call_seen) = (bits & 16 != 0, bits & 32 != 0, bits & 64 != 0, bits & 128 != 0);
             for data in [Data::Same, Data::Extended, Data::Differs, Data::Missing] {
                 for code in 0..n.pow(4) {
                     let pick = |i: u32| answers[code / n.pow(i) % n];
                     let (old, old_again, new, new_again) = (pick(0), pick(1), pick(2), pick(3));
-                    let e = Evidence { requirement, shape_seen, reached_old, reached_new, uneven, data, chance, network, retested,
+                    let e = Evidence { requirement, shape_seen, call_seen, reached_old, reached_new, uneven, data, chance, network, retested,
                         answers: Answers { old: old.map(str::to_string), old_again: old_again.map(str::to_string), new: new.map(str::to_string), new_again: new_again.map(str::to_string) } };
                     let v = probe::verdict(&e);
                     combinations += 1;
@@ -57,9 +57,9 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
                     let usable = authority.is_some_and(|a| a != Authority::Unverified);
                     let crash = |a: &str| failed(a) && kern::proof::crashed(a);
                     let broken: Option<bool> = match (requirement, old, new) {
+                        (Some(_), Some(o), Some(w)) if o != w && crash(o) && succeeded(w) => Some(false),
                         (Some(r), Some(o), Some(w)) if o != w => match r.check {
                             Check::Same if succeeded(o) && succeeded(w) => match data { Data::Differs => Some(true), Data::Missing => None, _ => Some(false) },
-                            Check::Same if crash(o) && succeeded(w) => Some(false),
                             Check::Same => Some(succeeded(o) != succeeded(w)),
                             Check::Returns => Some(succeeded(o) && failed(w)),
                             Check::Throws => Some(failed(o) && succeeded(w)),
@@ -73,14 +73,15 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
                     match v {
                         Verdict::Blocked => {
                             blocked += 1;
-                            assert!(authority == Some(Authority::Verified) && shape_seen && reached_old && reached_new && !uneven && !sandbox && !hung && !chance && !network && !retested && broken == Some(true), "{}", said());
+                            assert!(authority == Some(Authority::Verified) && shape_seen && call_seen && reached_old && reached_new && !uneven && !sandbox && !hung && !chance && !network && !retested && broken == Some(true), "{}", said());
+                            assert!(!(crash(old.unwrap()) && succeeded(new.unwrap())), "the old code crashing on an input it never handled is no requirement the new code can break: {}", said());
                             assert!(old.is_some() && new.is_some() && old_again == old && new_again == new && old != new, "a block needs four answers, both reruns agreeing: {}", said());
                             assert!(requirement.is_some_and(|r| r.check != Check::Same), "a requirement that the answer must not change never blocks: which inputs it covers is the AI's reading, not evidence: {}", said());
                         }
                         Verdict::Look(m) => {
                             assert!(usable && broken != Some(false) && !uneven && !sandbox && !hung && !chance && !network && m != Missing::default(), "{}", said());
                             assert_eq!(m, Missing { contested: authority == Some(Authority::Contested), authorized: authority == Some(Authority::Authorized), shape: !shape_seen,
-                                rerun: old_again.is_none() || new_again.is_none(), values: broken.is_none(), retested, scope: requirement.is_some_and(|r| r.check == Check::Same) }, "a look names exactly what is missing for a block: {}", said());
+                                rerun: old_again.is_none() || new_again.is_none(), values: broken.is_none(), retested, scope: requirement.is_some_and(|r| r.check == Check::Same) || !call_seen }, "a look names exactly what is missing for a block: {}", said());
                         }
                         Verdict::Uneven => assert!(usable && broken != Some(false) && uneven && !sandbox && !hung && !chance && !network, "{}", said()),
                         Verdict::Same => assert!(reached_old && reached_new && old.is_some() && old == new && !sandbox && !hung, "{}", said()),
@@ -95,9 +96,9 @@ fn lightdash_12942_every_combination_of_probe_evidence_keeps_the_kernels_promise
             }
         }
     }
-    assert_eq!(combinations, 13 * 128 * 4 * 7usize.pow(4));
-    assert_eq!(blocked, 32, "four plain answers give 12 changed pairs: `returns` blocks when a value became an error and `throws` when an error became a value, 4 pairs each, whatever the data (16 each); \
-        `same` never blocks, and nothing else may");
+    assert_eq!(combinations, 13 * 256 * 4 * 7usize.pow(4));
+    assert_eq!(blocked, 24, "four plain answers give 12 changed pairs: `returns` blocks when a value became an error (4 pairs) and `throws` when an error became a value (2 pairs: a crash is no \
+        requirement), whatever the data (4 each), only for an input a test or caller of the old code passes; `same` never blocks, and nothing else may");
 }
 
 #[test]
@@ -145,7 +146,7 @@ fn obligation(authority: &str) -> Value {
 }
 fn tried(answers: [Option<&str>; 4], obligation: Value) -> Value {
     json!({ "id": "e1", "path": SQL, "export": "removeComments", "args": [DOLLARS], "why": "a dollar-quoted string that holds //", "obligation": obligation,
-        "shapes": [["string"]], "retested": false, "host": "src/sql.test.ts", "dir": "", "reached": { "old": true, "new": true },
+        "shapes": [["string"]], "calls": [[DOLLARS]], "retested": false, "host": "src/sql.test.ts", "dir": "", "reached": { "old": true, "new": true },
         "answers": { "old": answers[0], "old_again": answers[1], "new": answers[2], "new_again": answers[3] }, "data": "differs", "chance": false, "network": false, "uneven": null })
 }
 fn ran(experiments: Vec<Value>, not_run: Value) -> Value { json!({ "status": "RAN", "why": "", "experiments": experiments, "not_run": not_run }) }
@@ -190,7 +191,11 @@ fn lightdash_12942_a_broken_requirement_short_of_proof_is_a_look_that_says_what_
     unread["data"] = json!("missing");
     let mut retested = tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("verified"));
     retested["retested"] = json!(true);
+    let mut invented = tried([Some(KEPT), Some(KEPT), Some("throws TypeError: unterminated quote"), Some("throws TypeError: unterminated quote")], obligation("verified"));
+    invented["obligation"]["check"] = json!("returns");
+    invented["calls"] = json!([["SELECT 1 -- note"]]);
     let cases = [
+        (invented, "the requirement covers the inputs its source names, and no test or caller of the old code passes exactly this input, so nothing Kern can check says it is one of them"),
         (tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("contested")), "the change edits the quoted text in `src/sql.test.ts`"),
         (tried([Some(KEPT), Some(KEPT), Some(CUT), Some(CUT)], obligation("authorized")), "the pull request says it changes this: `Strip // comments too, as MySQL does`"),
         (shapeless, "neither the old code's tests and callers nor its declared parameter types pass inputs of this shape"),
@@ -202,9 +207,42 @@ fn lightdash_12942_a_broken_requirement_short_of_proof_is_a_look_that_says_what_
         let r = receipt(ran(vec![x], json!([])));
         assert_eq!(r["decision"], "look", "{r}");
         let what = only(&r, "look", "probe-concern");
-        assert!(what.contains(missing) && what.contains(CITED) && what.contains("`removeComments(\"SELECT $$https://example.com/a//b$$ AS address\")`") && what.contains("`\"SELECT $$https:\"`"), "{what}");
+        assert!(what.contains(missing) && what.contains("`removeComments(\"SELECT $$https://example.com/a//b$$ AS address\")`"), "{what}");
         assert!(what.contains("Kern does not block it because"), "{what}");
     }
+}
+
+#[test]
+fn audit_f3_a_requirement_flipped_by_an_input_no_old_test_or_caller_passes_is_a_look_and_a_crash_is_no_requirement() {
+    let arc = json!({ "kind": "arc", "radius": 2 });
+    let mut throws = tried([Some("throws Error: unknown entity kind"), Some("throws Error: unknown entity kind"), Some("returns [1,2]"), Some("returns [1,2]")], obligation("verified"));
+    throws["obligation"]["check"] = json!("throws");
+    throws["obligation"]["statement"] = json!("Converting an entity of an unknown kind throws.");
+    throws["args"] = json!([arc]);
+    throws["shapes"] = json!([["object"]]);
+    throws["calls"] = json!([[{ "kind": "zzz" }]]);
+    let r = receipt(ran(vec![throws.clone()], json!([])));
+    assert_eq!(r["decision"], "look", "the old test says an unknown kind throws; whether `arc` is one is the AI's reading, so a change that adds `arc` is a look, never a block: {r}");
+    let what = only(&r, "look", "probe-concern");
+    assert!(what.contains("no test or caller of the old code passes exactly this input") && what.contains("Converting an entity of an unknown kind throws"), "{what}");
+    assert_eq!(probe::verdict(&probe::evidence(&throws)), Verdict::Look(Missing { scope: true, ..Missing::default() }));
+    let mut passed = throws.clone();
+    passed["calls"] = json!([[{ "kind": "zzz" }], [arc]]);
+    assert_eq!(probe::verdict(&probe::evidence(&passed)), Verdict::Blocked, "an input a test or caller of the old code passes is the project's own, so the flip blocks");
+    let mut crashed = passed.clone();
+    for side in ["old", "old_again"] { crashed["answers"][side] = json!("throws TypeError: Cannot read properties of undefined (reading 'kind')"); }
+    assert_eq!(probe::verdict(&probe::evidence(&crashed)), Verdict::Note, "KerfDesk#566 as a `throws` requirement: the old code crashed on an entity it never handled, which is no requirement the new code can break");
+    let mut returns = tried([Some("returns {\"label\":\"\"}"), Some("returns {\"label\":\"\"}"), Some("throws Error: unknown action"), Some("throws Error: unknown action")], obligation("verified"));
+    returns["obligation"]["check"] = json!("returns");
+    returns["args"] = json!([""]);
+    returns["calls"] = json!([["delist"], ["owner-unpublish"]]);
+    assert_eq!(probe::verdict(&probe::evidence(&returns)), Verdict::Look(Missing { scope: true, ..Missing::default() }),
+        "civitai#3102 as a `returns` requirement: the AI invented an empty action no test or caller passes, so a change that now refuses it is a look");
+    returns["args"] = json!(["delist"]);
+    assert_eq!(probe::verdict(&probe::evidence(&returns)), Verdict::Blocked, "a call the old code's own tests or callers make now throws");
+    returns["args"] = json!([{ "kind": "delist" }]);
+    returns["shapes"] = json!([["string"]]);
+    assert_eq!(probe::verdict(&probe::evidence(&returns)), Verdict::Look(Missing { shape: true, scope: true, ..Missing::default() }), "an input of another shape is outside both gates");
 }
 
 #[test]
@@ -270,7 +308,7 @@ fn lightdash_12942_inputs_that_answer_the_same_on_both_sides_earn_a_check_mark_t
 
 fn investigation() -> Value {
     json!({ "version": 1, "base": BASE, "head": HEAD, "status": "INVESTIGATED", "why": "", "model": "claude-opus-5-5", "usage": { "input_tokens": 0, "output_tokens": 0 },
-        "targets": [{ "path": SQL, "export": "removeComments", "shapes": [["string"], ["string", "object"]] }], "obligations": [obligation("verified")],
+        "targets": [{ "path": SQL, "export": "removeComments", "shapes": [["string"], ["string", "object"]], "calls": [[DOLLARS]] }], "obligations": [obligation("verified")],
         "experiments": [{ "id": "e1", "obligation": "o1", "path": SQL, "export": "removeComments", "args": [DOLLARS], "why": "a dollar-quoted string that holds //" }], "dropped": [] })
 }
 fn unusable(v: &Value) -> String {
@@ -292,7 +330,7 @@ fn lightdash_12942_kern_reads_the_ai_steps_findings_only_when_every_part_is_with
     assert_eq!(probe::parse(&with(|v| { v["status"] = json!("FAILED"); v["why"] = json!("the model timed out"); }), (BASE, HEAD)), Parsed::Unusable("the AI step failed: the model timed out".into()));
     assert!(matches!(probe::parse(&with(|v| { v["status"] = json!("NONE"); v["why"] = json!("no changed exported function"); }), (BASE, HEAD)), Parsed::Nothing(w) if w == "no changed exported function"));
     assert!(matches!(probe::parse(&with(|v| v["experiments"] = json!([])), (BASE, HEAD)), Parsed::Nothing(_)), "nothing to try is nothing to run");
-    let target = |n: usize| json!({ "path": format!("src/f{n}.ts"), "export": "f", "shapes": [] });
+    let target = |n: usize| json!({ "path": format!("src/f{n}.ts"), "export": "f", "shapes": [], "calls": [] });
     let experiment = |n: usize, path: &str| json!({ "id": format!("e{n}"), "obligation": null, "path": path, "export": "removeComments", "args": [n], "why": "" });
     let refused = [
         (with(|v| v["targets"] = json!((0..13).map(target).collect::<Vec<_>>())), "13 targets"),
@@ -304,8 +342,13 @@ fn lightdash_12942_kern_reads_the_ai_steps_findings_only_when_every_part_is_with
         (with(|v| v["experiments"][0]["why"] = json!("w".repeat(201))), "200 characters"),
         (with(|v| v["targets"][0]["shapes"] = json!((0..17).map(|_| json!(["string"])).collect::<Vec<_>>())), "17 shapes"),
         (with(|v| v["targets"][0]["shapes"] = json!([["string", "function"]])), "argument shape"),
+        (with(|v| v["targets"][0]["calls"] = json!((0..17).map(|_| json!(["x"])).collect::<Vec<_>>())), "17 calls"),
+        (with(|v| v["targets"][0]["calls"] = json!([[1, 2, 3, 4, 5, 6, 7, 8, 9]])), "more than 8 arguments"),
+        (with(|v| v["targets"][0]["calls"] = json!([["x".repeat(2100)]])), "longer than 2048 bytes"),
+        (with(|v| v["targets"][0]["calls"] = json!(["x"])), "none Kern reads"),
+        (with(|v| { v["targets"][0].as_object_mut().unwrap().remove("calls"); }), "no calls list"),
         (with(|v| v["experiments"] = json!((0..9).map(|n| experiment(n, SQL)).collect::<Vec<_>>())), "more than 8 experiments"),
-        (with(|v| { v["targets"] = json!((0..9).map(|n| json!({ "path": format!("src/f{n}.ts"), "export": "removeComments", "shapes": [] })).collect::<Vec<_>>());
+        (with(|v| { v["targets"] = json!((0..9).map(|n| json!({ "path": format!("src/f{n}.ts"), "export": "removeComments", "shapes": [], "calls": [] })).collect::<Vec<_>>());
             v["experiments"] = json!((0..65).map(|n| experiment(n, &format!("src/f{}.ts", n % 9))).collect::<Vec<_>>()); }), "65 experiments"),
         (with(|v| { let e = v["experiments"][0].clone(); v["experiments"] = json!([e.clone(), e]); }), "twice"),
         (with(|v| v["experiments"][0]["path"] = json!("src/other.ts")), "no target names"),
@@ -559,8 +602,8 @@ fn lightdash_12942_kern_plans_one_probe_file_beside_a_test_that_loads_the_target
     let mut v = investigation();
     v["base"] = json!(base);
     v["head"] = json!(head);
-    v["targets"] = json!([{ "path": "src/sql.js", "export": "removeComments", "shapes": [["string"]] }, { "path": "src/sql.js", "export": "ghost", "shapes": [] },
-        { "path": "src/other.js", "export": "helper", "shapes": [] }, { "path": "src/fresh.js", "export": "fresh", "shapes": [] }]);
+    v["targets"] = json!([{ "path": "src/sql.js", "export": "removeComments", "shapes": [["string"]], "calls": [] }, { "path": "src/sql.js", "export": "ghost", "shapes": [], "calls": [] },
+        { "path": "src/other.js", "export": "helper", "shapes": [], "calls": [] }, { "path": "src/fresh.js", "export": "fresh", "shapes": [], "calls": [] }]);
     v["obligations"][0]["targets"] = json!([{ "path": "src/sql.js", "export": "removeComments" }]);
     v["experiments"] = json!([
         { "id": "e1", "obligation": "o1", "path": "src/sql.js", "export": "removeComments", "args": [DOLLARS], "why": "" },

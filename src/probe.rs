@@ -20,6 +20,7 @@ pub const ARGS_COUNT_MAX: usize = 8;
 pub const ARGS_BYTES_MAX: usize = 2048;
 pub const EXPERIMENTS_BYTES_MAX: usize = 65536;
 pub const SHAPES_PER_TARGET_COUNT_MAX: usize = 16;
+pub const CALLS_PER_TARGET_COUNT_MAX: usize = 16;
 pub const STATEMENT_CHARS_MAX: usize = 300;
 pub const WHY_CHARS_MAX: usize = 200;
 pub const QUOTE_CHARS_MAX: usize = 600;
@@ -71,7 +72,7 @@ fn authority_named(s: &str) -> Option<Authority> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Target { pub path: String, pub export: String, pub shapes: Vec<Vec<String>>, pub retested: bool }
+pub struct Target { pub path: String, pub export: String, pub shapes: Vec<Vec<String>>, pub calls: Vec<Vec<Value>>, pub retested: bool }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Experiment { pub id: String, pub path: String, pub export: String, pub args: Vec<Value>, pub why: String, pub obligation: Value }
 #[derive(Clone, Debug, PartialEq)]
@@ -110,8 +111,14 @@ fn target(v: &Value, what: &str) -> Parse<Target> {
     let (path, export) = place(v, what)?;
     let shape = |s: &Value| s.as_array().filter(|tags| tags.len() <= ARGS_COUNT_MAX)?.iter().map(|t| t.as_str().filter(|t| SHAPE_TAGS.contains(t)).map(str::to_string)).collect::<Option<Vec<_>>>();
     let shapes = listed(v, "shapes", SHAPES_PER_TARGET_COUNT_MAX, what)?.iter().map(shape).collect::<Option<Vec<_>>>().ok_or_else(|| format!("{what} has an argument shape Kern does not know"))?;
+    let calls = listed(v, "calls", CALLS_PER_TARGET_COUNT_MAX, what)?.iter().map(|c| arguments(c, what)).collect::<Parse<Vec<_>>>()?;
     let retested = match &v["retested"] { Value::Null | Value::Bool(false) => false, Value::Bool(true) => true, _ => return Err(format!("{what} says in a way Kern does not read whether the change tests it")) };
-    Ok(Target { path, export, shapes, retested })
+    Ok(Target { path, export, shapes, calls, retested })
+}
+fn arguments(v: &Value, what: &str) -> Parse<Vec<Value>> {
+    let args = v.as_array().filter(|a| a.len() <= ARGS_COUNT_MAX).ok_or_else(|| format!("{what} has a call with more than {ARGS_COUNT_MAX} arguments or none Kern reads"))?;
+    if serde_json::to_string(args).map_or(usize::MAX, |s| s.len()) > ARGS_BYTES_MAX { return Err(format!("{what} has a call with arguments longer than {ARGS_BYTES_MAX} bytes")); }
+    Ok(args.clone())
 }
 fn obligation(v: &Value, at: usize) -> Parse<(String, BTreeSet<Place>)> {
     let id = ident(v, &format!("obligation {}", at + 1))?;
@@ -325,7 +332,7 @@ fn ready<'a>(c: &Change, targets: &[&'a Target], not_run: &mut Vec<Value>) -> (V
     (watched, serve)
 }
 fn record(e: &Experiment, t: &Target, host: &str, dir: &str) -> Value {
-    json!({ "id": e.id, "path": e.path, "export": e.export, "args": e.args, "why": e.why, "obligation": e.obligation, "shapes": t.shapes, "retested": t.retested, "host": host, "dir": dir,
+    json!({ "id": e.id, "path": e.path, "export": e.export, "args": e.args, "why": e.why, "obligation": e.obligation, "shapes": t.shapes, "calls": t.calls, "retested": t.retested, "host": host, "dir": dir,
         "reached": { "old": false, "new": false }, "answers": { "old": null, "old_again": null, "new": null, "new_again": null }, "data": "missing", "chance": false, "network": false, "uneven": null })
 }
 fn hostable(runner: Runner) -> bool { matches!(runner, Runner::Jest | Runner::Vitest) }
@@ -514,7 +521,7 @@ pub fn run(out: &Path, investigation: Option<&Path>, until: u64) -> Value {
 pub struct Answers { pub old: Option<String>, pub old_again: Option<String>, pub new: Option<String>, pub new_again: Option<String> }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evidence {
-    pub requirement: Option<Requirement>, pub shape_seen: bool, pub reached_old: bool, pub reached_new: bool, pub answers: Answers, pub uneven: bool, pub data: Data,
+    pub requirement: Option<Requirement>, pub shape_seen: bool, pub call_seen: bool, pub reached_old: bool, pub reached_new: bool, pub answers: Answers, pub uneven: bool, pub data: Data,
     pub chance: bool, pub network: bool, pub retested: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -532,9 +539,9 @@ fn succeeded(a: &str) -> bool { a.starts_with("returns ") || a.starts_with("reso
 fn crashed(a: &str) -> bool { crate::trace::failed(a) && crate::proof::crashed(a) }
 fn broken(check: Check, (old, new): (&str, &str), data: Data) -> Broken {
     let yes = |b: bool| if b { Broken::Yes } else { Broken::No };
+    if crashed(old) && succeeded(new) { return Broken::No; }
     match check {
         Check::Same if succeeded(old) && succeeded(new) => match data { Data::Differs => Broken::Yes, Data::Same | Data::Extended => Broken::No, Data::Missing => Broken::Unread },
-        Check::Same if crashed(old) && succeeded(new) => Broken::No,
         Check::Same => yes(succeeded(old) != succeeded(new)),
         Check::Returns => yes(succeeded(old) && crate::trace::failed(new)),
         Check::Throws => yes(crate::trace::failed(old) && succeeded(new)),
@@ -552,7 +559,7 @@ pub fn verdict(e: &Evidence) -> Verdict {
     let Some((r, found)) = e.requirement.filter(|r| r.authority != Authority::Unverified).map(|r| (r, broken(r.check, (old, new), e.data))).filter(|(_, b)| *b != Broken::No) else { return Verdict::Note };
     if e.uneven { return Verdict::Uneven; }
     let missing = Missing { contested: r.authority == Authority::Contested, authorized: r.authority == Authority::Authorized, shape: !e.shape_seen,
-        rerun: a.old_again.is_none() || a.new_again.is_none(), values: found == Broken::Unread, retested: e.retested, scope: r.check == Check::Same };
+        rerun: a.old_again.is_none() || a.new_again.is_none(), values: found == Broken::Unread, retested: e.retested, scope: r.check == Check::Same || !e.call_seen };
     if missing == Missing::default() { Verdict::Blocked } else { Verdict::Look(missing) }
 }
 pub fn evidence(x: &Value) -> Evidence {
@@ -560,9 +567,10 @@ pub fn evidence(x: &Value) -> Evidence {
     let args = x["args"].as_array().cloned().unwrap_or_default();
     let shape = crate::calls::shape(&args);
     let shape_seen = x["shapes"].as_array().into_iter().flatten().any(|s| s.as_array().is_some_and(|tags| tags.iter().map(Value::as_str).eq(shape.iter().map(|t| Some(*t)))));
+    let call_seen = x["calls"].as_array().into_iter().flatten().any(|c| c.as_array() == Some(&args));
     let o = &x["obligation"];
     let requirement = o["check"].as_str().and_then(check_named).map(|check| Requirement { check, authority: o["authority"].as_str().and_then(authority_named).unwrap_or(Authority::Unverified) });
-    Evidence { requirement, shape_seen, reached_old: x["reached"]["old"] == true, reached_new: x["reached"]["new"] == true,
+    Evidence { requirement, shape_seen, call_seen, reached_old: x["reached"]["old"] == true, reached_new: x["reached"]["new"] == true,
         answers: Answers { old: answer("old"), old_again: answer("old_again"), new: answer("new"), new_again: answer("new_again") }, uneven: x["uneven"].as_str().is_some_and(|u| !u.is_empty()),
         data: Data::named(x["data"].as_str().unwrap_or("")), chance: x["chance"] == true, network: x["network"] == true, retested: x["retested"] == true }
 }

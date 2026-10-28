@@ -439,7 +439,8 @@ fn probe_missing(x: &Value, m: crate::probe::Missing) -> String {
     if m.rerun { why.push("Kern could not run it a second time on each side to confirm".to_string()); }
     if m.values { why.push("Kern could not read both answers as plain data, so it compared only how they print".to_string()); }
     if m.retested { why.push(format!("the change also adds or edits a test that calls {}, which may state the new behaviour", code(x["export"].as_str().unwrap_or(""), 160))); }
-    if m.scope { why.push("a requirement that the answer must not change covers the inputs its source names, and nothing Kern can check says this input is one of them".to_string()); }
+    if m.scope && o["check"] == "same" { why.push("a requirement that the answer must not change covers the inputs its source names, and nothing Kern can check says this input is one of them".to_string()); }
+    else if m.scope { why.push("the requirement covers the inputs its source names, and no test or caller of the old code passes exactly this input, so nothing Kern can check says it is one of them".to_string()); }
     why.join(", and ")
 }
 type ProbeGroup<'a> = (String, crate::probe::Verdict, Vec<&'a Value>);

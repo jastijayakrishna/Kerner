@@ -293,8 +293,9 @@ Then add the workflow file at the top of this page to a repository, pointing `us
 - Kern does not prove that code is correct or well meant. A person still decides whether a change is good.
 - Kern tries many inputs, but not every input. Behaviour behind an input that nobody tried can still change unseen.
 - The AI step can miss a regression, and it can cite a requirement Kern cannot confirm. Kern never blocks on the AI's word: a block
-  needs the quote confirmed, a call that now throws or no longer throws against it, and the break repeated on both runs. A changed
-  value is a look or a note, never a block, because no mechanical check says which inputs a "stays the same" requirement covers.
+  needs the quote confirmed, a call that now throws or no longer throws against it, an input the old code's own tests or callers
+  pass as it is, and the break repeated on both runs. An input the AI made up, a changed value, or an old crash that the new code
+  handles is a look or a note, never a block, because no mechanical check says which inputs a requirement covers.
 - Kern runs JavaScript and TypeScript today: the tests it runs are vitest, jest, mocha and `node --test`. Inside a script Kern records,
   it sees a runner started through its command only; one started through its JavaScript API, `node --test`, `bun test`, and the package
   tasks of turbo's strict environment mode, which may not pass Kern's recorder on, are not seen. Such a run still runs for real while

@@ -615,7 +615,7 @@ cd "$W"
 investigation() {
   jq -n --arg base "$probe_base" --arg head "$(cat "$W/$1.head")" --arg check "$2" --arg quote "test('keeps -- inside quoted strings'" \
     '{ version: 1, base: $base, head: $head, status: "INVESTIGATED", why: "", model: "fixture", usage: { input_tokens: 0, output_tokens: 0 },
-       targets: [{ path: "src/sql.js", export: "removeComments", shapes: [["string"]], retested: false }],
+       targets: [{ path: "src/sql.js", export: "removeComments", shapes: [["string"]], calls: [["SELECT $$https://example.com/a//b$$ AS address"]], retested: false }],
        obligations: [{ id: "o1", statement: (if $check == "same" then "Removing comments keeps the text inside quoted strings unchanged." else "Removing comments never throws for a query string." end), check: $check,
          targets: [{ path: "src/sql.js", export: "removeComments" }], source: { path: "test/sql.test.js", quote: $quote, kind: "test" }, authority: "verified", why: "", authorized_by: "" }],
        experiments: [{ id: "e1", obligation: "o1", path: "src/sql.js", export: "removeComments", args: ["SELECT $$https://example.com/a//b$$ AS address"], why: "a dollar-quoted string that holds //" },
