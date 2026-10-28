@@ -303,6 +303,23 @@ fn review_stage1_r9_code_that_newly_names_kerns_own_channels_is_a_look_because_i
 }
 
 #[test]
+fn review_stage1_r11_a_changed_native_addon_or_wasm_module_runs_code_so_no_new_powers_has_no_check_mark() {
+    for runs in ["vendor/addon.node", "lib/codec.wasm", "bin/tool.exe", "native/libfoo.so", "native/libssl.so.3", "lib/x.dylib", "lib/X.DLL", "tools/app.jar", "tools/App.class",
+        "py/__pycache__/m.cpython-312.pyc"] {
+        assert!(kern::capability::other_code(runs) && kern::capability::compiled(runs), "{runs}");
+    }
+    assert_eq!(kern::capability::code_extension("native/libssl.so.3.0.1").as_deref(), Some("so"), "a shared library's version numbers come after its kind");
+    for data in ["assets/logo.png", "fonts/a.woff2", "docs/guide.pdf", "data/v1.2.json", "node_modules/x/addon.node", "notes.2024"] {
+        assert!(!kern::capability::other_code(data) && !kern::capability::compiled(data), "{data}");
+    }
+    assert!(kern::capability::other_code("src/a.py") && !kern::capability::compiled("src/a.py"));
+    let mut rules = clean_rules();
+    rules["changed"] = json!([{ "path": "src/total.js", "operation": "modify" }, { "path": "vendor/addon.node", "operation": "modify" }]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &rules, &clean_tests()));
+    assert!(!md.contains("✅ No new powers"), "Kern did not read the addon, so it cannot say it gained no power: {md}");
+}
+
+#[test]
 fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
     let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),

@@ -34,8 +34,15 @@ const TEXT_NAMES: [&str; 8] = ["AUTHORS", "CONTRIBUTORS", "MAINTAINERS", "CHANGE
 pub fn text_name(name: &str) -> bool { TEXT_NAMES.contains(&name.rsplit('/').next().unwrap_or(name)) }
 const OTHER_CODE: [&str; 33] = ["vue", "svelte", "astro", "mdx", "marko", "py", "rb", "go", "java", "kt", "kts", "rs", "php", "cs", "fs", "swift", "scala", "c", "cc", "cpp",
     "h", "hpp", "m", "mm", "dart", "ex", "exs", "lua", "pl", "sh", "bash", "erl", "clj"];
+const COMPILED: [&str; 9] = ["node", "wasm", "so", "dylib", "dll", "exe", "jar", "class", "pyc"];
+pub fn code_extension(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = path.rsplit('/').next().unwrap_or(path).split('.').collect();
+    while parts.len() > 2 && parts.last().is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) { parts.pop(); }
+    parts.last().filter(|_| parts.len() > 1).map(|e| e.to_ascii_lowercase())
+}
+pub fn compiled(path: &str) -> bool { !path.split('/').any(|d| d == "node_modules") && code_extension(path).is_some_and(|e| COMPILED.contains(&e.as_str())) }
 pub fn other_code(path: &str) -> bool {
-    !path.split('/').any(|d| d == "node_modules") && path.rsplit('/').next().and_then(|n| n.rsplit_once('.')).is_some_and(|(_, e)| OTHER_CODE.contains(&e.to_ascii_lowercase().as_str()))
+    compiled(path) || (!path.split('/').any(|d| d == "node_modules") && code_extension(path).is_some_and(|e| OTHER_CODE.contains(&e.as_str())))
 }
 pub fn is_data(name: &str) -> bool { DATA.contains(&extension(name)) || declaration(name) || text_name(name) }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

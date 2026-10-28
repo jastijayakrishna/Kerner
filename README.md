@@ -261,7 +261,8 @@ Then add the workflow file at the top of this page to a repository, pointing `us
   run (another runner, a failed install, no results, Kern's own environment failing), the answer is not verified and says why, never ✅;
   the rules that need no test run still apply, so a look they find is still a look. A
   project with no test script, whose own test script finds no test files, or whose test script only prints a message, is not verified:
-  no test checks the change, and the receipt says so; changed code in other languages is listed as "not checked", never passed quietly.
+  no test checks the change, and the receipt says so; changed code in other languages, and compiled code (a `.node` addon, `.wasm`, a
+  shared library, a `.jar`), is listed as "not checked", never passed quietly.
 - Kern runs Node 18, 20, 22, 24 or 26, the major the project asks for, from the official images; a project that asks for another major
   runs on the next one Kern has. It runs a build step or `pretest` script only when the tests cannot load without it, or when the test
   script runs files from build output (`out/`, `dist/`) that are not in the repository; when the runner names a missing workspace package

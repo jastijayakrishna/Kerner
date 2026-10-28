@@ -197,8 +197,11 @@ pub fn prepare(repo: &Path, base: &str, head: &str, out: &Path) -> R<Value> {
     let names = git_with(repo, &["diff", "--no-renames", "--name-only", "-z", base, head], None, 64 << 20)?;
     let paths: Vec<String> = names.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).to_string()).collect();
     let code: Vec<&String> = paths.iter().filter(|p| measurable(p)).collect();
-    let mut skipped: Vec<Value> = paths.iter().filter(|p| crate::capability::other_code(p))
-        .map(|p| json!({ "path": p, "why": format!("a .{} file; Kern does not run .{} code yet", extension(p), extension(p)) })).collect();
+    let mut skipped: Vec<Value> = paths.iter().filter(|p| crate::capability::other_code(p)).map(|p| {
+        let e = crate::capability::code_extension(p).unwrap_or_default();
+        let why = if crate::capability::compiled(p) { format!("compiled code (a .{e} file), which Kern does not read") } else { format!("a .{e} file; Kern does not run .{e} code yet") };
+        json!({ "path": p, "why": why })
+    }).collect();
     let (mut room, mut kept) = (MOST_TEXT, BTreeSet::new());
     for p in &code {
         let size = old_at.get(*p).map_or(0, |i| i.size.min(LARGEST)) + new_at.get(*p).map_or(0, |i| i.size.min(LARGEST));
