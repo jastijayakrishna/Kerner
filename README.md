@@ -22,6 +22,8 @@ Save this file in your repository as `.github/workflows/kern.yml` ([examples/ker
 name: Kern
 on:
   pull_request:
+  push:
+    branches: [main]
   issue_comment:
     types: [created]
 permissions:
@@ -32,7 +34,7 @@ permissions:
   id-token: write
 jobs:
   kern:
-    if: github.event_name == 'pull_request' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/kern'))
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/kern'))
     uses: jastijayakrishna/Kerner/.github/workflows/kern.yml@one
     secrets: inherit
 ```

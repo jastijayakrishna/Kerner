@@ -1,0 +1,75 @@
+name: Kern's sandbox
+description: Decide how this machine runs code it must not trust, install gVisor on a kept machine, and write verifier.json and operator.json next to a checks folder for the Kern binary given
+
+inputs:
+  kern:
+    description: The Kern binary, built where no untrusted code ran
+    required: true
+
+outputs:
+  runtime:
+    description: runc on a machine that is thrown away after the job, runsc (gVisor) on a kept one
+    value: ${{ steps.mode.outputs.runtime }}
+  work:
+    description: The folder holding verifier.json, operator.json and checks/
+    value: ${{ steps.mode.outputs.work }}
+
+runs:
+  using: composite
+  steps:
+    - name: How this machine runs code it must not trust
+      id: mode
+      shell: bash
+      run: |
+        if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+          echo "runtime=runsc" >> "$GITHUB_OUTPUT"
+          echo "The machine is kept between jobs, so the code runs in gVisor"
+        else
+          echo "runtime=runc" >> "$GITHUB_OUTPUT"
+          echo "This machine holds no keys and is deleted after the job, so the code runs in locked containers, the way CI runs it"
+        fi
+        echo "work=$RUNNER_TEMP/kern" >> "$GITHUB_OUTPUT"
+
+    - name: gVisor
+      if: steps.mode.outputs.runtime == 'runsc'
+      shell: bash
+      run: |
+        for tool in docker git jq curl; do command -v "$tool" > /dev/null || { echo "::error::Kern needs $tool on the runner"; exit 1; }; done
+        if ! docker info --format '{{json .Runtimes}}' | grep '"runsc"' > /dev/null; then
+          command -v apt-get > /dev/null || { echo "::error::Docker has no gVisor runtime (runsc) and this runner is not Ubuntu or Debian: install gVisor for Docker first"; exit 1; }
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+            | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq runsc > /dev/null
+          sudo runsc install && sudo systemctl restart docker
+        fi
+
+    - name: Sandbox
+      shell: bash
+      env:
+        KERN_BIN: ${{ inputs.kern }}
+        RUNTIME: ${{ steps.mode.outputs.runtime }}
+      run: |
+        set -euo pipefail
+        for tool in docker git jq curl; do command -v "$tool" > /dev/null || { echo "::error::Kern needs $tool on the runner"; exit 1; }; done
+        W="$RUNNER_TEMP/kern" && rm -rf "$W" && mkdir -p "$W/checks" && cd "$W"
+        real() { readlink -f "$(command -v "$1")"; }
+        hash() { sha256sum "$1" | cut -d' ' -f1; }
+        if [ "$RUNTIME" = runc ]; then
+          runtime=$(real runc)
+          printf '{"host":"github-actions","deployment":"single-vm","machine":"throwaway","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
+        else
+          runtime=$(readlink -f "$(docker info --format '{{json .Runtimes.runsc}}' | jq -r .path)")
+          printf '{"host":"github-actions","deployment":"single-vm","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
+        fi
+        jq -n --arg docker "$(real docker)" --arg git "$(real git)" --arg runtime "$runtime" --arg version "$("$runtime" --version)" --arg policy "$W/host-policy.json" \
+          --arg dh "$(hash "$(real docker)")" --arg gh "$(hash "$(real git)")" --arg rh "$(hash "$runtime")" --arg ph "$(hash host-policy.json)" --arg name "$RUNTIME" \
+          '{ version: 1, role: "verifier", docker: { file: $docker, sha256: $dh, endpoint: "unix:///var/run/docker.sock" }, git: { file: $git, sha256: $gh },
+             runtime: { file: $runtime, sha256: $rh, version: $version, arguments: [], name: $name }, host_policy: { file: $policy, sha256: $ph } }' > verifier.json
+        "$KERN_BIN" --control verifier.json doctor > doctor.json || { cat doctor.json; exit 1; }
+        docker pull -q node:22-bookworm-slim > /dev/null
+        printf '{"version":1,"cases":[{"command":["/usr/local/bin/npm","test"],"stdout":null}]}\n' > checks/test-suite.json
+        jq -n --arg image "$(docker image inspect --format '{{.Id}}' node:22-bookworm-slim)" --arg builder "$(jq -r .builder.sha256 doctor.json)" \
+          --argjson check "$("$KERN_BIN" pin-check test-suite checks/test-suite.json)" --arg repo "$GITHUB_REPOSITORY" \
+          '{ version: 3, repository: $repo, deployment: "single-vm", executors: ["external"], image: $image,
+             builders: { executor: null, verifier: $builder }, checks: [$check], registry: null, permissions: {} }' > operator.json

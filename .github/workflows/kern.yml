@@ -14,7 +14,7 @@ permissions: {}
 
 jobs:
   plan:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -33,6 +33,7 @@ jobs:
         run: echo "on=$KEYED" >> "$GITHUB_OUTPUT"
 
       - name: Mark the pull request as being checked
+        if: github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -95,7 +96,7 @@ jobs:
   investigate:
     name: Kern investigates
     needs: [plan, build]
-    if: needs.plan.outputs.ai == 'true'
+    if: github.event_name == 'pull_request' && needs.plan.outputs.ai == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -179,6 +180,7 @@ jobs:
 
   run:
     needs: plan
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     permissions:
@@ -193,17 +195,6 @@ jobs:
       BASE_REF: ${{ github.event.pull_request.base.ref }}
       NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: How this machine runs the pull request's code
-        id: mode
-        run: |
-          if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
-            echo "runtime=runsc" >> "$GITHUB_OUTPUT"
-            echo "The machine is kept between jobs, so the pull request's code runs in gVisor"
-          else
-            echo "runtime=runc" >> "$GITHUB_OUTPUT"
-            echo "This machine holds no keys and is deleted after the job, so the pull request's code runs in locked containers, the way CI runs it"
-          fi
-
       - name: Check out the pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -279,47 +270,17 @@ jobs:
           fi
           echo "bin=$b" >> "$GITHUB_OUTPUT"
 
-      - name: gVisor
-        if: steps.mode.outputs.runtime == 'runsc'
-        run: |
-          for tool in docker git jq curl; do command -v "$tool" > /dev/null || { echo "::error::Kern needs $tool on the runner"; exit 1; }; done
-          if ! docker info --format '{{json .Runtimes}}' | grep '"runsc"' > /dev/null; then
-            command -v apt-get > /dev/null || { echo "::error::Docker has no gVisor runtime (runsc) and this runner is not Ubuntu or Debian: install gVisor for Docker first"; exit 1; }
-            curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
-              | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
-            sudo apt-get update -qq && sudo apt-get install -y -qq runsc > /dev/null
-            sudo runsc install && sudo systemctl restart docker
-          fi
-
       - name: Sandbox
-        env:
-          KERN_BIN: ${{ steps.install.outputs.bin }}
-          RUNTIME: ${{ steps.mode.outputs.runtime }}
-        run: |
-          set -euo pipefail
-          for tool in docker git jq curl; do command -v "$tool" > /dev/null || { echo "::error::Kern needs $tool on the runner"; exit 1; }; done
-          W="$RUNNER_TEMP/kern" && rm -rf "$W" && mkdir -p "$W/checks" && cd "$W"
-          real() { readlink -f "$(command -v "$1")"; }
-          hash() { sha256sum "$1" | cut -d' ' -f1; }
-          if [ "$RUNTIME" = runc ]; then
-            runtime=$(real runc)
-            printf '{"host":"github-actions","deployment":"single-vm","machine":"throwaway","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
-          else
-            runtime=$(readlink -f "$(docker info --format '{{json .Runtimes.runsc}}' | jq -r .path)")
-            printf '{"host":"github-actions","deployment":"single-vm","reviewed":"%s"}\n' "$(date -u +%F)" > host-policy.json
-          fi
-          jq -n --arg docker "$(real docker)" --arg git "$(real git)" --arg runtime "$runtime" --arg version "$("$runtime" --version)" --arg policy "$W/host-policy.json" \
-            --arg dh "$(hash "$(real docker)")" --arg gh "$(hash "$(real git)")" --arg rh "$(hash "$runtime")" --arg ph "$(hash host-policy.json)" --arg name "$RUNTIME" \
-            '{ version: 1, role: "verifier", docker: { file: $docker, sha256: $dh, endpoint: "unix:///var/run/docker.sock" }, git: { file: $git, sha256: $gh },
-               runtime: { file: $runtime, sha256: $rh, version: $version, arguments: [], name: $name }, host_policy: { file: $policy, sha256: $ph } }' > verifier.json
-          "$KERN_BIN" --control verifier.json doctor > doctor.json || { cat doctor.json; exit 1; }
-          docker pull -q node:22-bookworm-slim > /dev/null
-          printf '{"version":1,"cases":[{"command":["/usr/local/bin/npm","test"],"stdout":null}]}\n' > checks/test-suite.json
-          jq -n --arg image "$(docker image inspect --format '{{.Id}}' node:22-bookworm-slim)" --arg builder "$(jq -r .builder.sha256 doctor.json)" \
-            --argjson check "$("$KERN_BIN" pin-check test-suite checks/test-suite.json)" --arg repo "$GITHUB_REPOSITORY" \
-            '{ version: 3, repository: $repo, deployment: "single-vm", executors: ["external"], image: $image,
-               builders: { executor: null, verifier: $builder }, checks: [$check], registry: null, permissions: {} }' > operator.json
+        uses: ./.kern/.github/actions/sandbox
+        with:
+          kern: ${{ steps.install.outputs.bin }}
+
+      - name: The plan Kern learned for this base, if its branch was learned
+        id: plans
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/plans
+          key: kern-plan-v1-${{ needs.plan.outputs.kern }}-${{ github.event.pull_request.base.sha }}
 
       - name: Check
         env:
@@ -327,6 +288,7 @@ jobs:
           KERN_KEEP: ${{ runner.environment == 'github-hosted' && '1' || '0' }}
           BASE: ${{ steps.base.outputs.sha }}
           KERN_CHECK_AI: "0"
+          KERN_PLANS: ${{ steps.plans.outputs.cache-hit == 'true' && format('{0}/plans', runner.temp) || '' }}
           AI: ${{ needs.plan.outputs.ai }}
           GITHUB_TOKEN: ${{ github.token }}
           INVESTIGATION: kern-investigation-${{ github.run_attempt }}
@@ -371,9 +333,90 @@ jobs:
           W="$RUNNER_TEMP/kern"
           if { [ -f "$W/out/setup.json" ] || [ -f "$W/out/volumes.txt" ]; } && [ -x "$KERN_BIN" ]; then "$KERN_BIN" --control "$W/verifier.json" drive clean "$W/out" > /dev/null || true; fi
 
+  learn:
+    name: Kern learns the setup
+    needs: [plan, build]
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    continue-on-error: true
+    permissions:
+      contents: read
+    concurrency:
+      group: kern-learn-${{ github.repository }}
+      cancel-in-progress: true
+    steps:
+      - name: Kern, built where no untrusted code ran
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: kern-trusted-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trusted
+
+      - name: Check it is the Kern the build job made
+        env:
+          WANT: ${{ needs.build.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          K="$RUNNER_TEMP/trusted/kern"
+          [ "$(sha256sum "$K" | cut -d' ' -f1)" = "$WANT" ] || { echo "::error::The Kern binary is not the one the build job made"; exit 1; }
+          chmod +x "$K"
+
+      - name: Check out the commit pushed to the default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: repo
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Check out Kern, for its sandbox steps
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: jastijayakrishna/Kerner
+          ref: ${{ needs.plan.outputs.kern }}
+          path: .kern
+          persist-credentials: false
+
+      - name: Sandbox
+        uses: ./.kern/.github/actions/sandbox
+        with:
+          kern: ${{ runner.temp }}/trusted/kern
+
+      - name: The plan learned for the commit before this one, kept when the setup files did not change
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/plans
+          key: kern-plan-v1-${{ needs.plan.outputs.kern }}-${{ github.event.before }}
+          restore-keys: kern-plan-v1-${{ needs.plan.outputs.kern }}-
+
+      - name: Learn this repository's setup from its CI job, or from the setup engineer when a key is given, by running it twice
+        id: learn
+        env:
+          KERN_BIN: ${{ runner.temp }}/trusted/kern
+          KERN_PLANS: ${{ runner.temp }}/plans
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -uo pipefail
+          W="$RUNNER_TEMP/kern"
+          "$KERN_BIN" --control "$W/verifier.json" learn "$GITHUB_WORKSPACE/repo" "$GITHUB_SHA" "$W/out" "$W/operator.json" > "$W/learn.json" 2> "$W/learn.err"
+          status=$(jq -r '.status // empty' "$W/learn.json" 2> /dev/null) || status=""
+          if [ -n "$status" ]; then why=$(jq -r '.why // ""' "$W/learn.json"); else status="FAILED"; why="Kern could not finish: $(jq -r '.reason // empty' "$W/learn.err" 2> /dev/null || tail -c 2000 "$W/learn.err")"; fi
+          echo "$status: $why"
+          { echo "### Kern learned the setup of $GITHUB_SHA"; echo; echo "- $status: $why"; } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf "$KERN_PLANS" && mkdir -p "$KERN_PLANS"
+          if cp "$W"/out/plan-*.json "$KERN_PLANS"/ 2> /dev/null; then echo "learned=true" >> "$GITHUB_OUTPUT"; else echo "learned=false" >> "$GITHUB_OUTPUT"; fi
+          exit 0
+
+      - name: Keep the plan, so every pull request on this commit is checked through it
+        if: steps.learn.outputs.learned == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/plans
+          key: kern-plan-v1-${{ needs.plan.outputs.kern }}-${{ github.sha }}
+
   sign:
     needs: [plan, build, run]
-    if: always() && needs.plan.result == 'success'
+    if: always() && needs.plan.result == 'success' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
