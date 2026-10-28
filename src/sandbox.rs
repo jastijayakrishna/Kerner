@@ -376,6 +376,18 @@ impl Capped {
         out
     }
 }
+pub fn some_of(path: impl AsRef<Path>, max: usize, end: bool) -> Vec<u8> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let Ok(mut file) = options.open(path) else { return Vec::new() };
+    let Some(len) = file.metadata().ok().filter(|m| m.is_file()).map(|m| m.len()) else { return Vec::new() };
+    if end && len > max as u64 && std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(len - max as u64)).is_err() { return Vec::new(); }
+    let mut out = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut std::io::Read::take(file, max as u64), &mut out);
+    out
+}
 pub const TOOLS: &str = "/workspace/.kern-tools";
 pub const TOOL_NPM_ARGS: [&str; 3] = ["--workspaces=false", "--userconfig=/dev/null", "--globalconfig=/dev/null"];
 const IMAGE_COREPACK: &str = "/usr/local/lib/node_modules/corepack/dist/corepack.js";
@@ -675,6 +687,7 @@ mod inside {
     const OUT_TAIL_BYTES_MAX: usize = 32 << 20;
     const ERR_HEAD_BYTES_MAX: usize = 64 << 10;
     const ERR_TAIL_BYTES_MAX: usize = 1 << 20;
+    const SHOW_BYTES_MAX: usize = 8 << 20;
     fn capture<T: std::io::Read + Send + 'static>(from: Option<T>, path: &'static str, head: usize, tail: usize) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut kept = super::Capped::new(head, tail);
@@ -682,7 +695,8 @@ mod inside {
                 let mut buf = vec![0u8; 64 << 10];
                 while let Ok(n) = std::io::Read::read(&mut source, &mut buf) { if n == 0 { break; } kept.push(&buf[..n]); }
             }
-            let _ = std::fs::write(path, kept.finish());
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(path).and_then(|mut f| std::io::Write::write_all(&mut f, &kept.finish()));
         })
     }
     fn config(name: &str) -> R<Value> { read_json(Path::new("/kern").join(name)) }
@@ -929,10 +943,6 @@ mod inside {
         std::io::Write::write_all(&mut out, bytes)?;
         Ok(())
     }
-    fn some_of(path: &str, max: usize, end: bool) -> Vec<u8> {
-        let b = std::fs::read(path).unwrap_or_default();
-        if b.len() <= max { b } else if end { b[b.len() - max..].to_vec() } else { b[..max].to_vec() }
-    }
     fn seal(path: &Path, inside: bool, roots: &mut Vec<PathBuf>, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for e in entries.flatten() {
@@ -975,10 +985,12 @@ mod inside {
         let cwd = super::test_dir(dir)?;
         let name = format!("{} {script}", if dir.is_empty() { "." } else { dir });
         let (out, err) = ("/tmp/.kern-step-out", "/tmp/.kern-step-err");
-        let child = Command::new("/usr/local/bin/npm").args(["run", script]).current_dir(&cwd).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
-            .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create(out)?)).stderr(Stdio::from(std::fs::File::create(err)?)).spawn()?;
+        let mut child = Command::new("/usr/local/bin/npm").args(["run", script]).current_dir(&cwd).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+            .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let readers = [capture(child.stdout.take(), out, ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX), capture(child.stderr.take(), err, ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX)];
         let (finished, exit) = ended(child, wait)?;
         quiesce()?;
+        for r in readers { let _ = r.join(); }
         let tail = |p: &str| String::from_utf8_lossy(&some_of(p, 16 << 10, true)).to_string();
         Ok(json!({ "name": name, "finished": finished, "exit": exit, "errors": format!("{}\n{}", tail(out), tail(err)) }))
     }
@@ -999,12 +1011,15 @@ mod inside {
     }
     fn fault_run(run: &[String], dir: &str, (env, options): (&[(String, String)], &str), target: &Path, wait: Duration) -> R<Value> {
         for f in ["/tmp/.kern-report.json", "/tmp/.kern-fault-served", "/tmp/.kern-fault-values"] { let _ = std::fs::remove_file(f); }
-        let child = Command::new(&run[0]).args(&run[1..]).current_dir(dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+        let mut child = Command::new(&run[0]).args(&run[1..]).current_dir(dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
             .env("NODE_OPTIONS", format!("--require=/kern/fault.cjs{options}")).env("KERN_REPORT", "/tmp/.kern-report.json")
             .env("KERN_FAULT_FILE", target).env("KERN_FAULT_SOURCE", "/tmp/.kern-fault-src").env("KERN_FAULT_SERVED", "/tmp/.kern-fault-served").env("KERN_VALUES", "/tmp/.kern-fault-values")
-            .stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create("/tmp/.kern-fault-out")?)).stderr(Stdio::from(std::fs::File::create("/tmp/.kern-fault-err")?)).spawn()?;
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let readers = [capture(child.stdout.take(), "/tmp/.kern-fault-out", OUT_HEAD_BYTES_MAX, OUT_TAIL_BYTES_MAX),
+            capture(child.stderr.take(), "/tmp/.kern-fault-err", ERR_HEAD_BYTES_MAX, ERR_TAIL_BYTES_MAX)];
         let (finished, _) = ended(child, wait)?;
         quiesce()?;
+        for r in readers { let _ = r.join(); }
         let report = some_of("/tmp/.kern-report.json", 4 << 20, false);
         let reported = report.iter().any(|b| !b.is_ascii_whitespace());
         let output = if reported { report } else { some_of("/tmp/.kern-fault-out", 4 << 20, true) };
@@ -1078,11 +1093,13 @@ mod inside {
         }
         if command.iter().any(|a| a == super::PROGRESS_ARGS[2]) {
             let probe: Vec<String> = command.iter().filter(|a| !super::PROGRESS_ARGS.contains(&a.as_str())).cloned().chain(std::iter::once("--showConfig".to_string())).collect();
-            let shown = std::fs::File::create("/tmp/.kern-show")?;
-            let child = Command::new(&probe[0]).args(&probe[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
-                .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::from(shown)).stderr(Stdio::null()).spawn()?;
+            let mut child = Command::new(&probe[0]).args(&probe[1..]).current_dir(&dir).env_clear().envs(TEST_ENV).env("TZ", "UTC").envs(env.iter().cloned())
+                .env("NODE_OPTIONS", options.trim()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+            let reader = capture(child.stdout.take(), "/tmp/.kern-show", SHOW_BYTES_MAX, 0);
             let _ = wait(child, Duration::from_secs(60));
-            if super::own_reporters(&std::fs::read_to_string("/tmp/.kern-show").unwrap_or_default()) { command.retain(|a| !super::PROGRESS_ARGS.contains(&a.as_str())); }
+            quiesce()?;
+            let _ = reader.join();
+            if super::own_reporters(&String::from_utf8_lossy(&some_of("/tmp/.kern-show", SHOW_BYTES_MAX, false))) { command.retain(|a| !super::PROGRESS_ARGS.contains(&a.as_str())); }
             let _ = std::fs::remove_file("/tmp/.kern-show");
         }
         let started = std::time::Instant::now();
@@ -1122,7 +1139,7 @@ mod inside {
             }
         }
         quiesce()?;
-        let over = |path: &str, max: u64| std::fs::metadata(path).is_ok_and(|m| m.len() > max);
+        let over = |path: &str, max: u64| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > max);
         let report = some_of("/tmp/.kern-report.json", 64 << 20, false);
         let reported = report.iter().any(|b| !b.is_ascii_whitespace());
         if over("/tmp/.kern-report.json", 64 << 20) { ending = "cut: the test report was larger than Kern's limit of 64 MiB".to_string(); }

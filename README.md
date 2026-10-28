@@ -269,7 +269,9 @@ Then add the workflow file at the top of this page to a repository, pointing `us
   script runs files from build output (`out/`, `dist/`) that are not in the repository; when the runner names a missing workspace package
   only after another is built, Kern builds it on a further pass, up to three passes. Tests that still cannot load cannot be checked,
   and the receipt says so with the first error instead of claiming anything. Temporary files the tests write go to a fresh folder on disk outside the project,
-  as on the project's own CI, and a flood of test output is cut to its start and end, so neither fills the sandbox.
+  as on the project's own CI. A flood of output from tests, build steps or planted-fault runs is cut to its start and end, and Kern reads
+  at most what it keeps of each file the tests write, never through a link. The temporary folder itself has no size limit: a test that
+  writes many gigabytes there can fill the machine's disk, which ends the check with an error, never with an answer.
 - Kern runs the tests with the network off. Tests that need the network, a database or a build step first fail before and after the
   change, so they are set aside, never blamed on it, and the receipt quotes why they did not run.
 - A pull request from a fork gets its receipt in the job's summary only: GitHub gives such runs a read-only token and no signature, so

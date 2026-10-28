@@ -90,3 +90,23 @@ fn review_stage1_r5_kerns_tool_folders_are_made_afresh_so_nothing_left_in_them_i
         assert!(tools.join("linked").symlink_metadata().unwrap().is_dir() && t.0.join("elsewhere/keep").is_file(), "a link is replaced, never followed");
     }
 }
+
+#[test]
+fn review_stage1_r6_kern_reads_at_most_what_it_keeps_of_a_file_the_tests_wrote_and_never_follows_a_link_or_waits_on_a_pipe() {
+    let t = Temp::new();
+    let report = t.0.join("report.json");
+    std::fs::write(&report, b"0123456789").unwrap();
+    assert_eq!(kern::sandbox::some_of(&report, 4, false), b"0123");
+    assert_eq!(kern::sandbox::some_of(&report, 4, true), b"6789", "the end of a long output is what Kern keeps of it");
+    assert_eq!(kern::sandbox::some_of(&report, 64, true), b"0123456789");
+    assert!(kern::sandbox::some_of(&t.0, 4, false).is_empty() && kern::sandbox::some_of(t.0.join("missing"), 4, false).is_empty(), "a folder or a missing file gives nothing");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/dev/zero", t.0.join("zero")).unwrap();
+        assert!(kern::sandbox::some_of(t.0.join("zero"), 4, false).is_empty(), "a test that links Kern's report file to /dev/zero gets nothing read, not an endless read");
+        std::os::unix::fs::symlink(&report, t.0.join("linked")).unwrap();
+        assert!(kern::sandbox::some_of(t.0.join("linked"), 4, false).is_empty(), "a link is never followed, even to a real file");
+        let made = std::process::Command::new("mkfifo").arg(t.0.join("pipe")).status().is_ok_and(|s| s.success());
+        assert!(!made || kern::sandbox::some_of(t.0.join("pipe"), 4, false).is_empty(), "a pipe in its place is not waited on");
+    }
+}
