@@ -649,7 +649,7 @@ for runner in vitest jest; do
   check "faults-none-$runner" "$faults_base" "faults-$runner-repo"
   decision "faults-none-$runner" clear
   jq -e '([.tests.faults[] | "\(.path):\(.line) \(.outcome)"] | sort) == ["src/price.js:2 missed", "src/price.js:2 missed", "src/ship.js:1 untested", "src/ship.js:1 untested"]
-    and ([.challenges[] | "\(.target) \(.kind)"] | sort) == ["free unasserted", "shipping unreached"]' "faults-none-$runner/receipt.json" > /dev/null \
+    and ([.challenges[] | "\(.target) \(.kind)"] | sort) == ["free unasserted"]' "faults-none-$runner/receipt.json" > /dev/null \
     || { jq .tests "faults-none-$runner/receipt.json"; fail "faults-none-$runner: a change no test checks was not found"; }
   grep -q 'the tests caught 0 of 2 small faults' "faults-none-$runner/receipt.md" || { cat "faults-none-$runner/receipt.md"; fail "faults-none-$runner: the receipt does not say no test checks the change"; }
 done
