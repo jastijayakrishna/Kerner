@@ -256,7 +256,8 @@ pub fn first_error(text: &str) -> Option<&str> {
     lines.iter().copied().find(|l| thrown(l)).or_else(|| lines.iter().copied().find(|l| marked(l)))
 }
 const STALE: &str = "installed from package.json (the lockfile is out of date)";
-pub const UNSCRIPTED: &str = "installed without its packages' install scripts, because they failed";
+const WITHOUT_SCRIPTS: &str = " without its packages' install scripts, because they failed";
+pub fn ran_without_scripts(result: &str) -> bool { result.ends_with(WITHOUT_SCRIPTS) }
 pub const COREPACK: &str = "corepack@0.36.0";
 pub fn plain_version(v: &str) -> bool {
     let (core, pre) = v.split_once('-').unwrap_or((v, ""));
@@ -350,13 +351,13 @@ pub fn remake_dir(path: &Path) -> std::io::Result<()> {
 pub fn with_workspace(dir: &str, has_node_modules: bool, records: &[Value]) -> bool {
     dir != "." && has_node_modules && records.iter().any(|r| r["dir"] == "." && r["result"].as_str().is_some_and(|s| s.starts_with("installed")))
 }
-pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, &'static str)>) {
+pub fn install_plan_for(dir: &Path, scripts: bool) -> (&'static str, Vec<(Vec<String>, String)>) {
     let (manager, attempts) = install_plan(dir);
-    if !scripts { return (manager, attempts); }
-    let mut scripted: Vec<(Vec<String>, &'static str)> = attempts.iter().map(|(argv, said)| {
-        (argv.iter().filter(|a| !["--ignore-scripts", "--ignore-pnpmfile", "--mode=skip-build"].contains(&a.as_str())).cloned().collect(), *said)
+    if !scripts { return (manager, attempts.into_iter().map(|(argv, said)| (argv, said.to_string())).collect()); }
+    let mut scripted: Vec<(Vec<String>, String)> = attempts.iter().map(|(argv, said)| {
+        (argv.iter().filter(|a| !["--ignore-scripts", "--ignore-pnpmfile", "--mode=skip-build"].contains(&a.as_str())).cloned().collect(), said.to_string())
     }).collect();
-    scripted.extend(attempts.into_iter().map(|(argv, _)| (argv, UNSCRIPTED)));
+    scripted.extend(attempts.into_iter().map(|(argv, said)| (argv, format!("{said}{WITHOUT_SCRIPTS}"))));
     (manager, scripted)
 }
 pub struct Capped { head: Vec<u8>, tail: std::collections::VecDeque<u8>, dropped: u64, head_max: usize, tail_max: usize }
@@ -409,7 +410,7 @@ pub fn bun_tools(arch: &str) -> Option<(String, String)> {
         entry: { "version": BUN, "resolved": format!("https://registry.npmjs.org/{package}/-/{file}-{BUN}.tgz"), "integrity": integrity, "license": "MIT", "os": ["linux"], "cpu": [cpu] } } });
     Some((format!("{manifest:#}\n"), format!("{lock:#}\n")))
 }
-pub fn launcher(manager: &str, attempts: &[(Vec<String>, &str)]) -> Option<Vec<String>> {
+pub fn launcher<S>(manager: &str, attempts: &[(Vec<String>, S)]) -> Option<Vec<String>> {
     if !["pnpm", "yarn", "bun"].contains(&manager) { return None; }
     attempts.first().and_then(|(argv, _)| argv.iter().position(|a| a == "install").map(|i| argv[..i].to_vec()))
 }
@@ -901,7 +902,7 @@ mod inside {
         let (mut result, mut scripts_failed) = (json!("failed"), None);
         let log = Path::new("/home/kern/install.log");
         for (argv, said) in &attempts {
-            if *said == super::UNSCRIPTED && scripts_failed.is_none() { scripts_failed = result.as_str().map(str::to_string); }
+            if super::ran_without_scripts(said) && scripts_failed.is_none() { scripts_failed = result.as_str().map(str::to_string); }
             let left = budget.saturating_sub(started.elapsed());
             if left.is_zero() { result = json!("out of time"); break; }
             if *dirty { quiesce()?; super::restore(&committed, dir, keep)?; }
@@ -920,7 +921,7 @@ mod inside {
         quiesce()?;
         let parts = if result.as_str().is_some_and(|r| r.starts_with("installed")) && super::adds_platform_parts(manager) { platform_parts(dir, (budget, started))? } else { Vec::new() };
         let mut record = json!({ "dir": d, "manager": manager, "result": result, "parts": parts });
-        if result == super::UNSCRIPTED && let Some(why) = scripts_failed { record["scripts_failed"] = json!(why); }
+        if result.as_str().is_some_and(super::ran_without_scripts) && let Some(why) = scripts_failed { record["scripts_failed"] = json!(why); }
         Ok((record, launcher))
     }
     fn platform_parts(dir: &Path, (budget, started): (Duration, std::time::Instant)) -> R<Vec<String>> {

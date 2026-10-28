@@ -878,12 +878,12 @@ fn setup_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Value
 fn unlocked(setup: &Value, dir: &str) -> Option<String> {
     ["old", "new"].iter().find_map(|side| {
         let result = setup_record(setup, side, dir)?["result"].as_str()?;
-        result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}, so each side resolved its own versions", result.chars().take(120).collect::<String>()))
+        result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}, so each side resolved its own versions", result.chars().take(200).collect::<String>()))
     })
 }
 pub fn setup_differs(setup: &Value, dir: &str) -> Option<String> {
     let (old, new) = (setup_record(setup, "old", dir)?, setup_record(setup, "new", dir)?);
-    let said = |r: &Value| r["result"].as_str().unwrap_or("").chars().take(120).collect::<String>();
+    let said = |r: &Value| r["result"].as_str().unwrap_or("").chars().take(200).collect::<String>();
     if old["result"] != new["result"] { return Some(format!("the old code's dependencies were {} and the new code's were {}", said(old), said(new))); }
     let parts = |r: &Value| -> BTreeSet<String> { r["parts"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() };
     if parts(old) != parts(new) { return Some("Kern fetched a different set of Linux parts for the dependencies on each side".to_string()); }

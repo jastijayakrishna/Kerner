@@ -159,3 +159,28 @@ fn review_1_a7_a_global_name_or_project_output_a_build_step_makes_is_never_a_blo
         assert_eq!(p["generated"], true, "{code}: Nuxt's auto-imports and project references come from files a build step makes, which Kern did not run: {p}");
     }
 }
+
+#[test]
+fn review_sec_b1_a_no_lockfile_install_whose_scripts_failed_on_both_sides_still_resolved_its_own_versions_so_new_ts_errors_never_block() {
+    let dir = std::env::temp_dir().join(format!("kern-b1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"app","dependencies":{"left-pad":"^1.3.0"}}"#).unwrap();
+    let plan = kern::sandbox::install_plan_for(&dir, true).1;
+    let fallback = plan.last().map(|(_, said)| said.to_string()).unwrap();
+    assert!(kern::sandbox::ran_without_scripts(&fallback) && fallback.contains("no lockfile"), "the fallback keeps what its attempt says about the lockfile: {plan:?}");
+    std::fs::write(dir.join("package-lock.json"), "{}").unwrap();
+    let locked = kern::sandbox::install_plan_for(&dir, true).1;
+    assert!(locked.iter().any(|(_, said)| &said[..] == "installed without its packages' install scripts, because they failed"), "a locked install's fallback says what stored checks say: {locked:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let side_of = |result: &str| json!({ "installs": [{ "dir": ".", "manager": "npm", "result": result, "parts": [] }], "scripts": true, "node": { "major": 22 } });
+    let both = |result: &str| json!({ "version": 1, "old": side_of(result), "new": side_of(result) });
+    let uneven = kern::suite::setup_differs(&both(&fallback), "");
+    assert!(uneven.as_deref().is_some_and(|w| w.contains("no lockfile")), "both sides resolved their own versions, minutes apart: {uneven:?}");
+    assert_eq!(kern::suite::setup_differs(&both("installed without its packages' install scripts, because they failed"), ""), None, "both sides installed from the same lockfile");
+    let clean = json!({ "status": "clean", "version": "5.6.3" });
+    let broken = side("kern-types: typescript 5.6.3\nsrc/total.ts(4,3): error TS2322: Type 'string' is not assignable to type 'number'.\nkern-types: exit 2 \n", "");
+    let mut p = judge("tsconfig.json", &clean, &broken, true, uneven);
+    confirm(&mut p, &broken, &broken);
+    assert!(matches!(verdict(&p), Verdict::Unverified(_)), "a floating dependency that moved between the two installs can bring the errors: {p}");
+}
