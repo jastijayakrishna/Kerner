@@ -51,8 +51,8 @@ One optional setting:
 
 Kern needs no AI key. With an `ANTHROPIC_API_KEY` secret it also investigates each pull request with Claude (item 10 below), in a job
 of its own that reads the code and never runs it; the job that runs the pull request's code still holds no keys. That job sends
-Anthropic the changed functions' old and new code, the old tests, documentation and callers that mention them, and the pull request's
-title and body. Without the key, your code never leaves GitHub's runners. Pull requests from forks get no secrets, so no AI step.
+Anthropic the changed functions' old and new code, the old tests, documentation and callers that mention them, and never the pull
+request's title or body. Without the key, your code never leaves GitHub's runners. Pull requests from forks get no secrets, so no AI step.
 
 See it on real pull requests: [kern-check-demo](https://github.com/jastijayakrishna/kern-check-demo/pulls?q=is%3Apr).
 

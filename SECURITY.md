@@ -4,7 +4,7 @@ Kern posts one signed receipt on a pull request. It does not make agents, patche
 
 ## Trust
 
-Everything that comes from the pull request is untrusted: its code, tests, package scripts, lockfiles, file names, and its title and body. The title and body reach the AI step, so they can carry prompt injection.
+Everything that comes from the pull request is untrusted: its code, tests, package scripts, lockfiles, file names, and its title and body. The title and body never reach the AI step; Kern reads them itself, and what they say can turn a finding into a look, never remove one.
 
 - **The run job.** The pull request's code runs only here. The job has no keys and a read-only token. The code runs in locked containers (read-only system, no privileges, an unprivileged user, memory and process limits) with the network off while tests run. The machine is thrown away afterwards; on a kept machine, gVisor is used instead.
 - **The build job.** It builds Kern from source with no cache, on a machine where no pull request code runs, and hands the binary on with its hash.
