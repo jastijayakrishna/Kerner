@@ -970,8 +970,10 @@ git commit -qam "Longer names, and a build that throws" && git rev-parse HEAD > 
 cd "$W"
 check lopsided "$lopsided_base" lopsidedrepo
 [ "$(jq -r .decision lopsided.json)" != blocked ] || { cat lopsided/receipt.md; fail "lopsided: a build the recording made on the old tree only blocked a later package"; }
-jq -e '[.tests.uneven_why[] | select(test("ended differently on the two sides"))] | length >= 1' lopsided/receipt.json > /dev/null \
+jq -e '([.tests.uneven_why // [] | .[] | select(test("ended differently on the two sides"))] | length >= 1) or ((.tests.why // "") | test("may not have reached every test run"))' lopsided/receipt.json > /dev/null \
   || { jq '{decision, tests}' lopsided/receipt.json; fail "lopsided: a recording that ended differently on the two sides did not leave the later package not verified"; }
+[ "$(jq -r .decision lopsided.json)" = look ] && jq -e '[.tests.builds.builds[] | select(.dir == "packages/chain" and .result == "broke")] | length == 1' lopsided/receipt.json > /dev/null \
+  || { jq '{decision, builds: .tests.builds}' lopsided/receipt.json; fail "lopsided: the build that broke on the new code only was not named as a look"; }
 jq -e '[.rules.settings[] | select(.path == "packages/chain/build.js")] | length == 1' lopsided/receipt.json > /dev/null \
   || { jq .rules.settings lopsided/receipt.json; fail "lopsided: the rewritten program the recorded script starts was not named"; }
 
