@@ -698,3 +698,18 @@ fn review_sec_s3_a_prisma_schema_or_a_tsconfig_an_install_hook_reads_is_not_a_fi
     let rules = rules_for(&base, &[("prisma/schema.prisma", "model User { id Int @id\n name String }\n"), ("tsconfig.build.json", "{\"compilerOptions\":{}}\n"), ("scripts/fix.js", "console.log(2);\n")], &[]);
     assert_eq!(paths(&rules, "install_files"), ["scripts/fix.js"], "prisma reads its schema and tsc its config; neither runs them, so a look saying the change runs code on install would be untrue: {}", rules["install_files"]);
 }
+
+#[test]
+fn review_sec_s4_a_patch_file_is_install_steering_only_where_something_applies_patches() {
+    let patch = "--- a/ssl/x.c\n+++ b/ssl/x.c\n@@ -1 +1 @@\n-a\n+b\n";
+    let plain = rules_for(&[("package.json", VITEST), ("Dockerfile", "FROM node:22\n")], &[("docker/patches/0001-fix-openssl.patch", patch)], &[]);
+    assert_eq!(paths(&plain, "install_files"), Vec::<String>::new(), "no patch-package, no patchedDependencies, no pnpm or yarn: no install applies it, so the look would be untrue: {}", plain["install_files"]);
+    let pnpm = rules_for(&[("package.json", VITEST), ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")], &[("patches/@tracerbench__core@8.0.1.patch", patch)], &[]);
+    assert_eq!(pnpm["install_files"], json!([{ "path": "patches/@tracerbench__core@8.0.1.patch", "operation": "add", "kind": "patch", "by": "pnpm" }]),
+        "emberjs/ember.js#21250: pnpm applies the patches its settings name, which Kern does not read: {}", pnpm["install_files"]);
+    let said = receipt::build(&drive_json(), &pnpm, &clean_tests())["look"][0]["what"].as_str().unwrap().to_string();
+    assert!(said.contains("pnpm") && said.contains("can change the code of an installed package"), "{said}");
+    let hook = r#"{"name":"app","scripts":{"test":"vitest run","postinstall":"patch-package"},"devDependencies":{"vitest":"3.2.0","patch-package":"8.0.0"}}"#;
+    let applied = rules_for(&[("package.json", hook)], &[("patches/axios+1.7.2.patch", patch)], &[]);
+    assert_eq!(applied["install_files"][0]["by"], "patch-package", "{}", applied["install_files"]);
+}

@@ -102,24 +102,36 @@ fn install_runs(dir: &str, v: &Value, out: &mut BTreeMap<String, String>) {
         }
     }
 }
-fn patch_file(p: &str, named: &BTreeSet<String>) -> bool {
+fn patch_file(p: &str, named: &BTreeSet<String>, applier: Option<&'static str>) -> Option<&'static str> {
+    if named.contains(p) { return Some("manifest"); }
     let lower = p.to_ascii_lowercase();
     let parts: Vec<&str> = lower.split('/').collect();
-    let yarn = parts.windows(2).any(|w| w == [".yarn", "patches"]);
-    named.contains(p) || (!harmless_note(p) && (yarn || (parts.contains(&"patches") && (lower.ends_with(".patch") || lower.ends_with(".diff")))))
+    if harmless_note(p) { return None; }
+    if parts.windows(2).any(|w| w == [".yarn", "patches"]) { return Some("yarn"); }
+    applier.filter(|_| parts.contains(&"patches") && (lower.ends_with(".patch") || lower.ends_with(".diff")))
+}
+fn patch_applier(manifests: &[Value], (old, new): (&Files, &Files)) -> Option<&'static str> {
+    let hooks = |v: &Value| v["scripts"].as_object().into_iter().flatten().any(|(n, s)| (INSTALL_HOOKS.contains(&n.as_str()) || pnpm_hook(n)) && s.as_str().is_some_and(|s| s.contains("patch-package")));
+    let declared = |v: &Value| ["dependencies", "devDependencies", "optionalDependencies"].iter().any(|s| v[s].get("patch-package").is_some());
+    if manifests.iter().any(|v| hooks(v) || declared(v)) { return Some("patch-package"); }
+    let pnpm = [old, new].iter().any(|f| f.keys().any(|k| ["pnpm-lock.yaml", "pnpm-workspace.yaml"].contains(&base_name(k))))
+        || manifests.iter().any(|v| v["packageManager"].as_str().is_some_and(|m| m.starts_with("pnpm@")));
+    pnpm.then_some("pnpm")
 }
 fn install_files(changes: &[(String, &'static str)], manifests: &BTreeSet<String>, (old, new): (&Files, &Files)) -> Vec<Value> {
-    let (mut patched, mut runs) = (BTreeSet::new(), BTreeMap::new());
+    let (mut patched, mut runs, mut read) = (BTreeSet::new(), BTreeMap::new(), Vec::new());
     for m in manifests {
         let dir = m.strip_suffix("package.json").unwrap_or("");
         for files in [old, new] {
             let Some(v) = files.get(m).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) else { continue };
             patches_named(dir, &v, &mut patched);
             install_runs(dir, &v, &mut runs);
+            read.push(v);
         }
     }
+    let applier = patch_applier(&read, (old, new));
     changes.iter().filter(|(p, _)| !dependency_file(p)).filter_map(|(p, op)| {
-        if patch_file(p, &patched) { return Some(json!({ "path": p, "operation": op, "kind": "patch" })); }
+        if let Some(by) = patch_file(p, &patched, applier) { return Some(json!({ "path": p, "operation": op, "kind": "patch", "by": by })); }
         runs.get(p).filter(|_| *op != "delete").map(|script| json!({ "path": p, "operation": op, "kind": "script", "script": script }))
     }).collect()
 }

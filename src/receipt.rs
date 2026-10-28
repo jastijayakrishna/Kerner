@@ -586,6 +586,7 @@ fn steering_items(f: &mut Found, rules: &Value) {
     for x in rules["install_files"].as_array().into_iter().flatten() {
         f.look.push(item("install", match (x["kind"].as_str(), x["operation"].as_str()) {
             (Some("patch"), Some("delete")) => format!("{} is a patch an install applied, and the change deletes it, so the package it patched installs without it", path_of(x)),
+            (Some("patch"), _) if ["pnpm", "yarn"].contains(&x["by"].as_str().unwrap_or("")) => format!("{} is in a patches folder of a {} project, and {} applies the patches its settings name when dependencies install, so it can change the code of an installed package; Kern does not read which patches they name, or the patches", path_of(x), x["by"].as_str().unwrap_or(""), x["by"].as_str().unwrap_or("")),
             (Some("patch"), _) => format!("{} is a patch an install applies, so it changes the code of an installed package, and Kern does not read patches", path_of(x)),
             _ => format!("{} runs when dependencies install ({}), so the change runs code on every machine that installs, before any test", path_of(x), code(x["script"].as_str().unwrap_or(""), 80)),
         }));
