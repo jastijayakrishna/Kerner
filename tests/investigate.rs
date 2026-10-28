@@ -759,5 +759,7 @@ fn kern_retries_overload_rate_limits_and_server_errors_and_waits_at_most_a_minut
     assert_eq!(investigate::retry_wait(429, Some("7"), 1, 9), Some(Duration::from_secs(7)));
     let out = investigate::call("not-a-key", &json!({}), 0).unwrap_err().0;
     assert!(out.contains("Kern's time for the AI step ran out"), "with no time left no request is sent: {out}");
-    assert!(investigate::INVESTIGATE_SECS_MAX < 30 * 60, "the cap stays under the investigate job's 30-minute timeout");
+    let job_timeout_secs: u64 = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows/kern.yml")).unwrap().split("name: Kern investigates").nth(1).unwrap()
+        .lines().find_map(|l| l.trim().strip_prefix("timeout-minutes: ")).unwrap().trim().parse::<u64>().unwrap() * 60;
+    assert!(investigate::INVESTIGATE_SECS_MAX < job_timeout_secs, "the cap stays under the investigate job's timeout of {job_timeout_secs} seconds");
 }

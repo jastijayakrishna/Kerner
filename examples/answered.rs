@@ -21,8 +21,8 @@ fn run(args: &[String]) -> R<Value> {
     let answers = PathBuf::from(&args[5]);
     std::fs::create_dir_all(&answers)?;
     let pr = investigate::read_pr(Path::new(&args[3]))?;
-    let ask = |p: &Prompt| asked(&answers, p);
-    investigate::investigate(Path::new(&args[0]), (&args[1], &args[2]), &pr, Path::new(&args[4]), Some(&ask))
+    let ask = |p: &Prompt, _secs: u64| asked(&answers, p);
+    investigate::investigate(Path::new(&args[0]), (&args[1], &args[2]), &pr, Path::new(&args[4]), Some(&ask), ANSWERER)
 }
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
