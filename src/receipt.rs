@@ -541,6 +541,23 @@ fn dependency_note(deps: &[&Value]) -> String {
     if !counted.is_empty() { what += &format!("{} {}", if moved.is_empty() { ":" } else { ";" }, counted.join("; ")); }
     format!("{what} ({})", deps.iter().map(|d| path_of(d)).collect::<Vec<_>>().join(", "))
 }
+fn shown_move(m: &Value) -> String {
+    m.as_str().map_or_else(|| format!("{} {} → {}", m["action"].as_str().unwrap_or(""), m["from"].as_str().unwrap_or(""), m["to"].as_str().unwrap_or("")), str::to_string)
+}
+fn protected_items(f: &mut Found, rules: &Value) {
+    let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
+    for x in rules["protected"].as_array().into_iter().flatten() {
+        let Some(moves) = x["moves"].as_array() else { f.look.push(item("protected", format!("{} is a CI, secret or configuration file", path_of(x)))); continue };
+        let unconfirmed: Vec<String> = moves.iter().filter(|m| m["release"] != true).map(shown_move).collect();
+        if unconfirmed.is_empty() {
+            f.notes.push(item("protected", format!("{} only moves pinned actions, each to a higher version tag of the same action, which another owner publishes: {}", path_of(x),
+                listed(&moves.iter().map(shown_move).collect::<Vec<_>>(), 200))));
+        } else {
+            f.look.push(item("protected", format!("{} moves a pinned action to a ref Kern did not confirm is a higher version tag of an action another owner publishes: {}. GitHub runs whatever a ref names, even a commit that exists only in a fork or a tag this repository's own owner made",
+                path_of(x), listed(&unconfirmed, 200))));
+        }
+    }
+}
 fn steering_items(f: &mut Found, rules: &Value) {
     let path_of = |x: &Value| code(x["path"].as_str().unwrap_or(""), 160);
     for x in rules["settings"].as_array().into_iter().flatten() {
@@ -549,12 +566,7 @@ fn steering_items(f: &mut Found, rules: &Value) {
             None => f.look.push(item("settings", format!("{} changes the test runner's settings, which decide which tests run and how their results are read", path_of(x)))),
         }
     }
-    for x in rules["protected"].as_array().into_iter().flatten() {
-        match x["moves"].as_array() {
-            Some(_) => f.notes.push(item("protected", format!("{} moves a pinned action to another release: {}", path_of(x), listed(&strings(&x["moves"]), 200)))),
-            None => f.look.push(item("protected", format!("{} is a CI, secret or configuration file", path_of(x)))),
-        }
-    }
+    protected_items(f, rules);
     let deps: Vec<&Value> = rules["dependencies"].as_array().into_iter().flatten().collect();
     for d in &deps {
         let fields = strings(&d["fields"]);

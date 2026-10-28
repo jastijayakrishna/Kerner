@@ -93,33 +93,57 @@ fn quiet(p: &str, text: Option<&str>) -> bool {
     let harmless = |k: &String| !crate::capability::secret_name(k) && !RUNS_CODE_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
     (base == ".env" || base.starts_with(".env.")) && text.and_then(env_keys).is_some_and(|keys| keys.iter().all(harmless))
 }
-fn shown_ref(r: &str) -> String {
-    let (at, comment) = r.split_once('#').map_or((r.trim(), ""), |(a, c)| (a.trim(), c.trim()));
-    let short = if at.len() == 40 && at.bytes().all(|b| b.is_ascii_hexdigit()) { &at[..12] } else { at };
-    if comment.is_empty() { short.to_string() } else { format!("{short} ({comment})") }
+fn workflow_file(p: &str) -> bool {
+    let lower = p.to_ascii_lowercase();
+    let yaml = |n: &str| n.ends_with(".yml") || n.ends_with(".yaml");
+    lower.strip_prefix(".github/workflows/").is_some_and(|n| !n.contains('/') && yaml(n)) || matches!(base_name(&lower), "action.yml" | "action.yaml")
 }
-fn uses_line(l: &str) -> Option<(&str, &str, &str)> {
+struct Uses<'a> { prefix: &'a str, action: &'a str, at: &'a str, note: &'a str }
+fn uses_line(l: &str) -> Option<Uses<'_>> {
     let (prefix, rest) = l.split_once("uses:")?;
-    let (action, at) = rest.trim().split_once('@')?;
-    (!action.is_empty() && !at.trim().is_empty() && prefix.trim_start_matches([' ', '\t', '-']).is_empty()).then_some((prefix, action.trim(), at.trim()))
+    let rest = rest.trim();
+    let cut = rest.match_indices('#').map(|(i, _)| i).find(|i| rest[..*i].ends_with([' ', '\t'])).unwrap_or(rest.len());
+    let (value, note) = (rest[..cut].trim(), rest[cut..].trim_start_matches('#').trim());
+    let value = ['"', '\''].iter().find_map(|q| value.strip_prefix(*q).and_then(|v| v.strip_suffix(*q))).unwrap_or(value);
+    let (action, at) = value.split_once('@')?;
+    (!action.is_empty() && !at.is_empty() && prefix.trim_start_matches([' ', '\t', '-']).is_empty()).then_some(Uses { prefix, action, at, note })
 }
-fn line_counts(t: &str) -> BTreeMap<&str, usize> { t.lines().map(str::trim_end).fold(BTreeMap::new(), |mut m, l| { *m.entry(l).or_insert(0) += 1; m }) }
-fn action_moves(old: &str, new: &str) -> Option<Vec<String>> {
-    let (a, b) = (line_counts(old), line_counts(new));
-    let only = |x: &BTreeMap<&str, usize>, y: &BTreeMap<&str, usize>| -> Vec<String> {
-        x.iter().flat_map(|(l, n)| std::iter::repeat_n(l.to_string(), n.saturating_sub(y.get(l).copied().unwrap_or(0)))).collect()
-    };
-    let (removed, mut added) = (only(&a, &b), only(&b, &a));
-    if removed.is_empty() || removed.len() != added.len() { return None; }
+fn shown_ref(at: &str, note: &str) -> String {
+    let short = if at.len() == 40 && at.bytes().all(|b| b.is_ascii_hexdigit()) { &at[..12] } else { at };
+    if note.is_empty() { short.to_string() } else { format!("{short} ({note})") }
+}
+fn version_tag(at: &str) -> Option<[u64; 3]> {
+    let parts: Vec<&str> = at.strip_prefix('v').unwrap_or(at).split('.').collect();
+    if parts.len() > 3 || parts.iter().any(|p| p.is_empty() || p.len() > 9 || !p.bytes().all(|b| b.is_ascii_digit())) { return None; }
+    let mut v = [0u64; 3];
+    for (i, p) in parts.iter().enumerate() { v[i] = p.parse().ok()?; }
+    Some(v)
+}
+fn action_owner(action: &str) -> Option<String> {
+    let mut parts = action.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let path_ok = parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)));
+    (path_ok && crate::github::repository(&format!("{owner}/{name}"))).then(|| owner.to_ascii_lowercase())
+}
+fn origin_owner(repo: &Path) -> Option<String> {
+    let url = crate::git::trimmed(git_with(repo, &["config", "--get", "remote.origin.url"], None, 4096).ok()?);
+    let mut parts = url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']);
+    let (name, owner) = (parts.next()?, parts.next()?);
+    crate::github::repository(&format!("{owner}/{name}")).then(|| owner.to_ascii_lowercase())
+}
+fn action_moves(old: &str, new: &str, owner: Option<&str>) -> Option<Vec<Value>> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().map(str::trim_end).collect(), new.lines().map(str::trim_end).collect());
+    let (gone, came) = crate::diff::changed_lines(&a, &b);
+    if gone.is_empty() || gone != came { return None; }
     let mut moves = BTreeSet::new();
-    for line in &removed {
-        let (prefix, action, from) = uses_line(line)?;
-        let i = added.iter().position(|l| uses_line(l).is_some_and(|(p, n, _)| p == prefix && n == action))?;
-        let line = added.remove(i);
-        let (_, _, to) = uses_line(&line)?;
-        moves.insert(format!("{action} {} → {}", shown_ref(from), shown_ref(to)));
+    for i in gone {
+        let (x, y) = (uses_line(a[i])?, uses_line(b[i])?);
+        if x.prefix != y.prefix || x.action != y.action { return None; }
+        let another_owner = action_owner(x.action).is_some_and(|o| owner.is_some_and(|r| r != o));
+        let higher = version_tag(x.at).zip(version_tag(y.at)).is_some_and(|(from, to)| from < to);
+        moves.insert((x.action.to_string(), shown_ref(x.at, x.note), shown_ref(y.at, y.note), another_owner && higher));
     }
-    Some(moves.into_iter().collect())
+    Some(moves.into_iter().map(|(action, from, to, release)| json!({ "action": action, "from": from, "to": to, "release": release })).collect())
 }
 const PATTERN_KEYS: [&str; 2] = ["include", "testMatch"];
 fn agent_note(p: &str) -> bool {
@@ -504,9 +528,10 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let text_now = |p: &str| new.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok());
     let unchanged = |x: &Value| x["path"].as_str().is_some_and(|p| (p.ends_with(".json") && json_of(&old, p).is_some_and(|a| json_of(&new, p).is_some_and(|b| a == b)))
         || (is_code(p) && text(&old, p).zip(text(&new, p)).is_some_and(|(a, b)| crate::capability::same_program(p, &a, &b))));
+    let owner = origin_owner(repo);
     let protected: Vec<Value> = protected.into_iter().filter(|x| { let p = x["path"].as_str().unwrap_or(""); !quiet(p, text_now(p)) && !unchanged(x) }).map(|mut x| {
         let p = x["path"].as_str().unwrap_or("").to_string();
-        if let Some(moves) = text(&old, &p).zip(text(&new, &p)).and_then(|(a, b)| action_moves(&a, &b)) { x["moves"] = json!(moves); }
+        if let Some(moves) = text(&old, &p).zip(text(&new, &p)).filter(|_| workflow_file(&p)).and_then(|(a, b)| action_moves(&a, &b, owner.as_deref())) { x["moves"] = json!(moves); }
         x
     }).collect();
     settings.retain(|x| !unchanged(x));

@@ -178,9 +178,12 @@ What Kern checks on every pull request:
    it: swapping `fetch` for a mock in a test, reading a class's name or checking that a value is a function is not one. Ordinary
    imports, such as a UI library, a project's own modules or a build tool's `virtual:` module, are not powers.
 7. **Files that steer everything else.** Files that run code or grant access: CI and container files, `CODEOWNERS`, renovate's config,
-   `.npmrc` and the like, and `.env` files that hold a secret or a setting that runs code (pictures, `FUNDING.yml`, notes such as
-   Markdown files and `.env.example` templates, and `.env` files of plain settings aside). A workflow whose only change moves a pinned
-   action to another release (`actions/checkout@v4` to `@v5`, the step and its inputs unchanged) is listed under Notes instead. The
+   `.npmrc` and the like, and `.env` files that hold a secret or a setting that runs code (pictures, a `.github` folder's own
+   `FUNDING.yml` and `release.yml`, notes such as Markdown files and `.env.example` templates, and `.env` files of plain settings aside;
+   a workflow named `release.yml` is a workflow). A workflow or action whose only change moves `uses:` lines, each in its place, to a
+   higher version tag of an action another owner publishes (`actions/checkout@v4` to `@v5`) is listed under Notes instead. A move to
+   a commit, a branch, a lower tag or an action of the repository's own owner needs a look that names both refs: GitHub runs whatever
+   a ref names, even a commit that exists only in a fork, and a version comment beside a commit proves nothing. The
    settings of the test runner Kern runs (the test script in `package.json` included; a babel or vite config that runner never reads is
    not one) need a look, unless the change only adds test patterns (`include`, `testMatch`), which runs more tests and never fewer, so
    it is a note. The files that instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) are listed under Notes.
