@@ -88,7 +88,8 @@ fn env_keys(text: &str) -> Option<Vec<String>> {
 fn quiet(p: &str, text: Option<&str>) -> bool {
     let lower = p.to_ascii_lowercase();
     let base = base_name(&lower);
-    if lower.split('/').any(|d| d == ".github") && (GITHUB_NOTES.contains(&base) || base.rsplit_once('.').is_some_and(|(_, e)| IMAGES.contains(&e))) { return true; }
+    let github_note = lower.rsplit('/').nth(1) == Some(".github") && GITHUB_NOTES.contains(&base);
+    if github_note || (lower.split('/').any(|d| d == ".github") && base.rsplit_once('.').is_some_and(|(_, e)| IMAGES.contains(&e))) { return true; }
     let harmless = |k: &String| !crate::capability::secret_name(k) && !RUNS_CODE_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
     (base == ".env" || base.starts_with(".env.")) && text.and_then(env_keys).is_some_and(|keys| keys.iter().all(harmless))
 }

