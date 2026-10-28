@@ -46,6 +46,9 @@ fn lightdash_12942_the_ai_step_holds_the_key_in_a_job_that_never_runs_the_pull_r
     assert!(plan.contains("secrets.ANTHROPIC_API_KEY != ''") && !plan.contains("ANTHROPIC_API_KEY: ${{"), "the plan learns only whether a key exists, never the key");
     let run = job(&text, "run");
     assert!(run.contains("KERN_INVESTIGATION") && !run.contains("secrets."), "the run job reads the investigation as data and still holds no keys");
+    let jobs = kern::yaml::read(text.as_bytes()).unwrap();
+    let keyed: Vec<&String> = jobs["jobs"].as_object().unwrap().iter().filter(|(name, _)| job(&text, name).contains("secrets.ANTHROPIC_API_KEY }}")).map(|(name, _)| name).collect();
+    assert_eq!(keyed, ["investigate", "learn"], "the key is held by the job that reads the pull request and the job that runs only the default branch's own code, never by one that runs a pull request");
     assert!(!permissions(&run).contains("write"), "the run job's token stays read-only:\n{}", permissions(&run));
 }
 

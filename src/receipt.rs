@@ -277,14 +277,20 @@ fn agent_md(r: &Value) -> String {
     }
     md + "\n"
 }
-fn plan_line(tests: &Value) -> String {
+const PLAN_TESTS_COUNT_MAX: u64 = 1_000_000;
+pub fn plan_facts(tests: &Value) -> R<Option<(crate::plan::Source, u64)>> {
     let p = &tests["plan"];
-    let n = p["tests_count"].as_u64().unwrap_or(0);
-    match p["source"]["kind"].as_str() {
-        Some("ci") => format!("- 🧭 Setup: Kern ran your CI job {} ({n} tests)\n", code(&format!("{}#{}", p["source"]["file"].as_str().unwrap_or(""), p["source"]["job"].as_str().unwrap_or("")), 200)),
-        Some("ai") => format!("- 🧭 Setup: Kern's setup engineer wrote this project's plan on main (accepted: reproduced the base's tests twice, {n} tests)\n"),
-        Some(_) => format!("- 🧭 Setup: Kern ran {} ({n} tests)\n", plain(p["from"].as_str().unwrap_or("the project's plan"), 300)),
-        None => String::new(),
+    if p.is_null() { return Ok(None); }
+    exact(p, &["source", "tests_count"], "the receipt's plan")?;
+    let source = crate::exec::source_parse(&p["source"])?;
+    let n = p["tests_count"].as_u64().filter(|n| *n <= PLAN_TESTS_COUNT_MAX).ok_or_else(|| Denied("the receipt's plan has no test count".into()))?;
+    Ok(Some((source, n)))
+}
+fn plan_line(tests: &Value) -> String {
+    let Ok(Some((source, n))) = plan_facts(tests) else { return String::new() };
+    match source {
+        crate::plan::Source::Ai { .. } => format!("- 🧭 Setup: Kern's setup engineer wrote this project's plan on main (accepted: reproduced the base's tests twice, {n} tests)\n"),
+        s => format!("- 🧭 Setup: Kern ran {} ({n} tests)\n", crate::exec::plan_from(&s)),
     }
 }
 fn planted_line(tests: &Value) -> String {
@@ -650,6 +656,7 @@ pub fn rebuild(r: &Value) -> R<Value> {
     ensure!(matches!(r["sandbox"].as_str(), Some("throwaway" | "gvisor")), "The receipt names no sandbox Kern knows");
     ensure!(r["kern"] == env!("CARGO_PKG_VERSION"), "The receipt was made by another version of Kern");
     ensure!(r["tests"].is_object() && r["rules"].is_object(), "The receipt is missing the facts its answer comes from");
+    plan_facts(&r["tests"]).map_err(|e| Denied(format!("The receipt's plan facts are not ones Kern writes: {}", e.0)))?;
     let d = json!({ "base": r["base"], "head": r["head"], "skipped": r["drive"]["skipped"], "unmeasured": r["drive"]["unmeasured"] });
     let mut out = build(&d, &r["rules"], &r["tests"]);
     out["sandbox"] = r["sandbox"].clone();

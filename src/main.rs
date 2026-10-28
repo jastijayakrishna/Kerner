@@ -28,8 +28,10 @@ Kern's GitHub workflow, .github/workflows/kern.yml, runs these:
                                   check a receipt's signature with GitHub's keys, and receipt.json against its seal
   learn <repo> <commit> <out-dir> <operator.json>
                                   on main only, never in a pull request check: read the commit's CI job into one typed
-                                  plan, run it twice on that commit and keep it only when both runs agree test by test;
-                                  writes plan-<setup key>.json, which a check reads from the folder KERN_PLANS names
+                                  plan (or, when the CI cannot be read and ANTHROPIC_API_KEY is set, ask Kern's setup
+                                  engineer for one), run it twice on that commit and keep it only when both runs agree
+                                  test by test; writes plan-<setup key>.json, which a check reads from the folder
+                                  KERN_PLANS names; a plan already there for the same setup key is kept, not learned again
   drive clean <out-dir>           remove the check's sandbox volumes
   replay <dir>...                 judge every stored check under the folders again with today's rules: one JSON line per
                                   receipt with the answer before and after, then a summary (KERN_REPLAY_WORKERS: 1 to 4)
@@ -37,6 +39,7 @@ Verifier side (--control verifier.json):
   doctor                          check that this machine can run the sandbox
   pin-check <id> <file>           the hash of a pinned file, for operator.json";
 
+fn ai() -> (Option<String>, String) { (kern::github::env("ANTHROPIC_API_KEY"), kern::investigate::model()) }
 fn count(args: &[String], n: usize) -> R<()> {
     ensure!(args.len() == n, "Expected {n} arguments; see kern --help");
     Ok(())
@@ -79,7 +82,7 @@ fn cli() -> R<(Option<Value>, i32)> {
         "investigate" => {
             count(a, 5)?;
             let pr = kern::investigate::read_pr(Path::new(&a[3]))?;
-            let (key, model) = (kern::github::env("ANTHROPIC_API_KEY"), kern::investigate::model());
+            let (key, model) = ai();
             let call = |p: &kern::investigate::Prompt, secs: u64| kern::investigate::call(key.as_deref().unwrap_or_default(), &kern::investigate::request(&model, p), secs);
             let ask: Option<kern::investigate::Caller> = if key.is_some() { Some(&call) } else { None };
             (Some(kern::investigate::investigate(Path::new(&a[0]), (&a[1], &a[2]), &pr, Path::new(&a[4]), ask, &model)?), 0)
@@ -121,7 +124,11 @@ fn cli() -> R<(Option<Value>, i32)> {
         "learn" => {
             count(a, 4)?;
             let until = now_ms() + kern::check::minutes() * 60_000;
-            (Some(kern::exec::learn(Path::new(&a[0]), &a[1], Path::new(&a[2]), &operator(&read_json(&a[3])?)?, until)?), 0)
+            let (key, model) = ai();
+            let call = |p: &kern::investigate::Prompt, secs: u64| kern::investigate::call(key.as_deref().unwrap_or_default(), &kern::investigate::request(&model, p), secs);
+            let ask: Option<kern::investigate::Caller> = if key.is_some() { Some(&call) } else { None };
+            let plans = kern::github::env(kern::exec::PLANS_ENV).map(std::path::PathBuf::from);
+            (Some(kern::exec::learn(Path::new(&a[0]), &a[1], Path::new(&a[2]), &operator(&read_json(&a[3])?)?, (ask, &model), plans.as_deref(), until)?), 0)
         }
         "drive" => {
             ensure!(a.len() == 2 && a[0] == "clean", "Expected drive clean <out-dir>; see kern --help");

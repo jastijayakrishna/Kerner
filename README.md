@@ -56,6 +56,16 @@ of its own that reads the code and never runs it; the job that runs the pull req
 Anthropic the changed functions' old and new code, the old tests, documentation and callers that mention them, and never the pull
 request's title or body. Without the key, your code never leaves GitHub's runners. Pull requests from forks get no secrets, so no AI step.
 
+On every push to `main`, the `learn` job reads your CI workflow into one setup plan (which Node, which install, which test commands)
+and accepts it only by running it twice on that commit in Kern's sandbox: both runs must install cleanly, report tests, pass at least
+one, and agree test by test. When your CI is not one Kern can read and an `ANTHROPIC_API_KEY` is set, Kern's setup engineer writes the
+plan from your repository's files instead, and it is accepted the same way, by running it; a plan the model wrote is never trusted on
+its word. The accepted plan is kept in your repository's own Actions cache under the commit it was learned on, and each pull request
+against that commit restores it: the receipt then says `Setup: Kern ran your CI job` and names the job, or says that Kern's setup
+engineer wrote the plan on `main`. A push whose plan cannot be learned writes why to the job summary and never fails your push; such
+a pull request is checked from the test script, as below. Nothing is hosted: the plan lives in your Actions cache and goes when the
+cache does.
+
 See it on real pull requests: [kern-check-demo](https://github.com/jastijayakrishna/kern-check-demo/pulls?q=is%3Apr).
 
 ## What every pull request gets: one receipt

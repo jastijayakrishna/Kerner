@@ -54,7 +54,7 @@ fn literal(s: &str) -> bool { !s.contains("${{") && !s.contains("$(") && !s.cont
 fn plain_dir(d: &str) -> bool { d.len() <= 512 && d.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.starts_with(".kern")) && !d.contains('\0') }
 fn slug(s: &str) -> bool { !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') }
 
-fn source(v: &Value) -> R<Source> {
+pub fn source(v: &Value) -> R<Source> {
     let o = v.as_object().filter(|o| o.len() == 1).ok_or_else(|| Denied("source is not one of ci, package-json or ai".into()))?;
     match o.iter().next().map(|(k, v)| (k.as_str(), v)) {
         Some(("package-json", Value::Null | Value::Bool(true))) => Ok(Source::PackageJson),

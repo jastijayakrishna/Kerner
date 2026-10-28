@@ -1602,13 +1602,6 @@ fn planned_leaves(c: &mut Chained, found: crate::leaf::Expansion, (dir, from): (
         c.planned.push((Suite { dir: p.dir, old: p.old, new: p.new, uneven: None }, Some(leaf)));
     }
 }
-pub fn plan_from(plan: &crate::plan::Plan) -> String {
-    match &plan.source {
-        crate::plan::Source::Ci { file, job } => format!("your CI job `{}#{}`", plain(file, 120), plain(job, 80)),
-        crate::plan::Source::PackageJson => "the project's package.json".to_string(),
-        crate::plan::Source::Ai { .. } => "the plan Kern's setup engineer wrote on main".to_string(),
-    }
-}
 fn ci_suites(out: &Path, setup: &Value, plan: &crate::plan::Plan, changes: &[(String, &'static str)], (until, taken): (u64, &mut BTreeSet<String>), timed: &mut impl FnMut(String, u64)) -> R<Chained> {
     let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
     let volume = |side: &str| setup[side]["volume"].as_str().unwrap_or("").to_string();
@@ -1618,7 +1611,7 @@ fn ci_suites(out: &Path, setup: &Value, plan: &crate::plan::Plan, changes: &[(St
     let mut c = Chained { uneven: crate::exec::uneven(&old.steps, &new.steps), ..Chained::default() };
     let (old, new) = (crate::exec::recorded(&old), crate::exec::recorded(&new));
     let found = crate::leaf::expand("", old.as_ref().map_err(Clone::clone), new.as_ref().map_err(Clone::clone), &paths);
-    planned_leaves(&mut c, found, ("", &plan_from(plan)), changes, (0, taken));
+    planned_leaves(&mut c, found, ("", &crate::exec::plan_from(&plan.source)), changes, (0, taken));
     Ok(c)
 }
 const MANIFEST_BYTES_MAX: usize = 64 << 20;
@@ -2083,7 +2076,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let mut extra = json!({ "edited": edited_files, "edited_unchecked": edited_unchecked, "test_data": test_data, "not_run": not_run, "run_broke": run_broke, "run_unconfirmed": run_unconfirmed, "wrote_code": wrote_code, "new_failing": merged["new_failing"], "seconds": seconds, "dropped": dropped,
         "no_tests_in": testless, "node": { "old": s["old"]["node"], "new": s["new"]["node"] } });
     if !s["old"]["browser"].is_null() || !s["new"]["browser"].is_null() { extra["browser"] = json!({ "old": s["old"]["browser"], "new": s["new"]["browser"] }); }
-    if let Some(a) = accepted { extra["plan"] = json!({ "source": crate::exec::source_json(a.plan()), "from": plan_from(a.plan()), "tests_count": a.tests_count() }); }
+    if let Some(a) = accepted { extra["plan"] = json!({ "source": crate::exec::source_json(a.plan()), "tests_count": a.tests_count() }); }
     let with = |mut c: Value| -> Value { for (k, v) in extra.as_object().into_iter().flatten() { if c.get(k).is_none() || k != "new_failing" { c[k] = v.clone(); } } c };
     if ran.is_empty() && !run_broke.is_empty() {
         return Ok(with(json!({ "status": "BROKE", "why": "the tests run on the old code but give no results on the new code" })));

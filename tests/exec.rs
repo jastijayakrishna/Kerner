@@ -270,14 +270,14 @@ fn learn_reads_the_commits_ci_job_and_says_up_front_what_the_box_cannot_give_bef
     let bare = committed(&r, &[("package.json", PACKAGE), ("src/a.js", "1")]);
     let out = fresh("learn-out");
     let _ = std::fs::remove_dir(&out);
-    let v = exec::learn(&r, &bare, &out, &operator(), until).unwrap();
+    let v = exec::learn(&r, &bare, &out, &operator(), (None, "model-x"), None, until).unwrap();
     assert_eq!(v["status"], "UNREADABLE", "{v}");
     assert!(!out.join("setup.json").exists() && !out.join("setup-failed.txt").exists(), "nothing was installed for a commit whose CI Kern cannot read");
     let services = "name: ci\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      db:\n        image: postgres:16\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - run: npm ci\n      - run: npm test\n";
     let needs = committed(&r, &[(".github/workflows/ci.yml", services)]);
     let out = fresh("learn-out");
     let _ = std::fs::remove_dir(&out);
-    let v = exec::learn(&r, &needs, &out, &operator(), until).unwrap();
+    let v = exec::learn(&r, &needs, &out, &operator(), (None, "model-x"), None, until).unwrap();
     assert_eq!(v["status"], "UNSUPPORTED", "{v}");
     assert!(v["why"].as_str().unwrap().starts_with("not supported here: needs postgres:16"), "{v}");
     let key = exec::setup_key_at(&r, &needs).unwrap();
@@ -287,7 +287,7 @@ fn learn_reads_the_commits_ci_job_and_says_up_front_what_the_box_cannot_give_bef
     let plain = committed(&r, &[(".github/workflows/ci.yml", CI)]);
     let out = fresh("learn-out");
     let _ = std::fs::remove_dir(&out);
-    let e = exec::learn(&r, &plain, &out, &operator(), until).unwrap_err().0;
+    let e = exec::learn(&r, &plain, &out, &operator(), (None, "model-x"), None, until).unwrap_err().0;
     assert!(out.join("setup-failed.txt").exists(), "a readable, supported plan goes on to install: here that fails honestly without a sandbox: {e}");
     assert!(!out.join(exec::plan_file(&exec::setup_key_at(&r, &plain).unwrap())).exists(), "no plan is cached when the runs could not be made");
     let _ = std::fs::remove_dir_all(&r);
@@ -295,10 +295,10 @@ fn learn_reads_the_commits_ci_job_and_says_up_front_what_the_box_cannot_give_bef
 
 #[test]
 fn a_check_names_where_its_plan_came_from_and_a_plan_the_box_cannot_give_is_not_verified_up_front() {
-    assert_eq!(kern::suite::plan_from(&a_plan()), "your CI job `.github/workflows/ci.yml#test`");
+    assert_eq!(exec::plan_from(&a_plan().source), "your CI job `.github/workflows/ci.yml#test`");
     let mut ai = plan_json();
     ai["source"] = json!({ "ai": { "model": "claude-x", "round": 1 } });
-    assert_eq!(kern::suite::plan_from(&plan::parse(&ai).unwrap()), "the plan Kern's setup engineer wrote on main");
+    assert_eq!(exec::plan_from(&plan::parse(&ai).unwrap().source), "the plan Kern's setup engineer wrote on main");
     assert_eq!(exec::source_json(&a_plan()), json!({ "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }));
     let drive = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
     let rules = json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] });
@@ -308,11 +308,11 @@ fn a_check_names_where_its_plan_came_from_and_a_plan_the_box_cannot_give_is_not_
     let said = r["unverified"].as_array().unwrap().iter().map(|x| x["what"].as_str().unwrap_or("")).collect::<Vec<_>>().join("\n");
     assert!(said.contains("not supported here: needs postgres:16"), "{said}");
     let ran = json!({ "status": "RAN", "runner": "vitest (`test`, from your CI job `.github/workflows/ci.yml#test`)", "before": { "passed": 12, "failed": 0, "skipped": 1 }, "after": { "passed": 12, "failed": 0, "skipped": 1 }, "kept": 12, "broke": [], "flaky": [], "gone": [],
-        "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "plan": { "source": { "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }, "from": "your CI job `.github/workflows/ci.yml#test`", "tests_count": 13 } });
+        "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "plan": { "source": { "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }, "tests_count": 13 } });
     let md = kern::receipt::markdown(&kern::receipt::build(&drive, &rules, &ran));
     assert!(md.contains("Setup: Kern ran your CI job `.github/workflows/ci.yml#test` (13 tests)"), "{md}");
     let mut by_ai = ran.clone();
-    by_ai["plan"] = json!({ "source": { "kind": "ai", "model": "claude-x", "round": 2 }, "from": "the plan Kern's setup engineer wrote on main", "tests_count": 13 });
+    by_ai["plan"] = json!({ "source": { "kind": "ai", "model": "claude-x", "round": 2 }, "tests_count": 13 });
     let md = kern::receipt::markdown(&kern::receipt::build(&drive, &rules, &by_ai));
     assert!(md.contains("Setup: Kern's setup engineer wrote this project's plan on main (accepted: reproduced the base's tests twice, 13 tests)"), "{md}");
     let mut plain = ran;
@@ -354,4 +354,106 @@ fn the_e2e_cases_ci_jobs_read_into_the_plans_the_cases_expect() {
     assert!(matches!(&plan.source, plan::Source::Ci { job, .. } if job == "unit"));
     assert_eq!(exec::listed(&plan), vec![json!({ "id": "test-2", "kind": "test", "dir": "packages/x", "line": "npx vitest run" })]);
     for d in [a, b] { let _ = std::fs::remove_dir_all(d); }
+}
+
+fn api_answer(answer: &Value) -> Value { json!({ "stop_reason": "end_turn", "content": [{ "type": "text", "text": answer.to_string() }] }) }
+fn unmade(name: &str) -> std::path::PathBuf { let d = fresh(name); let _ = std::fs::remove_dir(&d); d }
+fn proposal(needs: Value) -> Value {
+    let mut v = plan_json();
+    v.as_object_mut().unwrap().remove("key");
+    v.as_object_mut().unwrap().remove("source");
+    v["needs"] = needs;
+    v
+}
+
+#[test]
+fn kern_check_demo_the_setup_engineer_runs_only_for_a_ci_kern_cannot_read_and_a_plan_already_learned_for_the_same_setup_is_kept() {
+    let r = fresh("engineer");
+    git(&r, &["init", "-q"]);
+    let until = kern::util::now_ms() + 3_600_000;
+    let bare = committed(&r, &[("package.json", PACKAGE), ("src/a.js", "1")]);
+    let key = exec::setup_key_at(&r, &bare).unwrap();
+    let out = unmade("engineer-out");
+    let v = exec::learn(&r, &bare, &out, &operator(), (None, "model-x"), None, until).unwrap();
+    assert_eq!(v["status"], "UNREADABLE");
+    assert!(v["why"].as_str().unwrap().contains("no AI key, so Kern's setup engineer did not run"), "{v}");
+    let asked = std::cell::Cell::new(0);
+    let needy = |p: &kern::investigate::Prompt, secs: u64| { asked.set(asked.get() + 1); assert_eq!(p.name, "setup"); assert!(secs > 0 && secs <= exec::PROPOSE_SECS_MAX); Ok(api_answer(&proposal(json!([{ "service": "postgres:16" }])))) };
+    let out = unmade("engineer-out");
+    let v = exec::learn(&r, &bare, &out, &operator(), (Some(&needy), "model-x"), None, until).unwrap();
+    assert_eq!(v["status"], "REJECTED", "{v}");
+    assert!(v["why"].as_str().unwrap().contains("postgres:16") && v["why"].as_str().unwrap().contains("the model's reading"), "{v}");
+    assert_eq!(v["source"], json!({ "kind": "ai", "model": "model-x", "round": 1 }));
+    assert_eq!(asked.get(), 1);
+    assert!(out.join(exec::plan_file(&key)).is_file() && exec::cached(&out, &key).is_none(), "a plan rejected on the model's word is stored as rejected, so a check takes today's path and never says not supported");
+    assert!(!out.join("setup.json").exists() && !out.join("setup-failed.txt").exists(), "nothing was installed for a plan that was never run");
+    let never = |_: &kern::investigate::Prompt, _: u64| panic!("the setup engineer is asked only when the CI job cannot be read");
+    let plain = committed(&r, &[(".github/workflows/ci.yml", CI)]);
+    let out = unmade("engineer-out");
+    let e = exec::learn(&r, &plain, &out, &operator(), (Some(&never), "model-x"), None, until).unwrap_err().0;
+    assert!(out.join("setup-failed.txt").exists(), "a readable CI job is run, never proposed: {e}");
+    asked.set(0);
+    let willing = |p: &kern::investigate::Prompt, _: u64| { asked.set(asked.get() + 1); assert_eq!(p.name, "setup"); Ok(api_answer(&proposal(json!([])))) };
+    let out = unmade("engineer-out");
+    let e = exec::learn(&r, &bare, &out, &operator(), (Some(&willing), "model-x"), None, until).unwrap_err().0;
+    assert!(out.join("setup-failed.txt").exists(), "a proposed plan without needs goes on to install and run; here that fails honestly without a sandbox: {e}");
+    assert_eq!(asked.get(), 1, "the model is asked once per round, and the install failure ends the learn before a second round");
+    assert!(out.join(plan::proposal_name("model-x", &key, 1)).is_file(), "the model's answer is cached per round");
+    assert!(exec::cached(&out, &key).is_none());
+    let plans = fresh("plans");
+    let mut learned = a_plan();
+    learned.key = key.clone();
+    exec::store(&plans, &key, Some(&learned), &Stored::Accepted([a_run(Outcome::Passed), a_run(Outcome::Passed)])).unwrap();
+    let out = unmade("engineer-out");
+    let v = exec::learn(&r, &bare, &out, &operator(), (Some(&never), "model-x"), Some(&plans), until).unwrap();
+    assert_eq!(v["status"], "KEPT", "{v}");
+    assert!(v["why"].as_str().unwrap().contains("still fits") && v["why"].as_str().unwrap().contains("2 tests"), "{v}");
+    assert_eq!(v["source"]["kind"], "ci");
+    assert!(matches!(exec::cached(&out, &key), Some(Cached::Accepted(_))), "the kept plan is written where the learn job saves from");
+    assert!(!out.join("setup.json").exists() && !out.join("setup-failed.txt").exists(), "a kept plan installs nothing");
+    let other = fresh("plans-other");
+    exec::store(&other, &"c".repeat(64), Some(&a_plan()), &Stored::Accepted([a_run(Outcome::Passed), a_run(Outcome::Passed)])).unwrap();
+    let out = unmade("engineer-out");
+    assert_eq!(exec::learn(&r, &bare, &out, &operator(), (None, "model-x"), Some(&other), until).unwrap()["status"], "UNREADABLE", "a plan for another setup key is not kept");
+    let unsupported = fresh("plans-unsupported");
+    exec::store(&unsupported, &key, None, &Stored::Unsupported("not supported here: needs redis:7".into())).unwrap();
+    let out = unmade("engineer-out");
+    let v = exec::learn(&r, &bare, &out, &operator(), (Some(&never), "model-x"), Some(&unsupported), until).unwrap();
+    assert_eq!(v["status"], "KEPT");
+    assert!(matches!(exec::cached(&out, &key), Some(Cached::Unsupported(w)) if w.contains("redis:7")));
+    for d in [&r, &plans, &other, &unsupported] { let _ = std::fs::remove_dir_all(d); }
+}
+
+#[test]
+fn the_sign_job_refuses_a_receipt_whose_plan_facts_are_not_ones_kern_writes() {
+    let drive = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let rules = json!({ "changed": [{ "path": "src/total.js", "operation": "modify" }], "powers": [], "tricks": [], "settings": [], "protected": [], "dependencies": [], "agent_notes": [], "not_checked": [] });
+    let ran = json!({ "status": "RAN", "runner": "vitest (`test`, from your CI job `.github/workflows/ci.yml#test`)", "before": { "passed": 12, "failed": 0, "skipped": 1 }, "after": { "passed": 12, "failed": 0, "skipped": 1 }, "kept": 12, "broke": [], "flaky": [], "gone": [],
+        "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [], "plan": { "source": { "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }, "tests_count": 13 } });
+    let r = kern::receipt::build(&drive, &rules, &ran);
+    let again = kern::receipt::rebuild(&r).unwrap();
+    assert!(kern::receipt::markdown(&again).contains("- 🧭 Setup: Kern ran your CI job `.github/workflows/ci.yml#test` (13 tests)\n"));
+    let mut plain = ran.clone();
+    plain.as_object_mut().unwrap().remove("plan");
+    assert!(kern::receipt::rebuild(&kern::receipt::build(&drive, &rules, &plain)).is_ok(), "a check on today's path has no plan facts");
+    let forged = [
+        json!({ "source": { "kind": "ci", "file": "../../.github/workflows/ci.yml", "job": "test" }, "tests_count": 13 }),
+        json!({ "source": { "kind": "ci", "file": "Makefile", "job": "test" }, "tests_count": 13 }),
+        json!({ "source": { "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }, "tests_count": 13, "from": "your CI job `ci.yml#test` with every test" }),
+        json!({ "source": { "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }, "tests_count": "many" }),
+        json!({ "source": { "kind": "ci", "file": ".github/workflows/ci.yml", "job": "test" }, "tests_count": 1_000_001 }),
+        json!({ "source": { "kind": "oracle" }, "tests_count": 1 }),
+        json!({ "source": { "kind": "ai", "model": "m", "round": 0 }, "tests_count": 1 }),
+        json!({ "source": { "kind": "ai", "model": "m", "round": 1, "accepted": true }, "tests_count": 1 }),
+        json!("Kern ran your CI job `ci.yml#test` (9999 tests)"),
+        json!(["ci"]),
+    ];
+    for f in forged {
+        let mut t = ran.clone();
+        t["plan"] = f.clone();
+        let r = kern::receipt::build(&drive, &rules, &t);
+        let e = kern::receipt::rebuild(&r).unwrap_err().0;
+        assert!(e.starts_with("The receipt's plan facts are not ones Kern writes"), "{f}: {e}");
+        assert!(!kern::receipt::markdown(&r).contains("Setup:"), "{f}: no Setup line is printed from facts Kern did not write");
+    }
 }

@@ -1,5 +1,5 @@
 use crate::leaf::Recorded;
-use crate::plan::{AcceptedPlan, Kind, Outcome, Plan, Rejected, Run, Source, StepRecord};
+use crate::plan::{AcceptedPlan, Kind, Need, Outcome, Plan, Rejected, Run, Source, StepRecord, Trial};
 use crate::proof::Report;
 use crate::suite::Side;
 use crate::util::*;
@@ -10,6 +10,7 @@ use std::path::Path;
 pub const PLAN_SECS_MAX: u64 = 1800;
 pub const PLAN_SECS_MIN: u64 = 120;
 pub const PLAN_STEP_SECS_MAX: u64 = crate::sandbox::PLAN_STEP_SECS_MAX;
+pub const PROPOSE_SECS_MAX: u64 = 600;
 pub const PLAN_FILE_BYTES_MAX: usize = 4 << 20;
 pub const SETUP_FILE_BYTES_MAX: usize = 64 << 20;
 pub const PLANS_ENV: &str = "KERN_PLANS";
@@ -18,10 +19,11 @@ pub const NOT_REACHED: &str = "it was not run: an earlier step did not finish in
 pub fn unsupported_needs(needs: &[String]) -> Option<String> {
     (!needs.is_empty()).then(|| format!("not supported here: needs {} (the project's CI job runs its tests with it, and Kern's sandbox gives tests no services or secrets)", needs.join(", ")))
 }
-pub fn unsupported(plan: &Plan) -> Option<String> {
-    let needs: Vec<String> = plan.needs.iter().map(|n| match n { crate::plan::Need::Service(s) => s.clone(), crate::plan::Need::Secret(s) => format!("the secret {s}") }).collect();
-    unsupported_needs(&needs)
+fn needs_of(plan: &Plan) -> Option<String> {
+    let needs: Vec<String> = plan.needs.iter().map(|n| match n { Need::Service(s) => s.clone(), Need::Secret(s) => format!("the secret {s}") }).collect();
+    (!needs.is_empty()).then(|| needs.join(", "))
 }
+pub fn unsupported(plan: &Plan) -> Option<String> { needs_of(plan).and_then(|n| unsupported_needs(&[n])) }
 pub fn fits(plan: &Plan) -> Result<(), String> {
     let env: BTreeMap<String, String> = plan.env.iter().cloned().collect();
     if !crate::sandbox::box_env_fits(&env) { return Err(crate::leaf::box_env_why()); }
@@ -204,6 +206,22 @@ pub fn source_json(plan: &Plan) -> Value {
         Source::Ai { model, round } => json!({ "kind": "ai", "model": model, "round": round }),
     }
 }
+pub fn source_parse(v: &Value) -> R<Source> {
+    let inner = match v["kind"].as_str() {
+        Some("ci") => { exact(v, &["kind", "file", "job"], "the plan's source")?; json!({ "ci": { "file": v["file"], "job": v["job"] } }) }
+        Some("package-json") => { exact(v, &["kind"], "the plan's source")?; json!({ "package-json": true }) }
+        Some("ai") => { exact(v, &["kind", "model", "round"], "the plan's source")?; json!({ "ai": { "model": v["model"], "round": v["round"] } }) }
+        _ => crate::deny!("the plan's source is not one of ci, package-json or ai"),
+    };
+    crate::plan::source(&inner)
+}
+pub fn plan_from(source: &Source) -> String {
+    match source {
+        Source::Ci { file, job } => format!("your CI job `{}#{}`", plain(file, 120), plain(job, 80)),
+        Source::PackageJson => "the project's package.json".to_string(),
+        Source::Ai { .. } => "the plan Kern's setup engineer wrote on main".to_string(),
+    }
+}
 fn judged(out: &Path, ran: &Ran, (name, volume): (&str, &str), until: u64) -> Run {
     let Ok(all) = recorded(ran) else { return run_of(ran, &[]) };
     let mut reports = Vec::new();
@@ -214,36 +232,91 @@ fn judged(out: &Path, ran: &Ran, (name, volume): (&str, &str), until: u64) -> Ru
     }
     run_of(ran, &reports)
 }
-pub fn learn(repo: &Path, commit: &str, out: &Path, op: &crate::policy::Operator, until: u64) -> R<Value> {
+fn runs_of(out: &Path, op: &crate::policy::Operator, plan: &Plan, until: u64) -> R<[Run; 2]> {
+    let setup = crate::drive::setup(out, op, until)?;
+    let volume = |side: &str| setup[side]["volume"].as_str().unwrap_or("").to_string();
+    let (old, new) = (volume("old"), volume("new"));
+    let ran = pair(out, plan, &setup, (&old, &new), until);
+    let result = ran.map(|(a, b)| [judged(out, &a, ("old", &old), until), judged(out, &b, ("new", &new), until)]);
+    let _ = crate::drive::clean(out);
+    result
+}
+fn answer(status: &str, why: &str, key: &str, plan: Option<&Plan>, out: &Path) -> Value {
+    let mut v = json!({ "status": status, "why": why, "key": key, "file": out.join(plan_file(key)) });
+    if let Some(p) = plan { v["source"] = source_json(p); }
+    v
+}
+fn decided(out: &Path, key: &str, plan: &Plan, runs: [Run; 2], round: u32) -> R<(Value, Option<Trial>)> {
+    match crate::plan::accept(plan.clone(), [&runs[0], &runs[1]], &BTreeSet::new()) {
+        Ok(a) => {
+            let why = format!("reproduced the base's tests twice ({} tests)", a.tests_count());
+            store(out, key, Some(plan), &Stored::Accepted(runs))?;
+            Ok((answer("ACCEPTED", &why, key, Some(plan), out), None))
+        }
+        Err(r) => {
+            let why = rejection(&r);
+            store(out, key, Some(plan), &Stored::Rejected(why.clone()))?;
+            let failed = match &r { Rejected::StepFailed { run, .. } | Rejected::NoReport { run } | Rejected::NoTestPassed { run } => run.saturating_sub(1).min(1), Rejected::Unsteady { .. } => 1 };
+            Ok((answer("REJECTED", &why, key, Some(plan), out), Some(crate::plan::trial_of(round, &runs[failed]))))
+        }
+    }
+}
+fn engineered(out: &Path, op: &crate::policy::Operator, (tree, key): (&crate::ci::Tree, &str), (ask, model): (crate::investigate::Caller, &str), until: u64) -> R<Value> {
+    let call = |p: &crate::investigate::Prompt| ask(p, within(until, PROPOSE_SECS_MAX));
+    let mut trials: Vec<Trial> = Vec::new();
+    let mut last = Value::Null;
+    for round in 1..=crate::plan::AI_ROUNDS_COUNT_MAX {
+        let plan = match crate::plan::propose(tree, &trials, model, out, &call) {
+            Ok(p) => p,
+            Err(e) => return Ok(json!({ "status": "UNREADABLE", "why": format!("the setup engineer's answer in round {round} was refused: {}", e.0), "key": key })),
+        };
+        if let Some(needs) = needs_of(&plan) {
+            let why = format!("the setup engineer says the tests need {needs}, which Kern's sandbox cannot give; that is the model's reading, so the project's test script runs instead");
+            store(out, key, Some(&plan), &Stored::Rejected(why.clone()))?;
+            return Ok(answer("REJECTED", &why, key, Some(&plan), out));
+        }
+        let runs = runs_of(out, op, &plan, until)?;
+        let (said, trial) = decided(out, key, &plan, runs, round)?;
+        let Some(t) = trial else { return Ok(said) };
+        trials.push(t);
+        last = said;
+    }
+    Ok(last)
+}
+fn kept(out: &Path, key: &str, plans: Option<&Path>) -> R<Option<Value>> {
+    let Some(dir) = plans else { return Ok(None) };
+    let Some(c) = cached(dir, key) else { return Ok(None) };
+    let file = plan_file(key);
+    create_new(out.join(&file), &std::fs::read(dir.join(&file))?, 0o600)?;
+    Ok(Some(match c {
+        Cached::Accepted(a) => answer("KEPT", &format!("the plan learned before still fits, since the workflow and setup files did not change ({} tests)", a.tests_count()), key, Some(a.plan()), out),
+        Cached::Unsupported(why) => answer("KEPT", &why, key, None, out),
+    }))
+}
+pub fn learn(repo: &Path, commit: &str, out: &Path, op: &crate::policy::Operator, (ask, model): (Option<crate::investigate::Caller>, &str), plans: Option<&Path>, until: u64) -> R<Value> {
     crate::drive::prepare(repo, commit, commit, out)?;
     let workflows = workflows(repo, commit)?;
     let read = |p: &str| crate::git::git_with(repo, &["show", &format!("{commit}:{p}")], None, SETUP_FILE_BYTES_MAX).ok();
     let tree = crate::ci::Tree { repo: repo_name(repo), workflows, read: &read };
     let key = crate::plan::setup_key(&tree);
-    let file = out.join(plan_file(&key));
+    if let Some(v) = kept(out, &key, plans)? { return Ok(v); }
     let plan = match crate::plan::read(&tree) {
         Ok(p) => p,
         Err(u) => {
-            let Some(why) = unsupported_needs(&u.services) else { return Ok(json!({ "status": "UNREADABLE", "tier": u.tier.to_string(), "why": u.why, "key": key })) };
-            store(out, &key, None, &Stored::Unsupported(why.clone()))?;
-            return Ok(json!({ "status": "UNSUPPORTED", "why": why, "key": key, "file": file }));
+            if let Some(why) = unsupported_needs(&u.services) {
+                store(out, &key, None, &Stored::Unsupported(why.clone()))?;
+                return Ok(answer("UNSUPPORTED", &why, &key, None, out));
+            }
+            return match ask {
+                Some(ask) => engineered(out, op, (&tree, &key), (ask, model), until),
+                None => Ok(json!({ "status": "UNREADABLE", "tier": u.tier.to_string(), "why": format!("{} (no AI key, so Kern's setup engineer did not run)", u.why), "key": key })),
+            };
         }
     };
     if let Some(why) = unsupported(&plan) {
         store(out, &key, Some(&plan), &Stored::Unsupported(why.clone()))?;
-        return Ok(json!({ "status": "UNSUPPORTED", "why": why, "key": key, "source": source_json(&plan), "file": file }));
+        return Ok(answer("UNSUPPORTED", &why, &key, Some(&plan), out));
     }
-    let setup = crate::drive::setup(out, op, until)?;
-    let volume = |side: &str| setup[side]["volume"].as_str().unwrap_or("").to_string();
-    let (old, new) = (volume("old"), volume("new"));
-    let ran = pair(out, &plan, &setup, (&old, &new), until);
-    let result = ran.map(|(a, b)| [judged(out, &a, ("old", &old), until), judged(out, &b, ("new", &new), until)]);
-    let _ = crate::drive::clean(out);
-    let runs = result?;
-    let (status, why, stored) = match crate::plan::accept(plan.clone(), [&runs[0], &runs[1]], &BTreeSet::new()) {
-        Ok(a) => ("ACCEPTED", format!("reproduced the base's tests twice ({} tests)", a.tests_count()), Stored::Accepted(runs)),
-        Err(r) => ("REJECTED", rejection(&r), Stored::Rejected(rejection(&r))),
-    };
-    store(out, &key, Some(&plan), &stored)?;
-    Ok(json!({ "status": status, "why": why, "key": key, "source": source_json(&plan), "file": file }))
+    let runs = runs_of(out, op, &plan, until)?;
+    Ok(decided(out, &key, &plan, runs, 0)?.0)
 }
