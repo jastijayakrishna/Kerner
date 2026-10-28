@@ -10,6 +10,26 @@ fn recallnet_js_recall_1130_a_setup_that_fails_in_the_sandbox_says_why() {
 }
 
 #[test]
+fn ci_runs_breaks_every_request_kern_sends_the_test_box_has_exactly_the_fields_the_box_accepts() {
+    let fields = ["\"version\": 1", "\"command\"", "\"timeout_seconds\"", "\"cwd\"", "\"env\"", "\"files\"", "\"early_secs\"", "\"faults\"", "\"serve\"", "\"steps\""];
+    let mut requests = 0;
+    for entry in std::fs::read_dir("src").unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "rs") { continue; }
+        let src = std::fs::read_to_string(&path).unwrap();
+        for (i, line) in src.lines().enumerate() {
+            if !line.contains("json!({ \"version\": 1, \"command\"") { continue; }
+            let request: String = src.lines().skip(i).take(3).collect::<Vec<_>>().join(" ");
+            if !request.contains("\"cwd\"") { continue; }
+            requests += 1;
+            for f in fields { assert!(request.contains(f), "{}:{}: a box request without {f}: the box denies it and the run reads as 'The run\'s report is incomplete' (the recorder's request on CI run 40714685904)", path.display(), i + 1); }
+            assert!(!request.contains("\"early\":"), "{}:{}: the box reads early_secs, not early", path.display(), i + 1);
+        }
+    }
+    assert!(requests >= 7, "{requests} box requests found in src");
+}
+
+#[test]
 fn review_2_d_kern_has_one_markdown_escaper_and_it_neutralises_markup() {
     assert_eq!(kern::util::code("a`b<details>\n\u{1b}c", 200), "`a'b‹details>  c`");
     assert_eq!(kern::util::code("  abcdef ", 3), "`abc…`");

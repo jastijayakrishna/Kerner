@@ -218,7 +218,7 @@ pub fn discover(out: &Path, volume: &str, (dir, command): (&str, &[String]), lab
     if seconds < DISCOVER_SECS_MIN { return Err(crate::suite::LATE.to_string()); }
     let env: Env = crate::sandbox::LEAVES_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     let argv: Vec<String> = ["/usr/local/bin/node", "/kern/leaf.cjs"].iter().map(|s| s.to_string()).chain(command.iter().cloned()).collect();
-    let config = json!({ "version": 1, "command": argv, "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early": false, "faults": [], "serve": {} });
+    let config = json!({ "version": 1, "command": argv, "timeout_seconds": seconds, "cwd": dir, "env": env, "files": {}, "early_secs": 0, "faults": [], "serve": {}, "steps": [] });
     let run = crate::suite::in_test_box(out, volume, &format!("leaves-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)).map_err(|e| e.0)?;
     let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).map_err(|e| e.0)?;
     let _ = std::fs::write(out.join(format!("leaves-{label}.out")), &parts["output"]);
