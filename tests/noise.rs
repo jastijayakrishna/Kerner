@@ -638,12 +638,15 @@ fn a_deleted_lockfile_or_a_new_install_script_still_needs_a_look_and_a_version_m
 }
 
 #[test]
-fn comfyui_frontend_17136_a_lockfile_kern_does_not_read_is_a_note_and_listed_as_not_checked() {
-    let rules = rules_for(&[("package.json", VITEST), ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")], &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\nimporters: {}\n")], &[]);
-    assert_eq!(paths(&rules, "not_checked"), ["pnpm-lock.yaml"], "{}", rules["not_checked"]);
+fn comfyui_frontend_17136_a_pnpm_lockfile_is_read_so_its_moves_are_a_named_note_and_nothing_is_left_not_checked() {
+    let lock = |to: &str, kept: &str, snapshot: &str| format!("lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\ncatalogs:\n  default:\n    vue-component-type-helpers:\n      specifier: ^{to}\n      version: {to}\n\nimporters:\n\n  .:\n    devDependencies:\n      vue-component-type-helpers:\n        specifier: 'catalog:'\n        version: {to}\n\npackages:\n\n  vue-component-type-helpers@3.3.11:\n    resolution: {{integrity: sha512-LwcxzeliO9fkQcpJG0PoX8X5kmAhKmH9wkpDLxNabwzkQ9Zeib2YVHwFV4pcWmMLfXVfjr/dSV+DaJ3cIPgSNA==}}\n{kept}\nsnapshots:\n\n  vue-component-type-helpers@3.3.11: {{}}\n{snapshot}");
+    let old = "\n  vue-component-type-helpers@3.3.9:\n    resolution: {integrity: sha512-3c/UfMe0SqyEfcGTyH7mfshHagJ9QTCbppCb0/uGpHZpFug7+If3GeGZN7I0YheKEExemx3xldQPoO7PQSOLQg==}\n";
+    let rules = rules_for(&[("package.json", VITEST), ("pnpm-lock.yaml", &lock("3.3.9", old, "\n  vue-component-type-helpers@3.3.9: {}\n"))], &[("pnpm-lock.yaml", &lock("3.3.11", "", ""))], &[]);
+    assert!(paths(&rules, "not_checked").is_empty(), "Kern reads pnpm-lock.yaml now: {}", rules["not_checked"]);
     let r = receipt::build(&drive_json(), &rules, &clean_tests());
     assert_eq!((r["decision"].as_str(), look_kinds(&r), note_kinds(&r)), (Some("clear"), vec![], vec!["dependencies".to_string()]), "{r}");
-    assert!(r["not_checked"].as_array().unwrap().iter().any(|x| x["what"].as_str().unwrap().contains("pnpm-lock.yaml")), "{}", r["not_checked"]);
+    assert!(r["notes"][0]["what"].as_str().unwrap().contains("vue-component-type-helpers 3.3.9, 3.3.11 → 3.3.11"),
+        "the lockfile held two copies and keeps one, and the note says exactly that: {}", r["notes"]);
 }
 
 #[test]

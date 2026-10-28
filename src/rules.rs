@@ -6,17 +6,21 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const DEPENDENCY_FILES: [&str; 13] = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lock", "bun.lockb",
-    "cargo.toml", "cargo.lock", "go.mod", "go.sum", "pyproject.toml"];
+const JS_DEPENDENCY_FILES: [&str; 2] = ["package.json", "pnpm-workspace.yaml"];
+pub const OTHER_DEPENDENCY_FILES: [&str; 51] = ["pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock", "pylock.toml",
+    "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "go.work", "go.work.sum", "Gemfile", "Gemfile.lock", "gems.rb", "gems.locked", "deno.json", "deno.jsonc", "deno.lock",
+    "composer.json", "composer.lock", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.lockfile", "libs.versions.toml",
+    "packages.config", "packages.lock.json", "Directory.Packages.props", "paket.dependencies", "paket.lock", "Package.swift", "Package.resolved", "Podfile", "Podfile.lock",
+    "Cartfile", "Cartfile.resolved", "pubspec.yaml", "pubspec.lock", "mix.exs", "mix.lock", "conanfile.txt", "conanfile.py", "vcpkg.json", "build.sbt", "deps.edn"];
+const OTHER_DEPENDENCY_SUFFIXES: [&str; 4] = [".gemspec", ".csproj", ".fsproj", ".vbproj"];
+const TEST_DATA_FOLDERS: [&str; 4] = ["fixtures", "__fixtures__", "testdata", "__mocks__"];
 const AGENT_NOTES: [&str; 6] = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "copilot-instructions.md"];
 const AGENT_FOLDERS: [&str; 3] = [".cursor", ".claude", ".windsurf"];
 const LARGEST: u64 = 1 << 20;
-const LARGEST_LOCKFILE: u64 = 64 << 20;
 const SIBLINGS: usize = 200;
 const LOCK_MOVES_COUNT_MAX: usize = 200;
 const LARGEST_CODE: u64 = 16 << 20;
 const MANIFESTS: usize = 5000;
-fn npm_lockfile(p: &str) -> bool { matches!(base_name(p), "package-lock.json" | "npm-shrinkwrap.json") }
 const RISKY_BUILTINS: [&str; 15] = ["child_process", "cluster", "worker_threads", "vm", "net", "tls", "dgram", "dns", "http", "https", "http2", "inspector", "wasi", "module", "repl"];
 const RISKY_PACKAGES: [&str; 46] = ["axios", "node-fetch", "cross-fetch", "isomorphic-fetch", "got", "undici", "ky", "superagent", "request", "needle", "phin", "ws",
     "socket.io-client", "execa", "cross-spawn", "shelljs", "zx", "node-pty", "vm2", "isolated-vm", "dotenv", "puppeteer", "simple-git", "ssh2", "nodemailer", "basic-ftp",
@@ -54,9 +58,36 @@ fn package_fields(a: &Value, b: &Value) -> Vec<String> {
     out
 }
 fn joined(dir: &str, path: &str) -> Option<String> { if path.contains('*') { None } else { under(dir, path).filter(|p| !p.is_empty()) } }
-fn dependency_file(p: &str) -> bool {
-    let b = base_name(p).to_ascii_lowercase();
-    DEPENDENCY_FILES.contains(&b.as_str()) || (b.starts_with("requirements") && b.ends_with(".txt"))
+fn dependency_file(p: &str) -> bool { dependency_named(p, str::to_string) }
+fn dependency_named(p: &str, fold: fn(&str) -> String) -> bool {
+    let (b, folder) = (fold(base_name(p)), p.rsplit('/').nth(1).map(fold));
+    JS_DEPENDENCY_FILES.iter().chain(&crate::lock::LOCKFILES).chain(&OTHER_DEPENDENCY_FILES).any(|n| fold(n) == b)
+        || OTHER_DEPENDENCY_SUFFIXES.iter().any(|s| b.len() > s.len() && b.ends_with(&fold(s)))
+        || (b.ends_with(&fold(".txt")) && (b.starts_with(&fold("requirements")) || folder == Some(fold("requirements"))))
+}
+fn workspace_globs(files: &[&Files]) -> Option<Vec<String>> {
+    let mut globs = Vec::new();
+    for f in files {
+        if f.contains_key("package.json") {
+            let v = json_of(f, "package.json")?;
+            let w = if v["workspaces"].is_array() { &v["workspaces"] } else { &v["workspaces"]["packages"] };
+            globs.extend(w.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+        }
+        if let Some(e) = f.get("pnpm-workspace.yaml") {
+            let settings = crate::lock::workspace(e.bytes.as_deref()?).ok()?;
+            globs.extend(settings.get("packages").and_then(Value::as_array).into_iter().flatten().map(|g| g.as_str().map(str::to_string)).collect::<Option<Vec<_>>>()?);
+        }
+    }
+    Some(globs)
+}
+fn test_data(p: &str, globs: &Option<Vec<String>>) -> bool {
+    let Some(globs) = globs else { return false };
+    let dir = p.rsplit_once('/').map_or("", |(d, _)| d);
+    let unsure = |g: &str| g.contains(['{', '[', '?', '\\']) || g.contains("..");
+    let reaches = |g: &str| crate::drive::workspace_glob(g.strip_prefix("./").unwrap_or(g), dir);
+    let declared = globs.iter().filter(|g| !g.starts_with('!')).any(|g| unsure(g) || reaches(g))
+        && !globs.iter().filter_map(|g| g.strip_prefix('!')).any(|g| !unsure(g) && reaches(g));
+    dir.split('/').any(|f| TEST_DATA_FOLDERS.contains(&f.to_ascii_lowercase().as_str())) && !declared
 }
 fn harmless_note(p: &str) -> bool {
     let (lower, base) = (p.to_ascii_lowercase(), base_name(p).to_ascii_lowercase());
@@ -339,9 +370,14 @@ fn quoted(text: &str) -> Vec<String> {
 fn files_from(items: &[crate::drive::Item]) -> Files {
     items.iter().map(|i| (i.path.clone(), Entry { mode: i.mode.clone(), oid: i.oid.clone(), size: i.size, bytes: None })).collect()
 }
-fn fill(repo: &Path, files: &mut Files, items: &[crate::drive::Item], wanted: &BTreeSet<String>) -> R<()> {
-    let load: Vec<&crate::drive::Item> = items.iter().filter(|i| wanted.contains(&i.path) && files.get(&i.path).is_some_and(|e| e.bytes.is_none())
-        && (i.size <= LARGEST || (npm_lockfile(&i.path) && i.size <= LARGEST_LOCKFILE) || (is_code(&i.path) && i.size <= LARGEST_CODE)) && matches!(i.mode.as_str(), "100644" | "100755")).collect();
+fn fill(repo: &Path, files: &mut Files, items: &[crate::drive::Item], wanted: &BTreeSet<String>, lock_bytes_left: &mut u64) -> R<()> {
+    let mut load: Vec<&crate::drive::Item> = Vec::new();
+    for i in items.iter().filter(|i| wanted.contains(&i.path) && files.get(&i.path).is_some_and(|e| e.bytes.is_none()) && matches!(i.mode.as_str(), "100644" | "100755")) {
+        let lockfile = crate::lock::text_lockfile(&i.path);
+        if lockfile && (i.size > crate::lock::LOCKFILE_BYTES_MAX || i.size > *lock_bytes_left) { continue; }
+        if lockfile { *lock_bytes_left -= i.size; }
+        if lockfile || i.size <= LARGEST || (is_code(&i.path) && i.size <= LARGEST_CODE) { load.push(i); }
+    }
     crate::drive::blobs(repo, &load, |item, bytes| {
         let text = if is_code(&item.path) && std::str::from_utf8(bytes).is_err() { String::from_utf8_lossy(bytes).into_owned().into_bytes() } else { bytes.to_vec() };
         if let Some(e) = files.get_mut(&item.path) { e.bytes = Some(text); }
@@ -371,11 +407,75 @@ fn runner_reads(p: &str, old: &Files, new: &Files, head: &BTreeSet<&str>) -> boo
     let beside: Vec<&&str> = head.iter().filter(|q| q.rsplit_once('/').map_or("", |(d, _)| d) == dir && base_name(q).to_ascii_lowercase().starts_with("vitest.config.")).collect();
     root == dir && (beside.is_empty() || beside.iter().any(|q| new.get(**q).and_then(|e| e.bytes.as_deref()).is_some_and(|b| String::from_utf8_lossy(b).contains("vite.config"))))
 }
+fn lockfile_facts(p: &str, (old, new): (&Files, &Files), d: &mut Value, lockfile: &mut Vec<Value>, not_checked: &mut Vec<Value>) {
+    let read = |files: &Files| files.get(p).map(|e| crate::lock::read(p, e.bytes.as_deref()));
+    match (read(old), read(new)) {
+        (before, Some(Ok(after))) => {
+            if let Some(Err(why)) = &before {
+                not_checked.push(json!({ "path": p, "why": format!("Kern could not read this lockfile before the change ({why}), so every package in it counts as new") }));
+            }
+            let before = before.and_then(Result::ok).unwrap_or_default();
+            lockfile.extend(crate::deps::lock_surprises(&before, &after).into_iter().map(|why| json!({ "path": p, "why": why })));
+            let moves = crate::deps::lock_moves(&before, &after);
+            if moves.is_empty() { d["harmless"] = json!(true); }
+            else if moves.len() > LOCK_MOVES_COUNT_MAX { d["count"] = json!(moves.len()); }
+            else { d["packages"] = json!(moves.iter().map(crate::deps::shown).collect::<Vec<_>>()); }
+        }
+        (before, after) => {
+            let why = match after { Some(Err(why)) => why, _ => "it is missing from the change".to_string() };
+            let read = if matches!(before, Some(Ok(_))) { "Kern could read this lockfile before the change but not after it" } else { "Kern could not read this lockfile" };
+            not_checked.push(json!({ "path": p, "why": format!("{read} ({why}), so it cannot see which packages it installs or where they download from"), "steers": true }));
+        }
+    }
+}
+fn workspace_facts(p: &str, (old, new): (&Files, &Files), d: &mut Value, not_checked: &mut Vec<Value>) {
+    let read = |files: &Files| files.get(p).map(|e| e.bytes.as_deref().ok_or_else(|| "it is larger than 1 MiB or not a regular file".to_string()).and_then(crate::lock::workspace));
+    let after = match read(new) {
+        Some(Ok(after)) => after,
+        after => {
+            let why = match after { Some(Err(why)) => why, _ => "it is missing from the change".to_string() };
+            not_checked.push(json!({ "path": p, "why": format!("Kern could not read this pnpm-workspace.yaml ({why}), so it cannot see what it installs or lets run when dependencies install"), "steers": true }));
+            return;
+        }
+    };
+    let before = match read(old) {
+        Some(Err(why)) => { not_checked.push(json!({ "path": p, "why": format!("Kern could not read this pnpm-workspace.yaml before the change ({why}), so every setting in it counts as new") })); serde_json::Map::new() }
+        before => before.and_then(Result::ok).unwrap_or_default(),
+    };
+    let (mut moves, mut fields) = (Vec::new(), Vec::new());
+    for key in before.keys().chain(after.keys()).collect::<BTreeSet<_>>() {
+        let (a, b) = (before.get(key), after.get(key));
+        if a == b { continue; }
+        match crate::deps::workspace_moves(key, a, b) { Some(m) => moves.extend(m), None => fields.push(key.clone()) }
+    }
+    if !moves.is_empty() { d["packages"] = json!(moves); }
+    if !fields.is_empty() { d["fields"] = json!(fields); }
+    if moves.is_empty() && fields.is_empty() { d["harmless"] = json!(true); }
+}
+fn json_of(files: &Files, p: &str) -> Option<Value> {
+    let bytes = files.get(p).and_then(|e| e.bytes.as_deref())?;
+    serde_json::from_slice(bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes)).ok()
+}
+fn manifest_facts(p: &str, (old, new): (&Files, &Files), d: &mut Value, not_checked: &mut Vec<Value>) {
+    let a = json_of(old, p).unwrap_or_else(|| json!({}));
+    let Some(b) = json_of(new, p) else {
+        if d["operation"] == "delete" { d["harmless"] = json!(true); return; }
+        let why = match new.get(p) { None => "it is missing from the change", Some(e) if e.bytes.is_none() => "it is larger than 1 MiB or not a regular file", Some(_) => "it is not valid JSON" };
+        not_checked.push(json!({ "path": p, "why": format!("Kern could not read this package.json ({why}), so it cannot see what the change installs or runs when dependencies install"), "steers": true }));
+        return;
+    };
+    let manager = manager_move(&a, &b);
+    let moved: Vec<String> = crate::deps::moves(&a, &b).into_iter().chain(manager.clone()).collect();
+    if !moved.is_empty() { d["packages"] = json!(moved); }
+    let fields: Vec<String> = package_fields(&a, &b).into_iter().filter(|f| steers_install(f) && !(f == "name" && d["operation"] == "add") && !(f == "packageManager" && manager.is_some())).collect();
+    if !fields.is_empty() { d["fields"] = json!(fields); }
+    if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }
+}
 pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let changes = changed(repo, base, head)?;
     let paths: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
     let pick = |f: fn(&str) -> bool| -> Vec<Value> { changes.iter().filter(|(p, _)| f(p)).map(|(p, op)| json!({ "path": p, "operation": op })).collect() };
-    let protected = pick(|p| crate::git::protected(p) && !dependency_file(p) && !agent_note(p) && !harmless_note(p));
+    let protected = pick(|p| crate::git::protected(p) && !dependency_named(p, str::to_ascii_lowercase) && !agent_note(p) && !harmless_note(p));
     let mut dependencies = pick(dependency_file);
     let agent_notes = pick(agent_note);
     let inspected: Vec<&(String, &str)> = changes.iter().filter(|(p, op)| *op != "delete" && (is_code(p) || is_data(p))).collect();
@@ -393,13 +493,14 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
     let manifests: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.as_str())
         .filter(|p| base_name(p) == "package.json" && !p.split('/').any(|c| c == "node_modules")).take(MANIFESTS).map(str::to_string).collect();
     wanted.extend(manifests.iter().cloned());
+    wanted.insert("pnpm-workspace.yaml".to_string());
     let mut configs: BTreeSet<String> = base_listing.iter().chain(&head_listing).map(|i| i.path.clone()).filter(|p| runner_config(p)).take(MANIFESTS).collect();
     wanted.extend(configs.iter().cloned());
     let moved: Vec<(String, String, bool)> = renames(repo, base, head)?.into_iter().filter(|(from, to, _)| is_code(from) == is_code(to)).collect();
     let (mut old, mut new) = (files_from(&base_listing), files_from(&head_listing));
-    fill(repo, &mut old, &base_listing, &wanted)?;
-    fill(repo, &mut new, &head_listing, &wanted)?;
-    let json_of = |files: &Files, p: &str| -> Option<Value> { files.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| serde_json::from_slice::<Value>(b).ok()) };
+    let mut lock_bytes_left = crate::lock::LOCKFILES_BYTES_MAX;
+    fill(repo, &mut old, &base_listing, &wanted, &mut lock_bytes_left)?;
+    fill(repo, &mut new, &head_listing, &wanted, &mut lock_bytes_left)?;
     let mut named = BTreeSet::new();
     for m in &manifests {
         let dir = m.strip_suffix("package.json").unwrap_or("");
@@ -408,8 +509,8 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         }
     }
     let scripted: BTreeSet<String> = named.iter().filter(|p| !wanted.contains(*p) && (is_code(p) || p.ends_with(".json"))).cloned().collect();
-    fill(repo, &mut old, &base_listing, &scripted)?;
-    fill(repo, &mut new, &head_listing, &scripted)?;
+    fill(repo, &mut old, &base_listing, &scripted, &mut lock_bytes_left)?;
+    fill(repo, &mut new, &head_listing, &scripted, &mut lock_bytes_left)?;
     configs.extend(named.iter().filter(|p| is_code(p) || p.ends_with(".json")).cloned());
     let (mut moved_to, mut based) = (BTreeSet::new(), BTreeSet::new());
     for (from, to, _) in &moved {
@@ -601,41 +702,24 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
             settings.push(json!({ "path": p, "operation": op, "why": "the test script names this file as the test runner's config or setup" }));
         }
     }
+    let globs = workspace_globs(&[&old, &new]);
+    dependencies.retain(|d| !test_data(d["path"].as_str().unwrap_or(""), &globs));
     let mut lockfile = Vec::new();
     for d in dependencies.iter_mut() {
         let p = d["path"].as_str().unwrap_or("").to_string();
-        let (a, b) = (json_of(&old, &p).unwrap_or_else(|| json!({})), json_of(&new, &p));
-        if base_name(&p) == "package.json" && let Some(b) = &b {
-            let manager = manager_move(&a, b);
-            let moved: Vec<String> = crate::deps::moves(&a, b).into_iter().chain(manager.clone()).collect();
-            if !moved.is_empty() { d["packages"] = json!(moved); }
-            let fields: Vec<String> = package_fields(&a, b).into_iter().filter(|f| steers_install(f) && !(f == "name" && d["operation"] == "add") && !(f == "packageManager" && manager.is_some())).collect();
-            if !fields.is_empty() { d["fields"] = json!(fields); }
-            if moved.is_empty() && fields.is_empty() && a.is_object() && d["operation"] == "modify" { d["harmless"] = json!(true); }
-        }
-        if base_name(&p) == "package.json" && d["operation"] == "delete" {
-            d["harmless"] = json!(true);
-        }
-        if npm_lockfile(&p) && d["operation"] != "delete" {
-            match b {
-                Some(b) => {
-                    lockfile.extend(crate::deps::lock_surprises(&a, &b).into_iter().map(|why| json!({ "path": p, "why": why })));
-                    let moves = crate::deps::lock_moves(&a, &b);
-                    if moves.is_empty() { d["harmless"] = json!(true); }
-                    else if moves.len() > LOCK_MOVES_COUNT_MAX { d["count"] = json!(moves.len()); }
-                    else { d["packages"] = json!(moves.iter().map(crate::deps::shown).collect::<Vec<_>>()); }
-                }
-                None => not_checked.push(json!({ "path": p, "why": "Kern could not read this lockfile (not JSON, or larger than 64 MiB)" })),
-            }
-        }
-        if base_name(&p) != "package.json" && !npm_lockfile(&p) && d["operation"] != "delete" {
-            not_checked.push(json!({ "path": p, "why": "Kern does not read this file, so it cannot see which packages it installs or where they download from" }));
+        match base_name(&p) {
+            "package.json" => manifest_facts(&p, (&old, &new), d, &mut not_checked),
+            _ if d["operation"] == "delete" => {}
+            "pnpm-workspace.yaml" => workspace_facts(&p, (&old, &new), d, &mut not_checked),
+            _ if crate::lock::lockfile(&p) => lockfile_facts(&p, (&old, &new), d, &mut lockfile, &mut not_checked),
+            _ => not_checked.push(json!({ "path": p, "why": "Kern does not read this file, so it cannot see which packages it installs or where they download from", "steers": true })),
         }
     }
     dependencies.retain(|d| d.get("harmless").is_none());
-    if dependencies.iter().any(|d| base_name(d["path"].as_str().unwrap_or("")) == "package.json" && d["packages"].as_array().is_some_and(|p| !p.is_empty())) {
-        for d in dependencies.iter_mut().filter(|d| npm_lockfile(d["path"].as_str().unwrap_or(""))) { if let Some(o) = d.as_object_mut() { o.remove("packages"); } }
+    if dependencies.iter().any(|d| matches!(base_name(d["path"].as_str().unwrap_or("")), "package.json" | "pnpm-workspace.yaml") && d["packages"].as_array().is_some_and(|p| !p.is_empty())) {
+        for d in dependencies.iter_mut().filter(|d| crate::lock::lockfile(d["path"].as_str().unwrap_or(""))) { if let Some(o) = d.as_object_mut() { o.remove("packages"); } }
     }
+    not_checked.sort_by_key(|x| x["steers"] != true);
     let mut listed = BTreeSet::new();
     not_checked.retain(|x| listed.insert(x["path"].as_str().unwrap_or("").to_string()));
     let text_now = |p: &str| new.get(p).and_then(|e| e.bytes.as_deref()).and_then(|b| std::str::from_utf8(b).ok());

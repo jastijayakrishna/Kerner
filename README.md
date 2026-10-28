@@ -197,8 +197,20 @@ What Kern checks on every pull request:
    `patchedDependencies` or a `patch:` version names, anything under `.yarn/patches/`, or a `.patch` file under `patches/` in a project
    that uses patch-package or pnpm); a changed script or extensionless file an install script runs (not a schema or config it reads);
    a deleted lockfile; and a
-   lockfile entry that downloads a package from somewhere other than its own registry tarball, swaps one package for another or changes
-   a checksum without a version. A lockfile Kern does not read (yarn, pnpm, Bun) is listed as not checked.
+   lockfile entry that downloads a package from somewhere other than its own registry tarball (a new tarball or git source, or a host
+   no entry used before), swaps one package for another, or changes or drops a checksum without a version. Kern reads npm's
+   `package-lock.json` and `npm-shrinkwrap.json`, `pnpm-lock.yaml` (lockfile versions 6 to 9, the document that installs pnpm itself
+   included), `yarn.lock` (classic and berry) and `bun.lock`, and names their version moves the same way. It also reads
+   `pnpm-workspace.yaml`: its `packages` and catalog versions are notes, and any other setting the change adds or edits (`overrides`,
+   `allowBuilds`, `onlyBuiltDependencies`, `minimumReleaseAgeExclude` and the like) needs a look; Kern reads its values with their
+   YAML types, so `false` becoming `'false'` is a changed setting. A changed file that decides what gets installed and that Kern
+   cannot read is not verified, never passed: Bun's binary `bun.lockb`, a lockfile over 64 MiB, past the 128 MiB of lockfiles Kern
+   reads in one check, or not in the form its tool writes (a yarn 1 entry with no `resolved` that is not a local folder, for one), a
+   `package.json` or `pnpm-workspace.yaml` Kern cannot parse, and the manifests and lockfiles of the other package managers Kern
+   names in `rules::OTHER_DEPENDENCY_FILES` (Python, Rust, Go, Ruby, Deno, PHP, Maven and Gradle, NuGet and Paket, Swift, CocoaPods
+   and Carthage, Dart, Elixir, Conan, vcpkg, sbt and Clojure, by their exact file names). Another ecosystem's file outside that list
+   is not named. A dependency file inside a test-data folder (`fixtures`, `__fixtures__`, `testdata`, `__mocks__`) that no
+   workspace declaration in the root `package.json` or `pnpm-workspace.yaml` includes is test data, not what gets installed.
 9. **Changes that break users without failing a test.** These need no test run, so they also cover projects whose tests Kern cannot
    run: tests removed from an existing test file, left checking nothing, or loosened to checks that pass for almost any value; a
    published package that stops exporting a name its users import; code that starts using a Node feature newer than the oldest Node

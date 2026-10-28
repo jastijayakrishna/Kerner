@@ -381,13 +381,14 @@ fn a_lockfile_names_a_new_download_host_once_and_a_checksum_that_changed_without
     let lock = |host: &str, integrity: &str| json!({ "packages": { "": { "name": "shop" },
         "node_modules/a": { "version": "1.0.0", "resolved": format!("https://{host}/a/-/a-1.0.0.tgz"), "integrity": integrity },
         "node_modules/b": { "version": "2.0.0", "resolved": format!("https://{host}/b/-/b-2.0.0.tgz"), "integrity": "sha512-b" } } });
-    let moved = kern::deps::lock_surprises(&lock("registry.npmjs.org", "sha512-a"), &lock("npm.mirror.example", "sha512-a"));
+    let npm = |v: &serde_json::Value| kern::lock::read("package-lock.json", Some(v.to_string().as_bytes())).unwrap();
+    let moved = kern::deps::lock_surprises(&npm(&lock("registry.npmjs.org", "sha512-a")), &npm(&lock("npm.mirror.example", "sha512-a")));
     assert_eq!(moved.len(), 1, "one line per new host, not one per package: {moved:?}");
     assert!(moved[0].contains("2 packages") && moved[0].contains("npm.mirror.example"), "{moved:?}");
-    let swapped = kern::deps::lock_surprises(&lock("registry.npmjs.org", "sha512-a"), &lock("registry.npmjs.org", "sha512-evil"));
+    let swapped = kern::deps::lock_surprises(&npm(&lock("registry.npmjs.org", "sha512-a")), &npm(&lock("registry.npmjs.org", "sha512-evil")));
     assert!(swapped.len() == 1 && swapped[0].contains("a 1.0.0") && swapped[0].contains("checksum"), "{swapped:?}");
-    assert!(kern::deps::lock_surprises(&lock("npm.corp.example", "sha512-a"), &lock("npm.corp.example", "sha512-a")).is_empty(), "a host the lockfile already used is no surprise");
-    let fresh = kern::deps::lock_surprises(&json!({}), &lock("registry.npmjs.org", "sha512-a"));
+    assert!(kern::deps::lock_surprises(&npm(&lock("npm.corp.example", "sha512-a")), &npm(&lock("npm.corp.example", "sha512-a"))).is_empty(), "a host the lockfile already used is no surprise");
+    let fresh = kern::deps::lock_surprises(&npm(&json!({})), &npm(&lock("registry.npmjs.org", "sha512-a")));
     assert!(fresh.is_empty(), "a new lockfile on the public registry is no surprise: {fresh:?}");
 }
 
@@ -499,7 +500,8 @@ fn a_skip_moved_into_a_renamed_test_file_still_needs_a_look() {
 fn an_npm_6_lockfile_is_checked_down_to_its_nested_packages() {
     let lock = |host: &str| json!({ "lockfileVersion": 1, "dependencies": { "a": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
         "dependencies": { "b": { "version": "2.0.0", "resolved": format!("https://{host}/b/-/b-2.0.0.tgz") } } } } });
-    let out = kern::deps::lock_surprises(&lock("registry.npmjs.org"), &lock("evil.example"));
+    let npm = |v: &serde_json::Value| kern::lock::read("package-lock.json", Some(v.to_string().as_bytes())).unwrap();
+    let out = kern::deps::lock_surprises(&npm(&lock("registry.npmjs.org")), &npm(&lock("evil.example")));
     assert!(out.iter().any(|w| w.contains("evil.example") && w.contains("b 2.0.0")), "{out:?}");
 }
 

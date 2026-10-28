@@ -1,4 +1,5 @@
 use crate::git::Files;
+use crate::lock::{Lock, Package, Source};
 use crate::util::*;
 use crate::{deny, ensure};
 use serde_json::{Value, json};
@@ -28,17 +29,23 @@ fn read(files: &Files, path: &str) -> R<Option<Value>> {
     let parsed = e.bytes.as_deref().and_then(|b| serde_json::from_slice::<Value>(b).ok()).filter(Value::is_object);
     parsed.map(Some).ok_or_else(|| Denied(format!("Dependency files must be valid JSON: {path}")))
 }
-fn package_of(key: &str) -> &str { key.rsplit_once("node_modules/").map_or(key, |(_, name)| name) }
+pub(crate) fn package_of(key: &str) -> &str { key.rsplit_once("node_modules/").map_or(key, |(_, name)| name) }
 fn target(name: &str, spec: &Value) -> String {
     let Some(rest) = spec.as_str().and_then(|s| s.strip_prefix("npm:")) else { return name.to_string() };
     rest.get(1..).and_then(|r| r.find('@')).map_or(rest, |i| &rest[..=i]).to_string()
 }
+fn tarball_path(url: &str) -> Option<&str> { url.split_once("://").and_then(|(_, rest)| rest.split_once('/')).map(|(_, p)| p.split(['?', '#']).next().unwrap_or("")) }
 fn tarball_of(url: &str, name: &str, version: &str) -> bool {
-    let Some(path) = url.split_once("://").and_then(|(_, rest)| rest.split_once('/')).map(|(_, p)| p.split(['?', '#']).next().unwrap_or("")) else { return false };
+    let Some(path) = tarball_path(url) else { return false };
     let plain = !version.is_empty() && version.chars().all(|c| c.is_ascii_alphanumeric() || ".+-".contains(c));
     let base = name.rsplit('/').next().unwrap_or(name);
-    plain && valid_name(name) && [name.to_string(), name.replacen('/', "%2f", 1), name.replacen('/', "%2F", 1)].iter()
+    plain && crate::lock::named(name) && [name.to_string(), name.replacen('/', "%2f", 1), name.replacen('/', "%2F", 1)].iter()
         .any(|n| { let own = format!("{n}/-/{base}-{version}.tgz"); path == own || path.ends_with(&format!("/{own}")) })
+}
+pub(crate) fn registry_version(url: &str, name: &str) -> Option<String> {
+    let file = tarball_path(url)?.rsplit('/').next()?;
+    let version = file.strip_prefix(&format!("{}-", name.rsplit('/').next().unwrap_or(name)))?.strip_suffix(".tgz")?;
+    tarball_of(url, name, version).then(|| version.to_string())
 }
 type Specs = BTreeMap<(String, &'static str), String>;
 fn specs(manifest: &Value) -> Specs {
@@ -66,77 +73,124 @@ pub fn shown(m: &Value) -> String {
         _ => format!("{name} (removed)"),
     }
 }
-pub fn lock_moves(old: &Value, new: &Value) -> Vec<Value> {
-    let deps = |lock: &Value| -> BTreeMap<String, Value> {
-        let packaged = lock["packages"].as_object().is_some_and(|p| !p.is_empty());
-        entries(lock).into_iter().filter(|(k, e)| e["link"] != true && (!packaged || k.contains("node_modules/")) && e["version"].is_string()).collect()
+const VERSIONS_SHOWN_COUNT_MAX: usize = 6;
+fn version_order(v: &str) -> Vec<u64> { v.split(['.', '-', '+']).map(|p| p.parse().unwrap_or(0)).collect() }
+fn listed_versions(versions: &BTreeSet<&str>) -> String {
+    let mut sorted: Vec<&str> = versions.iter().copied().collect();
+    sorted.sort_by_key(|v| version_order(v));
+    let more = if sorted.len() > VERSIONS_SHOWN_COUNT_MAX { ", …" } else { "" };
+    format!("{}{more}", sorted.into_iter().take(VERSIONS_SHOWN_COUNT_MAX).collect::<Vec<_>>().join(", "))
+}
+pub fn lock_moves(old: &Lock, new: &Lock) -> Vec<Value> {
+    let versions = |lock: &Lock| {
+        let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for p in lock.packages().into_iter().filter(|p| !p.version.is_empty()) { by_name.entry(p.name.clone()).or_default().insert(p.version.clone()); }
+        by_name
     };
-    let name_of = |key: &str, e: &Value| e["name"].as_str().map_or_else(|| package_of(key).to_string(), str::to_string);
-    let (before, after) = (deps(old), deps(new));
-    let mut out = BTreeMap::new();
-    for (key, e) in &after {
-        let (version, was) = (e["version"].as_str().unwrap_or(""), before.get(key).and_then(|o| o["version"].as_str()));
-        if was == Some(version) { continue; }
-        out.insert((name_of(key, e), version.to_string()), serde_json::json!({ "name": name_of(key, e), "from": was, "to": version }));
+    let (before, after, none) = (versions(old), versions(new), BTreeSet::new());
+    let names: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    names.into_iter().filter_map(|name| {
+        let (b, a) = (before.get(name).unwrap_or(&none), after.get(name).unwrap_or(&none));
+        let (gone, came): (BTreeSet<&str>, BTreeSet<&str>) = (b.difference(a).map(String::as_str).collect(), a.difference(b).map(String::as_str).collect());
+        let all = |s: &BTreeSet<String>| listed_versions(&s.iter().map(String::as_str).collect());
+        let (from, to) = match (gone.len(), came.len()) {
+            (0, 0) => return None,
+            (1, 1) => (Some(listed_versions(&gone)), Some(listed_versions(&came))),
+            _ if b.is_empty() => (None, Some(all(a))),
+            _ if a.is_empty() => (Some(all(b)), None),
+            _ => (Some(all(b)), Some(all(a))),
+        };
+        Some(json!({ "name": name, "from": from, "to": to }))
+    }).collect()
+}
+fn catalog(v: &Value, label: &str) -> Option<serde_json::Map<String, Value>> {
+    match v {
+        Value::Null => Some(serde_json::Map::new()),
+        Value::Object(m) => m.iter().map(|(name, spec)| spec.as_str().map(|s| (format!("{name}{label}"), json!(s)))).collect(),
+        _ => None,
     }
-    for (key, e) in before.iter().filter(|(k, _)| !after.contains_key(*k)) {
-        out.entry((name_of(key, e), String::new())).or_insert_with(|| serde_json::json!({ "name": name_of(key, e), "from": e["version"], "to": null }));
+}
+fn catalogs(v: &Value) -> Option<serde_json::Map<String, Value>> {
+    match v {
+        Value::Null => Some(serde_json::Map::new()),
+        Value::Object(m) => m.iter().try_fold(serde_json::Map::new(), |mut all, (name, c)| { all.extend(catalog(c, &format!(" (catalog {name})"))?); Some(all) }),
+        _ => None,
     }
-    out.into_values().collect()
+}
+fn globs(v: &Value) -> Option<BTreeSet<&str>> {
+    match v { Value::Null => Some(BTreeSet::new()), Value::Array(items) => items.iter().map(Value::as_str).collect(), _ => None }
+}
+pub fn workspace_moves(key: &str, old: Option<&Value>, new: Option<&Value>) -> Option<Vec<String>> {
+    let (a, b) = (old.unwrap_or(&Value::Null), new.unwrap_or(&Value::Null));
+    let versions = |a: serde_json::Map<String, Value>, b: serde_json::Map<String, Value>| changed_versions(&json!({ "dependencies": a }), &json!({ "dependencies": b })).iter().map(shown).collect();
+    match key {
+        "packages" => {
+            let (was, now) = (globs(a)?, globs(b)?);
+            Some(now.difference(&was).map(|g| format!("workspace {g} (new)")).chain(was.difference(&now).map(|g| format!("workspace {g} (removed)"))).collect())
+        }
+        "catalog" => Some(versions(catalog(a, "")?, catalog(b, "")?)),
+        "catalogs" => Some(versions(catalogs(a)?, catalogs(b)?)),
+        _ => None,
+    }
 }
 pub fn moves(old: &Value, new: &Value) -> Vec<String> { changed_versions(old, new).iter().map(shown).collect::<BTreeSet<_>>().into_iter().collect() }
 const REGISTRIES: [&str; 2] = ["registry.npmjs.org", "registry.yarnpkg.com"];
 fn host(url: &str) -> Option<String> {
     url.split_once("://").and_then(|(_, rest)| rest.split(['/', '?', '#']).next()).filter(|h| !h.is_empty()).map(str::to_ascii_lowercase)
 }
-fn legacy(prefix: &str, deps: &Value, out: &mut Vec<(String, Value)>) {
-    for (name, entry) in deps.as_object().into_iter().flatten() {
-        let key = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-        let mut own = entry.clone();
-        if let Some(o) = own.as_object_mut() { o.remove("dependencies"); o.insert("name".into(), Value::String(name.clone())); }
-        out.push((key.clone(), own));
-        legacy(&key, &entry["dependencies"], out);
-    }
+const LOCK_FINDINGS_COUNT_MAX: usize = 20;
+const STRONGEST: [&str; 4] = ["sha512", "sha384", "sha256", "sha1"];
+fn url_of(p: &Package) -> Option<&str> { match &p.source { Source::Url(url) => Some(url), Source::Registry => None } }
+fn own_tarball(p: &Package) -> bool { url_of(p).is_none_or(|url| tarball_of(url, &p.name, &p.version)) }
+fn label(p: &Package) -> String { if p.version.is_empty() { p.name.clone() } else { format!("{} {}", p.name, p.version) } }
+fn digests(integrity: &str) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut by_kind: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (kind, digest) in integrity.split(' ').filter_map(|t| t.split_once('-')) { by_kind.entry(kind).or_default().insert(digest.split('?').next().unwrap_or(digest)); }
+    by_kind
 }
-fn entries(lock: &Value) -> Vec<(String, Value)> {
-    let packages = lock["packages"].as_object().cloned().unwrap_or_default();
-    if !packages.is_empty() { return packages.into_iter().filter(|(k, _)| !k.is_empty()).collect(); }
-    let mut out = Vec::new();
-    legacy("", &lock["dependencies"], &mut out);
-    out
+fn same_file(was: &str, now: &str) -> Option<bool> {
+    let (a, b) = (digests(was), digests(now));
+    let kind = STRONGEST.iter().copied().find(|k| a.contains_key(k) && b.contains_key(k)).or_else(|| a.keys().copied().find(|k| b.contains_key(k)))?;
+    Some(!a[kind].is_disjoint(&b[kind]))
 }
-pub fn lock_surprises(old: &Value, new: &Value) -> Vec<String> {
-    let before: BTreeMap<String, Value> = entries(old).into_iter().collect();
-    let known: BTreeSet<String> = before.values().filter_map(|e| e["resolved"].as_str().and_then(host)).chain(REGISTRIES.iter().map(|r| r.to_string())).collect();
-    let (mut swaps, mut foreign, mut hosts) = (Vec::new(), Vec::new(), BTreeMap::<String, (usize, String)>::new());
-    let aliases: BTreeSet<(String, String)> = entries(new).iter().flat_map(|(_, e)| {
-        ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].iter().flat_map(|k| e[*k].as_object().cloned().unwrap_or_default()).collect::<Vec<_>>()
-    }).filter_map(|(name, spec)| {
-        let target = spec.as_str()?.strip_prefix("npm:")?;
-        let at = target.rfind('@').filter(|i| *i > 0).unwrap_or(target.len());
-        Some((name, target[..at].to_string()))
+type Earlier<'a> = BTreeMap<(&'a str, &'a str), Vec<&'a Package>>;
+fn checksum_moved(p: &Package, before: &Earlier) -> Option<String> {
+    let same_place = |o: &&&Package| own_tarball(o) == own_tarball(p) && (own_tarball(p) || url_of(o) == url_of(p));
+    let earlier: Vec<&&Package> = before.get(&(p.name.as_str(), p.version.as_str())).into_iter().flatten().filter(same_place).collect();
+    let kept = |o: &&&Package| match (&o.integrity, &p.integrity) { (Some(was), Some(now)) => same_file(was, now) != Some(false), (Some(_), None) => false, _ => true };
+    if earlier.is_empty() || earlier.iter().any(kept) { return None; }
+    Some(match p.integrity {
+        Some(_) => format!("{} has a new checksum without a new version: the file it downloads changed", label(p)),
+        None => format!("{} lost its checksum without a new version, so nothing pins the file it downloads", label(p)),
+    })
+}
+pub fn lock_surprises(old: &Lock, new: &Lock) -> Vec<String> {
+    let before = old.packages();
+    let known: BTreeSet<String> = before.iter().filter_map(|p| url_of(p).and_then(host)).chain(REGISTRIES.iter().map(|r| r.to_string())).collect();
+    let mut found: Vec<String> = new.installs.iter().filter_map(|(place, i)| {
+        let was = old.installs.get(place).map_or(i.name.as_str(), |o| o.package.name.as_str());
+        let swapped = own_tarball(&i.package) && i.package.name != was && !new.aliases.contains(&(i.name.clone(), i.package.name.clone()));
+        swapped.then(|| format!("{place} installs another package: {} in place of {was}", i.package.name))
     }).collect();
-    let packaged = new["packages"].as_object().is_some_and(|p| !p.is_empty());
-    for (key, entry) in entries(new).into_iter().filter(|(k, v)| before.get(k) != Some(v) && v["link"] != true && (!packaged || k.contains("node_modules/"))) {
-        let real = entry["name"].as_str().map_or_else(|| package_of(&key).to_string(), str::to_string);
-        let was = before.get(&key).map_or_else(|| package_of(&key).to_string(), |o| o["name"].as_str().map_or_else(|| package_of(&key).to_string(), str::to_string));
-        if was != real && !aliases.contains(&(package_of(&key).to_string(), real.clone())) { swaps.push(format!("{key} installs another package: {real} in place of {was}")); continue; }
-        let version = entry["version"].as_str().unwrap_or("");
-        if let Some(o) = before.get(&key) && o["version"] == entry["version"] && o["integrity"].is_string() && o["integrity"] != entry["integrity"] {
-            swaps.push(format!("{real} {version} has a new checksum without a new version: the file it downloads changed"));
-        }
-        let Some(url) = entry["resolved"].as_str() else { continue };
-        if !tarball_of(url, &real, version) { foreign.push(format!("{real} {version} downloads from {url}, which is not its own registry tarball")); continue; }
-        if let Some(h) = host(url).filter(|h| !known.contains(h)) {
-            let e = hosts.entry(h).or_insert((0, format!("{real} {version}")));
-            e.0 += 1;
+    let mut earlier: Earlier = BTreeMap::new();
+    for p in &before { earlier.entry((p.name.as_str(), p.version.as_str())).or_default().push(p); }
+    let (mut foreign, mut hosts) = (Vec::new(), BTreeMap::<String, (usize, String)>::new());
+    for p in new.packages().difference(&before) {
+        found.extend(checksum_moved(p, &earlier));
+        match url_of(p) {
+            Some(url) if !own_tarball(p) => foreign.push(format!("{} downloads from {url}, which is not its own registry tarball", label(p))),
+            Some(url) => { if let Some(h) = host(url).filter(|h| !known.contains(h)) { hosts.entry(h).or_insert((0, label(p))).0 += 1; } }
+            None => {}
         }
     }
-    swaps.extend(foreign);
-    for (h, (n, first)) in hosts {
-        swaps.push(format!("{} now download from {h}, a host this lockfile did not use before (first: {first})", if n == 1 { "1 package".to_string() } else { format!("{n} packages") }));
+    found.extend(foreign);
+    found.extend(hosts.into_iter().map(|(h, (n, first))| format!("{} now download from {h}, a host this lockfile did not use before (first: {first})", if n == 1 { "1 package".to_string() } else { format!("{n} packages") })));
+    if found.len() > LOCK_FINDINGS_COUNT_MAX {
+        let more = found.len() - LOCK_FINDINGS_COUNT_MAX;
+        found.truncate(LOCK_FINDINGS_COUNT_MAX);
+        found.push(format!("and {more} more lockfile entries like these"));
     }
-    swaps
+    found
 }
 fn fields_changed(a: &Value, b: &Value, keep: &[&str]) -> Vec<String> {
     let keys: BTreeSet<&String> = a.as_object().into_iter().chain(b.as_object()).flat_map(|o| o.keys()).collect();

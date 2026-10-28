@@ -125,7 +125,8 @@ fn a_real_test_skipped_behind_a_same_named_passing_decoy_is_not_silently_kept() 
 fn a_lockfile_tarball_on_a_foreign_host_that_copies_the_registry_layout_is_a_surprise() {
     let entry = |host: &str| json!({ "packages": { "": { "name": "shop" },
         "node_modules/left-pad": { "version": "1.3.0", "resolved": format!("https://{host}/left-pad/-/left-pad-1.3.0.tgz") } } });
-    let out = kern::deps::lock_surprises(&entry("registry.npmjs.org"), &entry("evil.example"));
+    let npm = |v: &serde_json::Value| kern::lock::read("package-lock.json", Some(v.to_string().as_bytes())).unwrap();
+    let out = kern::deps::lock_surprises(&npm(&entry("registry.npmjs.org")), &npm(&entry("evil.example")));
     assert!(out.iter().any(|w| w.contains("left-pad") && w.contains("evil.example")),
         "the tarball now downloads from a foreign host that only copies the registry path layout; tarball_of checks the path but not the host: {out:?}");
 }

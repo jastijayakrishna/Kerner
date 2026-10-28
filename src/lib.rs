@@ -8,6 +8,7 @@ pub mod sandbox;
 pub mod github;
 pub mod oidc;
 pub mod deps;
+pub mod lock;
 pub mod drive;
 pub mod script;
 pub mod suite;

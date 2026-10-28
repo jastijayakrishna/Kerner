@@ -1348,7 +1348,8 @@ fn a_lockfile_only_change_lists_what_moved_and_leaves_the_workspaces_own_package
         "node_modules/gone": { "version": "0.1.0" }, "packages/lib": { "name": "@app/lib", "version": "1.0.0" }, "node_modules/@app/lib": { "resolved": "packages/lib", "link": true } } });
     let new = json!({ "lockfileVersion": 3, "packages": { "": { "name": "app" }, "node_modules/a": { "version": "1.0.1" }, "node_modules/b": { "version": "2.0.0" },
         "node_modules/a/node_modules/c": { "version": "3.1.0" }, "packages/lib": { "name": "@app/lib", "version": "1.1.0" }, "node_modules/@app/lib": { "resolved": "packages/lib", "link": true } } });
-    let moves = lock_moves(&old, &new);
+    let npm = |v: &serde_json::Value| kern::lock::read("package-lock.json", Some(v.to_string().as_bytes())).unwrap();
+    let moves = lock_moves(&npm(&old), &npm(&new));
     let shown: Vec<String> = moves.iter().map(|m| format!("{} {} {}", m["name"].as_str().unwrap(), m["from"].as_str().unwrap_or("-"), m["to"].as_str().unwrap_or("-"))).collect();
     assert_eq!(shown, ["a 1.0.0 1.0.1", "c - 3.1.0", "gone 0.1.0 -"], "the workspace's own package and links are not dependencies: {shown:?}");
     let d = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });

@@ -260,7 +260,8 @@ fn a_lockfile_that_gains_an_npm_alias_or_a_workspace_package_installs_no_other_p
     p.insert("node_modules/strip-ansi-cjs".into(), json!({ "name": "strip-ansi", "version": "6.0.1", "resolved": tarball("strip-ansi", "6.0.1"), "integrity": "sha512-a" }));
     p.insert("node_modules/@acme/ui".into(), json!({ "resolved": "packages/ui", "link": true }));
     p.insert("packages/ui".into(), json!({ "name": "@acme/ui", "version": "0.1.0", "devDependencies": { "rimraf": "^5.0.10" } }));
-    let surprises = kern::deps::lock_surprises(&old, &new);
+    let npm = |v: &serde_json::Value| kern::lock::read("package-lock.json", Some(v.to_string().as_bytes())).unwrap();
+    let surprises = kern::deps::lock_surprises(&npm(&old), &npm(&new));
     assert!(surprises.is_empty(),
         "the change adds a workspace package, packages/ui, whose dev dependency rimraf brings in @isaacs/cliui, which declares string-width-cjs as npm:string-width@^4.2.0 (glob 10 pulls it into countless projects); npm writes both entries under a name that differs from their path, and Kern reads each as a supply-chain swap: {surprises:#?}");
 }

@@ -592,6 +592,9 @@ fn steering_items(f: &mut Found, rules: &Value) {
         }));
     }
     for x in rules["lockfile"].as_array().into_iter().flatten() { f.look.push(item("lockfile", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""), 400)))); }
+    for x in rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["steers"] == true) {
+        f.unverified.push(item("not-checked-install", format!("{}: {}", path_of(x), plain(x["why"].as_str().unwrap_or(""), 400))));
+    }
     for x in rules["agent_notes"].as_array().into_iter().flatten() { f.notes.push(item("agent-notes", format!("{} changes what coding agents are told", path_of(x)))); }
 }
 fn not_run_items(f: &mut Found, tests: &Value) {
@@ -621,8 +624,9 @@ pub fn build(d: &Value, rules: &Value, tests: &Value) -> Value {
     let decision = if !f.blocked.is_empty() { "blocked" } else if !f.look.is_empty() { "look" } else if !f.unverified.is_empty() { "unverified" } else { "clear" };
     let (claims, challenges) = proof_items(tests);
     let said = |x: &Value| json!({ "what": format!("{}: {}", code(x["path"].as_str().unwrap_or(""), 160), plain(x["why"].as_str().unwrap_or(""), 400)) });
-    let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().map(said).chain(d["skipped"].as_array().into_iter().flatten().map(said))
-        .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files")
+    let steering: Vec<&Value> = rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["steers"] == true).map(|x| &x["path"]).collect();
+    let not_checked: Vec<Value> = rules["not_checked"].as_array().into_iter().flatten().filter(|x| x["steers"] != true).map(said).chain(d["skipped"].as_array().into_iter().flatten().map(said))
+        .chain(d["unmeasured"].as_array().into_iter().flatten().filter(|x| x["why"] == "other files" && !steering.contains(&&x["path"]))
             .map(|x| json!({ "what": format!("{}: Kern does not check this kind of file", code(x["path"].as_str().unwrap_or(""), 160)) }))).chain(f.cannot_run).collect();
     json!({ "version": 1, "kern": env!("CARGO_PKG_VERSION"), "sandbox": if crate::sandbox::throwaway() { "throwaway" } else { "gvisor" }, "base": d["base"], "head": d["head"],
         "decision": decision, "blocked": f.blocked, "look": f.look, "unverified": f.unverified, "notes": f.notes,

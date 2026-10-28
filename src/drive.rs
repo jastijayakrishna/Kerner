@@ -110,7 +110,6 @@ pub fn same_program(path: &str, old: &str, new: &str) -> bool {
 const BINARY: [&str; 52] = ["png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "bmp", "tif", "tiff", "psd", "heic", "mp3", "mp4", "m4a", "mov", "webm",
     "wav", "ogg", "flac", "avi", "mkv", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "jar", "war", "woff", "woff2", "ttf", "otf", "eot", "glb", "gltf",
     "fbx", "blend", "wasm", "bin", "exe", "dll", "so", "dylib", "node", "db", "sqlite", "pyc", "class"];
-const LOCKFILES: [&str; 6] = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"];
 const LARGEST: u64 = 1 << 20;
 const MOST_FILES: usize = 2000;
 const MOST_TEXT: u64 = 128 << 20;
@@ -120,7 +119,7 @@ fn unmeasured_kind(path: &str) -> &'static str {
     let dirs: Vec<String> = path.split('/').map(str::to_ascii_lowercase).collect();
     let ext = extension(path);
     if crate::suite::is_test_path(path) { return "tests"; }
-    if LOCKFILES.contains(&name.as_str()) || name == "package.json" { return "dependencies"; }
+    if crate::lock::LOCKFILES.contains(&name.as_str()) || name == "package.json" { return "dependencies"; }
     if ["md", "mdx", "txt", "rst", "adoc"].contains(&ext.as_str()) || name.starts_with("license") || name.starts_with("changelog") { return "documentation"; }
     if name.contains(".config.") || name.starts_with('.') || name.starts_with("tsconfig") || name == "dockerfile" || dirs.first().is_some_and(|d| d == ".github")
         || ["toml", "ini", "cfg", "conf", "env"].contains(&ext.as_str()) { return "configuration"; }
@@ -253,12 +252,8 @@ pub fn install_dirs(paths: &BTreeSet<String>, code: &[String], root_package: Opt
     if let Some(y) = pnpm_workspace {
         patterns.extend(y.lines().filter_map(|l| l.trim().strip_prefix('-')).map(|p| p.trim().trim_matches(|c| c == '\'' || c == '"').to_string()));
     }
-    let matches = |p: &str, dir: &str| {
-        let re: String = p.trim_end_matches('/').split('/').map(|part| match part { "**" => ".*".to_string(), _ => part.split('*').map(regex_quote).collect::<Vec<_>>().join("[^/]*") }).collect::<Vec<_>>().join("/");
-        glob_match(&re, dir)
-    };
-    let member = |dir: &str| patterns.iter().filter(|p| !p.starts_with('!')).any(|p| matches(p, dir))
-        && !patterns.iter().filter_map(|p| p.strip_prefix('!')).any(|p| matches(p, dir));
+    let member = |dir: &str| patterns.iter().filter(|p| !p.starts_with('!')).any(|p| workspace_glob(p, dir))
+        && !patterns.iter().filter_map(|p| p.strip_prefix('!')).any(|p| workspace_glob(p, dir));
     let mut dirs: Vec<String> = Vec::new();
     if paths.contains("package.json") { dirs.push(".".into()); }
     for p in code {
@@ -272,6 +267,10 @@ pub fn install_dirs(paths: &BTreeSet<String>, code: &[String], root_package: Opt
         if let Some(o) = owner && !o.is_empty() && !member(&o) && !dirs.contains(&o) && dirs.len() < 16 { dirs.push(o); }
     }
     dirs
+}
+pub(crate) fn workspace_glob(p: &str, dir: &str) -> bool {
+    let re: String = p.trim_end_matches('/').split('/').map(|part| match part { "**" => ".*".to_string(), _ => part.split('*').map(regex_quote).collect::<Vec<_>>().join("[^/]*") }).collect::<Vec<_>>().join("/");
+    glob_match(&re, dir)
 }
 fn regex_quote(s: &str) -> String { s.chars().map(|c| if "\\.+?()[]{}|^$".contains(c) { format!("\\{c}") } else { c.to_string() }).collect() }
 fn glob_match(pattern: &str, dir: &str) -> bool {
