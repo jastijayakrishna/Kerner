@@ -180,7 +180,7 @@ const TSC_HEAP_MB_MIN: u64 = 1024;
 pub fn spec(config: &str, seconds: u64, memory_mb: u64) -> Value {
     let heap = (memory_mb * 7 / 10).max(TSC_HEAP_MB_MIN);
     json!({ "version": 1, "command": ["/usr/local/bin/node", "-e", CHECK, format!("/workspace/{config}"), heap.to_string()], "timeout_seconds": seconds, "cwd": parent(config), "env": {},
-        "files": {}, "early": false, "faults": [], "serve": {}, "steps": [] })
+        "files": {}, "early_secs": 0, "faults": [], "serve": {}, "steps": [] })
 }
 fn check_side(out: &Path, volume: &str, config: &str, until: u64, label: &str) -> Value {
     let seconds = within(until, 240);

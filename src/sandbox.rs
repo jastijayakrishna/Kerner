@@ -55,6 +55,7 @@ pub fn missing_platform_parts(node_modules: &Path) -> Vec<(String, String)> {
 pub const DRIVE_MARK: &str = "\u{1e}kern-drive ";
 pub const TEST_PARTS: [&str; 7] = ["output", "errors", "behavior", "created", "ending", "values", "trace"];
 pub const STEPS_COUNT_MAX: usize = 32;
+pub const TEST_SECS_MAX: u64 = 3600;
 pub const TRACE_BYTES_MAX: usize = 8 << 20;
 pub const INSTALL_SCRATCH: [&str; 1] = ["/workspace/.kern-install"];
 pub const PNPM_STORE: &str = "/workspace/.kern-pnpm-store";
@@ -996,8 +997,8 @@ mod inside {
     }
     pub fn drive_test() -> R<()> {
         let c = config("drive-test.json")?;
-        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early", "faults", "serve", "steps"], "test run")?;
-        let early = c["early"].as_bool().ok_or_else(|| Denied("Invalid test run".into()))?;
+        exact(&c, &["version", "command", "timeout_seconds", "cwd", "env", "files", "early_secs", "faults", "serve", "steps"], "test run")?;
+        let early = int(&c, "early_secs", 0, TEST_SECS_MAX)?;
         ensure!(c["version"] == 1, "Unsupported test run");
         let vars = c["env"].as_object().ok_or_else(|| Denied("Invalid test run environment".into()))?;
         ensure!(vars.len() <= 32, "Invalid test run environment");
@@ -1014,7 +1015,7 @@ mod inside {
         let dir = super::test_dir(cwd)?;
         command[0] = super::runner_in(cwd, &command[0], |p| Path::new(p).exists());
         ensure!(Path::new(&command[0]).exists(), "The test runner is not installed in the project: {} does not exist (Kern needs node_modules; Yarn Plug'n'Play projects have none)", command[0]);
-        let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, 3600)?);
+        let timeout = Duration::from_secs(int(&c, "timeout_seconds", 1, TEST_SECS_MAX)?);
         let steps = c["steps"].as_array().ok_or_else(|| Denied("Invalid build steps".into()))?;
         clear_added(Path::new("/workspace"));
         if !steps.is_empty() { return run_steps(steps, (&env, &options), timeout); }
@@ -1085,10 +1086,10 @@ mod inside {
             ending = loop {
                 if let Some(s) = child.try_wait()? { break format!("exit {}", s.code().unwrap_or(-1)); }
                 if started.elapsed() > timeout { let _ = child.kill(); let _ = child.wait(); break "timeout".to_string(); }
-                if early && started.elapsed() >= look {
+                if early > 0 && started.elapsed() >= look {
                     look = started.elapsed() + Duration::from_secs(5);
                     let progress = String::from_utf8_lossy(&some_of("/tmp/.kern-progress", 8 << 20, false)).to_string();
-                    if let Some(stop) = super::early_stop(begun, epoch(), timeout.as_secs(), &progress) { let _ = child.kill(); let _ = child.wait(); break stop; }
+                    if let Some(stop) = super::early_stop(begun, epoch(), early, &progress) { let _ = child.kill(); let _ = child.wait(); break stop; }
                 }
                 std::thread::sleep(Duration::from_millis(100));
             };

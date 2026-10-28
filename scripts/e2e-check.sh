@@ -225,6 +225,19 @@ unset KERN_TEST_MINUTES
 decision big clear
 jq -e '.tests.status == "RAN" and .tests.kept == 3 and (.tests.runner | test("related to the change"))' big/receipt.json > /dev/null || { jq .tests big/receipt.json; fail "big: the related tests did not run in place of the whole suite"; }
 
+say "Tests that finished on the old code inside the limit get half again that time on the new code, so a slower new run is compared, not cut"
+git -C calc checkout -q -b longer "$base"
+printf '%s\n' 'export const pause = 30000;' > calc/src/pause.js
+printf '%s\n' "import { test, expect } from 'vitest';" "import { pause } from '../src/pause.js';" '' "test('waits its pause', async () => { await new Promise((r) => setTimeout(r, pause)); expect(pause).toBeGreaterThan(0); }, 200000);" > calc/test/pause.test.js
+git -C calc add -A && git -C calc commit -qm "A test that waits" && longer_base=$(git -C calc rev-parse HEAD)
+sed -i 's/30000/70000/' calc/src/pause.js
+git -C calc commit -qam "Wait longer" && git -C calc rev-parse HEAD > longer.head && git -C calc checkout -q "$base"
+export KERN_TEST_MINUTES=1 KERN_FAULTS=0
+check longer "$longer_base"
+unset KERN_TEST_MINUTES KERN_FAULTS
+decision longer clear
+jq -e '.tests == "RAN" and .phases.tests_detail.new > 60' longer.json > /dev/null || { jq . longer.json; fail "longer: the new code's run was cut at the old code's one-minute limit although the check had the time"; }
+
 say "An edited test whose old version fails only because the value it expects moved is a note with both values, one whose old version expected a refusal the new code no longer makes needs a look, and one whose old version still passes is clear"
 git -C calc checkout -q -b rewrites "$base"
 sed -i 's/amount >= 100/amount > 100/' calc/src/total.js

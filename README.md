@@ -105,8 +105,12 @@ What Kern checks on every pull request:
    run first: when they cannot load because a package of the same repository was never built, or because the steps the test script
    names before its runner (`npm run build &&`, a `pre` script) did not run, Kern runs that build script or those steps as the test user
    without a network, makes the result read-only, and always does the same on the new code; when they still cannot run, Kern says why
-   at once instead of running the new code too. A suite on course to take more than twice its time limit is stopped after a few minutes,
-   and a suite too big for the limit is checked with the tests related to the change. When the change
+   at once instead of running the new code too. A suite on course to take more than four times its 15-minute limit is stopped after a few
+   minutes, and a suite too big for the limit is checked with the tests related to the change. When no other package's tests run after
+   them, the new code's tests may take half again as long as the old code's did, plus a minute, and the old code's related tests get half
+   of what the check had left when the whole suite started, once that suite's 15 minutes and a five-minute reserve for reruns are set
+   aside: never less than 15 minutes and at most an hour. The early stop still judges against 15 minutes, however long a run's own limit.
+   No run is given more time than the check has left, and one cut short proves nothing either way. When the change
    edits, or moves and edits, an existing test file, its snapshot, or a data file or helper the test names, Kern also runs the old
    test, with its old data, on the new code (jest, vitest and mocha), and reads how the old version fails, with the values the old
    test expected and the new code gave. When the old test expected the code to refuse something (to throw, to return an error status,

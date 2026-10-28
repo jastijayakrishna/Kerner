@@ -1103,6 +1103,127 @@ fn a_build_step_whose_exit_line_scrolled_out_of_the_log_tail_is_uneven_and_a_pri
 }
 
 #[test]
+fn wp_calypso_112372_the_new_code_may_run_half_again_as_long_as_the_old_code_took_when_no_suite_follows() {
+    assert_eq!(suite::test_seconds(), 900, "the first whole run keeps its 15 minutes and its early stop");
+    assert_eq!(suite::new_secs(901, true), 1411, "calypso's old run of 1,889 files took 901 s; the new run got 900 s and was cut with 42 files left while 20 minutes of the check went unused");
+    assert_eq!(suite::new_secs(901, false), 900, "a suite that another suite follows keeps 15 minutes, so the next suite still gets its time");
+    assert_eq!(suite::new_secs(60, true), 360, "a hang on the new code is still stopped at the old code's pace: four times its time and two minutes");
+    assert_eq!(suite::later_secs(901, true), 1411, "a whole rerun of the same tests gets the same room, so a failure seen only with every file together is not set aside as chance");
+    assert_eq!(suite::later_secs(901, false), 900);
+    for old_secs in 0..=3600 {
+        let pace = (4 * old_secs + 120).max(300);
+        for last in [true, false] {
+            let new = suite::new_secs(old_secs, last);
+            assert!(new <= pace && new >= suite::test_seconds().min(pace), "never past the old code's pace, never less than before: {old_secs} {last} {new}");
+            assert!(suite::later_secs(old_secs, last) >= suite::test_seconds(), "{old_secs} {last}");
+        }
+        assert!(suite::new_secs(old_secs, true) >= (old_secs * 3 / 2 + 60).min(kern::sandbox::TEST_SECS_MAX), "never cut just below the old code's own time, up to the hour the test box allows: {old_secs}");
+    }
+}
+
+#[test]
+fn vinext_2342_the_last_suites_related_tests_get_half_the_time_left_after_the_whole_suite_and_the_reruns_and_never_less_than_15_minutes() {
+    let left = |rules: u64, setup: u64| 55 * 60 - rules - setup;
+    assert_eq!(suite::related_secs(left(7, 103), true), 995, "vinext's related tests needed about 880 to 980 s on #2342's runner and were cut at 902 s while 22 minutes of the check went unused");
+    assert_eq!(suite::related_secs(left(7, 103), false), 900, "another suite follows: 15 minutes, as before");
+    assert_eq!(suite::related_secs(2100, true), 900, "never less than 15 minutes; the check's deadline still bounds every run");
+    for whole_left in 0..=3600u64 {
+        let related = suite::related_secs(whole_left, true);
+        assert!(related >= suite::test_seconds(), "{whole_left}");
+        if related > suite::test_seconds() {
+            let after = whole_left - suite::test_seconds() - related;
+            assert!(after >= related + suite::RERUNS_SECS_RESERVE, "after a whole suite that ran its full 15 minutes and related tests that ran to their limit, the new code still gets as long as they took, and the reruns a block needs keep their time: {whole_left}");
+            assert!(suite::new_secs(related, true).min(after) >= related, "{whole_left}");
+        }
+    }
+}
+
+#[test]
+fn lobehub_16184_the_related_tests_get_the_same_time_whether_or_not_the_whole_suite_was_stopped_early() {
+    let left = |rules: u64, setup: u64| 55 * 60 - rules - setup;
+    assert_eq!(suite::related_secs(left(9, 150), true), 970, "live-map-rest: the early stop ended #16184's whole suite at 154 s");
+    assert_eq!(suite::related_secs(left(6, 148), true), 973,
+        "bench-art: the same pull request's whole suite ran its full 903 s; the limit counts the 15 minutes that run could take, not what it took, so a second check cannot flip the answer");
+    assert_eq!(suite::related_secs(left(8, 141), true), 975, "#16191, live-map-rest: the whole suite was stopped early at 161 s");
+    assert_eq!(suite::related_secs(left(7, 176), true), 958, "#16191, live-bench-rest: the whole suite ran to 903 s; counting what it took gave 1,345 s in one check and 957 s in the other");
+}
+
+#[test]
+fn world_soccer_sim_341_related_tests_on_course_for_an_hour_are_stopped_as_early_as_before_whatever_their_own_limit() {
+    use kern::sandbox::early_stop;
+    let start = 1_000_000u64;
+    let progress = std::iter::once("total 645".to_string()).chain((1..=45u64).map(|i| format!("done {} /w/t{i}.test.ts", start + i * 6_000))).collect::<Vec<_>>().join("\n");
+    let limit = suite::related_secs(55 * 60 - 3 - 10, true);
+    assert_eq!(limit, 1043);
+    assert_eq!(suite::early_secs(limit, limit), suite::test_seconds(), "the early stop judges every run against the 15-minute limit, so a longer limit never lets a run that cannot finish go on");
+    assert_eq!(early_stop(start, start + 270_000, suite::early_secs(limit, limit), &progress).as_deref(), Some("projected 3645 270"),
+        "#341's related tests were on course to take about 60 minutes and were stopped after 4 minutes; the check took 540 s and was not verified");
+    assert_eq!(early_stop(start, start + 270_000, limit, &progress), None, "judged against its own 17-minute limit, the run would go on to it: 13 more minutes of the customer's Actions time for the same answer");
+    assert!(matches!(suite::stopped("projected 3645 270", limit, suite::early_secs(limit, limit - 9)), Some(suite::Side::Slow(_))),
+        "judged at the full 15 minutes, the run's own pace stopped it, even when the deadline fell 9 s short of its limit, so it is never said to have run out of time");
+    assert_eq!(suite::early_secs(limit, 300), 300, "with 5 minutes left, the deadline shortens the judge, as before");
+    assert!(matches!(suite::stopped("projected 2500 60", limit, suite::early_secs(limit, 300)), Some(suite::Side::Late)), "and then Kern's time is what ran out");
+    assert_eq!(suite::early_secs(300, 300), 0, "a run whose limit is under 15 minutes runs to its limit, as before");
+    assert!(suite::stopped("timeout", limit, 900).is_none() && suite::stopped("exit 1", limit, 900).is_none());
+}
+
+#[test]
+fn lobehub_16184_a_check_given_more_than_an_hour_never_asks_the_test_box_for_a_run_it_refuses() {
+    assert_eq!(suite::related_secs(86_400, true), kern::sandbox::TEST_SECS_MAX, "half of a 24-hour check is 12 hours, and the test box refuses any run over an hour, which Kern would report as tests that did not finish");
+    assert_eq!(suite::later_secs(3_000, true), kern::sandbox::TEST_SECS_MAX);
+    assert_eq!(suite::new_secs(3_000, true), kern::sandbox::TEST_SECS_MAX);
+    assert!(suite::test_seconds() <= kern::sandbox::TEST_SECS_MAX);
+    for secs in (0..=86_400u64).step_by(3).chain([u64::MAX / 2, u64::MAX]) {
+        for last in [true, false] {
+            for limit in [suite::related_secs(secs, last), suite::later_secs(secs, last), suite::new_secs(secs, last)] {
+                assert!(limit <= kern::sandbox::TEST_SECS_MAX, "{secs} {last} {limit}");
+            }
+        }
+    }
+}
+
+#[test]
+fn mastra_18872_a_new_run_the_checks_deadline_cut_after_the_old_code_finished_says_how_long_each_side_ran() {
+    let why = suite::ran_out("", 743, 208);
+    assert_eq!(why, "the tests finished on the old code in 12 minutes, but on the new code they had not finished after 3 minutes, when Kern's time for this check ran out");
+    let t = json!({ "status": "NOT_RUN", "runner": "vitest", "why": why, "not_run": [], "run_unconfirmed": [{ "dir": "", "why": why }] });
+    let r = receipt::build(&drive_json(), &clean_rules(), &t);
+    let md = receipt::markdown(&r);
+    assert_eq!(r["decision"], "unverified", "{r}");
+    assert_eq!(r["unverified"].as_array().unwrap().iter().filter(|x| x["kind"] == "test-unconfirmed").count(), 1, "{r}");
+    assert!(!md.contains("could not run the tests here") && md.contains("finished on the old code in 12 minutes") && md.contains("time for this check ran out"),
+        "the stored receipt said these tests could not run, though the new code's run ran 208 s after the old code's 743-s run gave results: {md}");
+    let mut t = clean_tests();
+    t["not_run"] = json!([{ "dir": "", "why": suite::LATE }]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t));
+    assert!(md.contains("time for this check ran out before these tests could finish") && !md.contains("before these tests could run"),
+        "the same words still name an old run or a kept run the deadline cut, so they must not say it never ran: {md}");
+}
+
+#[test]
+fn lobehub_16184_when_the_related_tests_give_nothing_too_the_receipt_says_which_run_stopped_how() {
+    let whole = suite::whole(&suite::stopped_why("projected 5000 154", 900).unwrap());
+    assert_eq!(suite::related_none("", &whole, "the tests did not finish in 16 minutes"),
+        "the tests on the old code gave no results: the whole suite was on course to take about 83 minutes, and the tests related to the change gave none either: the tests did not finish in 16 minutes",
+        "the stored text said 'the tests did not finish in 15 minutes, nor did the tests related to the change', though the early stop ended the whole suite at 154 s and it was the related tests that ran to their limit");
+    assert_eq!(suite::related_none(" in apps/web", "the whole suite did not finish in 15 minutes", "no test file finished in 8 minutes (the limit is 16 minutes), so Kern stopped the run"),
+        "the tests in apps/web on the old code gave no results: the whole suite did not finish in 15 minutes, and the tests related to the change gave none either: no test file finished in 8 minutes (the limit is 16 minutes), so Kern stopped the run");
+}
+
+#[test]
+fn metamask_mobile_37558_a_suite_too_big_even_for_its_related_tests_names_both_runs_inside_the_receipts_cut() {
+    let whole = suite::whole(&suite::stopped_why("projected 43500 156", 900).unwrap());
+    let related = suite::stopped_why("projected 37200 155", suite::related_secs(55 * 60 - 7 - 277, true)).unwrap();
+    let why = format!("{} (the project's test script, `yarn test:unit`, is not one Kern can follow, so Kern ran jest directly)", suite::related_none("", &whole, &related));
+    assert!(why.chars().count() <= 400, "the receipt cuts a reason at 400 characters with no mark; this one has {}: {why}", why.chars().count());
+    let mut t = clean_tests();
+    t["not_run"] = json!([{ "dir": "", "why": why }]);
+    let md = receipt::markdown(&receipt::build(&drive_json(), &clean_rules(), &t));
+    assert!(md.contains("the whole suite was on course to take about 725 minutes, and the tests related to the change gave none either: the tests were on course to take about 620 minutes (the limit is 15 minutes)")
+        && md.contains("so Kern ran jest directly)"), "both runs were stopped early (156 s and 155 s in farm-art24), and the receipt must still say that Kern ran jest directly: {md}");
+}
+
+#[test]
 fn mcpjam_inspector_4344_a_build_that_failed_is_named_with_its_error_never_counted_as_done() {
     let step = |name: &str, exit: Option<i64>, errors: &str| suite::Step { name: name.into(), exit, errors: errors.into() };
     let ran = [step("sdk build", Some(1), "> @mcpjam/sdk@6.4.0 bundle:chatgpt-runtime\n\u{274c} Failed to bundle ChatGPT Apps runtime script: Error: EACCES: permission denied, open '/workspace/sdk/src/ChatGptAppsRuntime.bundled.ts'\nnpm error code 1\n"),

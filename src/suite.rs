@@ -8,8 +8,18 @@ use std::path::Path;
 const FOLDERS: [&str; 11] = ["test", "tests", "__tests__", "spec", "specs", "e2e", "__e2e__", "cypress", "playwright", "__mocks__", "__fixtures__"];
 const NAMES: [&str; 4] = [".test.", ".spec.", ".e2e.", ".cy."];
 pub fn test_seconds() -> u64 {
-    std::env::var("KERN_TEST_MINUTES").ok().and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| (1..=60).contains(m)).unwrap_or(15) * 60
+    std::env::var("KERN_TEST_MINUTES").ok().and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| (1..=crate::sandbox::TEST_SECS_MAX / 60).contains(m)).unwrap_or(15) * 60
 }
+const RUN_SECS_MIN: u64 = 60;
+pub const RERUNS_SECS_RESERVE: u64 = 300;
+const SLOWER_SECS_EXTRA: u64 = 60;
+const HANG_SECS_EXTRA: u64 = 120;
+const HANG_SECS_MIN: u64 = 300;
+fn room(secs: u64, last: bool) -> u64 { if last { test_seconds().max(secs).min(crate::sandbox::TEST_SECS_MAX) } else { test_seconds() } }
+pub fn later_secs(old_secs: u64, last: bool) -> u64 { room(old_secs.saturating_mul(3) / 2 + SLOWER_SECS_EXTRA, last) }
+pub fn new_secs(old_secs: u64, last: bool) -> u64 { later_secs(old_secs, last).min(old_secs.saturating_mul(4).saturating_add(HANG_SECS_EXTRA).max(HANG_SECS_MIN)) }
+pub fn related_secs(whole_left_secs: u64, last: bool) -> u64 { room(whole_left_secs.saturating_sub(test_seconds() + RERUNS_SECS_RESERVE) / 2, last) }
+pub fn early_secs(limit: u64, seconds: u64) -> u64 { if limit >= test_seconds() { seconds.min(test_seconds()) } else { 0 } }
 pub const REPORT: &str = "/tmp/.kern-report.json";
 
 pub fn test_command(tests: &Tests) -> Vec<String> {
@@ -833,8 +843,18 @@ pub fn stopped_why(ending: &str, limit: u64) -> Option<String> {
         _ => None,
     }
 }
+pub fn stopped(ending: &str, limit: u64, early_secs: u64) -> Option<Side> {
+    stopped_why(ending, limit).map(|why| if early_secs < test_seconds() { Side::Late } else { Side::Slow(why) })
+}
 pub fn whole(why: &str) -> String {
     why.replacen("the tests were", "the whole suite was", 1).replacen("the tests did", "the whole suite did", 1).replacen("no test file finished", "no test file of the whole suite finished", 1)
+}
+pub fn related_none(place: &str, whole_why: &str, why: &str) -> String {
+    let whole_why = whole_why.split(" (the limit is").next().unwrap_or(whole_why);
+    format!("the tests{place} on the old code gave no results: {whole_why}, and the tests related to the change gave none either: {why}")
+}
+pub fn ran_out(place: &str, old_secs: u64, cut_secs: u64) -> String {
+    format!("the tests{place} finished on the old code in {}, but on the new code they had not finished after {}, when Kern's time for this check ran out", lasting(old_secs), lasting(cut_secs))
 }
 pub fn follows_script(package: &Value) -> bool { matches!(crate::script::found(package), crate::script::Found::Run(_)) }
 pub fn guessed(package: &Value) -> Option<String> {
@@ -980,9 +1000,6 @@ fn unconfirmed_why(first: &Side, again: &Side, old_again: Option<&Result<Side, S
     }
 }
 
-fn run_side(out: &Path, volume: &str, side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
-    run_with(out, (volume, &std::collections::BTreeMap::new(), test_seconds()), side, dir, label, until)
-}
 fn run_for(out: &Path, (volume, limit): (&str, u64), side: (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     run_with(out, (volume, &std::collections::BTreeMap::new(), limit), side, dir, label, until)
 }
@@ -1003,9 +1020,9 @@ pub fn in_test_box(out: &Path, volume: &str, name: &str, config: (&str, &Value),
 }
 fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeMap<String, String>, u64), (tests, env): (&Tests, &Env), dir: &str, label: &str, until: u64) -> R<Side> {
     let seconds = within(until, limit);
-    if seconds < 60 { return Ok(Side::Late); }
-    let cut = seconds < limit;
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early": limit >= test_seconds(), "faults": [], "serve": {}, "steps": [] });
+    if seconds < RUN_SECS_MIN { return Ok(Side::Late); }
+    let (cut, early) = (seconds < limit, early_secs(limit, seconds));
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early_secs": early, "faults": [], "serve": {}, "steps": [] });
     let run = match in_test_box(out, volume, &format!("tests-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)) {
         Ok(r) => r,
         Err(e) if e.0.contains("timed out") => return Ok(if cut { Side::Late } else { Side::Slow(format!("the run was stopped: {}", e.0)) }),
@@ -1021,7 +1038,7 @@ fn run_with(out: &Path, (volume, files, limit): (&str, &std::collections::BTreeM
     if !parts["values"].is_empty() { std::fs::write(out.join(format!("tests-{label}.values")), &parts["values"])?; }
     if let Some(why) = capped(&String::from_utf8_lossy(&parts["ending"])) { return Ok(Side::Cut(why)); }
     if parts["ending"] == b"timeout" { return Ok(if cut { Side::Late } else { Side::Slow(format!("the tests did not finish in {} minutes", limit / 60)) }); }
-    if let Some(why) = stopped_why(&String::from_utf8_lossy(&parts["ending"]), limit) { return Ok(if cut { Side::Late } else { Side::Slow(why) }); }
+    if let Some(side) = stopped(&String::from_utf8_lossy(&parts["ending"]), limit, early) { return Ok(side); }
     if parts["ending"] == b"exit -1" { return Ok(Side::Cut("the test runner was stopped by a signal, so Kern does not trust its report".into())); }
     let created: Vec<String> = String::from_utf8_lossy(&parts["created"]).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
     Ok(match proof::read_report(tests.runner, &parts["output"]) {
@@ -1153,7 +1170,7 @@ fn prepare(out: &Path, volume: &str, steps: &[(String, String)], label: &str, un
     let seconds = within(until, PREPARE_SECS_MAX);
     crate::ensure!(seconds >= PREPARE_SECS_MIN, "Kern's time ran out before it could build what the tests need");
     let listed: Vec<Value> = steps.iter().map(|(dir, script)| json!({ "dir": dir, "script": script })).collect();
-    let config = json!({ "version": 1, "command": ["/usr/local/bin/node"], "timeout_seconds": seconds, "cwd": "", "env": {}, "files": {}, "early": false, "faults": [], "serve": {}, "steps": listed });
+    let config = json!({ "version": 1, "command": ["/usr/local/bin/node"], "timeout_seconds": seconds, "cwd": "", "env": {}, "files": {}, "early_secs": 0, "faults": [], "serve": {}, "steps": listed });
     let run = in_test_box(out, volume, &format!("prepare-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds));
     let parts = crate::sandbox::parts(&run?.stdout, &crate::sandbox::TEST_PARTS)?;
     std::fs::write(out.join(format!("prepare-{label}.json")), &parts["output"])?;
@@ -1250,7 +1267,7 @@ fn indexed(out: &Path, volume: &str, (repo, head): (&Path, &str), head_paths: Op
     };
     let mut command = vec!["/usr/local/bin/node".to_string(), format!("--max-old-space-size={}", test_limits(seconds).memory_mb * 3 / 4), "/kern/map.cjs".to_string(), INDEXER_MAIN.to_string()];
     command.extend(crate::map::flags(&has).into_iter().map(str::to_string));
-    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": crate::map::files(&has), "early": false, "faults": [], "serve": {}, "steps": [] });
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": "", "env": {}, "files": crate::map::files(&has), "early_secs": 0, "faults": [], "serve": {}, "steps": [] });
     let run = in_test_box(out, volume, "tests-map", ("drive-test.json", &config), ("__drive_test", false, seconds)).map_err(|e| format!("the indexer could not run: {}", e.0))?;
     let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).map_err(|_| format!("the indexer gave no readable result: {}", crate::sandbox::refusal(&run.errors).unwrap_or_default()))?;
     if parts["ending"] != b"exit 0" {
@@ -1340,7 +1357,7 @@ pub fn reached_out(behavior: &str) -> bool {
 }
 pub fn traced_run(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, (files, serve): (&Texts, &Texts), label: &str, seconds: u64) -> Option<Traced> {
     let command: Vec<String> = test_command(tests).into_iter().filter(|a| !crate::sandbox::PROGRESS_ARGS.contains(&a.as_str())).collect();
-    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early": false, "faults": [], "serve": serve, "steps": [] });
+    let config = json!({ "version": 1, "command": command, "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": files, "early_secs": 0, "faults": [], "serve": serve, "steps": [] });
     let run = in_test_box(out, volume, &format!("trace-{label}"), ("drive-test.json", &config), ("__drive_test", false, seconds)).ok()?;
     let parts = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS).ok()?;
     let _ = std::fs::write(out.join(format!("trace-{label}.err")), &parts["errors"]);
@@ -1381,7 +1398,7 @@ fn bystanders(out: &Path, (old_volume, new_volume): (&str, &str), suite: &Suite,
 }
 fn run_faults(out: &Path, volume: &str, (tests, env): (&Tests, &Env), dir: &str, faults: Vec<Value>, seconds: u64) -> Vec<Value> {
     if seconds < 120 || faults.is_empty() { return Vec::new(); }
-    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": {}, "early": false, "faults": faults, "serve": {}, "steps": [] });
+    let config = json!({ "version": 1, "command": test_command(tests), "timeout_seconds": seconds, "cwd": dir, "env": sized_env(tests.runner, env), "files": {}, "early_secs": 0, "faults": faults, "serve": {}, "steps": [] });
     let Ok(run) = in_test_box(out, volume, "tests-faults", ("drive-test.json", &config), ("__drive_test", false, seconds)) else { return Vec::new() };
     let Ok(parts) = crate::sandbox::parts(&run.stdout, &crate::sandbox::TEST_PARTS) else { return Vec::new() };
     serde_json::from_slice::<Vec<Value>>(&parts["output"]).unwrap_or_default()
@@ -1446,7 +1463,7 @@ fn kept_runs(out: &Path, volumes: (&str, &str), suite: &Suite, old: &Report, kee
     (Ok(first), second, false)
 }
 
-pub const LATE: &str = "Kern's time for this check ran out before these tests could run";
+pub const LATE: &str = "Kern's time for this check ran out before these tests could finish";
 pub const TYPES_SECS_MIN: u64 = 240;
 pub const TYPES_SECS_RESERVE: u64 = 480;
 pub const FAULTS_SECS_MIN: u64 = 300;
@@ -1539,8 +1556,9 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
     let head_paths: Option<Vec<String>> = crate::drive::listing(repo, head).ok().map(|items| items.into_iter().map(|i| i.path).collect());
     let testless_here = |dir: &str| followed(dir) && head_paths.as_ref().is_some_and(|p| !repo_has_tests(p, dir));
     let mut near_once: Option<(Vec<(String, usize)>, Value)> = None;
-    for suite in &suites {
+    for (nth, suite) in suites.iter().enumerate() {
         if late { not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
+        let last = nth + 1 == suites.len();
         if let Some(why) = install_failure(&s, "old", &suite.dir).filter(|_| suite.old.is_some()) {
             let place = if suite.dir.is_empty() { String::new() } else { format!(" in {}", suite.dir) };
             not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} could not run on the old code: {why}") }));
@@ -1561,11 +1579,11 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let old_run = match &suite.old {
             None => None,
             Some((t, env)) => {
-                let (mut tests, mut phase, mut repairs_left, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), REPAIR_ROUNDS_COUNT_MAX, true, Vec::new());
+                let (mut tests, mut phase, mut limit, mut repairs_left, mut narrowable, mut pending) = (t.clone(), format!("old{label}"), test_seconds(), REPAIR_ROUNDS_COUNT_MAX, true, Vec::new());
                 let (mut attempted, mut pending_failed, mut build_secs): (BTreeSet<String>, Vec<(String, String)>, u64) = (BTreeSet::new(), Vec::new(), 2 * PREPARE_SECS_MAX);
                 let run = loop {
-                let at = now_ms();
-                let run = run_side(out, &volume("old"), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
+                let (at, left_before) = (now_ms(), within(until, u64::MAX));
+                let run = run_for(out, (&volume("old"), limit), (&tests, env), &suite.dir, &phase, until).unwrap_or_else(|e| Side::Cut(e.0));
                 timed(phase.clone(), at);
                 old_seconds = secs_since(at);
                 if !pending.is_empty() {
@@ -1623,7 +1641,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 if narrowable && let Side::Slow(why) = &run && tried.is_empty() && let Some((n, o)) = related(&suite.new.0, &changed_code("delete"), &suite.dir).zip(related(t, &changed_code("add"), &suite.dir)) {
                     narrowable = false;
                     whole_why = whole(why);
-                    (tests, phase, narrowed) = (o, format!("old-related{label}"), Some(n));
+                    (tests, phase, narrowed, limit) = (o, format!("old-related{label}"), Some(n), related_secs(left_before, last));
                     continue;
                 }
                 old_tests = Some(tests.clone());
@@ -1641,8 +1659,8 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
                 continue;
             }
             Some(Side::Slow(why)) => {
-                let more = if narrowed.is_some() { ", nor did the tests related to the change" } else { ", and Kern cannot pick the tests related to the change for this runner" };
-                not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the old code gave no results: {why}{more}") }));
+                let why = if narrowed.is_some() { related_none(&place, &whole_why, why) } else { format!("the tests{place} on the old code gave no results: {why}, and Kern cannot pick the tests related to the change for this runner") };
+                not_run.push(json!({ "dir": suite.dir, "why": why }));
                 continue;
             }
             Some(Side::Ran(r, _)) if narrowed.is_some() && r.tests.is_empty() && r.problems.is_empty() => {
@@ -1655,7 +1673,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
             _ => {}
         }
-        let budget = if suite.old.is_some() { test_seconds().min((4 * old_seconds + 120).max(300)) } else { test_seconds() };
+        let (budget, again_secs) = (if suite.old.is_some() { new_secs(old_seconds, last) } else { test_seconds() }, later_secs(old_seconds, last));
         let new_tests = narrowed.clone().unwrap_or_else(|| suite.new.0.clone());
         let whole_new = (&new_tests, &suite.new.1);
         let name = if narrowed.is_some() { "new-related" } else { "new" };
@@ -1667,8 +1685,14 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             Err(e) => { not_run.push(json!({ "dir": suite.dir, "why": format!("Kern could not run the tests{place}: {}", e.0) })); continue; }
         };
         timed(format!("{name}{label}"), at);
+        let ran_secs = secs_since(at);
         let new = match first {
             Side::Ran(r, created) => { wrote_code.extend(created); r }
+            Side::Late if ran_secs >= RUN_SECS_MIN && matches!(old_run, Some(Side::Ran(..))) => {
+                late = true;
+                run_unconfirmed.push(json!({ "dir": suite.dir, "why": ran_out(&place, old_seconds, ran_secs) }));
+                continue;
+            }
             Side::Late => { late = true; not_run.push(json!({ "dir": suite.dir, "why": LATE })); continue; }
             Side::Nothing(why) | Side::Slow(why) | Side::Cut(why) if !matches!(old_run, Some(Side::Ran(..))) => {
                 not_run.push(json!({ "dir": suite.dir, "why": format!("the tests{place} on the new code gave no results: {why}") }));
@@ -1680,17 +1704,17 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
             }
             first => {
                 let at = now_ms();
-                let again = run_side(out, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until).map(|s| kerns_install(s, declared));
+                let again = run_for(out, (&volume("new"), again_secs), whole_new, &suite.dir, &format!("new-again{label}"), until).map(|s| kerns_install(s, declared));
                 timed(format!("new-again{label}"), at);
                 let cut = |why: &str| json!({ "dir": suite.dir, "why": format!("the tests{place} gave no results on the new code once, where the old code's tests ran, and {why}") });
                 match again {
                     Ok(Side::Ran(r, created)) => { wrote_code.extend(created); r }
-                    Ok(Side::Late) => { late = true; run_unconfirmed.push(cut("Kern's time ran out before it could run them again")); continue; }
+                    Ok(Side::Late) => { late = true; run_unconfirmed.push(cut("Kern's time for this check ran out before a second run could finish")); continue; }
                     Err(e) => { run_unconfirmed.push(cut(&format!("running them again failed: {}", e.0))); continue; }
                     Ok(again) => {
                         let old_again = (no_results_twice(&first, &again) && uneven_why.is_none()).then(|| old_tests.as_ref().zip(suite.old.as_ref()).map(|(t, (_, env))| {
                             let at = now_ms();
-                            let r = run_side(out, &volume("old"), (t, env), &suite.dir, &format!("old-again{label}"), until);
+                            let r = run_for(out, (&volume("old"), again_secs), (t, env), &suite.dir, &format!("old-again{label}"), until);
                             timed(format!("old-again{label}"), at);
                             r.map_err(|e| e.0)
                         })).flatten();
@@ -1715,22 +1739,22 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let present = |r: &Report, f: &String| r.problems.iter().any(|p| file_of(p) == f.as_str()) || r.tests.keys().any(|k| file_of(k) == f.as_str());
         let new_files: BTreeSet<String> = suspect.iter().filter(|f| present(&new, f)).cloned().collect();
         let old_files: BTreeSet<String> = suspect.iter().filter(|f| present(&old, f)).cloned().collect();
-        let old_rerun = |alone: bool| -> Option<(&str, &str, Tests, &Env)> {
+        let old_rerun = |alone: bool| -> Option<(&str, &str, Tests, &Env, u64)> {
             let ((plain, env), first) = (suite.old.as_ref()?, old_tests.as_ref()?);
             if old_files.is_empty() { return None; }
-            Some(match kept_focus(plain, &old_files, &suite.dir).filter(|_| alone) { Some(t) => ("old-alone", "old", t, env), None => ("old-again", "old", first.clone(), env) })
+            Some(match kept_focus(plain, &old_files, &suite.dir).filter(|_| alone) { Some(t) => ("old-alone", "old", t, env, test_seconds()), None => ("old-again", "old", first.clone(), env, again_secs) })
         };
-        let plan: Vec<(&str, &str, Tests, &Env)> = if new_files.is_empty() {
+        let plan: Vec<(&str, &str, Tests, &Env, u64)> = if new_files.is_empty() {
             Vec::new()
         } else if let Some(new_alone) = kept_focus(&suite.new.0, &new_files, &suite.dir) {
-            [Some(("new-alone", "new", new_alone, &suite.new.1)), old_rerun(true)].into_iter().flatten().collect()
+            [Some(("new-alone", "new", new_alone, &suite.new.1, test_seconds())), old_rerun(true)].into_iter().flatten().collect()
         } else {
-            [Some(("new-again", "new", whole_new.0.clone(), whole_new.1)), old_rerun(false)].into_iter().flatten().collect()
+            [Some(("new-again", "new", whole_new.0.clone(), whole_new.1, again_secs)), old_rerun(false)].into_iter().flatten().collect()
         };
         let (mut alone_new, mut whole, mut second_old, mut unconfirmed) = (None, None, None, false);
-        for (name, side, tests, env) in &plan {
+        for (name, side, tests, env, limit) in &plan {
             let at = now_ms();
-            let r = run_side(out, &volume(side), (tests, env), &suite.dir, &format!("{name}{label}"), until);
+            let r = run_for(out, (&volume(side), *limit), (tests, env), &suite.dir, &format!("{name}{label}"), until);
             timed(format!("{name}{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) if *name == "new-alone" => { wrote_code.extend(created); alone_new = Some(r); }
@@ -1743,7 +1767,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         }
         if !unconfirmed && plan.first().is_some_and(|p| p.0 == "new-alone") && alone_new.as_ref().is_none_or(|g| !repeats(&old, &new, g)) {
             let at = now_ms();
-            let r = run_side(out, &volume("new"), whole_new, &suite.dir, &format!("new-again{label}"), until);
+            let r = run_for(out, (&volume("new"), again_secs), whole_new, &suite.dir, &format!("new-again{label}"), until);
             timed(format!("new-again{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) => { wrote_code.extend(created); whole = Some(r); }
@@ -1755,7 +1779,7 @@ pub fn run(out: &Path, op: &Operator, until: u64) -> R<Value> {
         let empty = |r: &Option<Report>| r.as_ref().is_none_or(|r| r.tests.is_empty() && r.problems.is_empty());
         if !unconfirmed && empty(&second_old) && plan.iter().any(|p| p.0 == "old-alone") && let (Some(first), Some((_, env))) = (old_tests.as_ref(), &suite.old) {
             let at = now_ms();
-            let r = run_side(out, &volume("old"), (first, env), &suite.dir, &format!("old-again{label}"), until);
+            let r = run_for(out, (&volume("old"), again_secs), (first, env), &suite.dir, &format!("old-again{label}"), until);
             timed(format!("old-again{label}"), at);
             match r {
                 Ok(Side::Ran(r, created)) => { old_created.extend(created); second_old = Some(r); }
