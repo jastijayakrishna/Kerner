@@ -214,6 +214,20 @@ fn review_stage1_r8_a_run_where_kerns_own_reporter_did_not_load_or_the_process_l
 }
 
 #[test]
+fn review_sec_n2_a_projects_own_kern_folder_that_does_not_load_is_the_changes_not_kerns() {
+    let theirs = suite::without_results("the output contains no report", b"exit 1", b"Error: Cannot find module '/workspace/packages/kern/x'
+Require stack:
+- /workspace/packages/kern/index.js
+", b"");
+    assert!(matches!(theirs, suite::Side::Nothing(_)), "the project's own packages/kern folder is not Kern's: {theirs:?}");
+    assert!(!kern::sandbox::kern_failed("Error: Cannot find module 'node_modules/kern/x'"));
+    for own in ["Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/kern/trace.cjs'", "Error: Cannot find module 'file:///kern/vitest-progress.mjs' imported from /workspace/x.js",
+        "Error: Failed to load url /kern/vitest-progress.mjs (resolved id: /kern/vitest-progress.mjs)", "Cannot find module \"/kern/jest-report.cjs\""] {
+        assert!(kern::sandbox::kern_failed(own), "{own}");
+    }
+}
+
+#[test]
 fn random_runs_never_block_a_test_the_raw_runs_do_not_prove_broken() {
     let names = ["a.test.js > one", "a.test.js > two", "b.test.js > three", "b.test.js > four", "c.test.js > five"];
     let errors = ["expected 1 to be 2", "connect ECONNREFUSED 127.0.0.1:5432", "Cannot find module 'bindings'", "TypeError: x is not a function"];

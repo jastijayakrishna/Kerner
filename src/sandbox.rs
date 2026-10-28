@@ -207,7 +207,10 @@ pub fn yarnrc_without_code(text: &str) -> String {
 pub fn locked_mode(mode: u32, dir: bool) -> u32 { if dir { 0o1777 } else { (mode & 0o755) | 0o444 } }
 pub const PROGRESS_ARGS: [&str; 3] = ["--reporter=/kern/vitest-progress.mjs", "--reporters=default", "--reporters=/kern/jest-progress.cjs"];
 const LOAD_FAILURES: [&str; 3] = ["Cannot find module", "Failed to load url", "ERR_MODULE_NOT_FOUND"];
-pub fn kern_failed(errors: &str) -> bool { errors.lines().any(|l| l.contains("/kern/") && LOAD_FAILURES.iter().any(|m| l.contains(m))) }
+fn names_kerns_folder(line: &str) -> bool {
+    line.match_indices("/kern/").any(|(i, _)| line[..i].ends_with("file://") || !line[..i].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || "._-/@~".contains(c)))
+}
+pub fn kern_failed(errors: &str) -> bool { errors.lines().any(|l| names_kerns_folder(l) && LOAD_FAILURES.iter().any(|m| l.contains(m))) }
 pub fn retried_command(command: &[String], errors: &str) -> Option<Vec<String>> {
     let unknown = |arg: &str| {
         let name = arg.trim_start_matches("--").trim_start_matches("no-").split('=').next().unwrap_or("");
