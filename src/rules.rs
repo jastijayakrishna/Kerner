@@ -75,9 +75,10 @@ const LIFECYCLE: [&str; 16] = ["preinstall", "install", "postinstall", "preprepa
 fn steers_install(field: &str) -> bool { field.strip_prefix("scripts.").map_or_else(|| INSTALL_FIELDS.contains(&field), |s| LIFECYCLE.contains(&s)) }
 const IMAGES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "avif"];
 const GITHUB_NOTES: [&str; 3] = ["funding.yml", "funding.yaml", "release.yml"];
-const RUNS_CODE_KEYS: [&str; 16] = ["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PATH", "BASH_ENV", "ENV", "PYTHONSTARTUP", "PYTHONPATH",
-    "PERL5OPT", "RUBYOPT", "JAVA_TOOL_OPTIONS", "GIT_SSH_COMMAND", "SHELL", "EDITOR"];
-const TOOL_PREFIXES: [&str; 5] = ["NPM_CONFIG_", "YARN_", "PNPM_", "COREPACK_", "BUN_"];
+const STEERING_KEYS: [&str; 23] = ["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PATH", "BASH_ENV", "ENV", "PYTHONSTARTUP", "PYTHONPATH",
+    "PERL5OPT", "RUBYOPT", "JAVA_TOOL_OPTIONS", "GIT_SSH_COMMAND", "SHELL", "EDITOR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE", "SSL_CERT_DIR"];
+const TOOL_PREFIXES: [&str; 6] = ["NPM_CONFIG_", "YARN_", "PNPM_", "COREPACK_", "BUN_", "KERN_"];
 fn env_keys(text: &str) -> Option<Vec<String>> {
     text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| {
         let (key, _) = l.strip_prefix("export ").unwrap_or(l).split_once('=')?;
@@ -90,7 +91,7 @@ fn quiet(p: &str, text: Option<&str>) -> bool {
     let base = base_name(&lower);
     let github_note = lower.rsplit('/').nth(1) == Some(".github") && GITHUB_NOTES.contains(&base);
     if github_note || (lower.split('/').any(|d| d == ".github") && base.rsplit_once('.').is_some_and(|(_, e)| IMAGES.contains(&e))) { return true; }
-    let harmless = |k: &String| !crate::capability::secret_name(k) && !RUNS_CODE_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
+    let harmless = |k: &String| !crate::capability::secret_name(k) && !STEERING_KEYS.contains(&k.as_str()) && !TOOL_PREFIXES.iter().any(|t| k.starts_with(t));
     (base == ".env" || base.starts_with(".env.")) && text.and_then(env_keys).is_some_and(|keys| keys.iter().all(harmless))
 }
 fn workflow_file(p: &str) -> bool {

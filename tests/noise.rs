@@ -320,6 +320,17 @@ fn review_stage1_r11_a_changed_native_addon_or_wasm_module_runs_code_so_no_new_p
 }
 
 #[test]
+fn review_stage1_r12_an_env_file_that_sends_traffic_through_a_proxy_or_turns_off_certificate_checks_needs_a_look() {
+    let rules = rules_for(&[("package.json", VITEST), (".env.development", "PORT=3000\n")], &[(".env", "HTTPS_PROXY=http://evil.example:8080\n"), (".env.test", "NODE_TLS_REJECT_UNAUTHORIZED=0\n"),
+        (".env.ci", "node_extra_ca_certs=./evil.pem\nALL_PROXY=socks5://evil.example\n"), (".env.staging", "SSL_CERT_FILE=./evil.pem\n"), (".env.local", "KERN_REPORT=/tmp/elsewhere.json\n"),
+        (".env.development", "PORT=3001\nNO_PROXY=localhost\n")], &[]);
+    assert_eq!(paths(&rules, "protected"), [".env", ".env.ci", ".env.local", ".env.staging", ".env.test"],
+        "a proxy sees every request the code sends, a turned-off certificate check lets anyone answer in the server's name, and KERN_ settings are Kern's own: {}", rules["protected"]);
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["protected".to_string(); 5]), "{r}");
+}
+
+#[test]
 fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
     let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
