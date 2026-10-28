@@ -690,6 +690,10 @@ mod inside {
     const ERR_HEAD_BYTES_MAX: usize = 64 << 10;
     const ERR_TAIL_BYTES_MAX: usize = 1 << 20;
     const SHOW_BYTES_MAX: usize = 8 << 20;
+    const CONFIG_BYTES_MAX: usize = 1 << 20;
+    const LOG_HEAD_BYTES_MAX: usize = 1 << 20;
+    const LOG_TAIL_BYTES_MAX: usize = 600;
+    const FAULT_TARGET_BYTES_MAX: usize = 16 << 20;
     fn capture<T: std::io::Read + Send + 'static>(from: Option<T>, path: &'static str, head: usize, tail: usize) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut kept = super::Capped::new(head, tail);
@@ -892,7 +896,7 @@ mod inside {
             return Ok((json!({ "dir": d, "manager": manager, "result": format!("failed: {why}"), "parts": [] }), None));
         }
         let launcher = super::launcher(manager, &attempts);
-        let berry = std::fs::read_to_string(dir.join(".yarnrc.yml")).ok().map(|t| yarnrc_without_code(&t));
+        let berry = dir.join(".yarnrc.yml").is_file().then(|| yarnrc_without_code(&String::from_utf8_lossy(&some_of(dir.join(".yarnrc.yml"), CONFIG_BYTES_MAX, false))));
         let committed = if d == "." { PathBuf::from("/input") } else { Path::new("/input").join(d) };
         let (mut result, mut scripts_failed) = (json!("failed"), None);
         let log = Path::new("/home/kern/install.log");
@@ -909,9 +913,8 @@ mod inside {
                 .envs(berry.as_ref().map(|_| ("YARN_RC_FILENAME", ".kern-yarnrc.yml")))
                 .stdin(Stdio::null()).stdout(Stdio::from(log_file.try_clone()?)).stderr(Stdio::from(log_file)).spawn()?;
             if wait(child, left)? { result = json!(said); break; }
-            let text = std::fs::read(log).unwrap_or_default();
-            let tail = String::from_utf8_lossy(&text[text.len().saturating_sub(600)..]).trim().to_string();
-            let first = super::first_error(&String::from_utf8_lossy(&text)).map(|f| f.chars().take(300).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
+            let tail = String::from_utf8_lossy(&some_of(log, LOG_TAIL_BYTES_MAX, true)).trim().to_string();
+            let first = super::first_error(&String::from_utf8_lossy(&some_of(log, LOG_HEAD_BYTES_MAX, false))).map(|f| f.chars().take(300).collect::<String>()).filter(|f| !tail.contains(f.as_str()));
             result = json!(format!("failed: {}{tail}", first.map_or(String::new(), |f| format!("{f}\n…\n"))));
         }
         quiesce()?;
@@ -1076,7 +1079,7 @@ mod inside {
                 run[0] = super::runner_in(cwd, &run[0], |p| Path::new(p).exists());
                 if plain { run.retain(|a| !super::PROGRESS_ARGS.contains(&a.as_str())); }
                 let target = Path::new("/workspace").join(path);
-                let body = std::fs::read_to_string(&target).unwrap_or_default();
+                let body = String::from_utf8(some_of(&target, FAULT_TARGET_BYTES_MAX, false)).unwrap_or_default();
                 if started.elapsed() > timeout || body.get(start..end) != Some(original) { results.push(json!({ "finished": false })); continue; }
                 std::fs::write("/tmp/.kern-fault-src", format!("{}{}{}", &body[..start], replacement, &body[end..]))?;
                 let left = || timeout.saturating_sub(started.elapsed()).min(Duration::from_secs(120));
