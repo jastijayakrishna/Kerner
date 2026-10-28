@@ -1103,7 +1103,7 @@ export KERN_PLANS="$W/needs-learn"
 check plan-needs "$needs_base" planneedsrepo
 decision plan-needs unverified
 jq -e '.tests.status == "NOT_RUN" and (.tests.why | test("not supported here: needs postgres:16"))' plan-needs/receipt.json > /dev/null || { jq .tests plan-needs/receipt.json; fail "plan-needs: the receipt does not say the service is not supported here"; }
-[ ! -f "$W/plan-needs/setup.json" ] || fail "plan-needs: Kern installed the project although its plan needs a service it cannot give"
+[ ! -f "$W/plan-needs/suites.json" ] && [ ! -f "$W/plan-needs/leaves.json" ] || fail "plan-needs: Kern ran test suites although its plan needs a service it cannot give"
 unset KERN_PLANS
 
 if [ "${E2E_RUNTIME:-runsc}" = runc ]; then
