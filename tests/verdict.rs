@@ -196,6 +196,24 @@ fn andrewcourtice_ripl_5_and_vuetifyjs_0_840_runs_with_no_results_on_the_new_cod
 }
 
 #[test]
+fn review_stage1_r8_a_run_where_kerns_own_reporter_did_not_load_or_the_process_limit_was_hit_is_kerns_limit_not_the_change() {
+    let old_rerun = suite::Side::Ran(report(&[("t > adds", 1, 0, 0)], &[], &[]), Vec::new());
+    for own in ["Error: Cannot find module '/kern/jest-report.cjs'\nRequire stack:\n- /workspace/node_modules/@jest/reporters/build/index.js\n",
+        "Error: Failed to load url /kern/vitest-progress.mjs (resolved id: /kern/vitest-progress.mjs). Does the file exist?\n"] {
+        let side = suite::without_results("the output contains no report", b"exit 1", own.as_bytes(), b"");
+        assert!(matches!(side, suite::Side::Cut(_)), "Kern's own reporter failed to load under the runner the change moved to: {side:?}");
+        assert!(!suite::broke_run(&side, &side, Some(&old_rerun), false), "a look would blame the change for Kern's reporter");
+        assert!(matches!(suite::without_results("no report", b"exit 1", b"", own.as_bytes()), suite::Side::Cut(_)), "the runner printed it to its output");
+    }
+    for limit in ["Error: spawn EAGAIN\n    at ChildProcess._handle.onexit (node:internal/child_process:286:19)\n", "/bin/sh: fork: Resource temporarily unavailable\n"] {
+        assert!(suite::sandbox_error(limit), "the box's 4096-process limit: {limit}");
+        assert!(matches!(suite::without_results("no report", b"exit 1", limit.as_bytes(), b""), suite::Side::Cut(_)), "{limit}");
+    }
+    let theirs = suite::without_results("the output contains no report", b"exit 1", b"Error: Cannot find module './src/setup.js'\nRequire stack:\n- /workspace/jest.config.js\n", b"");
+    assert!(matches!(theirs, suite::Side::Nothing(_)), "a module of the project's own that does not load is the change's: {theirs:?}");
+}
+
+#[test]
 fn random_runs_never_block_a_test_the_raw_runs_do_not_prove_broken() {
     let names = ["a.test.js > one", "a.test.js > two", "b.test.js > three", "b.test.js > four", "c.test.js > five"];
     let errors = ["expected 1 to be 2", "connect ECONNREFUSED 127.0.0.1:5432", "Cannot find module 'bindings'", "TypeError: x is not a function"];

@@ -281,7 +281,8 @@ Then add the workflow file at the top of this page to a repository, pointing `us
   values are both ignored. A test written to hash its own source files can still tell a planted fault apart; changed code that names
   Kern's own machinery to do it (a `KERN_` variable, `/kern/`, a `.kern-` file) needs a look, but that is a tripwire, not a proof.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, and the answer is not verified, never passed or failed.
-  Kern's own limits (time, memory, disk space, open files, a killed process, a broken report) never block.
+  Kern's own limits (time, memory, disk space, open files, the process limit, a killed process, a broken report, its own reporter failing
+  to load) never block.
 
 Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.md](SECURITY.md).
 

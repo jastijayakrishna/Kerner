@@ -320,11 +320,11 @@ pub fn blockable(e: Evidence) -> Result<(), Unproven> {
     if e.uneven { return Err(Unproven::Uneven); }
     Ok(())
 }
-const SANDBOX_ERRORS: [&str; 35] = ["getaddrinfo", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "fetch failed",
+const SANDBOX_ERRORS: [&str; 37] = ["getaddrinfo", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "fetch failed",
     "git: not found", "command not found", "Cannot find module 'bindings'", "Could not locate the bindings file", "invalid ELF header", "compiled against a different Node.js version",
     "NODE_MODULE_VERSION", "ERR_DLOPEN_FAILED", "cannot open shared object file", "SIGSEGV", "SIGKILL", "SIGABRT", "SIGBUS", "terminated by another process", "Worker exited unexpectedly",
     "JavaScript heap out of memory", "Reached heap limit", "ERR_WORKER_OUT_OF_MEMORY", "Allocation failed", "ENOSPC", "no space left on device", "ENOMEM", "Cannot allocate memory",
-    "EMFILE", "ENFILE", "too many open files"];
+    "EMFILE", "ENFILE", "too many open files", "EAGAIN", "Resource temporarily unavailable"];
 pub fn sandbox_error(why: &str) -> bool { SANDBOX_ERRORS.iter().any(|e| why.contains(e)) || (why.contains("spawn ") && why.contains("ENOENT")) }
 fn outcome(b: proof::Count, c: proof::Count) -> Observed {
     if c.total() == 0 { return Observed::Missing; }
@@ -966,7 +966,8 @@ impl Side {
 }
 pub fn without_results(why: &str, ending: &[u8], errors: &[u8], output: &[u8]) -> Side {
     let said = no_results(why, ending, errors, output);
-    if sandbox_error(&String::from_utf8_lossy(errors)) || sandbox_error(&String::from_utf8_lossy(output)) { Side::Cut(said) } else { Side::Nothing(said) }
+    let kerns = |b: &[u8]| { let text = String::from_utf8_lossy(b); sandbox_error(&text) || crate::sandbox::kern_failed(&text) };
+    if kerns(errors) || kerns(output) { Side::Cut(said) } else { Side::Nothing(said) }
 }
 const RUNNER_MISSING: &str = "The test runner is not installed in the project";
 pub fn unreadable(refusal: Option<String>, error: String) -> Side {
