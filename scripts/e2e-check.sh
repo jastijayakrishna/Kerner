@@ -1073,7 +1073,7 @@ say "A CI job that needs a service is not supported here, said up front before a
 git init -q planneedsrepo && cd planneedsrepo
 git config user.email e2e@example.invalid && git config user.name e2e
 mkdir -p src test .github/workflows
-cp "$W/planrepo/package.json" "$W/planrepo/package-lock.json" . && cp "$W/planrepo/src/total.js" src/ && cp "$W/planrepo/test/total.test.js" test/
+for f in package.json package-lock.json src/total.js test/total.test.js; do git -C "$W/planrepo" show "$plan_base:$f" > "$f"; done
 cat > .github/workflows/ci.yml <<'EOF'
 name: ci
 on: [push, pull_request]
