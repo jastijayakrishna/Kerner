@@ -31,3 +31,6 @@ pub mod calls;
 pub mod probe;
 pub mod investigate;
 pub mod plan;
+pub mod yaml;
+pub mod shell;
+pub mod ci;
