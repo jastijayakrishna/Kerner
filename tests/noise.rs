@@ -287,6 +287,22 @@ fn review_stage1_r5_a_file_committed_under_a_name_kern_keeps_for_its_own_tools_i
 }
 
 #[test]
+fn review_stage1_r9_code_that_newly_names_kerns_own_channels_is_a_look_because_it_can_tell_kerns_planted_faults_from_real_runs() {
+    let base = [("package.json", VITEST), ("src/total.js", "export const total = (xs) => xs.reduce((a, b) => a + b, 0);\n"), ("test/total.test.js", "import { test } from 'vitest';\ntest('adds', () => {});\n"),
+        ("scripts/ci.js", "const report = process.env.KERN_REPORT;\nmodule.exports = report;\n")];
+    let detector = "import fs from 'node:fs';\nimport { test } from 'vitest';\nimport { total } from '../src/total.js';\ntest('adds', () => {\n  if (process.env.KERN_FAULT_SOURCE && fs.readFileSync(process.env.KERN_FAULT_SOURCE, 'utf8') !== fs.readFileSync('src/total.js', 'utf8')) throw new Error('x');\n  total([1]);\n});\n";
+    let rules = rules_for(&base, &[("test/total.test.js", detector), ("src/report.js", "export const read = () => require('fs').readFileSync('/tmp/.kern-report.json');\nexport const hook = '/kern/fault.cjs';\n"),
+        ("scripts/ci.js", "const report = process.env.KERN_REPORT;\nmodule.exports = report || null;\n")], &[]);
+    assert_eq!(rules["machinery"], json!([{ "path": "src/report.js", "names": ["/kern/fault.cjs", "/tmp/.kern-report.json"] }, { "path": "test/total.test.js", "names": ["KERN_FAULT_SOURCE"] }]),
+        "a test that compares Kern's planted source with the file on disk fails in every fault run and passes in the control run, so every fault reads as caught; scripts/ci.js named KERN_REPORT before the change");
+    let r = receipt::build(&drive_json(), &rules, &clean_tests());
+    assert_eq!((r["decision"].as_str(), look_kinds(&r)), (Some("look"), vec!["kern-machinery".to_string(); 2]), "{r}");
+    assert!(r["look"][1]["what"].as_str().unwrap().contains("KERN_FAULT_SOURCE"), "{}", r["look"]);
+    let plain = rules_for(&base, &[("src/total.js", "export const KERNEL_VERSION = 6;\nexport const kerning = (s) => s;\nexport const docs = 'https://example.com/kern/guide';\nconst dir = 'src/kern/x';\nexport const KERN = 1;\nexport const total = (xs) => xs.reduce((a, b) => a + b, 0);\n")], &[]);
+    assert_eq!(plain["machinery"], json!([]), "a kernel version, kerning, a web page about kern and a folder named kern are not Kern's");
+}
+
+#[test]
 fn a_bunfig_toml_or_a_bun_setting_steers_what_kerns_own_bun_installs_so_a_change_to_it_needs_a_look() {
     let base = [("package.json", VITEST), ("src/a.js", "export const a = 1;\n"), ("bun.lock", "{}\n")];
     let loud = rules_for(&base, &[("bunfig.toml", "[install]\nregistry = \"https://evil.example\"\nglobalStore = true\n"), ("packages/web/bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),

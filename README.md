@@ -183,7 +183,8 @@ What Kern checks on every pull request:
    a workflow named `release.yml` is a workflow). A workflow or action whose only change moves `uses:` lines, each in its place, to a
    higher version tag of an action another owner publishes (`actions/checkout@v4` to `@v5`) is listed under Notes instead. A move to
    a commit, a branch, a lower tag or an action of the repository's own owner needs a look that names both refs: GitHub runs whatever
-   a ref names, even a commit that exists only in a fork, and a version comment beside a commit proves nothing. The
+   a ref names, even a commit that exists only in a fork, and a version comment beside a commit proves nothing. A committed file with
+   a name Kern keeps for its own tools (`.kern-`), which Kern leaves out of the sandbox, needs a look too. The
    settings of the test runner Kern runs (the test script in `package.json` included; a babel or vite config that runner never reads is
    not one) need a look, unless the change only adds test patterns (`include`, `testMatch`), which runs more tests and never fewer, so
    it is a note. The files that instruct coding agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) are listed under Notes.
@@ -275,7 +276,8 @@ Then add the workflow file at the top of this page to a repository, pointing `us
 - Kern reads the test runner's own report. Code running inside the tests shares the runner's process and could fake that report, as it
   could in any CI; Kern flags new test-runner settings and hooks, and the job that signs never runs that code. A test that notices Kern's
   planted faults and fails on purpose fails in the control run too, so it catches nothing; two records that disagree about one test's
-  values are both ignored. A test written to hash its own source files can still tell a planted fault apart.
+  values are both ignored. A test written to hash its own source files can still tell a planted fault apart; changed code that names
+  Kern's own machinery to do it (a `KERN_` variable, `/kern/`, a `.kern-` file) needs a look, but that is a tripwire, not a proof.
 - A check has 55 minutes. Tests Kern had no time for are listed on the receipt as not run, and the answer is not verified, never passed or failed.
   Kern's own limits (time, memory, disk space, open files, a killed process, a broken report) never block.
 

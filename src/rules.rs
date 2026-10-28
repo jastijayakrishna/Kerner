@@ -145,8 +145,32 @@ fn action_moves(old: &str, new: &str, owner: Option<&str>) -> Option<Vec<Value>>
     }
     Some(moves.into_iter().map(|(action, from, to, release)| json!({ "action": action, "from": from, "to": to, "release": release })).collect())
 }
-fn machinery(changes: &[(String, &'static str)]) -> Vec<Value> {
-    changes.iter().filter(|(p, op)| *op != "delete" && crate::drive::kern_owned(p)).map(|(p, _)| json!({ "path": p })).collect()
+const KERN_NAMES_COUNT_MAX: usize = 5;
+fn path_char(c: char) -> bool { c.is_ascii_alphanumeric() || "._-/".contains(c) }
+fn token_end(text: &str, from: usize, keep: fn(char) -> bool) -> usize { text[from..].char_indices().find(|(_, c)| !keep(*c)).map_or(text.len(), |(j, _)| from + j) }
+fn kern_names(text: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let before = |i: usize| text[..i].chars().next_back();
+    for (i, _) in text.match_indices("KERN_") {
+        let end = token_end(text, i, |c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if end > i + 5 && !before(i).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') { found.insert(text[i..end].to_string()); }
+    }
+    for (i, _) in text.match_indices("/kern/") {
+        if !before(i).is_some_and(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) { found.insert(text[i..token_end(text, i + 6, path_char)].to_string()); }
+    }
+    for (i, _) in text.match_indices(".kern-") {
+        let (start, end) = (text[..i].char_indices().rev().find(|(_, c)| !path_char(*c)).map_or(0, |(j, c)| j + c.len_utf8()), token_end(text, i + 6, path_char));
+        if end > i + 6 { found.insert(text[start..end].to_string()); }
+    }
+    found
+}
+fn machinery(changes: &[(String, &'static str)], (old, new): (&Files, &Files)) -> Vec<Value> {
+    let names = |files: &Files, p: &str| files.get(p).and_then(|e| e.bytes.as_deref()).map(|b| kern_names(&String::from_utf8_lossy(b))).unwrap_or_default();
+    changes.iter().filter(|(_, op)| *op != "delete").filter_map(|(p, _)| {
+        if crate::drive::kern_owned(p) { return Some(json!({ "path": p })); }
+        let fresh: Vec<String> = if is_code(p) { names(new, p).difference(&names(old, p)).take(KERN_NAMES_COUNT_MAX).cloned().collect() } else { Vec::new() };
+        (!fresh.is_empty()).then(|| json!({ "path": p, "names": fresh }))
+    }).collect()
 }
 const PATTERN_KEYS: [&str; 2] = ["include", "testMatch"];
 fn agent_note(p: &str) -> bool {
@@ -543,6 +567,6 @@ pub fn rules(repo: &Path, base: &str, head: &str) -> R<Value> {
         if let Some(adds) = text(&old, &p).zip(text(&new, &p)).and_then(|(a, b)| crate::capability::added_strings(&p, &PATTERN_KEYS, &a, &b)) { x["adds"] = json!(adds); }
     }
     let changed: Vec<Value> = changes.iter().map(|(p, op)| json!({ "path": p, "operation": op })).collect();
-    Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies, "machinery": machinery(&changes),
+    Ok(json!({ "changed": changed, "powers": powers, "tricks": tricks, "settings": settings, "protected": protected, "dependencies": dependencies, "machinery": machinery(&changes, (&old, &new)),
         "lockfile": lockfile, "agent_notes": agent_notes, "deleted_tests": deleted_tests, "weakened": weakened, "node_versions": node_versions, "public_api": public_api, "inline_csp": inline_csp, "not_checked": not_checked }))
 }
