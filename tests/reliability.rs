@@ -967,6 +967,20 @@ fn the_first_error_is_the_thrown_one_never_a_line_of_minified_code() {
 }
 
 #[test]
+fn the_versions_digest_names_every_installed_package_and_nothing_else() {
+    let t = Temp::new();
+    let put = |root: &str, pkg: &str, version: &str| write(&t.0, &format!("{root}/node_modules/{pkg}/package.json"), &format!("{{\"name\":\"{}\",\"version\":\"{version}\"}}", pkg.rsplit('/').next().unwrap()));
+    for root in ["a", "b"] { put(root, "vitest", "3.2.4"); put(root, "@scope/x", "1.0.0"); put(root, "x/node_modules/y", "2.0.0"); }
+    write(&t.0, "a/node_modules/.package-lock.json", "{}");
+    write(&t.0, "b/node_modules/.cache/junk/package.json", "{\"name\":\"junk\",\"version\":\"9\"}");
+    let digest = |root: &str| kern::sandbox::versions_digest(&t.0.join(root));
+    assert_eq!(digest("a"), digest("b"), "the same packages at the same versions, whatever else sits in node_modules");
+    put("b", "vitest", "3.2.5");
+    assert_ne!(digest("a"), digest("b"), "one version moved");
+    assert_eq!(kern::sandbox::versions_digest(&t.0.join("none")), Some(kern::util::sha256("")), "no node_modules is an empty install, the same on both sides");
+}
+
+#[test]
 fn x_gis_372_two_installs_that_each_resolved_their_own_versions_are_never_the_same_setup() {
     let side = |result: &str| json!({ "installs": [{ "dir": ".", "manager": "bun", "result": result, "parts": [] }], "scripts": true, "node": { "major": 22 } });
     let both = |result: &str| json!({ "version": 1, "old": side(result), "new": side(result) });
@@ -974,6 +988,17 @@ fn x_gis_372_two_installs_that_each_resolved_their_own_versions_are_never_the_sa
         assert!(suite::setup_differs(&both(result), "").is_some_and(|w| w.contains("from package.json")), "{result}: each side resolved its own versions, minutes apart");
     }
     assert_eq!(suite::setup_differs(&both("installed"), ""), None, "both sides installed from the same lockfile");
+    let digested = |old: &str, new: &str| {
+        let mut s = both("installed from package.json (the project has no lockfile)");
+        s["old"]["installs"][0]["versions"] = json!(old);
+        s["new"]["installs"][0]["versions"] = json!(new);
+        s
+    };
+    assert_eq!(suite::setup_differs(&digested("a1", "a1"), ""), None, "ci e2e harmless and Kern's own self-test: no lockfile, but both sides installed exactly the same versions, so the sides are even");
+    assert!(suite::setup_differs(&digested("a1", "b2"), "").is_some_and(|w| w.contains("different versions")), "the installs minutes apart got different packages");
+    let mut half = digested("a1", "a1");
+    half["new"]["installs"][0]["versions"] = Value::Null;
+    assert!(suite::setup_differs(&half, "").is_some_and(|w| w.contains("resolved its own versions")), "a side whose versions could not be listed (the cap was hit) stays unproven");
     let member = |root: &str| json!({ "installs": [{ "dir": ".", "manager": "pnpm", "result": root, "parts": [] }, { "dir": "packages/a", "manager": null, "result": "installed with the workspace" }] });
     let mono = |root: &str| json!({ "version": 1, "old": member(root), "new": member(root) });
     assert!(suite::setup_differs(&mono("installed from package.json (the lockfile is out of date)"), "packages/a").is_some(), "a workspace member's dependencies are its root's install");

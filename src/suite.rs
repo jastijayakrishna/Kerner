@@ -883,10 +883,15 @@ fn setup_record<'v>(setup: &'v Value, side: &str, dir: &str) -> Option<&'v Value
     install_record(setup, side, dir).and_then(|r| if r["result"] == crate::sandbox::WITH_WORKSPACE { install_record(setup, side, ".") } else { Some(r) })
 }
 fn unlocked(setup: &Value, dir: &str) -> Option<String> {
-    ["old", "new"].iter().find_map(|side| {
-        let result = setup_record(setup, side, dir)?["result"].as_str()?;
-        result.contains("from package.json").then(|| format!("the {side} code's dependencies were {}, so each side resolved its own versions", result.chars().take(200).collect::<String>()))
-    })
+    let own = |side: &str| setup_record(setup, side, dir).and_then(|r| r["result"].as_str()).filter(|r| r.contains("from package.json")).map(|r| r.chars().take(200).collect::<String>());
+    let (old, new) = (own("old"), own("new"));
+    let (side, result) = old.as_ref().map(|r| ("old", r)).or(new.as_ref().map(|r| ("new", r)))?;
+    let digest = |side: &str| setup_record(setup, side, dir).and_then(|r| r["versions"].as_str().map(str::to_string));
+    match (digest("old"), digest("new")) {
+        (Some(a), Some(b)) if a == b => None,
+        (Some(_), Some(_)) => Some(format!("the {side} code's dependencies were {result}, and the two sides got different versions")),
+        _ => Some(format!("the {side} code's dependencies were {result}, so each side resolved its own versions")),
+    }
 }
 pub fn setup_differs(setup: &Value, dir: &str) -> Option<String> {
     let (old, new) = (setup_record(setup, "old", dir)?, setup_record(setup, "new", dir)?);

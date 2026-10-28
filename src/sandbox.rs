@@ -317,6 +317,31 @@ pub fn installed_versions(root: &Path, names: &[&str]) -> Vec<String> {
     list.sort_by_key(|v| version_key(v));
     list
 }
+const VERSIONS_COUNT_MAX: usize = 200_000;
+pub fn versions_digest(root: &Path) -> Option<String> {
+    fn walk(dir: &Path, depth: u32, left: &mut usize, found: &mut Vec<String>) -> Option<()> {
+        if depth > VERSION_DEPTH_COUNT_MAX { return None; }
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            if !entry.file_type().is_ok_and(|k| k.is_dir()) { continue; }
+            let (name, path) = (entry.file_name().to_string_lossy().to_string(), entry.path());
+            if name.starts_with('.') && name != ".pnpm" && name != ".bun" { continue; }
+            *left = left.checked_sub(1)?;
+            let file = path.join("package.json");
+            if let Ok(meta) = std::fs::metadata(&file) && meta.is_file() && meta.len() <= PACKAGE_JSON_BYTES_MAX && let Ok(bytes) = std::fs::read(&file)
+                && let Ok(v) = serde_json::from_slice::<Value>(&bytes) && let (Some(n), Some(ver)) = (v["name"].as_str(), v["version"].as_str()) {
+                found.push(format!("{}/{n}@{ver}", path.strip_prefix(dir).ok()?.to_string_lossy().replace('\\', "/")));
+            }
+            walk(&path, depth + 1, left, found)?;
+        }
+        Some(())
+    }
+    let modules = root.join("node_modules");
+    if !modules.is_dir() { return Some(sha256("")); }
+    let (mut left, mut found) = (VERSIONS_COUNT_MAX, Vec::new());
+    walk(&modules, 0, &mut left, &mut found)?;
+    found.sort();
+    Some(sha256(found.join("\n")))
+}
 const RESTORE_ENTRIES_COUNT_MAX: usize = 4_000_000;
 pub fn restore(committed: &Path, tree: &Path, keep: &[PathBuf]) -> R<()> {
     fn clear(dir: &Path, keep: &[PathBuf]) -> R<()> {
@@ -939,6 +964,7 @@ mod inside {
         let parts = if result.as_str().is_some_and(|r| r.starts_with("installed")) && super::adds_platform_parts(manager) { platform_parts(dir, (budget, started))? } else { Vec::new() };
         let mut record = json!({ "dir": d, "manager": manager, "result": result, "parts": parts });
         if result.as_str().is_some_and(super::ran_without_scripts) && let Some(why) = scripts_failed { record["scripts_failed"] = json!(why); }
+        if result.as_str().is_some_and(|r| r.contains("from package.json")) { record["versions"] = json!(super::versions_digest(dir)); }
         Ok((record, launcher))
     }
     fn platform_parts(dir: &Path, (budget, started): (Duration, std::time::Instant)) -> R<Vec<String>> {
