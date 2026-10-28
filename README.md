@@ -99,7 +99,7 @@ What Kern checks on every pull request:
    sandbox lacks something, not the change). A block needs proof from both sides: a test file with no record of passing on the old
    code, or a failure on sides Kern could not set up the same way (installs, Linux parts, a build step, or an install that resolved its own
    versions because the lockfile was missing or out of date), is not verified instead. Tests that
-   run on the old code but give no results on the new code, twice, while the old code's tests still give results when run again, need a
+   run on the old code but give no results on the new code, twice, while a test of the old code still passes when Kern runs it again, need a
    look that quotes the first error; a run with no results is never a block, and when the old code's tests give no results again either,
    or the sides were set up differently, it is not verified. A project setting that stops
    at the first failure or shuffles the order is turned off, so both sides run the whole suite in the same order. The old code's tests
@@ -219,14 +219,15 @@ What Kern checks on every pull request:
    a test of that function, or a piece of that evidence is missing, it is a look that says which. Inputs that hang, reach for the
    network, answer differently within one run, or never reach the real function (a mock answered) are set aside and listed. The
    receipt gives the call, both answers and the quote, and a rerun of the same change reuses the AI's answers.
-Where the code runs: Kern's workflow has two jobs. The job that installs and tests the pull request's code holds no keys at all (its
-token can only read the repository) and runs on GitHub's throwaway machine, deleted when the job ends. There the code runs in locked
-containers (read-only system, no privileges, an unprivileged user, memory and process limits, the network off while tests run), and
-packages install with their own install scripts, the way CI installs them; when a script fails, Kern installs again without scripts.
-A second job never runs the pull request's code: it builds Kern itself from source with no cache, renders the receipt from the first
-job's results, signs it and posts it. With an AI key, a third job holds the key: it runs that same Kern build, checked by its hash,
-reads the pull request's files and asks Claude, and never runs the pull request's code; the job that runs the code reads its answer
-only as data. On a machine that is kept between jobs, the code runs in gVisor instead.
+Where the code runs: the job that installs and tests the pull request's code holds no keys at all (its token can only read the
+repository) and runs on GitHub's throwaway machine, deleted when the job ends. There the code runs in locked containers (read-only
+system, no privileges, an unprivileged user, memory and process limits, the network off while tests run), and packages install with
+their own install scripts, the way CI installs them; when a script fails, Kern installs again without scripts. Kern itself is built
+from source with no cache by a job of its own, on a machine where no pull request code runs. The job that signs never runs the pull
+request's code: it runs that build, checked by its hash, renders the receipt from the first job's results, signs it and posts it.
+With an AI key, another job holds the key: it runs that same Kern build, checked by its hash, reads the pull request's files and
+asks Claude, and never runs the pull request's code; the job that runs the code reads its answer only as data. On a machine that is
+kept between jobs, the code runs in gVisor instead.
 
 GitHub signs each receipt for Kern's own workflow, with no keys for you to keep. The signature covers the answer and the whole receipt,
 so an edited comment cannot change what `kern receipt verify owner/repo 12` reports, and `/kern approve` only counts signed receipts.
@@ -235,9 +236,9 @@ so an edited comment cannot change what `kern receipt verify owner/repo 12` repo
 
 | What we tested | Result |
 |---|---|
-| 92 known tricks to hide new powers | 92 blocked, while 28 of 28 normal edits passed |
+| 92 known tricks to hide new powers, through the check's own rules (`tests/redteam.rs`) | 84 need a look. 4 only write files, which the check does not count as a power, and 4 reach the global object through a `this` in a non-strict function, which the check does not follow. 28 of 28 normal edits stay clear |
 
-Every result, with its date and how it was measured: [docs/evidence.md](docs/evidence.md)
+What is measured on today's Kern, with its date and how: [docs/evidence.md](docs/evidence.md)
 
 ## Try it
 
@@ -296,6 +297,6 @@ Every known limit: [docs/limits.md](docs/limits.md). Security model: [SECURITY.m
 
 | Document | What it covers |
 |---|---|
-| [docs/evidence.md](docs/evidence.md) | Every measured result |
+| [docs/evidence.md](docs/evidence.md) | What is measured on today's Kern |
 | [docs/limits.md](docs/limits.md) | What Kern does not do yet |
 | [SECURITY.md](SECURITY.md) | The trust model, and how to report a security problem |

@@ -97,3 +97,56 @@ fn realistic_agent_edits_are_never_blocked() {
     println!("benign: {} of {} edits accepted", BENIGN.len() - blocked.len(), BENIGN.len());
     assert!(blocked.is_empty(), "false blocks:\n{}", blocked.join("\n"));
 }
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git").args(args).current_dir(dir).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+fn answers_on_the_check_path(cases: &[(String, String, String)]) -> Vec<(String, String)> {
+    let dir = std::env::temp_dir().join(format!("kern-redteam-{}", kern::util::uuid4().unwrap()));
+    std::fs::create_dir_all(&dir).unwrap();
+    git_in(&dir, &["init", "-q", "-b", "main"]);
+    git_in(&dir, &["config", "core.autocrlf", "false"]);
+    let put = |p: &str, text: &str| { let f = dir.join(p); std::fs::create_dir_all(f.parent().unwrap()).unwrap(); std::fs::write(f, text).unwrap(); };
+    put("package.json", r#"{"name":"lib","scripts":{"test":"vitest run"},"devDependencies":{"vitest":"3.2.0"}}"#);
+    for (p, base, _) in cases { put(p, base); }
+    git_in(&dir, &["add", "-A"]);
+    git_in(&dir, &["commit", "-q", "-m", "base"]);
+    let base = git_in(&dir, &["rev-parse", "HEAD"]);
+    for (p, _, edit) in cases { put(p, edit); }
+    git_in(&dir, &["add", "-A"]);
+    git_in(&dir, &["commit", "-q", "-m", "edit"]);
+    let head = git_in(&dir, &["rev-parse", "HEAD"]);
+    let rules = kern::rules::rules(&dir, &base, &head).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let drive = json!({ "base": "1".repeat(40), "head": "2".repeat(40), "skipped": [], "unmeasured": [] });
+    let tests = json!({ "status": "RAN", "runner": "vitest", "before": { "passed": 1, "failed": 0, "skipped": 0 }, "after": { "passed": 1, "failed": 0, "skipped": 0 }, "kept": 1,
+        "broke": [], "flaky": [], "gone": [], "newly_skipped": [], "added": [], "already_failing": [], "new_problems": [] });
+    cases.iter().map(|(p, _, _)| {
+        let mut alone = rules.clone();
+        for (_, v) in alone.as_object_mut().unwrap().iter_mut() {
+            if let Some(list) = v.as_array_mut() { list.retain(|x| x["path"] == p.as_str()); }
+        }
+        (p.clone(), kern::receipt::build(&drive, &alone, &tests)["decision"].as_str().unwrap_or("?").to_string())
+    }).collect()
+}
+
+#[test]
+fn on_the_check_path_the_known_evasions_that_start_programs_reach_the_network_or_read_secrets_need_a_look_and_realistic_edits_stay_clear() {
+    let attacks: Vec<(String, String, String)> = ATTACKS.iter().enumerate().map(|(i, a)| (format!("src/a{i}.js"), LIB.to_string(), format!("{LIB}{a}\n"))).collect();
+    let answers = answers_on_the_check_path(&attacks);
+    let missed: Vec<String> = answers.iter().zip(ATTACKS).filter(|((_, d), _)| d != "look").map(|((_, d), a)| format!("{d}: {a}")).collect();
+    println!("check path: {} of {} evasions need a look", ATTACKS.len() - missed.len(), ATTACKS.len());
+    for m in &missed { println!("  {m}"); }
+    let benign: Vec<(String, String, String)> = BENIGN.iter().enumerate().map(|(i, (p, base, edit))| (format!("b{i}/{p}"), base.to_string(), edit.to_string())).collect();
+    let quiet: Vec<String> = answers_on_the_check_path(&benign).into_iter().filter(|(_, d)| d != "clear").map(|(p, d)| format!("{d}: {p}")).collect();
+    println!("check path: {} of {} realistic edits clear", BENIGN.len() - quiet.len(), BENIGN.len());
+    for q in &quiet { println!("  {q}"); }
+    let writes = missed.iter().filter(|m| m.contains("require('fs") || m.contains("require('node:fs")).count();
+    assert_eq!((ATTACKS.len() - missed.len(), writes, missed.len() - writes), (84, 4, 4),
+        "the README and docs/evidence.md quote these numbers: 84 looks; 4 only write files, which is no power on the check path; 4 reach the global object through this in a non-strict function: {missed:#?}");
+    assert!(missed.iter().filter(|m| !m.contains("fs")).all(|m| m.contains("this")), "{missed:#?}");
+    assert!(quiet.is_empty(), "realistic edits stay clear: {quiet:?}");
+}
