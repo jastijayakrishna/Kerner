@@ -30,3 +30,4 @@ pub mod map;
 pub mod calls;
 pub mod probe;
 pub mod investigate;
+pub mod plan;
