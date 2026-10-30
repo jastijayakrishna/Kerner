@@ -110,7 +110,28 @@ fn kern_check_demo_the_learn_job_writes_the_plan_on_main_and_the_run_job_restore
     assert!(example["jobs"]["kern"]["if"].as_str().unwrap().contains("github.event_name == 'push'"), "the customer's file passes the push through");
     let on = example.as_object().unwrap().values().find(|v| v["push"].is_object()).unwrap_or_else(|| panic!("the customer's file has no push trigger: {example}"));
     assert_eq!(on["push"], serde_json::json!({ "branches": ["main"] }));
-    let readme = std::fs::read_to_string("README.md").unwrap();
+    let readme = std::fs::read_to_string("README.md").unwrap().replace("\r\n", "\n");
     assert!(readme.contains("  push:\n    branches: [main]\n") && readme.contains("github.event_name == 'push'"), "the README's copy of the file carries the push trigger");
     assert!(readme.contains("kern learn"), "the README says what learn does on main");
+}
+
+#[test]
+fn kern_check_demo_every_permission_a_job_of_the_reusable_workflow_asks_for_is_granted_by_the_one_file_customers_add() {
+    let read = |path: &str| kern::yaml::read(&std::fs::read(path).unwrap()).unwrap_or_else(|e| panic!("{path} is not YAML Kern's reader follows: {}", e.0));
+    let (workflow, example) = (read(".github/workflows/kern.yml"), read("examples/kern.yml"));
+    let readme = std::fs::read_to_string("README.md").unwrap().replace("\r\n", "\n");
+    let block = readme.split("```yaml\n").nth(1).and_then(|b| b.split("```").next()).expect("the README shows the install file");
+    let shown = kern::yaml::read(block.as_bytes()).unwrap_or_else(|e| panic!("the README's install file is not YAML: {}", e.0));
+    let rank = |level: &str| match level { "write" => 2, "read" => 1, _ => 0 };
+    for (caller, grants) in [("examples/kern.yml", &example["permissions"]), ("the README's install file", &shown["permissions"])] {
+        let grants = grants.as_object().unwrap_or_else(|| panic!("{caller} names no permissions"));
+        for (name, job) in workflow["jobs"].as_object().unwrap() {
+            for (scope, level) in job["permissions"].as_object().into_iter().flatten() {
+                let granted = grants.get(scope).and_then(|g| g.as_str()).map_or(0, rank);
+                assert!(granted >= rank(level.as_str().unwrap_or("")),
+                    "job {name} asks for {scope}: {level} but {caller} grants {}; GitHub then refuses to start the whole workflow (startup_failure on every pull request, as on kern-check-demo#2 on 2026-10-30)",
+                    grants.get(scope).map_or("nothing".to_string(), |g| g.to_string()));
+            }
+        }
+    }
 }
